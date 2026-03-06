@@ -14,7 +14,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
-genai.configure(api_key="AIzaSyDF1dWFEkizvogIOmkzaJseXA8xeuKoZaI")
+
+# Henter Google API-nøkkelen trygt fra Streamlit Secrets (eller Render Environment Variables)
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 try:
     import fitz  # PyMuPDF
@@ -88,7 +90,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), points
 
-# --- 3. DYNAMISK PDF MOTOR ---
+# --- 3. DYNAMISK PDF MOTOR (MED STRAMME MARGER) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -109,6 +111,9 @@ class BuiltlyProPDF(FPDF):
     def check_space(self, height):
         if self.get_y() + height > 270: 
             self.add_page()
+            # Tvinger absolutte marger for hver ny side
+            self.set_margins(25, 25, 25)
+            self.set_x(25)
 
 def create_full_report_pdf(name, client, content, maps):
     pdf = BuiltlyProPDF()
@@ -200,10 +205,13 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(0, 5, safe_text)
+                    # Låst bredde på 155 for å unngå blødning utenfor arket
+                    pdf.multi_cell(155, 5, safe_text)
                     pdf.set_x(25)
                 else:
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.set_x(25)
+                    # Låst bredde på 160 for normal tekst
+                    pdf.multi_cell(160, 5, safe_text)
             except Exception:
                 pdf.ln(2)
 
@@ -260,7 +268,9 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                             st.error("PyMuPDF mangler!")
                             st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
-                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        
+                        # TILBAKE TIL PRO-KVALITET PÅ BILDENE (Matrix 3.0) FOR RENDER
+                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                         doc.close() 
                     else:
@@ -287,10 +297,8 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 if not gyldige_modeller:
                     raise Exception("Fikk kontakt med Google, men din API-nøkkel har ikke tilgang til noen AI-modeller i skyen.")
 
-                # Vi velger den første modellen Google ga oss (fallback)
                 valgt_modell = gyldige_modeller[0]
                 
-                # Men vi prøver å finne flaggskipene først hvis du har dem
                 for favoritt in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
                     if favoritt in gyldige_modeller:
                         valgt_modell = favoritt
