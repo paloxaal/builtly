@@ -46,41 +46,59 @@ def ironclad_text_formatter(text):
 
 # --- 2. KARTVERKET API & FLYFOTO (NORGE I BILDER WMS) ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
+    """Smartere API-søk som tvinger frem UTM33-koordinater og takler feilstavinger"""
+    # Renser bort kommaer som ofte forvirrer API-et
+    adr_clean = adresse.replace(',', '') if adresse else ""
+    kom_clean = kommune.replace(',', '') if kommune else ""
+    
+    # Forsøk 1: Full pakke (Adresse + Kommune + Gnr/Bnr)
     query_parts = []
-    if adresse: query_parts.append(adresse)
-    if kommune: query_parts.append(kommune)
+    if adr_clean: query_parts.append(adr_clean)
+    if kom_clean: query_parts.append(kom_clean)
     if gnr and bnr: query_parts.append(f"{gnr}/{bnr}")
     
     search_query = " ".join(query_parts)
     if not search_query.strip():
         return "Ingen adresse eller Gnr/Bnr oppgitt.", None, None
 
-    try:
-        safe_query = urllib.parse.quote(search_query)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get('adresser'):
-                hit = data['adresser'][0]
+    def api_call(query_string):
+        safe_query = urllib.parse.quote(query_string)
+        # NØKKELEN: utkoordsys=25833 tvinger Kartverket til å gi oss UTM33 (Nord/Øst)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200 and resp.json().get('adresser'):
+                hit = resp.json()['adresser'][0]
                 nord = hit.get('representasjonspunkt', {}).get('nord', None)
                 ost = hit.get('representasjonspunkt', {}).get('øst', None)
                 kom = hit.get('kommunenavn', 'Ukjent')
-                fylke = hit.get('fylkesnavn', 'Ukjent')
-                tekst = f"Bekreftet i Kartverket: {hit['adressetekst']}, {kom} ({fylke}). Koordinater: N {nord}, Ø {ost}."
-                return tekst, nord, ost
-            else:
-                return f"Fant ingen treff i Kartverket for søket: '{search_query}'.", None, None
-    except Exception:
-        return "Kartverket API utilgjengelig.", None, None
+                return hit['adressetekst'], kom, nord, ost
+        except Exception:
+            pass
+        return None, None, None, None
+
+    # Utfører Forsøk 1
+    adr_tekst, kom, nord, ost = api_call(search_query)
+    
+    # Forsøk 2: Hvis Gnr/Bnr forvirret Kartverket, prøv KUN adresse
+    if nord is None and adr_clean:
+        fallback_query = f"{adr_clean} {kom_clean}"
+        adr_tekst, kom, nord, ost = api_call(fallback_query)
+
+    if nord and ost:
+        tekst = f"Bekreftet i Kartverket: {adr_tekst}, {kom}. Koordinater (UTM33): N {nord}, Ø {ost}."
+        return tekst, nord, ost
+    else:
+        return f"Fant ingen eksakte treff i Kartverket for: '{search_query}'. Prøv kun gatenavn.", None, None
+
 
 def fetch_kartverket_flyfoto(nord, ost):
-    """Henter høyoppløselig ortofoto (flyfoto) fra Statens Kartverk WMS"""
+    """Henter høyoppløselig ortofoto basert på UTM33-koordinater"""
     try:
         if not nord or not ost: return None
-        # Lager en bounding box (300x300 meter) rundt koordinaten
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
+        # Definerer en bounding box (ca 200x200 meter rundt bygget)
+        min_x, max_x = float(ost) - 100, float(ost) + 100
+        min_y, max_y = float(nord) - 100, float(nord) + 100
         
         # WMS-kall til 'Norge i Bilder'
         wms_url = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
@@ -89,7 +107,7 @@ def fetch_kartverket_flyfoto(nord, ost):
         if response.status_code == 200:
             return Image.open(io.BytesIO(response.content))
     except Exception as e:
-        return None
+        pass
     return None
 
 # --- 3. BEREGNINGSMOTOR (AUTOMATISK BOREPLAN) ---
@@ -178,7 +196,6 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
-    # FORSIDE FIKSET (Likt Akustikk)
     pdf.add_page()
     if os.path.exists("logo.png"): 
         pdf.image("logo.png", x=25, y=20, w=50)
@@ -239,9 +256,8 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
             pdf.ln(4)
             continue
             
-        # MAGISK INJEKSJON AV FLYFOTO UNDER KAPITTEL 3
         if line.startswith('# 3. KARTVERKET'):
-            pdf.check_space(180) # Sikrer at det er plass til hele bildet
+            pdf.check_space(180) 
             pdf.ln(8)
             pdf.set_x(25)
             pdf.set_font('Helvetica', 'B', 14)
@@ -258,7 +274,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
                     pdf.set_font('Helvetica', 'I', 9)
                     pdf.set_text_color(100, 100, 100)
                     pdf.set_x(25)
-                    pdf.cell(0, 5, clean_pdf_text("Figur 1: Ortofoto over prosjektområdet. Hentet automatisk via Kartverket WMS (Norge i Bilder)."), 0, 1, 'C')
+                    pdf.cell(0, 5, clean_pdf_text("Figur 1: Ortofoto over prosjektområdet. Hentet direkte via Kartverket WMS."), 0, 1, 'C')
                     pdf.ln(5)
             else:
                 pdf.set_font('Helvetica', 'I', 9)
@@ -342,8 +358,8 @@ with st.expander("Prosjekt & Lokasjon", expanded=True):
     kommune = c4.text_input("Kommune", "Trondheim")
     
     c5, c6 = st.columns(2)
-    gnr = c5.text_input("Gårdsnummer (Gnr)", "316")
-    bnr = c6.text_input("Bruksnummer (Bnr)", "725")
+    gnr = c5.text_input("Gårdsnummer (Gnr) (Valgfritt)", "316")
+    bnr = c6.text_input("Bruksnummer (Bnr) (Valgfritt)", "725")
 
 files = st.file_uploader("Last opp situasjonsplan for Boreplan (Kun PDF/Bilder)", accept_multiple_files=True)
 
@@ -351,22 +367,22 @@ if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
     if not files: 
         st.error("Last opp en tegning først for å generere boreplan.")
     else:
-        # 1. HENT DATA FRA KARTVERKET
         kartverket_info = ""
         nord = ost = None
         aerial_photo = None
         
-        with st.spinner("🌍 Kobler til Geonorge API (Koordinater og WMS Flyfoto)..."):
+        with st.spinner("🌍 Kobler til Geonorge API (Tvinger UTM33-koordinater)..."):
             kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
             if nord and ost:
                 st.success(kartverket_info)
                 aerial_photo = fetch_kartverket_flyfoto(nord, ost)
                 if aerial_photo:
                     st.success("✅ Lastet ned høyoppløselig flyfoto fra Norge i Bilder (WMS)!")
+                else:
+                    st.warning("Fant koordinater, men WMS-serveren for bilde svarte ikke.")
             else:
                 st.warning(kartverket_info)
         
-        # 2. GENERER GRAFIKK OG BOREPLAN
         processed_maps = []
         with st.spinner("1. Analyserer tegning og oppretter boreplan..."):
             try:
@@ -393,7 +409,6 @@ if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
 
                 st.toast("Boreplan ferdig. Kobler til Google AI...")
                 
-                # 3. KOBLE TIL AI OG SKRIV RAPPORT
                 gyldige_modeller = []
                 for mod in genai.list_models():
                     if 'generateContent' in mod.supported_generation_methods:
