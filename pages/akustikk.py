@@ -21,13 +21,8 @@ except ImportError:
     fitz = None
 
 def get_model():
-    """Sikrer tilkobling uansett API-versjon"""
-    try:
-        available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        for t in ['models/gemini-1.5-pro-latest', 'models/gemini-1.5-pro', 'models/gemini-1.5-flash-latest', 'models/gemini-1.5-flash', 'gemini-1.5-flash']:
-            if t in available: return genai.GenerativeModel(t)
-        return genai.GenerativeModel(available[0])
-    except: return genai.GenerativeModel('gemini-1.5-flash')
+    """Direkte tilkobling for Streamlit Cloud (Bypasser list_models)"""
+    return genai.GenerativeModel('gemini-1.5-pro-latest')
 
 def clean_pdf_text(text):
     """Renser tekst for PDF-motoren (Spesialtegn)"""
