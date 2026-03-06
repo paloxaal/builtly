@@ -10,12 +10,12 @@ import numpy as np
 import io
 import math
 import gc
+import json
 from PIL import Image, ImageDraw, ImageFont
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
 
-# Henter Google API-nøkkel kun fra Render Environment Variables
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
     genai.configure(api_key=google_key)
@@ -42,13 +42,36 @@ def ironclad_text_formatter(text):
     text = text.replace('**', '').replace('__', '')
     return clean_pdf_text(text)
 
+# --- NY: AI VISION MODUL ---
+def analyze_drawing_with_vision(img):
+    """Sender bildet til Gemini for å lese av koter og støyskjermer automatisk."""
+    try:
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        prompt = """
+        Du er en ekspert i å lese arkitekttegninger og situasjonsplaner.
+        Søk nøye gjennom dette bildet etter tekst eller symboler som angir en 'støyskjerm'. 
+        Finn ut hva høyden på denne støyskjermen er i meter.
+        Svar KUN med dette eksakte JSON-formatet. Ikke legg til noe annen tekst:
+        {"støyskjerm_hoyde_m": 0.0}
+        Bytt ut 0.0 med høyden du finner. Finner du ingen skjerm, behold 0.0.
+        """
+        response = model.generate_content([prompt, img])
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            return float(data.get("støyskjerm_hoyde_m", 0.0))
+    except Exception as e:
+        pass
+    return 0.0
+
 # --- 2. BEREGNINGSMOTOR (GRAFIKK) ---
-def generate_pro_stoykart(img, adt, speed, dist, floor_num):
+def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     w, h = img.size
     draw_img = img.convert("RGBA")
     overlay = Image.new("RGBA", draw_img.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
     
+    # Standard etasjehøyde (Vindu på 1.5m, 3m per etasje)
     floor_h = (floor_num - 1) * 3.0 + 1.5
     base_db = 10 * math.log10(max(adt, 1)) + 20 * math.log10(max(speed, 30)/50.0) + 14
     
@@ -57,9 +80,15 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
     except: 
         font_large = ImageFont.load_default()
 
+    # Tegner de store støysonene (gul og rød) oppå tegningen
     for y in range(int(h*0.3), h, 10):
         d_m = dist + (h - y) * (40/h)
         db_at_y = base_db - 10 * math.log10(max(d_m, 1) / 10.0)
+        
+        # Hvis terrenget bak skjermen er lavere enn skjermen, legges skyggen på bakken
+        if screen_height > 0:
+            db_at_y -= 8 # Demping av støy i sonen bak skjermen
+            
         if db_at_y > 60: 
             color = (255, 0, 0, 40)
         elif db_at_y > 55: 
@@ -68,14 +97,44 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
             color = (0, 255, 0, 20)
         draw.rectangle([0, y, w, y+10], fill=color)
 
+    # Smart-Snap: Finner bygget
+    gray_array = np.array(img.convert("L"))
+    non_white_y, non_white_x = np.where(gray_array < 240)
+
+    if len(non_white_x) > 100 and len(non_white_y) > 100:
+        min_x, max_x = np.min(non_white_x), np.max(non_white_x)
+        min_y, max_y = np.min(non_white_y), np.max(non_white_y)
+
+        x_margin = (max_x - min_x) * 0.15
+        y_margin = (max_y - min_y) * 0.15
+
+        start_x = min_x + x_margin
+        end_x = max_x - x_margin
+        start_y = min_y + y_margin * 1.5 
+        end_y = max_y - y_margin
+    else:
+        start_x, end_x = 0.2 * w, 0.8 * w
+        start_y, end_y = 0.4 * h, 0.7 * h
+
+    if start_x >= end_x: start_x, end_x = 0.2 * w, 0.8 * w
+    if start_y >= end_y: start_y, end_y = 0.4 * h, 0.7 * h
+
     points = []
-    x_positions = np.linspace(0.15*w, 0.85*w, 8)
-    y_positions = [0.45*h, 0.6*h] 
+    x_positions = np.linspace(start_x, end_x, 6)
+    y_positions = np.linspace(start_y, end_y, 3)
+
     for x in x_positions:
         for y in y_positions:
             d_m = dist + (h - y) * (40/h)
             d_3d = math.sqrt(d_m**2 + floor_h**2)
-            db = int(base_db - 10 * math.log10(d_3d / 10.0))
+            
+            shielding_effect = 0
+            # Akustikk-logikk: Ligger vinduet i skyggen av skjermen?
+            if screen_height > 0 and floor_h <= (screen_height + 1.0):
+                shielding_effect = 8 # Drastisk reduksjon for vinduer rett bak skjermen
+                
+            db = int(base_db - 10 * math.log10(d_3d / 10.0)) - shielding_effect
+            
             dot_color = (200, 0, 0, 255) if db >= 60 else ((200, 150, 0, 255) if db >= 55 else (50, 150, 50, 255))
             r = int(h/70)
             
@@ -87,7 +146,12 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
     box_w, box_h = int(w*0.3), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
-    draw.text((w-box_w+20, h-box_h+60), f"PLAN {floor_num} | Parametere Lden", fill="black", font=font_large)
+    
+    info_text = f"PLAN {floor_num} | Parametere Lden"
+    if screen_height > 0:
+        info_text += f" (Inkl. skjerm {screen_height}m)"
+        
+    draw.text((w-box_w+20, h-box_h+60), info_text, fill="black", font=font_large)
     draw.text((w-box_w+20, h-box_h+100), f"Maksimalt beregnet nivå: {max(points)} dB", fill=(200,0,0) if max(points)>=60 else "black", font=font_large)
 
     out = Image.alpha_composite(draw_img, overlay)
@@ -255,6 +319,36 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
     if not files: 
         st.error("Last opp tegninger først.")
     else:
+        # --- AI VISION TRIGGER ---
+        detected_screen_height = 0.0
+        with st.spinner("👁️ AI Vision skanner tegningene for skjerming og terreng..."):
+            try:
+                # Vi lar Vision analysere det første dokumentet
+                f_vision = files[0]
+                if f_vision.name.lower().endswith('pdf'):
+                    doc_v = fitz.open(stream=f_vision.read(), filetype="pdf")
+                    pix_v = doc_v.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                    vision_img = Image.open(io.BytesIO(pix_v.tobytes("png")))
+                    doc_v.close()
+                else:
+                    vision_img = Image.open(f_vision)
+                
+                # Sender bildet til hjernen
+                detected_screen_height = analyze_drawing_with_vision(vision_img.convert("RGB"))
+                vision_img.close()
+                
+                # Tilbakestiller filpekeren slik at den kan brukes igjen i beregningen
+                files[0].seek(0)
+                
+                if detected_screen_height > 0:
+                    st.success(f"✅ AI Vision fant en støyskjerm på {detected_screen_height}m! Oppdaterer matematikken.")
+                else:
+                    st.info("ℹ️ AI Vision fant ingen støyskjermer på tegningen. Bruker fri sikt.")
+                    
+            except Exception as e:
+                st.warning(f"AI Vision klarte ikke å lese tegningen. Bruker standard fri sikt. Feil: {e}")
+        
+        # --- KLASSISK BEREGNING ---
         with st.spinner("1. Utfører Builtly 3D-simulering og tegner kart..."):
             try:
                 processed_maps = []
@@ -269,17 +363,22 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                             st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
                         
-                        # Optimalisert oppløsning for å unngå 502 (Out of Memory)
                         pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                         doc.close() 
-                        del pix # Tvinger sletting av rådata
+                        del pix 
                     else:
                         img = Image.open(f)
                     
-                    m, points = generate_pro_stoykart(img, adt, fart, avst, i+1)
+                    # Sender med skjermhøyden inn i matematikken!
+                    m, points = generate_pro_stoykart(img, adt, fart, avst, i+1, detected_screen_height)
                     processed_maps.append(m)
-                    data_summary.append(f"PLAN {i+1} (Høyde ca {(i)*3+1.5}m): Maks Lden {max(points)} dB, Snitt {int(np.mean(points))} dB.")
+                    
+                    effekt_tekst = ""
+                    if detected_screen_height > 0 and (i*3+1.5) <= (detected_screen_height + 1.0):
+                        effekt_tekst = " (Kraftig dempet av skjerm)"
+                        
+                    data_summary.append(f"PLAN {i+1} (Høyde ca {(i)*3+1.5}m){effekt_tekst}: Maks Lden {max(points)} dB, Snitt {int(np.mean(points))} dB.")
                     
                     img.close()
                     gc.collect()
@@ -294,17 +393,12 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 except Exception as list_err:
                     raise Exception(f"NETTVERKSFEIL: Fikk ikke kontakt med Google. Sjekk API-nøkkel. Detaljer: {list_err}")
 
-                if not gyldige_modeller:
-                    raise Exception("Fikk kontakt med Google, men din API-nøkkel har ikke tilgang til noen AI-modeller i skyen.")
-
                 valgt_modell = gyldige_modeller[0]
-                
                 for favoritt in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
                     if favoritt in gyldige_modeller:
                         valgt_modell = favoritt
                         break
                 
-                st.info(f"Suksess: Gjenkjente og bruker modellen '{valgt_modell}'")
                 model = genai.GenerativeModel(valgt_modell)
 
                 prompt = f"""
@@ -314,13 +408,13 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 PROSJEKT: {p_name}
                 KUNDE: {c_name}
                 TRAFIKKDATA BRUKT I MODELL: ÅDT {adt}, Fart {fart} km/t, Avstand {avst} m.
+                AI VISION SKJERMING: Skjerm/terrengvoll oppdaget med høyde {detected_screen_height} m.
                 RESULTATER FRA 3D-FASADEBEREGNING: {data_summary}
                 
                 KRAV TIL TEKSTEN:
                 - Dokumentet MÅ være langt og utfyllende (Skriv minimum 1500 ord).
-                - Bruk formelt, teknisk ingeniørspråk. Omtal deg selv som Builtly RIAKU AI eller Builtly Acoustic Engine der det er naturlig.
+                - Bruk formelt, teknisk ingeniørspråk. Omtal deg selv som Builtly RIAKU AI.
                 - Unngå tabeller. Ikke bruk '|' eller lange understreker. Skriv alt med ren tekst og kulepunkter.
-                - Du må bruke følgende kapittelstruktur nøyaktig slik den står under (Bruk '# ' for hovedkapitler).
                 
                 STRUKTUR SOM SKAL FØLGES:
                 # 1. SAMMENDRAG OG KONKLUSJON
@@ -330,19 +424,19 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 Beskriv prosjektet og hensikten med rapporten.
                 
                 # 3. KRAV OG RETNINGSLINJER (T-1442 / NS 8175)
-                Gå i dybden på Miljødirektoratets retningslinje T-1442. Forklar Lden, Lnight, og grensene for gul og rød sone i detalj.
+                Gå i dybden på Miljødirektoratets retningslinje T-1442. 
                 
                 # 4. BEREGNINGSFORUTSETNINGER OG METODIKK
-                Beskriv trafikktallene som er oppgitt. 
+                Beskriv trafikktallene. Forklar spesifikt om AI Vision oppdaget skjerming og hvordan det påvirker de lavere etasjene.
                 
                 # 5. RESULTATER: STØYUTBREDELSE
                 Analyser resultatene fra fasadeberegningen plan for plan. Diskuter forskjellene i høyden.
                 
                 # 6. VURDERING AV FASADEISOLERING OG TILTAK
-                Dette er det viktigste kapittelet. Gitt maksnivåene, foreslå konkrete krav til vinduer (Rw+Ctr).
+                Gitt maksnivåene, foreslå konkrete krav til vinduer (Rw+Ctr).
                 
                 # 7. VURDERING AV UTEOPPHOLDSAREALER
-                Drøft plassering av uteplasser, balkonger, og behovet for skjerming/tette rekkverk for å få støyen under 55 dB.
+                Drøft plassering av uteplasser, balkonger, og skjerming for å få støyen under 55 dB.
                 """
                 
                 res = model.generate_content(prompt)
