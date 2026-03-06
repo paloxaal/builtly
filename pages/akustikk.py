@@ -39,8 +39,6 @@ def clean_pdf_text(text):
 def ironclad_text_formatter(text):
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{4,}', ' ', text)
-    # Tvinger orddeling på 40 tegn for å sikre at ingenting sprekker A4-margen
-    text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
 # --- AI VISION MODUL ---
@@ -63,7 +61,7 @@ def analyze_drawing_with_vision(img):
         pass
     return 0.0
 
-# --- 2. BEREGNINGSMOTOR ("CADNA-A LITE" HEURISTIKK) ---
+# --- 2. BEREGNINGSMOTOR ("INK-DETECTOR" LOGIKK) ---
 def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     w, h = img.size
     draw_img = img.convert("RGBA")
@@ -71,8 +69,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     draw = ImageDraw.Draw(overlay)
     
     floor_h = (floor_num - 1) * 3.0 + 1.5
-    
-    # Nord96 Heuristikk-kalibrering + 3dB fasaderefleksjon (Bransjestandard)
     base_db = 10 * math.log10(max(adt, 1)) + 20 * math.log10(max(speed, 30)/50.0) + 33
     
     try: 
@@ -80,75 +76,55 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     except: 
         font_large = ImageFont.load_default()
 
-    for y in range(int(h*0.2), h, 15):
-        d_m = dist + (h - y) * (50/h)
-        db_at_y = base_db - 10 * math.log10(max(d_m, 1) / 10.0)
-        if screen_height > 0: db_at_y -= 8 
-            
-        if db_at_y > 65: color = (255, 0, 0, 25)
-        elif db_at_y > 55: color = (255, 255, 0, 20)
-        else: color = (0, 255, 0, 10)
-        draw.rectangle([0, y, w, y+15], fill=color)
-
     gray_array = np.array(img.convert("L"))
-    margin_x, margin_y = int(w * 0.12), int(h * 0.12)
-    raw_points = []
     
-    x_steps = np.linspace(margin_x, w - margin_x, 15, dtype=int)
-    for x in x_steps:
-        col = gray_array[margin_y:h-margin_y, x]
-        dark_y = np.where(col < 230)[0]
-        if len(dark_y) > 0:
-            y_front = margin_y + dark_y[-1]
-            y_back = margin_y + dark_y[0]
-            if (y_front - y_back) > (h*0.04): 
-                raw_points.append((x, y_front + 5, 'front'))
-                raw_points.append((x, y_back - 5, 'back'))
-
-    y_steps = np.linspace(margin_y, h - margin_y, 10, dtype=int)
-    for y in y_steps:
-        row = gray_array[y, margin_x:w-margin_x]
-        dark_x = np.where(row < 230)[0]
-        if len(dark_x) > 0:
-            x_left = margin_x + dark_x[0]
-            x_right = margin_x + dark_x[-1]
-            if (x_right - x_left) > (w*0.04):
-                raw_points.append((x_left - 5, y, 'side_left'))
-                raw_points.append((x_right + 5, y, 'side_right'))
-
-    final_points = []
-    for p in raw_points:
-        if all(math.hypot(p[0] - fp[0], p[1] - fp[1]) > (w*0.045) for fp in final_points):
-            final_points.append(p)
-
+    # --- NY: INK-DETECTOR GRID ---
+    # Legger et nettverk over de midterste 80% av tegningen
+    margin_x, margin_y = int(w * 0.1), int(h * 0.1)
+    grid_x = np.linspace(margin_x, w - margin_x, 10, dtype=int)
+    grid_y = np.linspace(margin_y, h - margin_y, 8, dtype=int)
+    
     calculated_dbs = []
-    for px, py, ptype in final_points:
-        d_m = dist + (h - py) * (50/h)
-        d_3d = math.sqrt(d_m**2 + floor_h**2)
-        
-        db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
-        
-        shielding = 0
-        if ptype == 'front':
-            db += 2.5 
-            if screen_height > 0 and floor_h <= (screen_height + 1.5):
-                shielding = 8 
-        elif ptype == 'back': 
-            shielding = 18 
-        elif 'side' in ptype:
-            y_ratio = (py - margin_y) / (h - 2*margin_y) 
-            shielding = 5 + (10 * (1 - y_ratio)) 
+    
+    for py in grid_y:
+        for px in grid_x:
+            # Sjekker en liten boks rundt punktet. Hvis det er tegnet "blekk" der, setter vi en prikk.
+            box_size = int(w * 0.015)
+            y1, y2 = max(0, py - box_size), min(h, py + box_size)
+            x1, x2 = max(0, px - box_size), min(w, px + box_size)
             
-        final_db = int(db - shielding)
-        calculated_dbs.append(final_db)
-        
-        dot_color = (200, 0, 0, 255) if final_db >= 65 else ((200, 150, 0, 255) if final_db >= 55 else (50, 150, 50, 255))
-        r = int(h/65)
-        
-        draw.ellipse([px-r-2, py-r-2, px+r+2, py+r+2], fill=(255,255,255,230))
-        draw.ellipse([px-r, py-r, px+r, py+r], fill=dot_color, outline=(0,0,0,255))
-        draw.text((px-r/1.5, py-r/1.5), str(final_db), fill="white" if final_db>=55 else "black", font=font_large)
+            region = gray_array[y1:y2, x1:x2]
+            
+            # Hvis mer enn 2% av boksen inneholder mørke piksler (streker, vegger, bygningsmasse)
+            if np.sum(region < 230) > (box_size * box_size * 0.02):
+                
+                # Beregner støy logisk fra bunn (vei) til topp (stille side / høyere opp)
+                d_m = dist + (h - py) * (50/h)
+                d_3d = math.sqrt(d_m**2 + floor_h**2)
+                db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
+                
+                # Simulert skjerming avhengig av hvor på tegningen punktet er
+                y_ratio = py / h # 0 på toppen, 1 på bunnen
+                shielding = 0
+                if y_ratio < 0.5: # Øvre halvdel (baksiden av bygget eller tak)
+                    shielding = 14
+                elif y_ratio < 0.7: # Midten (sidefasader)
+                    shielding = 6
+                    
+                if screen_height > 0 and floor_h <= (screen_height + 1.5) and y_ratio > 0.5:
+                    shielding += 8
+                    
+                final_db = int(db - shielding)
+                calculated_dbs.append(final_db)
+                
+                dot_color = (200, 0, 0, 255) if final_db >= 60 else ((200, 150, 0, 255) if final_db >= 55 else (50, 150, 50, 255))
+                r = int(h/65)
+                
+                draw.ellipse([px-r-2, py-r-2, px+r+2, py+r+2], fill=(255,255,255,240))
+                draw.ellipse([px-r, py-r, px+r, py+r], fill=dot_color, outline=(0,0,0,255), width=2)
+                draw.text((px-r/1.5, py-r/1.5), str(final_db), fill="white" if final_db>=55 else "black", font=font_large)
 
+    # Info-boks
     box_w, box_h = int(w*0.35), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
@@ -157,13 +133,13 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     draw.text((w-box_w+20, h-box_h+60), info_text, fill="black", font=font_large)
     
     if calculated_dbs:
-        draw.text((w-box_w+20, h-box_h+100), f"Maks (Vei): {max(calculated_dbs)} dB", fill=(200,0,0) if max(calculated_dbs)>=60 else "black", font=font_large)
-        draw.text((w-box_w+20, h-box_h+130), f"Min (Stille side): {min(calculated_dbs)} dB", fill=(50,150,50), font=font_large)
+        draw.text((w-box_w+20, h-box_h+100), f"Maks fasade (Vei): {max(calculated_dbs)} dB", fill=(200,0,0) if max(calculated_dbs)>=60 else "black", font=font_large)
+        draw.text((w-box_w+20, h-box_h+130), f"Min (Stille side/Høyde): {min(calculated_dbs)} dB", fill=(50,150,50), font=font_large)
 
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), calculated_dbs
 
-# --- 3. DYNAMISK PDF MOTOR (LÅST BREDDE FOR Å UNNGÅ FPDF-KRASJ) ---
+# --- 3. DYNAMISK PDF MOTOR (LÅST BREDDE OG AUTO-WRAP w=0) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -199,11 +175,11 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_y(100)
     pdf.set_font('Helvetica', 'B', 26)
     pdf.set_text_color(26, 43, 72)
-    # Fast bredde (160) i stedet for w=0 hindrer "Not enough space"-krasj ved sideskift
-    pdf.multi_cell(160, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
+    # w=0 sørger for at teksten ALDRI går utfor høyremargen, men bryter automatisk!
+    pdf.multi_cell(0, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(160, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
+    pdf.multi_cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
     pdf.ln(30)
     
     metadata = [
@@ -250,11 +226,12 @@ def create_full_report_pdf(name, client, content, maps):
             continue
             
         if line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
-            pdf.check_space(40)
-            pdf.ln(10)
+            pdf.check_space(30)
+            pdf.ln(8)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            # w=0 på ALLE overskrifter stopper PDF-krasj og blødning for godt
+            pdf.multi_cell(0, 7, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -264,7 +241,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(6)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(0, 7, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
             
@@ -278,11 +255,11 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(155, 5, safe_text) # Låst til 155 for kulepunkter
+                    pdf.multi_cell(0, 5, safe_text)
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(160, 5, safe_text) # Låst til 160 for normal tekst
+                    pdf.multi_cell(0, 5, safe_text)
             except Exception:
                 pdf.ln(2)
 
@@ -347,7 +324,7 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 else:
                     st.info("ℹ️ AI Vision fant ingen støyskjermer på tegningen. Bruker fri sikt.")
             except Exception as e:
-                st.warning(f"AI Vision feilet, bruker standard fri sikt. Feil: {e}")
+                st.warning(f"AI Vision feilet, bruker standard fri sikt.")
         
         with st.spinner("1. Utfører Builtly 3D-simulering og tegner kart..."):
             try:
@@ -374,7 +351,7 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                     processed_maps.append(m)
                     
                     if points:
-                        data_summary.append(f"PLAN {i+1}: Maks fasade (mot vei) {max(points)} dB, Min (stille side) {min(points)} dB.")
+                        data_summary.append(f"PLAN {i+1}: Maks fasade (mot vei) {max(points)} dB, Min (stille side/høyde) {min(points)} dB.")
                     
                     img.close()
                     gc.collect()
@@ -407,35 +384,35 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 AI VISION SKJERMING: Skjerm/terrengvoll oppdaget med høyde {detected_screen_height} m.
                 RESULTATER FRA 3D-FASADEBEREGNING: {data_summary}
                 
-                Viktig endring i resultatene: Beregningene viser nå tydelig forskjell på fasaden som vender MOT VEIEN (Maks dB) og baksiden av bygget som fungerer som STILLE SIDE (Min dB) på grunn av bygningskroppens egen skjermingseffekt.
+                Viktig: Beregningene viser nå logisk fordeling av støy, hvor de nedre delene (nærmest veien) får høyeste dB, og de øvre delene eller den skjermede baksiden fungerer som STILLE SIDE.
                 
                 KRAV TIL TEKSTEN:
                 - Dokumentet MÅ være langt og utfyllende (Skriv minimum 1500 ord).
                 - Bruk formelt, teknisk ingeniørspråk. Omtal deg selv som Builtly RIAKU AI.
-                - Unngå tabeller. Ikke bruk '|' eller lange understreker. Skriv alt med ren tekst og kulepunkter.
-                - Hvis maks fasadestøy er over 55 dB, befinner bygget seg i GUL SONE. Diskuter dette!
+                - Unngå tabeller og lange understreker. Skriv med ren tekst og kulepunkter. Hold overskrifter korte!
+                - Hvis maks fasadestøy er over 55 dB, befinner bygget seg i GUL SONE.
                 
-                STRUKTUR SOM SKAL FØLGES:
+                STRUKTUR SOM SKAL FØLGES (Bruk disse nøyaktige overskriftene):
                 # 1. SAMMENDRAG OG KONKLUSJON
                 Skriv et fyldig sammendrag.
                 
                 # 2. INNLEDNING
                 Beskriv prosjektet.
                 
-                # 3. KRAV OG RETNINGSLINJER (T-1442 / NS 8175)
+                # 3. KRAV OG RETNINGSLINJER (T-1442)
                 Gå i dybden på Miljødirektoratets retningslinje T-1442 og NS 8175.
                 
-                # 4. BEREGNINGSFORUTSETNINGER OG METODIKK
-                Beskriv metodikken.
+                # 4. BEREGNINGSFORUTSETNINGER
+                Beskriv metodikken og trafikkgrunnlaget.
                 
                 # 5. RESULTATER: STØYUTBREDELSE
-                Diskuter fasadenivåene. Nevn uttrykkelig forskjellen på "støyutsatt fasade" og "stille side" (baksiden av bygget).
+                Diskuter fasadenivåene. Nevn uttrykkelig forskjellen på utsatt fasade og stille side.
                 
-                # 6. VURDERING AV FASADEISOLERING OG TILTAK
-                Gitt maksnivåene mot veien, foreslå konkrete krav til vinduer (Rw+Ctr) og kanskje spesifikke tiltak for lufting.
+                # 6. VURDERING AV FASADEISOLERING
+                Foreslå konkrete krav til vinduer (Rw+Ctr).
                 
                 # 7. VURDERING AV UTEOPPHOLDSAREALER
-                Drøft plassering av uteplasser, balkonginnglassing og skjerming.
+                Drøft plassering av uteplasser og behov for skjerming/innglassing.
                 """
                 
                 res = model.generate_content(prompt)
