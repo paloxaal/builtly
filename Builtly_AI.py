@@ -4,14 +4,14 @@ import os
 # --- 1. GRUNNINNSTILLINGER ---
 st.set_page_config(page_title="Builtly Portal | Enterprise", page_icon="🏗️", layout="wide", initial_sidebar_state="expanded")
 
-# --- 2. NEON / DARK MODE CSS (Forbedret over ChatGPT) ---
+# --- 2. NEON / DARK MODE CSS ---
 st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
         
         /* Tvinger global styling */
         .stApp {
-            background-color: #090e17 !important; /* Enda dypere svart/blå */
+            background-color: #090e17 !important; 
             font-family: 'Inter', sans-serif;
         }
         
@@ -76,7 +76,7 @@ st.markdown("""
         }
         .metric-trend {
             font-size: 0.85rem;
-            color: #10b981; /* Grønn trend */
+            color: #10b981; 
             margin-top: 8px;
             display: flex;
             align-items: center;
@@ -287,7 +287,7 @@ st.markdown("""
             </div>
         </a>
 
-        <a href="Geo_&_Miljø" target="_self" class="module-card">
+        <a href="Geo" target="_self" class="module-card">
             <div class="card-top">
                 <div class="card-icon-title">
                     <div class="icon-box">🌍</div>
@@ -308,7 +308,7 @@ st.markdown("""
             </div>
         </a>
 
-        <a href="Konstruksjon_(RIB)" target="_self" class="module-card">
+        <a href="Konstruksjon" target="_self" class="module-card">
             <div class="card-top">
                 <div class="card-icon-title">
                     <div class="icon-box">🏢</div>
