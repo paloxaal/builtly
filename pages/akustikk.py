@@ -21,27 +21,6 @@ try:
 except ImportError:
     fitz = None
 
-def get_model():
-    """Smart tilkobling som sjekker nøyaktig hva API-nøkkelen din har tilgang til"""
-    try:
-        # Henter listen over alle modeller din nøkkel faktisk har lov til å bruke
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Vi prioriterer fra nyeste til eldste/mest stabile
-        for model_name in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro', 'gemini-pro']:
-            if model_name in available_models:
-                return genai.GenerativeModel(model_name)
-                
-        # Hvis våre favoritter ikke finnes, ta den første som fungerer på listen din
-        if available_models:
-            return genai.GenerativeModel(available_models[0])
-            
-    except Exception:
-        pass
-        
-    # Den absolutte siste utveien som "alltid" fungerer hos Google
-    return genai.GenerativeModel('gemini-pro')
-
 def clean_pdf_text(text):
     """Renser tekst for PDF-motoren, men bevarer ÆØÅ"""
     if not text: 
@@ -73,7 +52,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
     except: 
         font_large = ImageFont.load_default()
 
-    # Tegn støysoner (gradient fra kilden)
     for y in range(int(h*0.3), h, 10):
         d_m = dist + (h - y) * (40/h)
         db_at_y = base_db - 10 * math.log10(max(d_m, 1) / 10.0)
@@ -85,7 +63,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
             color = (0, 255, 0, 20)
         draw.rectangle([0, y, w, y+10], fill=color)
 
-    # Tegn Fasadepunkter
     points = []
     x_positions = np.linspace(0.15*w, 0.85*w, 8)
     y_positions = [0.45*h, 0.6*h] 
@@ -102,7 +79,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
             draw.text((x-r/1.5, y-r/1.5), str(db), fill="white" if db>=55 else "black", font=font_large)
             points.append(db)
 
-    # Tegningsramme (Legend)
     box_w, box_h = int(w*0.3), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
@@ -140,7 +116,6 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
-    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): 
         pdf.image("logo.png", x=25, y=20, w=50)
@@ -166,7 +141,6 @@ def create_full_report_pdf(name, client, content, maps):
         pdf.set_font('Helvetica', '', 10)
         pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    # INNHOLDSFORTEGNELSE
     pdf.add_page()
     pdf.set_font('Helvetica', 'B', 16)
     pdf.set_text_color(26, 43, 72)
@@ -190,7 +164,6 @@ def create_full_report_pdf(name, client, content, maps):
         pdf.set_draw_color(220, 220, 220)
         pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
-    # PARSING AV AI INNHOLD
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
@@ -234,7 +207,6 @@ def create_full_report_pdf(name, client, content, maps):
             except Exception:
                 pdf.ln(2)
 
-    # TEGNINGSVEDLEGG
     if maps:
         pdf.add_page()
         pdf.set_font('Helvetica', 'B', 16)
@@ -301,9 +273,33 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                     img.close()
                     gc.collect()
 
-                st.toast("Simulering ferdig. Builtly RIAKU AI forfatter utredningen...")
+                st.toast("Simulering ferdig. Kobler til Google AI...")
                 
-                model = get_model()
+                # --- DEN NYE, IDIOTSIKKERE RADAREN ---
+                gyldige_modeller = []
+                try:
+                    for m in genai.list_models():
+                        if 'generateContent' in m.supported_generation_methods:
+                            gyldige_modeller.append(m.name)
+                except Exception as list_err:
+                    raise Exception(f"NETTVERKSFEIL: Fikk ikke kontakt med Google. Sjekk API-nøkkel. Detaljer: {list_err}")
+
+                if not gyldige_modeller:
+                    raise Exception("Fikk kontakt med Google, men din API-nøkkel har ikke tilgang til noen AI-modeller i skyen.")
+
+                # Vi velger den første modellen Google ga oss (fallback)
+                valgt_modell = gyldige_modeller[0]
+                
+                # Men vi prøver å finne flaggskipene først hvis du har dem
+                for favoritt in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
+                    if favoritt in gyldige_modeller:
+                        valgt_modell = favoritt
+                        break
+                
+                st.info(f"Suksess: Gjenkjente og bruker modellen '{valgt_modell}'")
+                model = genai.GenerativeModel(valgt_modell)
+                # -------------------------------------
+
                 prompt = f"""
                 Du er Builtly RIAKU AI, en avansert støyfaglig AI-ingeniør og rådgiver.
                 Du skal skrive en KOMPLETT, DYPTGÅENDE og DETALJERT støyfaglig utredning for rammetillatelse.
