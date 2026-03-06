@@ -10,7 +10,6 @@ import numpy as np
 import io
 import math
 import gc
-import json
 import requests
 import urllib.parse
 from PIL import Image, ImageDraw, ImageFont
@@ -39,31 +38,24 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
+    """Den ultimate PDF-beskytteren som forhindrer alle krasj"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
-    text = re.sub(r'([^\s]{40})', r'\1 ', text)
+    # Tvinger mellomrom inn i alle ord over 30 tegn
+    text = re.sub(r'([^\s]{30})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTVERKET API & FLYFOTO (NORGE I BILDER WMS) ---
+# --- 2. KARTVERKET API & FLYFOTO ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
-    """Smartere API-søk som tvinger frem UTM33-koordinater og takler feilstavinger"""
-    # Renser bort kommaer som ofte forvirrer API-et
-    adr_clean = adresse.replace(',', '') if adresse else ""
-    kom_clean = kommune.replace(',', '') if kommune else ""
-    
-    # Forsøk 1: Full pakke (Adresse + Kommune + Gnr/Bnr)
-    query_parts = []
-    if adr_clean: query_parts.append(adr_clean)
-    if kom_clean: query_parts.append(kom_clean)
-    if gnr and bnr: query_parts.append(f"{gnr}/{bnr}")
-    
-    search_query = " ".join(query_parts)
-    if not search_query.strip():
-        return "Ingen adresse eller Gnr/Bnr oppgitt.", None, None
+    """Smart fossefall-søk for å garantere treff i Geonorge API"""
+    adr_clean = adresse.replace(',', '').strip() if adresse else ""
+    kom_clean = kommune.replace(',', '').strip() if kommune else ""
+    gnr_clean = gnr.strip() if gnr else ""
+    bnr_clean = bnr.strip() if bnr else ""
 
     def api_call(query_string):
+        if not query_string.strip(): return None, None, None, None
         safe_query = urllib.parse.quote(query_string)
-        # NØKKELEN: utkoordsys=25833 tvinger Kartverket til å gi oss UTM33 (Nord/Øst)
         url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&utkoordsys=25833&treffPerSide=1"
         try:
             resp = requests.get(url, timeout=5)
@@ -72,41 +64,46 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
                 nord = hit.get('representasjonspunkt', {}).get('nord', None)
                 ost = hit.get('representasjonspunkt', {}).get('øst', None)
                 kom = hit.get('kommunenavn', 'Ukjent')
-                return hit['adressetekst'], kom, nord, ost
+                adr_tekst = hit.get('adressetekst', query_string)
+                return adr_tekst, kom, nord, ost
         except Exception:
             pass
         return None, None, None, None
 
-    # Utfører Forsøk 1
-    adr_tekst, kom, nord, ost = api_call(search_query)
-    
-    # Forsøk 2: Hvis Gnr/Bnr forvirret Kartverket, prøv KUN adresse
-    if nord is None and adr_clean:
-        fallback_query = f"{adr_clean} {kom_clean}"
-        adr_tekst, kom, nord, ost = api_call(fallback_query)
+    # Forsøk 1: Adresse + Kommune (Mest presist)
+    query1 = f"{adr_clean} {kom_clean}".strip()
+    adr_tekst, kom, nord, ost = api_call(query1)
+
+    # Forsøk 2: Kun Adresse (hvis kommunen forvirrer)
+    if not nord and adr_clean:
+        adr_tekst, kom, nord, ost = api_call(adr_clean)
+
+    # Forsøk 3: Kommune + Gnr/Bnr (Matrikkelsøk hvis adressen er feil/mangler)
+    if not nord and gnr_clean and bnr_clean:
+        query3 = f"{kom_clean} {gnr_clean}/{bnr_clean}".strip()
+        adr_tekst, kom, nord, ost = api_call(query3)
+
+    # Forsøk 4: Kun Gnr/Bnr
+    if not nord and gnr_clean and bnr_clean:
+        query4 = f"{gnr_clean}/{bnr_clean}".strip()
+        adr_tekst, kom, nord, ost = api_call(query4)
 
     if nord and ost:
         tekst = f"Bekreftet i Kartverket: {adr_tekst}, {kom}. Koordinater (UTM33): N {nord}, Ø {ost}."
         return tekst, nord, ost
     else:
-        return f"Fant ingen eksakte treff i Kartverket for: '{search_query}'. Prøv kun gatenavn.", None, None
-
+        return "Fant ingen treff i Kartverket. Prøv et annet skrivemåte på adressen.", None, None
 
 def fetch_kartverket_flyfoto(nord, ost):
-    """Henter høyoppløselig ortofoto basert på UTM33-koordinater"""
     try:
         if not nord or not ost: return None
-        # Definerer en bounding box (ca 200x200 meter rundt bygget)
         min_x, max_x = float(ost) - 100, float(ost) + 100
         min_y, max_y = float(nord) - 100, float(nord) + 100
-        
-        # WMS-kall til 'Norge i Bilder'
         wms_url = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        
         response = requests.get(wms_url, timeout=10)
         if response.status_code == 200:
             return Image.open(io.BytesIO(response.content))
-    except Exception as e:
+    except Exception:
         pass
     return None
 
@@ -166,7 +163,7 @@ def generate_geo_boreplan(img, project_name):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), bore_points
 
-# --- 4. DYNAMISK PDF MOTOR MED FLYFOTO-INTEGRASJON ---
+# --- 4. DYNAMISK PDF MOTOR MED SIKKERHETSMARGER ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -196,6 +193,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
+    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): 
         pdf.image("logo.png", x=25, y=20, w=50)
@@ -224,6 +222,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
         pdf.set_font('Helvetica', '', 10)
         pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
+    # INNHOLDSFORTEGNELSE
     pdf.add_page()
     pdf.set_x(25)
     pdf.set_font('Helvetica', 'B', 16)
@@ -249,6 +248,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
         pdf.set_draw_color(220, 220, 220)
         pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
+    # RAPPORT
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
@@ -280,7 +280,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
                 pdf.set_font('Helvetica', 'I', 9)
                 pdf.set_text_color(150, 0, 0)
                 pdf.set_x(25)
-                pdf.cell(0, 5, "Merknad: Kunne ikke hente flyfoto fra Kartverket for denne adressen.", 0, 1, 'L')
+                pdf.cell(0, 5, "Merknad: Kunne ikke hente flyfoto fra Kartverket for dette søket.", 0, 1, 'L')
                 pdf.ln(5)
                 
             pdf.set_font('Helvetica', '', 10)
@@ -323,6 +323,7 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
             except Exception:
                 pdf.ln(2)
 
+    # VEDLEGG
     if maps:
         pdf.add_page()
         pdf.set_x(25)
