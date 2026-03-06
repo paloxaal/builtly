@@ -37,10 +37,10 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    """Den ultimate PDF-beskytteren som forhindrer alle krasj"""
+    """Den ultimate PDF-beskytteren som forhindrer alle krasj i brødteksten"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
-    # HENSYNSLØST FILTER: Tvinger mellomrom inn i alle "ord" (f.eks URLer) over 30 tegn!
+    # Tvinger mellomrom inn i alle "ord" over 30 tegn
     text = re.sub(r'([^\s]{30})', r'\1 ', text)
     return clean_pdf_text(text)
 
@@ -81,7 +81,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
 
     gray_array = np.array(img.convert("L"))
     
-    # "Blekk-sensoren" som skanner tegningen
     margin_x, margin_y = int(w * 0.1), int(h * 0.1)
     grid_x = np.linspace(margin_x, w - margin_x, 10, dtype=int)
     grid_y = np.linspace(margin_y, h - margin_y, 8, dtype=int)
@@ -97,7 +96,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
             region = gray_array[y1:y2, x1:x2]
             
             if np.sum(region < 230) > (box_size * box_size * 0.02):
-                
                 d_m = dist + (h - py) * (50/h)
                 d_3d = math.sqrt(d_m**2 + floor_h**2)
                 db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
@@ -136,7 +134,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), calculated_dbs
 
-# --- 3. DYNAMISK PDF MOTOR (EKSTRA STORE SIKKERHETSMARGINER) ---
+# --- 3. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -169,14 +167,19 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     if os.path.exists("logo.png"): 
         pdf.image("logo.png", x=25, y=20, w=50)
+        
+    # --- FIKS PÅ FORSIDEN: Låste X-koordinater og standard linjebryting ---
     pdf.set_y(100)
+    pdf.set_x(25)
     pdf.set_font('Helvetica', 'B', 26)
     pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(150, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
+    pdf.cell(0, 15, clean_pdf_text("STØYFAGLIG UTREDNING"), 0, 1, 'L')
+    pdf.set_x(25)
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(150, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
+    pdf.cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"), 0, 1, 'L')
     pdf.ln(30)
+    # ------------------------------------------------------------------------
     
     metadata = [
         ("OPPDRAGSGIVER:", client), 
@@ -186,12 +189,14 @@ def create_full_report_pdf(name, client, content, maps):
     ]
     
     for l, v in metadata:
+        pdf.set_x(25)
         pdf.set_font('Helvetica', 'B', 10)
         pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10)
         pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
     pdf.add_page()
+    pdf.set_x(25)
     pdf.set_font('Helvetica', 'B', 16)
     pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1)
@@ -210,6 +215,7 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_font('Helvetica', '', 11)
     pdf.set_text_color(0, 0, 0)
     for t in toc:
+        pdf.set_x(25)
         pdf.cell(0, 10, clean_pdf_text(t), 0, 1)
         pdf.set_draw_color(220, 220, 220)
         pdf.line(25, pdf.get_y(), 185, pdf.get_y())
@@ -224,9 +230,9 @@ def create_full_report_pdf(name, client, content, maps):
         if line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
             pdf.check_space(30)
             pdf.ln(8)
+            pdf.set_x(25)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            # Sikkerhetsbredde 150mm på overskrifter
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
@@ -235,6 +241,7 @@ def create_full_report_pdf(name, client, content, maps):
         elif line.startswith('##'):
             pdf.check_space(20)
             pdf.ln(6)
+            pdf.set_x(25)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
@@ -251,16 +258,17 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(145, 5, safe_text) # Tvinger inn smalere bredde for kulepunkter
+                    pdf.multi_cell(145, 5, safe_text)
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(150, 5, safe_text) # Tvinger inn smalere bredde for brødtekst
+                    pdf.multi_cell(150, 5, safe_text)
             except Exception:
                 pdf.ln(2)
 
     if maps:
         pdf.add_page()
+        pdf.set_x(25)
         pdf.set_font('Helvetica', 'B', 16)
         pdf.set_text_color(26, 43, 72)
         pdf.cell(0, 20, "VEDLEGG: BEREGNEDE STØYSONEKART", 0, 1)
@@ -272,6 +280,7 @@ def create_full_report_pdf(name, client, content, maps):
                 img_h = 160 * (m.height / m.width)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.set_y(pdf.get_y() + img_h + 5)
+                pdf.set_x(25)
                 pdf.set_font('Helvetica', 'I', 10)
                 pdf.set_text_color(100, 100, 100)
                 pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Beregnet fasadestøy og støysoner for Plan {i+1}. Lden (dB)."), 0, 1, 'C')
@@ -302,7 +311,6 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
         detected_screen_height = 0.0
         with st.spinner("👁️ AI Vision skanner tegningene for skjerming og terreng..."):
             try:
-                # Filtrer ut potensielle Excel-filer etc.
                 valid_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
                 if not valid_files:
                     st.warning("Fant ingen gyldige bildefiler for AI Vision.")
