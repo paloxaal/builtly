@@ -12,6 +12,7 @@ import math
 import gc
 import json
 import requests
+import urllib.parse
 from PIL import Image, ImageDraw, ImageFont
 
 # --- 1. TEKNISK OPPSETT ---
@@ -40,14 +41,27 @@ def clean_pdf_text(text):
 def ironclad_text_formatter(text):
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{4,}', ' ', text)
+    # Tvinger orddeling på 40 tegn for å unngå FPDF-krasj
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- NY: KARTVERKET API INTEGRASJON ---
-def fetch_kartverket_data(adresse):
+# --- NY: AVANSERT KARTVERKET API (GNR/BNR) ---
+def fetch_kartverket_data(adresse, kommune, gnr, bnr):
     """Henter ekte stedsdata og koordinater fra Norges offisielle Geonorge API"""
+    # Bygger en smart søkestreng
+    query_parts = []
+    if adresse: query_parts.append(adresse)
+    if kommune: query_parts.append(kommune)
+    if gnr and bnr: query_parts.append(f"{gnr}/{bnr}")
+    
+    search_query = " ".join(query_parts)
+    
+    if not search_query.strip():
+        return "Ingen adresse eller Gnr/Bnr oppgitt for Kartverket-søk."
+
     try:
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={adresse}"
+        safe_query = urllib.parse.quote(search_query)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}"
         resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
@@ -55,12 +69,13 @@ def fetch_kartverket_data(adresse):
                 hit = data['adresser'][0]
                 nord = hit.get('representasjonspunkt', {}).get('nord', 'Ukjent')
                 ost = hit.get('representasjonspunkt', {}).get('øst', 'Ukjent')
-                kommune = hit.get('kommunenavn', 'Ukjent')
+                kom = hit.get('kommunenavn', 'Ukjent')
                 fylke = hit.get('fylkesnavn', 'Ukjent')
-                return f"Bekreftet i Kartverket: {hit['adressetekst']}, {kommune} ({fylke}). Koordinater: Nord {nord}, Øst {ost}."
+                return f"Bekreftet i Kartverket: {hit['adressetekst']}, {kom} ({fylke}). Koordinater: Nord {nord}, Øst {ost}."
+            else:
+                return f"Fant ingen direkte treff i Kartverket for søket: '{search_query}'. Antar fiktive data for rapporten."
     except Exception as e:
-        pass
-    return f"Kartverket (Frakoblet/Fiktiv): Adresse '{adresse}' antatt i marin grense, Trøndelag. Koordinatsystem EUREF89."
+        return f"Kartverket API utilgjengelig. Søkte etter: {search_query}. Bruker standardverdier."
 
 # --- 2. BEREGNINGSMOTOR (AUTOMATISK BOREPLAN) ---
 def generate_geo_boreplan(img, project_name):
@@ -77,50 +92,39 @@ def generate_geo_boreplan(img, project_name):
         font_large = ImageFont.load_default()
         font_small = ImageFont.load_default()
 
-    # --- AVANSERT BYGG-SPORING ---
     gray_array = np.array(img.convert("L"))
     margin_x, margin_y = int(w * 0.15), int(h * 0.15)
     
-    # Finner hjørnene av bygget for å plassere borepunkter
     dark_y, dark_x = np.where(gray_array[margin_y:h-margin_y, margin_x:w-margin_x] < 230)
     
     bore_points = []
     if len(dark_x) > 100:
-        # Justerer koordinatene tilbake til originalbildet
         min_x = np.min(dark_x) + margin_x
         max_x = np.max(dark_x) + margin_x
         min_y = np.min(dark_y) + margin_y
         max_y = np.max(dark_y) + margin_y
         
-        # Plasserer 4 borepunkter i hjørnene, med 10% offset ut fra bygget
         offset_x, offset_y = int((max_x - min_x) * 0.1), int((max_y - min_y) * 0.1)
         
         bore_points = [
-            (min_x - offset_x, min_y - offset_y, "BP1"), # Topp Venstre
-            (max_x + offset_x, min_y - offset_y, "BP2"), # Topp Høyre
-            (max_x + offset_x, max_y + offset_y, "BP3"), # Bunn Høyre
-            (min_x - offset_x, max_y + offset_y, "BP4"), # Bunn Venstre
-            ((min_x + max_x)//2, ((min_y + max_y)//2), "BP5") # Senter (Kjerneboring)
+            (min_x - offset_x, min_y - offset_y, "BP1"),
+            (max_x + offset_x, min_y - offset_y, "BP2"),
+            (max_x + offset_x, max_y + offset_y, "BP3"),
+            (min_x - offset_x, max_y + offset_y, "BP4"),
+            ((min_x + max_x)//2, ((min_y + max_y)//2), "BP5") 
         ]
     else:
-        # Fallback hvis tegningen er blank
         cx, cy = w//2, h//2
         bore_points = [(cx-100, cy-100, "BP1"), (cx+100, cy-100, "BP2"), (cx, cy+100, "BP3")]
 
-    # Tegner bransjestandard symbol for Borepunkt (Sirkel med kryss)
     r = int(h/70)
     for px, py, label in bore_points:
-        # Hvit bakgrunn for lesbarhet
         draw.ellipse([px-r-2, py-r-2, px+r+2, py+r+2], fill=(255,255,255,240))
-        # Rød sirkel
         draw.ellipse([px-r, py-r, px+r, py+r], outline=(200,0,0,255), width=3)
-        # Kryss inni sirkelen
         draw.line([px-r, py, px+r, py], fill=(200,0,0,255), width=2)
         draw.line([px, py-r, px, py+r], fill=(200,0,0,255), width=2)
-        # Etikett (BP1, BP2 etc)
         draw.text((px+r+5, py-r), label, fill=(0,0,0,255), font=font_large)
 
-    # Profesjonell Info-boks
     box_w, box_h = int(w*0.35), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"FORESLÅTT BOREPLAN", fill="black", font=font_large)
@@ -130,7 +134,7 @@ def generate_geo_boreplan(img, project_name):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), bore_points
 
-# --- 3. DYNAMISK PDF MOTOR (AUTO-BREDDE w=0) ---
+# --- 3. DYNAMISK PDF MOTOR (MED FAST BREDDE SOM I AKUSTIKK) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -166,10 +170,11 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_y(100)
     pdf.set_font('Helvetica', 'B', 26)
     pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(0, 10, clean_pdf_text("GEOTEKNISK VURDERING (RIG)"))
+    # 160mm låst bredde hindrer FPDF i å krasje
+    pdf.multi_cell(160, 10, clean_pdf_text("GEOTEKNISK VURDERING (RIG)"))
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
+    pdf.multi_cell(160, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
     pdf.ln(30)
     
     metadata = [
@@ -220,7 +225,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(10)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -230,7 +235,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(6)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
             
@@ -244,11 +249,11 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(155, 5, safe_text)
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(160, 5, safe_text)
             except Exception:
                 pdf.ln(2)
 
@@ -280,9 +285,16 @@ with st.expander("Prosjekt & Lokasjon", expanded=True):
     p_name = c1.text_input("Prosjektnavn", "Saga Park")
     c_name = c2.text_input("Oppdragsgiver", "Saga Park AS")
     
-    adresse = st.text_input("Prosjektadresse (Brukt til Kartverket-oppslag)", "Industriveien, Trondheim")
+    st.markdown("##### Kartverket Oppslag")
+    c3, c4 = st.columns(2)
+    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1B")
+    kommune = c4.text_input("Kommune", "Trondheim")
+    
+    c5, c6 = st.columns(2)
+    gnr = c5.text_input("Gårdsnummer (Gnr)", "316")
+    bnr = c6.text_input("Bruksnummer (Bnr)", "725")
 
-files = st.file_uploader("Last opp situasjonsplan for Boreplan (PDF/PNG)", accept_multiple_files=True)
+files = st.file_uploader("Last opp situasjonsplan for Boreplan (Kun PDF/Bilder)", accept_multiple_files=True)
 
 if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
     if not files: 
@@ -291,15 +303,21 @@ if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
         # 1. HENT DATA FRA KARTVERKET
         kartverket_info = ""
         with st.spinner("🌍 Kobler til Geonorge/Kartverket API..."):
-            kartverket_info = fetch_kartverket_data(adresse)
+            kartverket_info = fetch_kartverket_data(adresse, kommune, gnr, bnr)
             st.success(kartverket_info)
         
         # 2. GENERER GRAFIKK OG BOREPLAN
         processed_maps = []
         with st.spinner("1. Analyserer tegning og oppretter boreplan..."):
             try:
-                for i in range(min(len(files), 1)): # Lager kun boreplan for første tegning for demo
-                    f = files[i]
+                # Filtrerer ut Excel og tekstfiler slik at grafikkmotoren ikke krasjer
+                valid_image_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
+                
+                if not valid_image_files:
+                    st.warning("Fant ingen gyldige bildefiler (PDF/PNG/JPG) for å tegne boreplan. Genererer kun tekst-rapport.")
+                
+                for i in range(min(len(valid_image_files), 1)): 
+                    f = valid_image_files[i]
                     if f.name.lower().endswith('pdf'):
                         if fitz is None: st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
@@ -337,9 +355,9 @@ if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
                 
                 PROSJEKT: {p_name}
                 OPPDRAGSGIVER: {c_name}
-                ADRESSE: {adresse}
+                ADRESSE / GNR / BNR: {adresse}, {kommune}. Gnr {gnr} / Bnr {bnr}.
                 KARTVERKET-DATA: {kartverket_info}
-                BOREPLAN: Generert med {len(b_points)} borepunkter.
+                BOREPLAN: Generert og vedlagt rapporten.
                 
                 INSTRUKSER:
                 - Skriv utfyllende, profesjonelt og formelt. Minimum 1500 ord.
@@ -353,7 +371,7 @@ if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
                 # 4. FORVENTEDE GRUNNFORHOLD (NGU) (Drøft løsmasser, berg, grunnvann)
                 # 5. KVIKKLEIRE OG OMRÅDESTABILITET (Svært viktig vurdering)
                 # 6. FUNDAMENTERING OG GRAVING (Anbefalinger)
-                # 7. ANBEFALT GRUNNUNDERSØKELSE (BOREPLAN) (Forklar at vi har lagt opp {len(b_points)} punkter i vedlegget for totalsondering/CPTU).
+                # 7. ANBEFALT GRUNNUNDERSØKELSE (BOREPLAN) (Forklar strategien for plassering av borepunkter).
                 """
                 
                 res = model.generate_content(prompt)
