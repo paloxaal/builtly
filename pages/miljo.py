@@ -6,16 +6,13 @@ import os
 from datetime import datetime
 import tempfile
 import re
-import numpy as np
-import io
-import math
-import gc
 import requests
 import urllib.parse
-from PIL import Image, ImageDraw, ImageFont
+import io
+from PIL import Image
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Geoteknikk Pro | Builtly AI", layout="wide")
+st.set_page_config(page_title="Geo & Miljø Pro | Builtly AI", layout="wide")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -24,30 +21,23 @@ else:
     st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
     st.stop()
 
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    fitz = None
-
 def clean_pdf_text(text):
-    if not text: 
-        return ""
+    if not text: return ""
     rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*", "²": "2", "³": "3"}
     for old, new in rep.items(): 
         text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    """Den ultimate PDF-beskytteren som forhindrer alle krasj"""
+    """Den ultimate PDF-beskytteren som forhindrer krasj"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
-    # Tvinger mellomrom inn i alle ord over 30 tegn
-    text = re.sub(r'([^\s]{30})', r'\1 ', text)
+    # Tvinger orddeling på 40 tegn
+    text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
 # --- 2. KARTVERKET API & FLYFOTO ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
-    """Smart fossefall-søk for å garantere treff i Geonorge API"""
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
     gnr_clean = gnr.strip() if gnr else ""
@@ -70,35 +60,28 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
             pass
         return None, None, None, None
 
-    # Forsøk 1: Adresse + Kommune (Mest presist)
-    query1 = f"{adr_clean} {kom_clean}".strip()
-    adr_tekst, kom, nord, ost = api_call(query1)
+    queries = []
+    if adr_clean and kom_clean:
+        queries.append(f"{adr_clean} {kom_clean}")
+        base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
+        if base_num != adr_clean: queries.append(f"{base_num} {kom_clean}")
+        street_only = re.sub(r'\d+.*', '', adr_clean).strip()
+        if street_only: queries.append(f"{street_only} {kom_clean}")
+    if gnr_clean and bnr_clean:
+        queries.append(f"{kom_clean} {gnr_clean}/{bnr_clean}")
 
-    # Forsøk 2: Kun Adresse (hvis kommunen forvirrer)
-    if not nord and adr_clean:
-        adr_tekst, kom, nord, ost = api_call(adr_clean)
+    for q in queries:
+        adr_tekst, kom, nord, ost = api_call(q)
+        if nord and ost:
+            return f"✅ Bekreftet i Kartverket: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
 
-    # Forsøk 3: Kommune + Gnr/Bnr (Matrikkelsøk hvis adressen er feil/mangler)
-    if not nord and gnr_clean and bnr_clean:
-        query3 = f"{kom_clean} {gnr_clean}/{bnr_clean}".strip()
-        adr_tekst, kom, nord, ost = api_call(query3)
-
-    # Forsøk 4: Kun Gnr/Bnr
-    if not nord and gnr_clean and bnr_clean:
-        query4 = f"{gnr_clean}/{bnr_clean}".strip()
-        adr_tekst, kom, nord, ost = api_call(query4)
-
-    if nord and ost:
-        tekst = f"Bekreftet i Kartverket: {adr_tekst}, {kom}. Koordinater (UTM33): N {nord}, Ø {ost}."
-        return tekst, nord, ost
-    else:
-        return "Fant ingen treff i Kartverket. Prøv et annet skrivemåte på adressen.", None, None
+    return "Fant ingen eksakte treff. Appen fortsetter uten flyfoto.", None, None
 
 def fetch_kartverket_flyfoto(nord, ost):
     try:
         if not nord or not ost: return None
-        min_x, max_x = float(ost) - 100, float(ost) + 100
-        min_y, max_y = float(nord) - 100, float(nord) + 100
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
         wms_url = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
         response = requests.get(wms_url, timeout=10)
         if response.status_code == 200:
@@ -107,70 +90,34 @@ def fetch_kartverket_flyfoto(nord, ost):
         pass
     return None
 
-# --- 3. BEREGNINGSMOTOR (AUTOMATISK BOREPLAN) ---
-def generate_geo_boreplan(img, project_name):
-    w, h = img.size
-    draw_img = img.convert("RGBA")
-    overlay = Image.new("RGBA", draw_img.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
+# --- 3. EXCEL / CSV DATA EXTRACTOR ---
+def extract_drill_data(files):
+    """Leser Excel-filer fra boreentreprenør og gjør dem om til tekst for AI-en"""
+    extracted_text = ""
+    for f in files:
+        if f.name.lower().endswith(('.xlsx', '.xls', '.csv')):
+            try:
+                if f.name.lower().endswith('.csv'):
+                    df = pd.read_csv(f)
+                else:
+                    df = pd.read_excel(f)
+                
+                # Konverterer de første 100 radene til tekst
+                extracted_text += f"\n--- RÅDATA FRA FIL: {f.name.upper()} ---\n"
+                extracted_text += df.head(100).to_string() + "\n\n"
+            except Exception as e:
+                extracted_text += f"\n[Feil ved lesing av {f.name}: {e}]\n"
     
-    try: 
-        font_large = ImageFont.truetype("arial.ttf", int(h/45))
-        font_small = ImageFont.truetype("arial.ttf", int(h/60))
-    except: 
-        font_large = ImageFont.load_default()
-        font_small = ImageFont.load_default()
+    return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
 
-    gray_array = np.array(img.convert("L"))
-    margin_x, margin_y = int(w * 0.15), int(h * 0.15)
-    
-    dark_y, dark_x = np.where(gray_array[margin_y:h-margin_y, margin_x:w-margin_x] < 230)
-    
-    bore_points = []
-    if len(dark_x) > 100:
-        min_x = np.min(dark_x) + margin_x
-        max_x = np.max(dark_x) + margin_x
-        min_y = np.min(dark_y) + margin_y
-        max_y = np.max(dark_y) + margin_y
-        
-        offset_x, offset_y = int((max_x - min_x) * 0.1), int((max_y - min_y) * 0.1)
-        
-        bore_points = [
-            (min_x - offset_x, min_y - offset_y, "BP1"),
-            (max_x + offset_x, min_y - offset_y, "BP2"),
-            (max_x + offset_x, max_y + offset_y, "BP3"),
-            (min_x - offset_x, max_y + offset_y, "BP4"),
-            ((min_x + max_x)//2, ((min_y + max_y)//2), "BP5") 
-        ]
-    else:
-        cx, cy = w//2, h//2
-        bore_points = [(cx-100, cy-100, "BP1"), (cx+100, cy-100, "BP2"), (cx, cy+100, "BP3")]
-
-    r = int(h/70)
-    for px, py, label in bore_points:
-        draw.ellipse([px-r-2, py-r-2, px+r+2, py+r+2], fill=(255,255,255,240))
-        draw.ellipse([px-r, py-r, px+r, py+r], outline=(200,0,0,255), width=3)
-        draw.line([px-r, py, px+r, py], fill=(200,0,0,255), width=2)
-        draw.line([px, py-r, px, py+r], fill=(200,0,0,255), width=2)
-        draw.text((px+r+5, py-r), label, fill=(0,0,0,255), font=font_large)
-
-    box_w, box_h = int(w*0.35), int(h*0.2)
-    draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
-    draw.text((w-box_w+20, h-box_h+20), f"FORESLÅTT BOREPLAN", fill="black", font=font_large)
-    draw.text((w-box_w+20, h-box_h+60), f"Prosjekt: {project_name}", fill="black", font=font_large)
-    draw.text((w-box_w+20, h-box_h+100), f"Antall punkt: {len(bore_points)} (Totalsondering/CPTU)", fill=(50,50,150), font=font_small)
-
-    out = Image.alpha_composite(draw_img, overlay)
-    return out.convert("RGB"), bore_points
-
-# --- 4. DYNAMISK PDF MOTOR MED SIKKERHETSMARGER ---
+# --- 4. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
             self.set_y(15)
             self.set_font('Helvetica', 'B', 10)
             self.set_text_color(26, 43, 72)
-            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: GEO-001"), 0, 1, 'R')
+            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIM-001"), 0, 1, 'R')
             self.set_draw_color(200, 200, 200)
             self.line(25, 25, 185, 25)
             self.set_y(30)
@@ -187,7 +134,7 @@ class BuiltlyProPDF(FPDF):
             self.set_margins(25, 25, 25)
             self.set_x(25)
 
-def create_full_report_pdf(name, client, content, maps, aerial_photo):
+def create_full_report_pdf(name, client, content, aerial_photo):
     pdf = BuiltlyProPDF()
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
@@ -199,20 +146,20 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
         pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100)
     pdf.set_x(25)
-    pdf.set_font('Helvetica', 'B', 26)
+    pdf.set_font('Helvetica', 'B', 24)
     pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("GEOTEKNISK VURDERING (RIG)"), 0, 1, 'L')
+    pdf.cell(0, 15, clean_pdf_text("GEOTEKNISK & MILJØTEKNISK RAPPORT"), 0, 1, 'L')
     pdf.set_x(25)
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"), 0, 1, 'L')
+    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L')
     pdf.ln(30)
     
     metadata = [
         ("OPPDRAGSGIVER:", client), 
         ("DATO:", datetime.now().strftime("%d. %m. %Y")), 
-        ("UTARBEIDET AV:", "Builtly RIG AI Engine v2.0"), 
-        ("KONTROLLERT AV:", "[Ansvarlig Geotekniker]")
+        ("UTARBEIDET AV:", "Builtly RIG/RIM AI Engine"), 
+        ("KONTROLLERT AV:", "[Ansvarlig Geotekniker/Miljørådgiver]")
     ]
     
     for l, v in metadata:
@@ -222,7 +169,6 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
         pdf.set_font('Helvetica', '', 10)
         pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    # INNHOLDSFORTEGNELSE
     pdf.add_page()
     pdf.set_x(25)
     pdf.set_font('Helvetica', 'B', 16)
@@ -233,12 +179,11 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
     toc = [
         "1. SAMMENDRAG OG KONKLUSJON", 
         "2. INNLEDNING OG PROSJEKTBESKRIVELSE", 
-        "3. KARTVERKET OG TOPOGRAFI", 
-        "4. FORVENTEDE GRUNNFORHOLD (NGU)", 
-        "5. KVIKKLEIRE OG OMRÅDESTABILITET", 
-        "6. FUNDAMENTERING OG GRAVING", 
-        "7. ANBEFALT GRUNNUNDERSØKELSE (BOREPLAN)", 
-        "VEDLEGG: FORESLÅTT BOREPLAN"
+        "3. KARTVERKET OG LOKASJON", 
+        "4. UTFØRTE GRUNNUNDERSØKELSER (METODIKK)", 
+        "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING", 
+        "6. GEOTEKNISKE VURDERINGER (FUNDAMENTERING)", 
+        "7. TILTAKSPLAN OG MASSEHÅNDTERING"
     ]
     pdf.set_font('Helvetica', '', 11)
     pdf.set_text_color(0, 0, 0)
@@ -248,7 +193,6 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
         pdf.set_draw_color(220, 220, 220)
         pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
-    # RAPPORT
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
@@ -322,31 +266,12 @@ def create_full_report_pdf(name, client, content, maps, aerial_photo):
                     pdf.multi_cell(150, 5, safe_text)
             except Exception:
                 pdf.ln(2)
-
-    # VEDLEGG
-    if maps:
-        pdf.add_page()
-        pdf.set_x(25)
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 20, "VEDLEGG: FORESLÅTT BOREPLAN", 0, 1)
-        for i, m in enumerate(maps):
-            if i > 0: pdf.add_page()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                m.save(tmp.name)
-                img_h = 160 * (m.height / m.width)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.set_y(pdf.get_y() + img_h + 5)
-                pdf.set_x(25)
-                pdf.set_font('Helvetica', 'I', 10)
-                pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: AI-generert forslag til geotekniske borepunkter (BP)."), 0, 1, 'C')
                 
     return bytes(pdf.output(dest='S'))
 
 # --- 5. STREAMLIT UI ---
-st.title("🌍 Builtly RIG AI (Geoteknikk)")
-st.info("Genererer geotekniske vurderinger og boreplaner med direkte WMS-integrasjon mot Kartverket.")
+st.title("🌍 Builtly RIG/RIM AI (Geoteknikk & Miljø)")
+st.info("Analyser Excel-data fra boreentreprenør/laboratorium og generer automatisk grunnundersøkelse og tiltaksplan.")
 
 with st.expander("Prosjekt & Lokasjon", expanded=True):
     c1, c2 = st.columns(2)
@@ -355,105 +280,85 @@ with st.expander("Prosjekt & Lokasjon", expanded=True):
     
     st.markdown("##### Kartverket Oppslag")
     c3, c4 = st.columns(2)
-    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1B")
+    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1")
     kommune = c4.text_input("Kommune", "Trondheim")
     
     c5, c6 = st.columns(2)
-    gnr = c5.text_input("Gårdsnummer (Gnr) (Valgfritt)", "316")
-    bnr = c6.text_input("Bruksnummer (Bnr) (Valgfritt)", "725")
+    gnr = c5.text_input("Gårdsnummer (Gnr)", "316")
+    bnr = c6.text_input("Bruksnummer (Bnr)", "689")
 
-files = st.file_uploader("Last opp situasjonsplan for Boreplan (Kun PDF/Bilder)", accept_multiple_files=True)
+files = st.file_uploader("Last opp boreresultater / lab-analyser (Excel/CSV)", accept_multiple_files=True)
 
-if st.button("GENERER KOMPLETT GEOTEKNISK RAPPORT", type="primary"):
+if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
     if not files: 
-        st.error("Last opp en tegning først for å generere boreplan.")
-    else:
-        kartverket_info = ""
-        nord = ost = None
-        aerial_photo = None
+        st.warning("Du har ikke lastet opp rådata (Excel). Genererer en generell rapport kun basert på lokasjon.")
+    
+    kartverket_info = ""
+    nord = ost = None
+    aerial_photo = None
+    
+    with st.spinner("🌍 Kobler til Geonorge API og henter flyfoto..."):
+        kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
+        if nord and ost:
+            st.success(kartverket_info)
+            aerial_photo = fetch_kartverket_flyfoto(nord, ost)
+        else:
+            st.warning(kartverket_info)
+    
+    with st.spinner("📊 Analyserer Excel-data og borerapporter..."):
+        extracted_data = extract_drill_data(files) if files else "Ingen opplastet data. Be brukeren ettersende boreprøver."
+        st.toast("Data analysert. Skriver rapport...")
         
-        with st.spinner("🌍 Kobler til Geonorge API (Tvinger UTM33-koordinater)..."):
-            kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
-            if nord and ost:
-                st.success(kartverket_info)
-                aerial_photo = fetch_kartverket_flyfoto(nord, ost)
-                if aerial_photo:
-                    st.success("✅ Lastet ned høyoppløselig flyfoto fra Norge i Bilder (WMS)!")
-                else:
-                    st.warning("Fant koordinater, men WMS-serveren for bilde svarte ikke.")
-            else:
-                st.warning(kartverket_info)
+        gyldige_modeller = []
+        try:
+            for mod in genai.list_models():
+                if 'generateContent' in mod.supported_generation_methods:
+                    gyldige_modeller.append(mod.name)
+        except:
+            st.error("Kunne ikke koble til Google AI. Sjekk API-nøkkel.")
+            st.stop()
+
+        valgt_modell = gyldige_modeller[0]
+        for favoritt in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+            if favoritt in gyldige_modeller:
+                valgt_modell = favoritt
+                break
         
-        processed_maps = []
-        with st.spinner("1. Analyserer tegning og oppretter boreplan..."):
-            try:
-                valid_image_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
-                if not valid_image_files:
-                    st.warning("Fant ingen gyldige bildefiler for å tegne boreplan. Bruk PDF eller bildefiler.")
-                
-                for i in range(min(len(valid_image_files), 1)): 
-                    f = valid_image_files[i]
-                    if f.name.lower().endswith('pdf'):
-                        if fitz is None: st.stop()
-                        doc = fitz.open(stream=f.read(), filetype="pdf")
-                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        doc.close() 
-                        del pix 
-                    else:
-                        img = Image.open(f)
-                    
-                    m, b_points = generate_geo_boreplan(img, p_name)
-                    processed_maps.append(m)
-                    img.close()
-                    gc.collect()
+        model = genai.GenerativeModel(valgt_modell)
 
-                st.toast("Boreplan ferdig. Kobler til Google AI...")
-                
-                gyldige_modeller = []
-                for mod in genai.list_models():
-                    if 'generateContent' in mod.supported_generation_methods:
-                        gyldige_modeller.append(mod.name)
-
-                valgt_modell = gyldige_modeller[0]
-                for favoritt in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-                    if favoritt in gyldige_modeller:
-                        valgt_modell = favoritt
-                        break
-                
-                model = genai.GenerativeModel(valgt_modell)
-
-                prompt = f"""
-                Du er Builtly RIG AI, en fagekspert innen geoteknikk i Norge (Rådgivende Ingeniør Geoteknikk).
-                Skriv en detaljert skrivebordsstudie og geoteknisk vurdering for rammetillatelse.
-                
-                PROSJEKT: {p_name}
-                OPPDRAGSGIVER: {c_name}
-                ADRESSE / GNR / BNR: {adresse}, {kommune}. Gnr {gnr} / Bnr {bnr}.
-                KARTVERKET-DATA: {kartverket_info}
-                BOREPLAN: Generert og vedlagt rapporten.
-                
-                INSTRUKSER:
-                - Skriv utfyllende, profesjonelt og formelt. Minimum 1500 ord.
-                - Bruk Kartverket-dataen til å drøfte sannsynlige grunnforhold via NGU sine databaser (Anta forhold typisk for denne kommunen).
-                - Foreslå konkrete fundamenteringsmetoder (peling vs. direkte fundamentering).
-                
-                STRUKTUR (Bruk disse eksakte overskriftene, uten tillegg i parentes):
-                # 1. SAMMENDRAG OG KONKLUSJON
-                # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
-                # 3. KARTVERKET OG TOPOGRAFI
-                # 4. FORVENTEDE GRUNNFORHOLD (NGU)
-                # 5. KVIKKLEIRE OG OMRÅDESTABILITET
-                # 6. FUNDAMENTERING OG GRAVING
-                # 7. ANBEFALT GRUNNUNDERSØKELSE (BOREPLAN)
-                """
-                
-                res = model.generate_content(prompt)
-                
-                with st.spinner("Kompilerer profesjonell PDF..."):
-                    pdf_data = create_full_report_pdf(p_name, c_name, res.text, processed_maps, aerial_photo)
-                
-                st.success("✅ Komplett geoteknisk utredning er ferdigstilt!")
-                st.download_button("📄 Last ned Builtly GEO-rapport", pdf_data, f"Builtly_GEO_{p_name}.pdf")
-            except Exception as e: 
-                st.error(f"Kritisk feil under generering: {e}")
+        prompt = f"""
+        Du er Builtly RIG/RIM AI, en fagekspert innen geoteknikk (RIG) og miljøteknikk (RIM) i Norge.
+        Du skal skrive en detaljert "Miljøteknisk grunnundersøkelse og tiltaksplan for forurenset grunn" samt geoteknisk vurdering.
+        
+        PROSJEKT: {p_name}
+        OPPDRAGSGIVER: {c_name}
+        ADRESSE: {adresse}, {kommune}. Gnr {gnr}/Bnr {bnr}.
+        KARTVERKET-DATA: {kartverket_info}
+        
+        RÅDATA FRA BOREENTREPRENØR / LABORATORIUM:
+        {extracted_data}
+        
+        INSTRUKSER:
+        - Skriv formelt, teknisk og utfyllende (Minimum 1500 ord).
+        - Bruk rådataene over for å vurdere grunnforholdene (Hva slags masser er det? Er det funnet forurensning? Vurder tilstandsklasser ihht. Miljødirektoratets veileder).
+        - Foreslå konkrete tiltak i tiltaksplanen basert på om dataene viser forurensning eller rene masser.
+        
+        STRUKTUR (Bruk disse eksakte overskriftene, uten tillegg i parentes):
+        # 1. SAMMENDRAG OG KONKLUSJON
+        # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
+        # 3. KARTVERKET OG LOKASJON
+        # 4. UTFØRTE GRUNNUNDERSØKELSER
+        # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
+        # 6. GEOTEKNISKE VURDERINGER (FUNDAMENTERING)
+        # 7. TILTAKSPLAN OG MASSEHÅNDTERING
+        """
+        
+        try:
+            res = model.generate_content(prompt)
+            with st.spinner("Kompilerer profesjonell PDF..."):
+                pdf_data = create_full_report_pdf(p_name, c_name, res.text, aerial_photo)
+            
+            st.success("✅ Komplett geoteknisk utredning og tiltaksplan er ferdigstilt!")
+            st.download_button("📄 Last ned Builtly RIG/RIM-rapport", pdf_data, f"Builtly_GEO_MILJO_{p_name}.pdf")
+        except Exception as e: 
+            st.error(f"Kritisk feil under generering: {e}")
