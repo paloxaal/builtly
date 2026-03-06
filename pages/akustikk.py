@@ -39,7 +39,7 @@ def clean_pdf_text(text):
 def ironclad_text_formatter(text):
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{4,}', ' ', text)
-    # Tvinger orddeling på 40 tegn for å unngå FPDF "Not enough space"-krasj
+    # Tvinger orddeling på 40 tegn for å sikre at ingenting sprekker A4-margen
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
@@ -80,7 +80,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     except: 
         font_large = ImageFont.load_default()
 
-    # Myk støygradient i bakgrunnen
     for y in range(int(h*0.2), h, 15):
         d_m = dist + (h - y) * (50/h)
         db_at_y = base_db - 10 * math.log10(max(d_m, 1) / 10.0)
@@ -91,13 +90,10 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
         else: color = (0, 255, 0, 10)
         draw.rectangle([0, y, w, y+15], fill=color)
 
-    # --- AVANSERT BYGG-SPORING ---
     gray_array = np.array(img.convert("L"))
     margin_x, margin_y = int(w * 0.12), int(h * 0.12)
-    
     raw_points = []
     
-    # Vertikal skanning
     x_steps = np.linspace(margin_x, w - margin_x, 15, dtype=int)
     for x in x_steps:
         col = gray_array[margin_y:h-margin_y, x]
@@ -109,7 +105,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
                 raw_points.append((x, y_front + 5, 'front'))
                 raw_points.append((x, y_back - 5, 'back'))
 
-    # Horisontal skanning
     y_steps = np.linspace(margin_y, h - margin_y, 10, dtype=int)
     for y in y_steps:
         row = gray_array[y, margin_x:w-margin_x]
@@ -121,7 +116,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
                 raw_points.append((x_left - 5, y, 'side_left'))
                 raw_points.append((x_right + 5, y, 'side_right'))
 
-    # Filtrering
     final_points = []
     for p in raw_points:
         if all(math.hypot(p[0] - fp[0], p[1] - fp[1]) > (w*0.045) for fp in final_points):
@@ -134,7 +128,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
         
         db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
         
-        # FYSIKKMODUL
         shielding = 0
         if ptype == 'front':
             db += 2.5 
@@ -170,7 +163,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), calculated_dbs
 
-# --- 3. DYNAMISK PDF MOTOR (OPPGRADERT MED AUTO-BREDDE w=0) ---
+# --- 3. DYNAMISK PDF MOTOR (LÅST BREDDE FOR Å UNNGÅ FPDF-KRASJ) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -206,10 +199,11 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_y(100)
     pdf.set_font('Helvetica', 'B', 26)
     pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(0, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
+    # Fast bredde (160) i stedet for w=0 hindrer "Not enough space"-krasj ved sideskift
+    pdf.multi_cell(160, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
+    pdf.multi_cell(160, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
     pdf.ln(30)
     
     metadata = [
@@ -260,7 +254,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(10)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -270,7 +264,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(6)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(160, 8, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
             
@@ -282,14 +276,13 @@ def create_full_report_pdf(name, client, content, maps):
                 continue
 
             try:
-                # w=0 gjør at margen regnes ut automatisk. Krasjer aldri på bredden igjen!
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(155, 5, safe_text) # Låst til 155 for kulepunkter
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(160, 5, safe_text) # Låst til 160 for normal tekst
             except Exception:
                 pdf.ln(2)
 
