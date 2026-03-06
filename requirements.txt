@@ -3,6 +3,7 @@ pandas
 google-generativeai
 fpdf2
 numpy
+markdown
 Pillow
 PyMuPDF
 requests
