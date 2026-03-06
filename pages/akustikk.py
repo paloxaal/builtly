@@ -39,7 +39,8 @@ def clean_pdf_text(text):
 def ironclad_text_formatter(text):
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{4,}', ' ', text)
-    text = re.sub(r'([^\s]{45})', r'\1 ', text)
+    # Tvinger orddeling på 40 tegn for å unngå FPDF "Not enough space"-krasj
+    text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
 # --- AI VISION MODUL ---
@@ -90,13 +91,13 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
         else: color = (0, 255, 0, 10)
         draw.rectangle([0, y, w, y+15], fill=color)
 
-    # --- AVANSERT BYGG-SPORING (Finner nøyaktig omriss) ---
+    # --- AVANSERT BYGG-SPORING ---
     gray_array = np.array(img.convert("L"))
     margin_x, margin_y = int(w * 0.12), int(h * 0.12)
     
     raw_points = []
     
-    # Vertikal skanning (Front og Bak)
+    # Vertikal skanning
     x_steps = np.linspace(margin_x, w - margin_x, 15, dtype=int)
     for x in x_steps:
         col = gray_array[margin_y:h-margin_y, x]
@@ -104,11 +105,11 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
         if len(dark_y) > 0:
             y_front = margin_y + dark_y[-1]
             y_back = margin_y + dark_y[0]
-            if (y_front - y_back) > (h*0.04): # Bygget må ha dybde
-                raw_points.append((x, y_front + 5, 'front')) # Klistrer 5px ut fra veggen
+            if (y_front - y_back) > (h*0.04): 
+                raw_points.append((x, y_front + 5, 'front'))
                 raw_points.append((x, y_back - 5, 'back'))
 
-    # Horisontal skanning (Sider)
+    # Horisontal skanning
     y_steps = np.linspace(margin_y, h - margin_y, 10, dtype=int)
     for y in y_steps:
         row = gray_array[y, margin_x:w-margin_x]
@@ -120,7 +121,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
                 raw_points.append((x_left - 5, y, 'side_left'))
                 raw_points.append((x_right + 5, y, 'side_right'))
 
-    # Avstandsfiltrering slik at prikkene ikke overlapper, men sitter tett (som CadnaA)
+    # Filtrering
     final_points = []
     for p in raw_points:
         if all(math.hypot(p[0] - fp[0], p[1] - fp[1]) > (w*0.045) for fp in final_points):
@@ -128,31 +129,26 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
 
     calculated_dbs = []
     for px, py, ptype in final_points:
-        # Fysisk avstand
         d_m = dist + (h - py) * (50/h)
         d_3d = math.sqrt(d_m**2 + floor_h**2)
         
-        # Geometrisk spredning
         db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
         
-        # --- "CADNA-A LITE" FYSIKKMODUL ---
+        # FYSIKKMODUL
         shielding = 0
         if ptype == 'front':
-            db += 2.5 # Fasaderefleksjon (Lyd forsterkes foran tett flate)
+            db += 2.5 
             if screen_height > 0 and floor_h <= (screen_height + 1.5):
-                shielding = 8 # Ekstern støyskjerm
+                shielding = 8 
         elif ptype == 'back': 
-            shielding = 18 # Massiv bygningsskjerming (Stille side)
+            shielding = 18 
         elif 'side' in ptype:
-            # Diffraksjon: Lyd bøyer seg. Regner ut hvor langt bak på bygget vi er.
             y_ratio = (py - margin_y) / (h - 2*margin_y) 
-            # Desto lenger bak på sideveggen, desto mer skjerming (5 dB til 15 dB)
             shielding = 5 + (10 * (1 - y_ratio)) 
             
         final_db = int(db - shielding)
         calculated_dbs.append(final_db)
         
-        # Fargekode-standard
         dot_color = (200, 0, 0, 255) if final_db >= 65 else ((200, 150, 0, 255) if final_db >= 55 else (50, 150, 50, 255))
         r = int(h/65)
         
@@ -160,7 +156,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
         draw.ellipse([px-r, py-r, px+r, py+r], fill=dot_color, outline=(0,0,0,255))
         draw.text((px-r/1.5, py-r/1.5), str(final_db), fill="white" if final_db>=55 else "black", font=font_large)
 
-    # Profesjonell Info-boks
     box_w, box_h = int(w*0.35), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
@@ -175,7 +170,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), calculated_dbs
 
-# --- 3. DYNAMISK PDF MOTOR (UENDRET FOR STABILITET) ---
+# --- 3. DYNAMISK PDF MOTOR (OPPGRADERT MED AUTO-BREDDE w=0) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -287,13 +282,14 @@ def create_full_report_pdf(name, client, content, maps):
                 continue
 
             try:
+                # w=0 gjør at margen regnes ut automatisk. Krasjer aldri på bredden igjen!
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(155, 5, safe_text)
+                    pdf.multi_cell(0, 5, safe_text)
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(160, 5, safe_text)
+                    pdf.multi_cell(0, 5, safe_text)
             except Exception:
                 pdf.ln(2)
 
