@@ -15,8 +15,20 @@ from PIL import Image, ImageDraw, ImageFont
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
 
-# Henter Google API-nøkkelen trygt fra Streamlit Secrets (eller Render Environment Variables)
-genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+# --- SKUDDSIKKER NØKKEL-HENTER ---
+# Sjekker først Render (os.environ), deretter Streamlit-safen (st.secrets) hvis Render feiler.
+google_key = os.environ.get("GOOGLE_API_KEY")
+if not google_key:
+    try:
+        google_key = st.secrets["GOOGLE_API_KEY"]
+    except:
+        pass
+
+if google_key:
+    genai.configure(api_key=google_key)
+else:
+    st.error("Kritisk feil: Fant ingen Google API-nøkkel på serveren!")
+# --------------------------------
 
 try:
     import fitz  # PyMuPDF
@@ -331,27 +343,4 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 Beskriv prosjektet og hensikten med rapporten.
                 
                 # 3. KRAV OG RETNINGSLINJER (T-1442 / NS 8175)
-                Gå i dybden på Miljødirektoratets retningslinje T-1442. Forklar Lden, Lnight, og grensene for gul og rød sone i detalj.
-                
-                # 4. BEREGNINGSFORUTSETNINGER OG METODIKK
-                Beskriv trafikktallene som er oppgitt. 
-                
-                # 5. RESULTATER: STØYUTBREDELSE
-                Analyser resultatene fra fasadeberegningen plan for plan. Diskuter forskjellene i høyden.
-                
-                # 6. VURDERING AV FASADEISOLERING OG TILTAK
-                Dette er det viktigste kapittelet. Gitt maksnivåene, foreslå konkrete krav til vinduer (Rw+Ctr).
-                
-                # 7. VURDERING AV UTEOPPHOLDSAREALER
-                Drøft plassering av uteplasser, balkonger, og behovet for skjerming/tette rekkverk for å få støyen under 55 dB.
-                """
-                
-                res = model.generate_content(prompt)
-                
-                with st.spinner("Kompilerer profesjonell PDF..."):
-                    pdf_data = create_full_report_pdf(p_name, c_name, res.text, processed_maps)
-                
-                st.success("✅ Komplett ingeniørutredning er ferdigstilt!")
-                st.download_button("📄 Last ned Builtly AKU-rapport", pdf_data, f"Builtly_AKU_{p_name}.pdf")
-            except Exception as e: 
-                st.error(f"Kritisk feil under generering: {e}")
+                Gå i dybden på Miljødirektoratets retningslinje T-1442. Forklar Lden, Lnight, og grens
