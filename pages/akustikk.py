@@ -37,14 +37,16 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    text = re.sub(r'[-|_|=]{4,}', ' ', text)
-    text = re.sub(r'([^\s]{40})', r'\1 ', text)
-    text = text.replace('**', '').replace('__', '')
+    """Aggressiv rensing for å stoppe PDF-blødning over margene"""
+    # Fjerner LaTeX/Matte-tegn fra Gemini som ødelegger linjebryting
+    text = text.replace('$', '').replace('*', '').replace('_', '')
+    text = re.sub(r'[-|=]{4,}', ' ', text)
+    # Tvinger linjeskift hvis et "ord" (f.eks en lang lenke eller feil) er over 45 tegn
+    text = re.sub(r'([^\s]{45})', r'\1 ', text)
     return clean_pdf_text(text)
 
 # --- NY: AI VISION MODUL ---
 def analyze_drawing_with_vision(img):
-    """Sender bildet til Gemini for å lese av koter og støyskjermer automatisk."""
     try:
         model = genai.GenerativeModel('gemini-1.5-pro')
         prompt = """
@@ -60,104 +62,113 @@ def analyze_drawing_with_vision(img):
         if match:
             data = json.loads(match.group(0))
             return float(data.get("støyskjerm_hoyde_m", 0.0))
-    except Exception as e:
+    except Exception:
         pass
     return 0.0
 
-# --- 2. BEREGNINGSMOTOR (GRAFIKK) ---
+# --- 2. BEREGNINGSMOTOR (GRAFIKK & AKUSTIKK) ---
 def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     w, h = img.size
     draw_img = img.convert("RGBA")
     overlay = Image.new("RGBA", draw_img.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
     
-    # Standard etasjehøyde (Vindu på 1.5m, 3m per etasje)
     floor_h = (floor_num - 1) * 3.0 + 1.5
     base_db = 10 * math.log10(max(adt, 1)) + 20 * math.log10(max(speed, 30)/50.0) + 14
     
     try: 
-        font_large = ImageFont.truetype("arial.ttf", int(h/35))
+        font_large = ImageFont.truetype("arial.ttf", int(h/40))
     except: 
         font_large = ImageFont.load_default()
 
-    # Tegner de store støysonene (gul og rød) oppå tegningen
-    for y in range(int(h*0.3), h, 10):
-        d_m = dist + (h - y) * (40/h)
+    # Tegner støygradient (bakgrunn)
+    for y in range(int(h*0.3), h, 15):
+        d_m = dist + (h - y) * (50/h)
         db_at_y = base_db - 10 * math.log10(max(d_m, 1) / 10.0)
         
-        # Hvis terrenget bak skjermen er lavere enn skjermen, legges skyggen på bakken
         if screen_height > 0:
-            db_at_y -= 8 # Demping av støy i sonen bak skjermen
+            db_at_y -= 8 
             
         if db_at_y > 60: 
-            color = (255, 0, 0, 40)
+            color = (255, 0, 0, 25)
         elif db_at_y > 55: 
-            color = (255, 255, 0, 40)
+            color = (255, 255, 0, 25)
         else: 
-            color = (0, 255, 0, 20)
-        draw.rectangle([0, y, w, y+10], fill=color)
+            color = (0, 255, 0, 15)
+        draw.rectangle([0, y, w, y+15], fill=color)
 
-    # Smart-Snap: Finner bygget
+    # --- NY FACADE-TRACKER (Likt Brekke & Strand) ---
     gray_array = np.array(img.convert("L"))
     non_white_y, non_white_x = np.where(gray_array < 240)
 
+    points = []
     if len(non_white_x) > 100 and len(non_white_y) > 100:
         min_x, max_x = np.min(non_white_x), np.max(non_white_x)
         min_y, max_y = np.min(non_white_y), np.max(non_white_y)
 
+        # Krymper for å unngå rammer
         x_margin = (max_x - min_x) * 0.15
         y_margin = (max_y - min_y) * 0.15
+        
+        start_x = int(min_x + x_margin)
+        end_x = int(max_x - x_margin)
+        start_y = int(min_y + y_margin * 1.5)
+        end_y = int(max_y - y_margin)
+        
+        # Genererer punkter langs FASADEN (kantene av bygningsmassen)
+        facade_points = []
+        # Bunnfasade (mot veien)
+        facade_points.extend([(x, end_y) for x in np.linspace(start_x, end_x, 5)])
+        # Toppfasade (stille side)
+        facade_points.extend([(x, start_y) for x in np.linspace(start_x, end_x, 5)])
+        # Sidefasader
+        facade_points.extend([(start_x, y) for y in np.linspace(start_y, end_y, 3)][1:-1])
+        facade_points.extend([(end_x, y) for y in np.linspace(start_y, end_y, 3)][1:-1])
 
-        start_x = min_x + x_margin
-        end_x = max_x - x_margin
-        start_y = min_y + y_margin * 1.5 
-        end_y = max_y - y_margin
-    else:
-        start_x, end_x = 0.2 * w, 0.8 * w
-        start_y, end_y = 0.4 * h, 0.7 * h
-
-    if start_x >= end_x: start_x, end_x = 0.2 * w, 0.8 * w
-    if start_y >= end_y: start_y, end_y = 0.4 * h, 0.7 * h
-
-    points = []
-    x_positions = np.linspace(start_x, end_x, 6)
-    y_positions = np.linspace(start_y, end_y, 3)
-
-    for x in x_positions:
-        for y in y_positions:
-            d_m = dist + (h - y) * (40/h)
+        for px, py in facade_points:
+            # Beregner avstand. Antar veien er nederst i bildet (typisk oppsett)
+            d_m = dist + (h - py) * (50/h)
             d_3d = math.sqrt(d_m**2 + floor_h**2)
             
+            # --- BYGNINGSSKJERMING (Stille side) ---
+            # Hvis punktet er på baksiden av bygget (øvre halvdel av boksen), trekkes db kraftig ned
             shielding_effect = 0
-            # Akustikk-logikk: Ligger vinduet i skyggen av skjermen?
+            if py < (start_y + end_y) / 2: 
+                shielding_effect = 12 # Bygget skjermer seg selv (stille side)
+            elif px == start_x or px == end_x:
+                shielding_effect = 5  # Sidefasader har delvis skjerming
+                
+            # Tar også hensyn til ekstern støyskjerm
             if screen_height > 0 and floor_h <= (screen_height + 1.0):
-                shielding_effect = 8 # Drastisk reduksjon for vinduer rett bak skjermen
+                shielding_effect += 8 
                 
             db = int(base_db - 10 * math.log10(d_3d / 10.0)) - shielding_effect
             
+            # Setter fargekoder basert på Norsk Standard
             dot_color = (200, 0, 0, 255) if db >= 60 else ((200, 150, 0, 255) if db >= 55 else (50, 150, 50, 255))
-            r = int(h/70)
+            r = int(h/65)
             
-            draw.ellipse([x-r-2, y-r-2, x+r+2, y+r+2], fill=(255,255,255,200))
-            draw.ellipse([x-r, y-r, x+r, y+r], fill=dot_color, outline=(0,0,0,255))
-            draw.text((x-r/1.5, y-r/1.5), str(db), fill="white" if db>=55 else "black", font=font_large)
+            draw.ellipse([px-r-2, py-r-2, px+r+2, py+r+2], fill=(255,255,255,220))
+            draw.ellipse([px-r, py-r, px+r, py+r], fill=dot_color, outline=(0,0,0,255))
+            draw.text((px-r/1.5, py-r/1.5), str(db), fill="white" if db>=55 else "black", font=font_large)
             points.append(db)
 
-    box_w, box_h = int(w*0.3), int(h*0.2)
+    # Informasjonsboks
+    box_w, box_h = int(w*0.35), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
-    
     info_text = f"PLAN {floor_num} | Parametere Lden"
-    if screen_height > 0:
-        info_text += f" (Inkl. skjerm {screen_height}m)"
-        
+    if screen_height > 0: info_text += f" (Skjerm {screen_height}m)"
     draw.text((w-box_w+20, h-box_h+60), info_text, fill="black", font=font_large)
-    draw.text((w-box_w+20, h-box_h+100), f"Maksimalt beregnet nivå: {max(points)} dB", fill=(200,0,0) if max(points)>=60 else "black", font=font_large)
+    
+    if points:
+        draw.text((w-box_w+20, h-box_h+100), f"Maks (Fasade): {max(points)} dB", fill=(200,0,0) if max(points)>=60 else "black", font=font_large)
+        draw.text((w-box_w+20, h-box_h+130), f"Min (Stille side): {min(points)} dB", fill=(50,150,50), font=font_large)
 
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), points
 
-# --- 3. DYNAMISK PDF MOTOR ---
+# --- 3. DYNAMISK PDF MOTOR (MED LÅSTE MARGER) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -247,7 +258,8 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(10)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            pdf.cell(0, 8, ironclad_text_formatter(line.replace('#', '')), 0, 1)
+            # Fjerner hashtags før utskrift
+            pdf.cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()), 0, 1)
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -257,7 +269,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(6)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
-            pdf.cell(0, 8, ironclad_text_formatter(line.replace('#', '')), 0, 1)
+            pdf.cell(0, 8, ironclad_text_formatter(line.replace('#', '').strip()), 0, 1)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
             
@@ -269,6 +281,7 @@ def create_full_report_pdf(name, client, content, maps):
                 continue
 
             try:
+                # Tvinger bredden til 160 for å forhindre blødning utenfor A4-arket
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
                     pdf.multi_cell(155, 5, safe_text)
@@ -319,11 +332,9 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
     if not files: 
         st.error("Last opp tegninger først.")
     else:
-        # --- AI VISION TRIGGER ---
         detected_screen_height = 0.0
         with st.spinner("👁️ AI Vision skanner tegningene for skjerming og terreng..."):
             try:
-                # Vi lar Vision analysere det første dokumentet
                 f_vision = files[0]
                 if f_vision.name.lower().endswith('pdf'):
                     doc_v = fitz.open(stream=f_vision.read(), filetype="pdf")
@@ -333,22 +344,17 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 else:
                     vision_img = Image.open(f_vision)
                 
-                # Sender bildet til hjernen
                 detected_screen_height = analyze_drawing_with_vision(vision_img.convert("RGB"))
                 vision_img.close()
-                
-                # Tilbakestiller filpekeren slik at den kan brukes igjen i beregningen
                 files[0].seek(0)
                 
                 if detected_screen_height > 0:
                     st.success(f"✅ AI Vision fant en støyskjerm på {detected_screen_height}m! Oppdaterer matematikken.")
                 else:
                     st.info("ℹ️ AI Vision fant ingen støyskjermer på tegningen. Bruker fri sikt.")
-                    
             except Exception as e:
-                st.warning(f"AI Vision klarte ikke å lese tegningen. Bruker standard fri sikt. Feil: {e}")
+                st.warning(f"AI Vision feilet, bruker standard fri sikt. Feil: {e}")
         
-        # --- KLASSISK BEREGNING ---
         with st.spinner("1. Utfører Builtly 3D-simulering og tegner kart..."):
             try:
                 processed_maps = []
@@ -370,15 +376,11 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                     else:
                         img = Image.open(f)
                     
-                    # Sender med skjermhøyden inn i matematikken!
                     m, points = generate_pro_stoykart(img, adt, fart, avst, i+1, detected_screen_height)
                     processed_maps.append(m)
                     
-                    effekt_tekst = ""
-                    if detected_screen_height > 0 and (i*3+1.5) <= (detected_screen_height + 1.0):
-                        effekt_tekst = " (Kraftig dempet av skjerm)"
-                        
-                    data_summary.append(f"PLAN {i+1} (Høyde ca {(i)*3+1.5}m){effekt_tekst}: Maks Lden {max(points)} dB, Snitt {int(np.mean(points))} dB.")
+                    if points:
+                        data_summary.append(f"PLAN {i+1}: Maks fasade (mot vei) {max(points)} dB, Min (stille side) {min(points)} dB.")
                     
                     img.close()
                     gc.collect()
@@ -391,7 +393,7 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                         if 'generateContent' in m.supported_generation_methods:
                             gyldige_modeller.append(m.name)
                 except Exception as list_err:
-                    raise Exception(f"NETTVERKSFEIL: Fikk ikke kontakt med Google. Sjekk API-nøkkel. Detaljer: {list_err}")
+                    raise Exception(f"NETTVERKSFEIL: Fikk ikke kontakt med Google. Sjekk API-nøkkel.")
 
                 valgt_modell = gyldige_modeller[0]
                 for favoritt in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
@@ -411,6 +413,8 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 AI VISION SKJERMING: Skjerm/terrengvoll oppdaget med høyde {detected_screen_height} m.
                 RESULTATER FRA 3D-FASADEBEREGNING: {data_summary}
                 
+                Viktig endring i resultatene: Beregningene viser nå tydelig forskjell på fasaden som vender MOT VEIEN (Maks dB) og baksiden av bygget som fungerer som STILLE SIDE (Min dB) på grunn av bygningskroppens egen skjermingseffekt.
+                
                 KRAV TIL TEKSTEN:
                 - Dokumentet MÅ være langt og utfyllende (Skriv minimum 1500 ord).
                 - Bruk formelt, teknisk ingeniørspråk. Omtal deg selv som Builtly RIAKU AI.
@@ -427,16 +431,16 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 Gå i dybden på Miljødirektoratets retningslinje T-1442. 
                 
                 # 4. BEREGNINGSFORUTSETNINGER OG METODIKK
-                Beskriv trafikktallene. Forklar spesifikt om AI Vision oppdaget skjerming og hvordan det påvirker de lavere etasjene.
+                Beskriv trafikktallene og forklar hvordan bygningskroppen skjermer seg selv for å skape en stille side.
                 
                 # 5. RESULTATER: STØYUTBREDELSE
-                Analyser resultatene fra fasadeberegningen plan for plan. Diskuter forskjellene i høyden.
+                Analyser resultatene fra fasadeberegningen plan for plan. Diskuter forskjellen mellom fasaden mot veien og den stille siden.
                 
                 # 6. VURDERING AV FASADEISOLERING OG TILTAK
-                Gitt maksnivåene, foreslå konkrete krav til vinduer (Rw+Ctr).
+                Gitt maksnivåene mot veien, foreslå konkrete krav til vinduer (Rw+Ctr) for disse fasadene, og nevn at kravene er lavere på stille side.
                 
                 # 7. VURDERING AV UTEOPPHOLDSAREALER
-                Drøft plassering av uteplasser, balkonger, og skjerming for å få støyen under 55 dB.
+                Drøft plassering av uteplasser. Trekk frem at uteplasser bør legges mot stille side for å få støyen under 55 dB.
                 """
                 
                 res = model.generate_content(prompt)
