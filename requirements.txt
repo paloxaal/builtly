@@ -1,0 +1,9 @@
+streamlit
+pandas
+google-generativeai
+fpdf2
+numpy
+Pillow
+PyMuPDF
+requests
+openpyxl
