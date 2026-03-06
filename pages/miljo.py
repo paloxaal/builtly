@@ -29,13 +29,13 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    """Den ultimate PDF-beskytteren som forhindrer krasj"""
+    """Sikrer at PDF-en ikke krasjer på lange ord"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTVERKET API & USTOPPELIG BILDEHENTER ---
+# --- 2. KARTKATALOGEN API & TRIPPPEL BILDEHENTER ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
@@ -57,7 +57,6 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
             pass
         return None, None, None, None
 
-    # Tvinger frem et resultat ved å gradvis fjerne informasjon som kan forvirre databasen
     queries = []
     if adr_clean:
         if kom_clean: queries.append(f"{adr_clean} {kom_clean}")
@@ -70,14 +69,14 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
         street_only = re.sub(r'\d+.*', '', adr_clean).strip()
         if street_only: 
             queries.append(f"{street_only} {kom_clean}")
-            queries.append(street_only) # Hvis alt annet feiler, søk KUN på "Industriveien"
+            queries.append(street_only)
 
     for q in queries:
         adr_tekst, kom, nord, ost = api_call(q)
         if nord and ost:
-            return f"✅ Fant gate/område i Kartverket: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
+            return f"✅ Lokasjon bekreftet: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
 
-    # Nødløsning: Finner i det minste sentrum av kommunen for å unngå blankt kart
+    # Nødløsning for kommunesenter
     if kom_clean:
         safe_kom = urllib.parse.quote(kom_clean)
         url_sted = f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={safe_kom}&utkoordsys=25833&treffPerSide=1"
@@ -89,11 +88,11 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
                 ost = hit.get('representasjonspunkt', {}).get('øst')
                 stedsnavn = hit.get('stedsnavn', kom_clean)
                 if nord and ost:
-                    return f"⚠️ Bruker senter av {stedsnavn} (N {nord}, Ø {ost}) for kartskisse.", nord, ost
+                    return f"⚠️ Fant ikke eksakt gate. Bruker senter av {stedsnavn} (N {nord}, Ø {ost}).", nord, ost
         except Exception:
             pass
 
-    return "❌ Fant ingen treff i Kartverket. Appen fortsetter uten flyfoto.", None, None
+    return "❌ Fant ingen treff i Kartverket. Appen fortsetter uten kart.", None, None
 
 def fetch_kartverket_flyfoto(nord, ost):
     try:
@@ -101,29 +100,44 @@ def fetch_kartverket_flyfoto(nord, ost):
         min_x, max_x = float(ost) - 150, float(ost) + 150
         min_y, max_y = float(nord) - 150, float(nord) + 150
         
-        # Forkler oss som Google Chrome for å slippe forbi Kartverkets robot-filter
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         }
         
-        # 1. Prøver Norge i Bilder (Ortofoto)
-        wms_ortho = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/jpeg"
-        resp1 = requests.get(wms_ortho, headers=headers, timeout=6)
-        
-        # Hvis bildet er større enn 2KB, er det et ekte bilde og ikke en XML-feilmelding
-        if resp1.status_code == 200 and len(resp1.content) > 2000:
-            return Image.open(io.BytesIO(resp1.content)), "Ortofoto"
-            
-        # 2. Hvis Ortofoto feiler/er nede, bytt automatisk til Topografisk Norgeskart
-        wms_topo = f"https://opencache.statkart.no/gatekeeper/gk/gk.open_wms?service=WMS&request=GetMap&version=1.1.1&layers=topo4&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        resp2 = requests.get(wms_topo, headers=headers, timeout=6)
-        
-        if resp2.status_code == 200 and len(resp2.content) > 2000:
-            return Image.open(io.BytesIO(resp2.content)), "Topokart"
-            
-    except Exception as e:
+        # URL 1: Kartkatalogen - Norge i Bilder Ortofoto
+        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+        # URL 2: Kartkatalogen - Nyeste Topo Cache (Mest stabil)
+        url_topo_cache = f"https://cache.kartverket.no/topo/v1/wms?service=WMS&request=GetMap&version=1.1.1&layers=topo&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+        # URL 3: Kartkatalogen - OpenWMS Topo4 (Gammel men pålitelig)
+        url_topo_open = f"https://opencache.statkart.no/gatekeeper/gk/gk.open_wms?service=WMS&request=GetMap&version=1.1.1&layers=topo4&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+
+        # Forsøk 1
+        try:
+            r1 = requests.get(url_orto, headers=headers, timeout=6)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                img = Image.open(io.BytesIO(r1.content)).convert('RGB') # Tvinger fjerning av Alpha-kanal for PDF
+                return img, "Ortofoto (Flyfoto)"
+        except Exception: pass
+
+        # Forsøk 2
+        try:
+            r2 = requests.get(url_topo_cache, headers=headers, timeout=6)
+            if r2.status_code == 200 and len(r2.content) > 5000:
+                img = Image.open(io.BytesIO(r2.content)).convert('RGB')
+                return img, "Topografisk Norgeskart (Cache)"
+        except Exception: pass
+
+        # Forsøk 3
+        try:
+            r3 = requests.get(url_topo_open, headers=headers, timeout=6)
+            if r3.status_code == 200 and len(r3.content) > 5000:
+                img = Image.open(io.BytesIO(r3.content)).convert('RGB')
+                return img, "Topografisk Norgeskart (OpenWMS)"
+        except Exception: pass
+
+    except Exception:
         pass
-    return None, "Feil"
+    return None, "Serverfeil hos Kartverket"
 
 # --- 3. EXCEL / CSV DATA EXTRACTOR ---
 def extract_drill_data(files):
@@ -139,7 +153,7 @@ def extract_drill_data(files):
                 extracted_text += f"\n--- RÅDATA FRA FIL: {f.name.upper()} ---\n"
                 extracted_text += df.head(100).to_string() + "\n\n"
             except Exception as e:
-                extracted_text += f"\n[Klarte ikke å lese Excel-fil {f.name} automatisk. Feilkode: {e}]\n"
+                extracted_text += f"\n[Feil ved lesing av Excel-fil {f.name}: {e}]\n"
     
     return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
 
@@ -243,23 +257,22 @@ def create_full_report_pdf(name, client, content, aerial_photo, map_type):
             pdf.ln(4)
             
             if aerial_photo:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                    # Konverterer uansett til RGB for å unngå PDF-krasj på gjennomsiktige Topokart
-                    aerial_photo.convert('RGB').save(tmp.name)
+                # LAGRER EKSPLISITT SOM PNG FOR Å HINDRE FPDF KRASJ
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    aerial_photo.save(tmp.name, format="PNG")
                     img_h = 160 * (aerial_photo.height / aerial_photo.width)
                     pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                     pdf.set_y(pdf.get_y() + img_h + 5)
                     pdf.set_font('Helvetica', 'I', 9)
                     pdf.set_text_color(100, 100, 100)
                     pdf.set_x(25)
-                    kart_navn = "Ortofoto" if map_type == "Ortofoto" else "Topografisk Norgeskart"
-                    pdf.cell(0, 5, clean_pdf_text(f"Figur 1: {kart_navn} over prosjektområdet. Hentet direkte via Kartverket WMS."), 0, 1, 'C')
+                    pdf.cell(0, 5, clean_pdf_text(f"Figur 1: {map_type} over prosjektområdet. Hentet via Kartverkets WMS."), 0, 1, 'C')
                     pdf.ln(5)
             else:
                 pdf.set_font('Helvetica', 'I', 9)
                 pdf.set_text_color(150, 0, 0)
                 pdf.set_x(25)
-                pdf.cell(0, 5, "Merknad: Kunne ikke hente flyfoto fra Kartverket for dette søket.", 0, 1, 'L')
+                pdf.cell(0, 5, f"Merknad: Karttjeneste var utilgjengelig. Status: {map_type}", 0, 1, 'L')
                 pdf.ln(5)
                 
             pdf.set_font('Helvetica', '', 10)
@@ -329,18 +342,18 @@ if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
     kartverket_info = ""
     nord = ost = None
     aerial_photo = None
-    map_type = ""
+    map_type = "Ikke funnet"
     
-    with st.spinner("🌍 Kobler til Geonorge API (Omgår brannmur og tvinger kart)..."):
+    with st.spinner("🌍 Kobler til Kartkatalogen (Henter Flyfoto / Topokart)..."):
         kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
         if nord and ost:
             st.success(kartverket_info)
             aerial_photo, map_type = fetch_kartverket_flyfoto(nord, ost)
             
             if aerial_photo:
-                st.success(f"✅ Bilde lastet ned vellykket! (Type: {map_type})")
+                st.success(f"✅ Suksess! Hentet {map_type} fra Kartverket.")
             else:
-                st.warning("⚠️ Både Ortofoto og Topokart fra Kartverket var nede. Fortsetter uten bilde.")
+                st.warning("⚠️ Kunne ikke hente bilde (Server timeout).")
         else:
             st.warning(kartverket_info)
     
@@ -400,4 +413,4 @@ if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
             st.success("✅ Komplett geoteknisk utredning og tiltaksplan er ferdigstilt!")
             st.download_button("📄 Last ned Builtly RIG/RIM-rapport", pdf_data, f"Builtly_GEO_MILJO_{p_name}.pdf")
         except Exception as e: 
-            st.error(f"Kritisk feil under generering: {e}")
+            st.error(f"Kritisk feil under generering PDF: {e}")
