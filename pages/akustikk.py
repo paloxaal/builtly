@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
-genai.configure(api_key="AIzaSyCMsSGwIy7necJYMEjI1BSNY4A-OEHW9eM")
+genai.configure(api_key="AIzaSyDF1dWFEkizvogIOmkzaJseXA8xeuKoZaI")
 
 try:
     import fitz  # PyMuPDF
