@@ -281,10 +281,11 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                             st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
                         
-                        # TILBAKE TIL PRO-KVALITET PÅ BILDENE (Matrix 3.0) FOR RENDER
-                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        doc.close() 
+# Optimalisert oppløsning for å unngå 502 (Out of Memory) krasj på serveren
+                     pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                     img = Image.open(io.BytesIO(pix.tobytes("png")))
+                     doc.close() 
+                     del pix  # Tvinger serveren til å slette den tunge råfilen med én gang
                     else:
                         img = Image.open(f)
                     
