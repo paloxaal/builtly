@@ -29,115 +29,93 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    """Sikrer at PDF-en ikke krasjer på lange ord"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTKATALOGEN API & TRIPPPEL BILDEHENTER ---
+# --- 2. KARTVERKET API 3.0 (SEPARERTE PARAMETERE & MATRIKKEL) ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
-    adr_clean = adresse.replace(',', '').strip() if adresse else ""
-    kom_clean = kommune.replace(',', '').strip() if kommune else ""
+    adr = adresse.replace(',', '').strip() if adresse else ""
+    kom = kommune.replace(',', '').strip() if kommune else ""
+    g = gnr.strip() if gnr else ""
+    b = bnr.strip() if bnr else ""
 
-    def api_call(query_string):
-        if not query_string.strip(): return None, None, None, None
-        safe_query = urllib.parse.quote(query_string)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+    def make_request(params):
+        params['utkoordsys'] = '25833'
+        params['treffPerSide'] = 1
         try:
-            resp = requests.get(url, timeout=5)
+            resp = requests.get("https://ws.geonorge.no/adresser/v1/sok", params=params, timeout=10)
             if resp.status_code == 200 and resp.json().get('adresser'):
                 hit = resp.json()['adresser'][0]
                 nord = hit.get('representasjonspunkt', {}).get('nord')
                 ost = hit.get('representasjonspunkt', {}).get('øst')
-                kom = hit.get('kommunenavn', 'Ukjent')
-                adr_tekst = hit.get('adressetekst', query_string)
-                return adr_tekst, kom, nord, ost
+                kommune_navn = hit.get('kommunenavn', '')
+                adr_tekst = hit.get('adressetekst', '')
+                return adr_tekst, kommune_navn, nord, ost
         except Exception:
             pass
         return None, None, None, None
 
-    queries = []
-    if adr_clean:
-        if kom_clean: queries.append(f"{adr_clean} {kom_clean}")
-        queries.append(adr_clean) 
+    # STRATEGI 1: Direkte Matrikkelsøk (Gnr/Bnr + Kommune). Ignorerer gatenavn helt!
+    if g and b and kom:
+        a, k, n, o = make_request({'gardsnummer': g, 'bruksnummer': b, 'kommunenavn': kom})
+        if n and o: return f"✅ Funnet via Matrikkel (Gnr/Bnr): {a}, {k}. (N {n}, Ø {o})", n, o
+
+    # STRATEGI 2: Adresse + Kommune (Separert for å unngå Heimdal/Trondheim-feil)
+    if adr and kom:
+        a, k, n, o = make_request({'sok': adr, 'kommunenavn': kom, 'fuzzy': 'true'})
+        if n and o: return f"✅ Funnet via Adresse: {a}, {k}. (N {n}, Ø {o})", n, o
         
-        base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
-        if base_num != adr_clean: 
-            queries.append(base_num)
-            
-        street_only = re.sub(r'\d+.*', '', adr_clean).strip()
-        if street_only: 
-            queries.append(f"{street_only} {kom_clean}")
-            queries.append(street_only)
+        # STRATEGI 3: Kun gatenavn + Kommune
+        street_only = re.sub(r'\d+.*', '', adr).strip()
+        if street_only:
+            a, k, n, o = make_request({'sok': street_only, 'kommunenavn': kom, 'fuzzy': 'true'})
+            if n and o: return f"✅ Funnet via Gatenavn: {a}, {k}. (N {n}, Ø {o})", n, o
 
-    for q in queries:
-        adr_tekst, kom, nord, ost = api_call(q)
-        if nord and ost:
-            return f"✅ Lokasjon bekreftet: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
-
-    # Nødløsning for kommunesenter
-    if kom_clean:
-        safe_kom = urllib.parse.quote(kom_clean)
-        url_sted = f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={safe_kom}&utkoordsys=25833&treffPerSide=1"
+    # STRATEGI 4: Nødløsning (Kommunesenter)
+    if kom:
         try:
-            resp = requests.get(url_sted, timeout=5)
+            safe_kom = urllib.parse.quote(kom)
+            resp = requests.get(f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={safe_kom}&utkoordsys=25833&treffPerSide=1", timeout=10)
             if resp.status_code == 200 and resp.json().get('navn'):
                 hit = resp.json()['navn'][0]
                 nord = hit.get('representasjonspunkt', {}).get('nord')
                 ost = hit.get('representasjonspunkt', {}).get('øst')
-                stedsnavn = hit.get('stedsnavn', kom_clean)
                 if nord and ost:
-                    return f"⚠️ Fant ikke eksakt gate. Bruker senter av {stedsnavn} (N {nord}, Ø {ost}).", nord, ost
+                    return f"⚠️ Fant ikke eksakt gate. Bruker senter av {kom} (N {nord}, Ø {ost}).", nord, ost
         except Exception:
             pass
 
-    return "❌ Fant ingen treff i Kartverket. Appen fortsetter uten kart.", None, None
+    return "❌ Fant ingen treff i Kartverket. Fortsetter uten kart.", None, None
+
 
 def fetch_kartverket_flyfoto(nord, ost):
-    try:
-        if not nord or not ost: return None, "Mangler koordinater"
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        }
-        
-        # URL 1: Kartkatalogen - Norge i Bilder Ortofoto
-        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        # URL 2: Kartkatalogen - Nyeste Topo Cache (Mest stabil)
-        url_topo_cache = f"https://cache.kartverket.no/topo/v1/wms?service=WMS&request=GetMap&version=1.1.1&layers=topo&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        # URL 3: Kartkatalogen - OpenWMS Topo4 (Gammel men pålitelig)
-        url_topo_open = f"https://opencache.statkart.no/gatekeeper/gk/gk.open_wms?service=WMS&request=GetMap&version=1.1.1&layers=topo4&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-
-        # Forsøk 1
+    if not nord or not ost: return None, "Mangler koordinater"
+    
+    min_x, max_x = float(ost) - 150, float(ost) + 150
+    min_y, max_y = float(nord) - 150, float(nord) + 150
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36'}
+    
+    # Tre offisielle WMS-tjenester vi prøver i rekkefølge
+    urls = [
+        ("Ortofoto (Flyfoto)", f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"),
+        ("Topografisk Norgeskart", f"https://cache.kartverket.no/topo/v1/wms?service=WMS&request=GetMap&version=1.1.1&layers=topo&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"),
+        ("OpenWMS Norgeskart", f"https://opencache.statkart.no/gatekeeper/gk/gk.open_wms?service=WMS&request=GetMap&version=1.1.1&layers=topo4&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png")
+    ]
+    
+    for map_name, url in urls:
         try:
-            r1 = requests.get(url_orto, headers=headers, timeout=6)
-            if r1.status_code == 200 and len(r1.content) > 5000:
-                img = Image.open(io.BytesIO(r1.content)).convert('RGB') # Tvinger fjerning av Alpha-kanal for PDF
-                return img, "Ortofoto (Flyfoto)"
-        except Exception: pass
-
-        # Forsøk 2
-        try:
-            r2 = requests.get(url_topo_cache, headers=headers, timeout=6)
-            if r2.status_code == 200 and len(r2.content) > 5000:
-                img = Image.open(io.BytesIO(r2.content)).convert('RGB')
-                return img, "Topografisk Norgeskart (Cache)"
-        except Exception: pass
-
-        # Forsøk 3
-        try:
-            r3 = requests.get(url_topo_open, headers=headers, timeout=6)
-            if r3.status_code == 200 and len(r3.content) > 5000:
-                img = Image.open(io.BytesIO(r3.content)).convert('RGB')
-                return img, "Topografisk Norgeskart (OpenWMS)"
-        except Exception: pass
-
-    except Exception:
-        pass
-    return None, "Serverfeil hos Kartverket"
+            # Økt timeout til hele 15 sekunder for å unngå "Server timeout" på tunge bilder
+            r = requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200 and len(r.content) > 5000:
+                img = Image.open(io.BytesIO(r.content)).convert('RGB')
+                return img, map_name
+        except Exception:
+            continue
+            
+    return None, "WMS Server Timeout"
 
 # --- 3. EXCEL / CSV DATA EXTRACTOR ---
 def extract_drill_data(files):
@@ -257,7 +235,6 @@ def create_full_report_pdf(name, client, content, aerial_photo, map_type):
             pdf.ln(4)
             
             if aerial_photo:
-                # LAGRER EKSPLISITT SOM PNG FOR Å HINDRE FPDF KRASJ
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
                     aerial_photo.save(tmp.name, format="PNG")
                     img_h = 160 * (aerial_photo.height / aerial_photo.width)
@@ -344,7 +321,7 @@ if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
     aerial_photo = None
     map_type = "Ikke funnet"
     
-    with st.spinner("🌍 Kobler til Kartkatalogen (Henter Flyfoto / Topokart)..."):
+    with st.spinner("🌍 Slår opp i Matrikkelen og henter kart..."):
         kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
         if nord and ost:
             st.success(kartverket_info)
@@ -353,7 +330,7 @@ if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
             if aerial_photo:
                 st.success(f"✅ Suksess! Hentet {map_type} fra Kartverket.")
             else:
-                st.warning("⚠️ Kunne ikke hente bilde (Server timeout).")
+                st.warning(f"⚠️ Kunne ikke hente bilde. Årsak: {map_type}.")
         else:
             st.warning(kartverket_info)
     
