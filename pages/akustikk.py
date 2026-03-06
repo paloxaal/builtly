@@ -15,20 +15,13 @@ from PIL import Image, ImageDraw, ImageFont
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
 
-# --- SKUDDSIKKER NØKKEL-HENTER ---
-# Sjekker først Render (os.environ), deretter Streamlit-safen (st.secrets) hvis Render feiler.
+# Henter Google API-nøkkel kun fra Render Environment Variables
 google_key = os.environ.get("GOOGLE_API_KEY")
-if not google_key:
-    try:
-        google_key = st.secrets["GOOGLE_API_KEY"]
-    except:
-        pass
-
 if google_key:
     genai.configure(api_key=google_key)
 else:
-    st.error("Kritisk feil: Fant ingen Google API-nøkkel på serveren!")
-# --------------------------------
+    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
+    st.stop()
 
 try:
     import fitz  # PyMuPDF
@@ -36,7 +29,6 @@ except ImportError:
     fitz = None
 
 def clean_pdf_text(text):
-    """Renser tekst for PDF-motoren, men bevarer ÆØÅ"""
     if not text: 
         return ""
     rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*", "²": "2", "³": "3"}
@@ -45,7 +37,6 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
-    """Fjerner alt som kan krasje PDF-en"""
     text = re.sub(r'[-|_|=]{4,}', ' ', text)
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     text = text.replace('**', '').replace('__', '')
@@ -102,7 +93,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), points
 
-# --- 3. DYNAMISK PDF MOTOR (MED STRAMME MARGER) ---
+# --- 3. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -123,7 +114,6 @@ class BuiltlyProPDF(FPDF):
     def check_space(self, height):
         if self.get_y() + height > 270: 
             self.add_page()
-            # Tvinger absolutte marger for hver ny side
             self.set_margins(25, 25, 25)
             self.set_x(25)
 
@@ -217,12 +207,10 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    # Låst bredde på 155 for å unngå blødning utenfor arket
                     pdf.multi_cell(155, 5, safe_text)
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    # Låst bredde på 160 for normal tekst
                     pdf.multi_cell(160, 5, safe_text)
             except Exception:
                 pdf.ln(2)
@@ -281,11 +269,11 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                             st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
                         
-# Optimalisert oppløsning for å unngå 502 (Out of Memory) krasj på serveren
-                     pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                     img = Image.open(io.BytesIO(pix.tobytes("png")))
-                     doc.close() 
-                     del pix  # Tvinger serveren til å slette den tunge råfilen med én gang
+                        # Optimalisert oppløsning for å unngå 502 (Out of Memory)
+                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        doc.close() 
+                        del pix # Tvinger sletting av rådata
                     else:
                         img = Image.open(f)
                     
@@ -298,7 +286,6 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
 
                 st.toast("Simulering ferdig. Kobler til Google AI...")
                 
-                # --- DEN NYE, IDIOTSIKKERE RADAREN ---
                 gyldige_modeller = []
                 try:
                     for m in genai.list_models():
@@ -319,7 +306,6 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
                 
                 st.info(f"Suksess: Gjenkjente og bruker modellen '{valgt_modell}'")
                 model = genai.GenerativeModel(valgt_modell)
-                # -------------------------------------
 
                 prompt = f"""
                 Du er Builtly RIAKU AI, en avansert støyfaglig AI-ingeniør og rådgiver.
