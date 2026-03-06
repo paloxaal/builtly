@@ -1,83 +1,137 @@
 import streamlit as st
 import os
 
-# Må være første kommando
-st.set_page_config(page_title="Builtly.ai", page_icon="🏗️", layout="wide")
+# 1. Grunninnstillinger
+st.set_page_config(page_title="Builtly.ai | Enterprise", page_icon="🏗️", layout="wide")
 
-# --- KOSMETIKK OG ENTERPRISE-CSS ---
+# 2. Lås logoen HELT ØVERST over menyen (Krever Streamlit 1.35+)
+if os.path.exists("logo.png"):
+    st.logo("logo.png", icon_image="logo.png")
+
+# 3. PREMIUM CSS DESIGN
 st.markdown("""
     <style>
-        /* Skjuler standard toppbjelke for et renere app-design */
+        /* Skjul default header bjelke */
         header {visibility: hidden;}
+        .block-container {padding-top: 1rem; padding-bottom: 2rem;}
         
-        /* Gjør sidemenyen bredere slik at logo og slagord får plass */
-        [data-testid="stSidebar"] {
-            min-width: 320px;
-            background-color: #f8f9fa;
-        }
-        
-        /* Eksklusiv tagline-boks for hovedsiden */
-        .slogan-container {
-            background: linear-gradient(135deg, #0F2027, #203A43, #2C5364);
-            padding: 4rem 2rem;
-            border-radius: 12px;
+        /* Hero Banner */
+        .hero {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            padding: 4rem 3rem;
+            border-radius: 16px;
             text-align: center;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
             margin-bottom: 3rem;
-            color: white;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            border: 1px solid #334155;
         }
-        .slogan-title {
+        .hero h1 {
+            color: #f8fafc;
             font-size: 3.5rem;
             font-weight: 800;
-            margin-bottom: 10px;
-            letter-spacing: 2px;
+            letter-spacing: -1px;
+            margin-bottom: 0.5rem;
+            font-family: 'Inter', 'Helvetica Neue', sans-serif;
         }
-        .slogan-text {
-            font-size: 1.4rem;
+        .hero p {
+            color: #94a3b8;
+            font-size: 1.25rem;
             font-weight: 300;
-            color: #d1d5db;
-            font-style: italic;
+            letter-spacing: 0.5px;
+        }
+        
+        /* Moderne SaaS Kort-Grid */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+        .saas-card {
+            background-color: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+            transition: all 0.3s ease;
+            height: 100%;
+        }
+        .saas-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+            border-color: #cbd5e1;
+        }
+        .icon-box {
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            width: 54px;
+            height: 54px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.6rem;
+            margin-bottom: 1.2rem;
+        }
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 0.5rem;
+        }
+        .card-desc {
+            font-size: 0.95rem;
+            color: #64748b;
+            line-height: 1.6;
         }
     </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEMENY (Logo og meny) ---
-with st.sidebar:
-    if os.path.exists("logo.png"):
-        # use_container_width=True tvinger logoen til å bruke hele plassen, 
-        # slik at eventuell tekst/slagord i selve logobildet blir lesbart!
-        st.image("logo.png", use_container_width=True)
-    else:
-        st.markdown("## 🏗️ Builtly.ai")
-    
-    st.markdown("---")
-    # Streamlit legger automatisk sidene fra 'pages'-mappen her under.
-
-# --- HOVEDSIDE (Landing Page) ---
+# 4. HTML STRUKTUR PÅ FORSIDEN
 st.markdown("""
-    <div class="slogan-container">
-        <div class="slogan-title">Builtly.ai</div>
-        <div class="slogan-text">Compliance-grade engineering deliverables — generated fast, signed by professionals.</div>
+    <div class="hero">
+        <h1>Builtly.ai</h1>
+        <p>Compliance-grade engineering deliverables — generated fast, signed by professionals.</p>
+    </div>
+    
+    <h3 style="color: #0f172a; font-weight: 700; font-size: 1.5rem; margin-bottom: 1rem;">Prosjekteringsmoduler</h3>
+    <p style="color: #64748b; margin-bottom: 2rem;">Velg ønsket ingeniørdisiplin i sidemenyen for å starte.</p>
+    
+    <div class="card-grid">
+        <div class="saas-card">
+            <div class="icon-box">📐</div>
+            <div class="card-title">Mulighetsstudie</div>
+            <div class="card-desc">Fase 0 volumanalyse, utnyttelsesgrad (NS3940) og automatisk integrasjon av Kartverket.</div>
+        </div>
+        
+        <div class="saas-card">
+            <div class="icon-box">🌍</div>
+            <div class="card-title">Geo & Miljø (RIG/RIM)</div>
+            <div class="card-desc">Boreplaner, geoteknisk utredning og miljøtekniske tiltaksplaner basert på Excel-data.</div>
+        </div>
+        
+        <div class="saas-card">
+            <div class="icon-box">🏢</div>
+            <div class="card-title">Konstruksjon (RIB)</div>
+            <div class="card-desc">Konseptuelt bæresystem, klimalaster (Eurokode) og CO2/klimagass-vurderinger.</div>
+        </div>
+        
+        <div class="saas-card">
+            <div class="icon-box">🔥</div>
+            <div class="card-title">Brannsikkerhet (RIBr)</div>
+            <div class="card-desc">Rømningsveier, branncelleinndeling og kostnadsoptimale TEK17-løsninger.</div>
+        </div>
+        
+        <div class="saas-card">
+            <div class="icon-box">🔊</div>
+            <div class="card-title">Akustikk (RIAku)</div>
+            <div class="card-desc">Romakustikk, lydklasser og støyvurderinger med automatisk grenseverdi-sjekk.</div>
+        </div>
+        
+        <div class="saas-card" style="background-color: #f8fafc; border: 1px dashed #cbd5e1;">
+            <div class="icon-box" style="background-color: transparent; border: none; font-size: 2rem;">🚀</div>
+            <div class="card-title" style="color: #64748b;">Flere moduler</div>
+            <div class="card-desc" style="color: #94a3b8;">VVS, Elektroteknikk og trafikkvurderinger er under utvikling...</div>
+        </div>
     </div>
 """, unsafe_allow_html=True)
-
-st.markdown("### Velkommen til din digitale prosjekteringsavdeling")
-st.info("👈 Velg ønsket ingeniørdisiplin i menyen til venstre for å starte prosjekteringen.")
-
-st.markdown("---")
-
-# Dashbord-oversikt med pene kolonner
-c1, c2, c3 = st.columns(3)
-c1.success("**📐 FASE 0:**\n\nMulighetsstudier, Utnyttelse (NS3940) og Volumskisser.")
-c2.warning("**🌍 GRUNNARBEID:**\n\nGeoteknikk (RIG), Miljø (RIM) og Tiltaksplaner.")
-c3.error("**🔥 SIKKERHET:**\n\nBrannteknisk konsept (RIBr), Brannceller og Rømning.")
-
-st.write("")
-
-c4, c5, c6 = st.columns(3)
-c4.info("**🏢 KONSTRUKSJON:**\n\nBæresystem, Laster (Eurokode) og Klimagass (RIB).")
-c5.info("**🔊 MILJØ & HELSE:**\n\nLydklasser, Romakustikk og Støyvurdering (RIAku).")
-c6.markdown("") # Tom kolonne for symmetri
-
-st.markdown("---")
-st.caption("© 2026 Builtly.ai – The future of PropTech.")
