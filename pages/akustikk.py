@@ -37,8 +37,11 @@ def clean_pdf_text(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
+    """Den ultimate PDF-beskytteren som forhindrer alle krasj"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
-    text = re.sub(r'[-|=]{4,}', ' ', text)
+    text = re.sub(r'[-|=]{3,}', ' ', text)
+    # HENSYNSLØST FILTER: Tvinger mellomrom inn i alle "ord" (f.eks URLer) over 30 tegn!
+    text = re.sub(r'([^\s]{30})', r'\1 ', text)
     return clean_pdf_text(text)
 
 # --- AI VISION MODUL ---
@@ -78,8 +81,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
 
     gray_array = np.array(img.convert("L"))
     
-    # --- NY: INK-DETECTOR GRID ---
-    # Legger et nettverk over de midterste 80% av tegningen
+    # "Blekk-sensoren" som skanner tegningen
     margin_x, margin_y = int(w * 0.1), int(h * 0.1)
     grid_x = np.linspace(margin_x, w - margin_x, 10, dtype=int)
     grid_y = np.linspace(margin_y, h - margin_y, 8, dtype=int)
@@ -88,27 +90,23 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     
     for py in grid_y:
         for px in grid_x:
-            # Sjekker en liten boks rundt punktet. Hvis det er tegnet "blekk" der, setter vi en prikk.
             box_size = int(w * 0.015)
             y1, y2 = max(0, py - box_size), min(h, py + box_size)
             x1, x2 = max(0, px - box_size), min(w, px + box_size)
             
             region = gray_array[y1:y2, x1:x2]
             
-            # Hvis mer enn 2% av boksen inneholder mørke piksler (streker, vegger, bygningsmasse)
             if np.sum(region < 230) > (box_size * box_size * 0.02):
                 
-                # Beregner støy logisk fra bunn (vei) til topp (stille side / høyere opp)
                 d_m = dist + (h - py) * (50/h)
                 d_3d = math.sqrt(d_m**2 + floor_h**2)
                 db = base_db - 10 * math.log10(max(d_3d, 1) / 10.0)
                 
-                # Simulert skjerming avhengig av hvor på tegningen punktet er
-                y_ratio = py / h # 0 på toppen, 1 på bunnen
+                y_ratio = py / h 
                 shielding = 0
-                if y_ratio < 0.5: # Øvre halvdel (baksiden av bygget eller tak)
+                if y_ratio < 0.5: 
                     shielding = 14
-                elif y_ratio < 0.7: # Midten (sidefasader)
+                elif y_ratio < 0.7: 
                     shielding = 6
                     
                 if screen_height > 0 and floor_h <= (screen_height + 1.5) and y_ratio > 0.5:
@@ -124,7 +122,6 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
                 draw.ellipse([px-r, py-r, px+r, py+r], fill=dot_color, outline=(0,0,0,255), width=2)
                 draw.text((px-r/1.5, py-r/1.5), str(final_db), fill="white" if final_db>=55 else "black", font=font_large)
 
-    # Info-boks
     box_w, box_h = int(w*0.35), int(h*0.2)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
     draw.text((w-box_w+20, h-box_h+20), f"AKUSTISK KARTLEGGING", fill="black", font=font_large)
@@ -139,7 +136,7 @@ def generate_pro_stoykart(img, adt, speed, dist, floor_num, screen_height=0.0):
     out = Image.alpha_composite(draw_img, overlay)
     return out.convert("RGB"), calculated_dbs
 
-# --- 3. DYNAMISK PDF MOTOR (LÅST BREDDE OG AUTO-WRAP w=0) ---
+# --- 3. DYNAMISK PDF MOTOR (EKSTRA STORE SIKKERHETSMARGINER) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -175,11 +172,10 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.set_y(100)
     pdf.set_font('Helvetica', 'B', 26)
     pdf.set_text_color(26, 43, 72)
-    # w=0 sørger for at teksten ALDRI går utfor høyremargen, men bryter automatisk!
-    pdf.multi_cell(0, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
+    pdf.multi_cell(150, 10, clean_pdf_text("STØYFAGLIG UTREDNING"))
     pdf.set_font('Helvetica', '', 16)
     pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
+    pdf.multi_cell(150, 10, clean_pdf_text(f"FOR RAMMETILLATELSE: {pdf.p_name}"))
     pdf.ln(30)
     
     metadata = [
@@ -230,8 +226,8 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(8)
             pdf.set_font('Helvetica', 'B', 14)
             pdf.set_text_color(26, 43, 72)
-            # w=0 på ALLE overskrifter stopper PDF-krasj og blødning for godt
-            pdf.multi_cell(0, 7, ironclad_text_formatter(line.replace('#', '').strip()))
+            # Sikkerhetsbredde 150mm på overskrifter
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.ln(2)
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -241,7 +237,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(6)
             pdf.set_font('Helvetica', 'B', 12)
             pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(0, 7, ironclad_text_formatter(line.replace('#', '').strip()))
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
             pdf.set_font('Helvetica', '', 10)
             pdf.set_text_color(0, 0, 0)
             
@@ -255,11 +251,11 @@ def create_full_report_pdf(name, client, content, maps):
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
                     pdf.set_x(30)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(145, 5, safe_text) # Tvinger inn smalere bredde for kulepunkter
                     pdf.set_x(25)
                 else:
                     pdf.set_x(25)
-                    pdf.multi_cell(0, 5, safe_text)
+                    pdf.multi_cell(150, 5, safe_text) # Tvinger inn smalere bredde for brødtekst
             except Exception:
                 pdf.ln(2)
 
@@ -306,23 +302,28 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
         detected_screen_height = 0.0
         with st.spinner("👁️ AI Vision skanner tegningene for skjerming og terreng..."):
             try:
-                f_vision = files[0]
-                if f_vision.name.lower().endswith('pdf'):
-                    doc_v = fitz.open(stream=f_vision.read(), filetype="pdf")
-                    pix_v = doc_v.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                    vision_img = Image.open(io.BytesIO(pix_v.tobytes("png")))
-                    doc_v.close()
+                # Filtrer ut potensielle Excel-filer etc.
+                valid_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
+                if not valid_files:
+                    st.warning("Fant ingen gyldige bildefiler for AI Vision.")
                 else:
-                    vision_img = Image.open(f_vision)
-                
-                detected_screen_height = analyze_drawing_with_vision(vision_img.convert("RGB"))
-                vision_img.close()
-                files[0].seek(0)
-                
-                if detected_screen_height > 0:
-                    st.success(f"✅ AI Vision fant en støyskjerm på {detected_screen_height}m! Oppdaterer matematikken.")
-                else:
-                    st.info("ℹ️ AI Vision fant ingen støyskjermer på tegningen. Bruker fri sikt.")
+                    f_vision = valid_files[0]
+                    if f_vision.name.lower().endswith('pdf'):
+                        doc_v = fitz.open(stream=f_vision.read(), filetype="pdf")
+                        pix_v = doc_v.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                        vision_img = Image.open(io.BytesIO(pix_v.tobytes("png")))
+                        doc_v.close()
+                    else:
+                        vision_img = Image.open(f_vision)
+                    
+                    detected_screen_height = analyze_drawing_with_vision(vision_img.convert("RGB"))
+                    vision_img.close()
+                    valid_files[0].seek(0)
+                    
+                    if detected_screen_height > 0:
+                        st.success(f"✅ AI Vision fant en støyskjerm på {detected_screen_height}m! Oppdaterer matematikken.")
+                    else:
+                        st.info("ℹ️ AI Vision fant ingen støyskjermer på tegningen. Bruker fri sikt.")
             except Exception as e:
                 st.warning(f"AI Vision feilet, bruker standard fri sikt.")
         
@@ -330,10 +331,11 @@ if st.button("GENERER KOMPLETT AKUSTISK UTREDNING", type="primary"):
             try:
                 processed_maps = []
                 data_summary = []
-                process_limit = min(len(files), int(et_count))
+                valid_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
+                process_limit = min(len(valid_files), int(et_count))
                 
                 for i in range(process_limit):
-                    f = files[i]
+                    f = valid_files[i]
                     if f.name.lower().endswith('pdf'):
                         if fitz is None: 
                             st.error("PyMuPDF mangler!")
