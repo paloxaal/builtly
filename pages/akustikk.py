@@ -22,8 +22,25 @@ except ImportError:
     fitz = None
 
 def get_model():
-    """Skuddsikker tilkobling for Streamlit Cloud"""
-    return genai.GenerativeModel('gemini-1.5-flash')
+    """Smart tilkobling som sjekker nøyaktig hva API-nøkkelen din har tilgang til"""
+    try:
+        # Henter listen over alle modeller din nøkkel faktisk har lov til å bruke
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Vi prioriterer fra nyeste til eldste/mest stabile
+        for model_name in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro', 'gemini-pro']:
+            if model_name in available_models:
+                return genai.GenerativeModel(model_name)
+                
+        # Hvis våre favoritter ikke finnes, ta den første som fungerer på listen din
+        if available_models:
+            return genai.GenerativeModel(available_models[0])
+            
+    except Exception:
+        pass
+        
+    # Den absolutte siste utveien som "alltid" fungerer hos Google
+    return genai.GenerativeModel('gemini-pro')
 
 def clean_pdf_text(text):
     """Renser tekst for PDF-motoren, men bevarer ÆØÅ"""
