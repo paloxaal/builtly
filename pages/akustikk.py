@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 st.set_page_config(page_title="Akustikk Pro | Builtly AI", layout="wide")
 
 # Henter Google API-nøkkelen trygt fra Streamlit Secrets (eller Render Environment Variables)
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
 
 try:
     import fitz  # PyMuPDF
