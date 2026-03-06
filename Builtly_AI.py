@@ -17,7 +17,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.image("logo.png", width=250)
+import os
+if os.path.exists("logo.png"):
+    st.image("logo.png", width=250)
 st.title("Builtly AI | Engineering Suite")
 st.markdown("---")
 
