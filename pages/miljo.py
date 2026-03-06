@@ -32,27 +32,27 @@ def ironclad_text_formatter(text):
     """Den ultimate PDF-beskytteren som forhindrer krasj"""
     text = text.replace('$', '').replace('*', '').replace('_', '')
     text = re.sub(r'[-|=]{3,}', ' ', text)
-    # Tvinger orddeling på 40 tegn
+    # Tvinger orddeling på 40 tegn for å sikre mot margin-krasj
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTVERKET API & FLYFOTO ---
+# --- 2. KARTVERKET API (FUZZY SEARCH) & FLYFOTO ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
+    """Avansert søk som tåler skrivefeil og poststed-konflikter"""
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
-    gnr_clean = gnr.strip() if gnr else ""
-    bnr_clean = bnr.strip() if bnr else ""
 
     def api_call(query_string):
         if not query_string.strip(): return None, None, None, None
         safe_query = urllib.parse.quote(query_string)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&utkoordsys=25833&treffPerSide=1"
+        # Fuzzy=true gjør at Kartverket godtar feilstavinger og unøyaktigheter (som 1b vs 1)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
         try:
             resp = requests.get(url, timeout=5)
             if resp.status_code == 200 and resp.json().get('adresser'):
                 hit = resp.json()['adresser'][0]
-                nord = hit.get('representasjonspunkt', {}).get('nord', None)
-                ost = hit.get('representasjonspunkt', {}).get('øst', None)
+                nord = hit.get('representasjonspunkt', {}).get('nord')
+                ost = hit.get('representasjonspunkt', {}).get('øst')
                 kom = hit.get('kommunenavn', 'Ukjent')
                 adr_tekst = hit.get('adressetekst', query_string)
                 return adr_tekst, kom, nord, ost
@@ -61,25 +61,50 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
         return None, None, None, None
 
     queries = []
-    if adr_clean and kom_clean:
-        queries.append(f"{adr_clean} {kom_clean}")
+    if adr_clean:
+        # 1. Fullt søk
+        if kom_clean: queries.append(f"{adr_clean} {kom_clean}")
+        
+        # 2. Kun adresse (ofte best, fordi "Trondheim" forvirrer hvis adressen ligger i Heimdal/Tiller)
+        queries.append(adr_clean)
+
+        # 3. Fjerner bokstaver i nummeret (Industriveien 1b -> Industriveien 1)
         base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
-        if base_num != adr_clean: queries.append(f"{base_num} {kom_clean}")
+        if base_num != adr_clean:
+            queries.append(base_num)
+            
+        # 4. Kun gatenavn
         street_only = re.sub(r'\d+.*', '', adr_clean).strip()
-        if street_only: queries.append(f"{street_only} {kom_clean}")
-    if gnr_clean and bnr_clean:
-        queries.append(f"{kom_clean} {gnr_clean}/{bnr_clean}")
+        if street_only:
+            queries.append(street_only)
 
     for q in queries:
         adr_tekst, kom, nord, ost = api_call(q)
         if nord and ost:
-            return f"✅ Bekreftet i Kartverket: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
+            return f"✅ Fant gate i Kartverket: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
 
-    return "Fant ingen eksakte treff. Appen fortsetter uten flyfoto.", None, None
+    # 5. ULTIMAT NØDLØSNING: Hvis gaten ikke finnes, hent et bykart over selve kommunen!
+    if kom_clean:
+        safe_kom = urllib.parse.quote(kom_clean)
+        url_sted = f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={safe_kom}&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url_sted, timeout=5)
+            if resp.status_code == 200 and resp.json().get('navn'):
+                hit = resp.json()['navn'][0]
+                nord = hit.get('representasjonspunkt', {}).get('nord')
+                ost = hit.get('representasjonspunkt', {}).get('øst')
+                stedsnavn = hit.get('stedsnavn', kom_clean)
+                if nord and ost:
+                    return f"⚠️ Fant ikke eksakt gate. Bruker senter av {stedsnavn} (N {nord}, Ø {ost}) for kartskisse.", nord, ost
+        except Exception:
+            pass
+
+    return "❌ Fant ingen treff i Kartverket. Appen fortsetter uten flyfoto.", None, None
 
 def fetch_kartverket_flyfoto(nord, ost):
     try:
         if not nord or not ost: return None
+        # Viser ca 300x300 meter
         min_x, max_x = float(ost) - 150, float(ost) + 150
         min_y, max_y = float(nord) - 150, float(nord) + 150
         wms_url = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
@@ -102,11 +127,11 @@ def extract_drill_data(files):
                 else:
                     df = pd.read_excel(f)
                 
-                # Konverterer de første 100 radene til tekst
+                # Begrenser til 100 rader for å ikke sprenge AI-minnet
                 extracted_text += f"\n--- RÅDATA FRA FIL: {f.name.upper()} ---\n"
                 extracted_text += df.head(100).to_string() + "\n\n"
             except Exception as e:
-                extracted_text += f"\n[Feil ved lesing av {f.name}: {e}]\n"
+                extracted_text += f"\n[Klarte ikke å lese Excel-fil {f.name} automatisk. Feilkode: {e}]\n"
     
     return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
 
@@ -280,28 +305,30 @@ with st.expander("Prosjekt & Lokasjon", expanded=True):
     
     st.markdown("##### Kartverket Oppslag")
     c3, c4 = st.columns(2)
-    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1")
+    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1B")
     kommune = c4.text_input("Kommune", "Trondheim")
     
     c5, c6 = st.columns(2)
     gnr = c5.text_input("Gårdsnummer (Gnr)", "316")
-    bnr = c6.text_input("Bruksnummer (Bnr)", "689")
+    bnr = c6.text_input("Bruksnummer (Bnr)", "724")
 
 files = st.file_uploader("Last opp boreresultater / lab-analyser (Excel/CSV)", accept_multiple_files=True)
 
 if st.button("GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary"):
-    if not files: 
-        st.warning("Du har ikke lastet opp rådata (Excel). Genererer en generell rapport kun basert på lokasjon.")
     
     kartverket_info = ""
     nord = ost = None
     aerial_photo = None
     
-    with st.spinner("🌍 Kobler til Geonorge API og henter flyfoto..."):
+    with st.spinner("🌍 Kobler til Geonorge API (Fuzzy-søk) og henter flyfoto..."):
         kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
         if nord and ost:
             st.success(kartverket_info)
             aerial_photo = fetch_kartverket_flyfoto(nord, ost)
+            if aerial_photo:
+                st.success("✅ Ortofoto lastet ned vellykket!")
+            else:
+                st.warning("⚠️ Fant koordinater, men selve bilde-serveren (WMS) til Kartverket svarte ikke.")
         else:
             st.warning(kartverket_info)
     
