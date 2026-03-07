@@ -1019,9 +1019,8 @@ render_html(
 render_html(
     """
     <div class="footer-block">
-        <div class="footer-name">Builtly AS</div>
         <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
-        <div class="footer-meta">© 2026 Builtly. All rights reserved.</div>
+        <div class="footer-meta">© 2026 Builtly Engineering AS. All rights reserved.</div>
     </div>
     """
 )
