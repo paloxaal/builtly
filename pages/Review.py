@@ -57,7 +57,6 @@ st.markdown("""
     .stat-value { font-size: 2.2rem; font-weight: 750; color: #fff; margin-bottom: 0.3rem; line-height: 1; }
 
     /* --- MAGISK CSS FOR REVIEW-KORTENE --- */
-    /* Gjør om Streamlits kolonne til et solid, mørkt kort */
     [data-testid="column"]:has(.review-card-hook) {
         background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
         border: 1px solid rgba(120, 145, 170, 0.18) !important;
@@ -73,24 +72,34 @@ st.markdown("""
         transform: translateY(-2px);
     }
     
-    /* Fjerner den gigantiske hvite rammen rundt standard-knappen */
+    /* --- LØSNING FOR DEN STYGGE HVITE KNAPPEN --- */
     [data-testid="column"]:has(.review-card-hook) [data-testid="stButton"] {
         margin-top: 0.5rem !important;
     }
-    [data-testid="column"]:has(.review-card-hook) button[kind="secondary"] {
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(120,145,170,0.3) !important;
-        color: #f5f7fb !important;
+    
+    /* Tvinger knappen til å være mørk */
+    [data-testid="stButton"] button[kind="secondary"] {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120,145,170,0.4) !important;
         border-radius: 8px !important;
         padding: 8px 24px !important;
-        font-weight: 650 !important;
-        font-size: 0.95rem !important;
         transition: all 0.2s ease !important;
     }
-    [data-testid="column"]:has(.review-card-hook) button[kind="secondary"]:hover {
-        background: rgba(56,194,201,0.1) !important;
+    
+    /* Tvinger selve teksten inni knappen til å være hvit og tydelig */
+    [data-testid="stButton"] button[kind="secondary"] * {
+        color: #f5f7fb !important;
+        font-weight: 650 !important;
+        font-size: 0.95rem !important;
+    }
+    
+    /* Hover-effekt (Cyan) */
+    [data-testid="stButton"] button[kind="secondary"]:hover {
+        background-color: rgba(56,194,201,0.1) !important;
         border-color: rgba(56,194,201,0.8) !important;
-        color: #ffffff !important;
+    }
+    [data-testid="stButton"] button[kind="secondary"]:hover * {
+        color: var(--accent) !important;
     }
 
     /* BADGES (STATUS) */
@@ -143,7 +152,6 @@ st.markdown("<h2 style='font-size: 1.6rem; margin-bottom: 1.5rem; border-bottom:
 # --- 5. KØ (REVIEW CARDS) ---
 def review_card(title, doc_id, module, drafter, reviewer, status_text, status_class, btn_key):
     """En funksjon som tvinger Streamlit til å tegne et feilfritt mørkt kort med en innfødt knapp"""
-    # Vi putter alt inni én kolonne for å kunne fange den opp med CSS :has()
     col, _ = st.columns([1, 0.001])
     with col:
         st.markdown('<div class="review-card-hook"></div>', unsafe_allow_html=True)
@@ -158,7 +166,6 @@ def review_card(title, doc_id, module, drafter, reviewer, status_text, status_cl
         </div>
         """, unsafe_allow_html=True)
         
-        # En innfødt Streamlit knapp som nå har perfekt mørkt design takket være CSS-en på toppen!
         if st.button("🔍 Åpne for kontroll", key=btn_key, type="secondary"):
             st.toast(f"Åpner dokument '{title}' for sign-off...", icon="⏳")
 
