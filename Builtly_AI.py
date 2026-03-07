@@ -1,4 +1,5 @@
 import os
+import textwrap
 from pathlib import Path
 import streamlit as st
 
@@ -73,7 +74,8 @@ def module_card(
         else '<span class="module-cta disabled">In development</span>'
     )
 
-    return f"""
+    # Bruker textwrap.dedent for å forhindre at Markdown gjør HTML-en om til en kodeblokk!
+    return textwrap.dedent(f"""
     <div class="module-card">
         <div class="module-header">
             <div class="module-icon">{icon}</div>
@@ -90,7 +92,7 @@ def module_card(
             {action_html}
         </div>
     </div>
-    """
+    """).strip()
 
 
 # -------------------------------------------------
@@ -150,8 +152,7 @@ st.markdown(
     .topbar {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
+        justify-content: flex-end;
         margin-bottom: 1rem;
     }
 
@@ -160,21 +161,7 @@ st.markdown(
         align-items: center;
         justify-content: flex-end;
         gap: 0.75rem;
-        flex-wrap: wrap;
-    }
-
-    .brand-kicker {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 0.85rem;
-        border: 1px solid rgba(56,194,201,0.24);
-        background: rgba(56,194,201,0.08);
-        border-radius: 999px;
-        font-size: 0.82rem;
-        color: var(--accent-2);
-        letter-spacing: 0.02em;
-        white-space: nowrap;
+        flex-wrap: nowrap; /* Tvinger dem på én linje */
     }
 
     .top-link {
@@ -189,6 +176,7 @@ st.markdown(
         font-size: 0.92rem;
         transition: all 0.2s ease;
         border: 1px solid transparent;
+        white-space: nowrap; /* Forhindrer at teksten brekker */
     }
 
     .top-link.ghost {
@@ -679,7 +667,15 @@ st.markdown(
     @media (max-width: 760px) {
         .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr; }
         .topbar { flex-direction: column; align-items: flex-start; }
-        .topbar-right { justify-content: flex-start; }
+        .topbar-right { 
+            justify-content: flex-start; 
+            width: 100%;
+        }
+        .top-link {
+            padding: 0.7rem 0.8rem; /* Litt mindre padding på mobil */
+            font-size: 0.88rem;
+            flex: 1; /* Lar knappene dele plassen likt på mobil */
+        }
         .hero-title { max-width: none; }
     }
 </style>
@@ -688,23 +684,24 @@ st.markdown(
 )
 
 # -------------------------------------------------
-# 5) TOP BAR
+# 5) TOP BAR (Logo + Knapper)
 # -------------------------------------------------
-logo_col, right_col = st.columns([0.42, 0.58], gap="large")
+logo_col, right_col = st.columns([0.5, 0.5], gap="large")
 
 with logo_col:
     if os.path.exists("logo-white.png"):
-        st.image("logo-white.png", width=220)
+        st.image("logo-white.png", width=290) # Økt størrelsen med over 30%!
     elif os.path.exists("logo.png"):
-        st.image("logo.png", width=220)
+        st.image("logo.png", width=290)
     else:
         st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
 
 with right_col:
+    # Fjernet tagline "AI-assisted engineering...", kun knapper igjen.
+    # flex-wrap: nowrap sikrer at knappene holder seg ved siden av hverandre.
     st.markdown(
         f"""
         <div class="topbar">
-            <div class="brand-kicker">AI-assisted engineering - Human-verified - Compliance-grade</div>
             <div class="topbar-right">
                 {top_link('project', 'Project Setup', 'ghost')}
                 {top_link('review', 'QA & Sign-off', 'primary')}
@@ -715,9 +712,10 @@ with right_col:
     )
 
 # -------------------------------------------------
-# 6) HERO
+# 6) HERO (50/50 Symmetri)
 # -------------------------------------------------
-left, right = st.columns([1.42, 0.78], gap="large")
+# Endret fra [1.42, 0.78] til [2, 2] for å gi dem nøyaktig like mye plass for perfekt symmetri.
+left, right = st.columns(2, gap="large")
 
 with left:
     st.markdown(
