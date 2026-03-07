@@ -373,7 +373,7 @@ A platform where customers self-serve inputs and professionals certify outputs. 
 # -------------------------------------------------
 st.markdown("""
 <div class="builtly-footer">
-    <strong>&copy; 2026 Builtly AI AS.</strong> All rights reserved.<br>
+    <strong>&copy; 2026 Builtly Engineering AS.</strong> All rights reserved.<br>
     <span style="font-size: 0.8rem; margin-top: 5px; display: inline-block;">Setting the global standard for compliance-grade engineering deliverables.</span>
 </div>
 """, unsafe_allow_html=True)
