@@ -13,7 +13,6 @@ import io
 from PIL import Image
 from pathlib import Path
 
-# --- 1. TEKNISK OPPSETT & ANTI-BUG RENDERER ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
@@ -24,7 +23,6 @@ else:
     st.stop()
 
 def render_html(html_string: str):
-    """Forhindrer at Streamlit lager hvite kodebokser av HTML."""
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
 def logo_data_uri() -> str:
@@ -49,96 +47,19 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. HENT DATA FRA SSOT (MED GUARDRAIL LÅS) ---
+# --- GUARDRAIL LÅS ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
-    render_html(f"""
-    <div style="margin-bottom: 2rem; display: flex; align-items: center; gap: 1rem;">
-        <img src="{logo_data_uri()}" style="height: 60px;">
-    </div>
-    """)
     st.warning("⚠️ **Handling kreves: Du må sette opp prosjektet først.**")
     st.info("Denne AI-agenten krever at adresse, bygningsdata og regelverk er satt opp i Master Data (SSOT) før den kan generere en faglig korrekt miljørapport.")
-    st.markdown("<br>", unsafe_allow_html=True)
     st.page_link("pages/Project.py", label="Gå til Project Setup", icon="⚙️")
     st.stop()
 
 pd_state = st.session_state.project_data
 
-# Lagrer kart i session_state slik at de ikke forsvinner når UI oppdateres
 if "geo_maps" not in st.session_state:
     st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
 
-# --- 3. PREMIUM CSS ---
-st.markdown("""
-<style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3;
-        --accent: #38bdf8; --radius-lg: 16px;
-    }
-    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
-    .stApp { background-color: var(--bg) !important; color: var(--text); }
-    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
-    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
-
-    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
-    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-    
-    .back-btn {
-        color: var(--accent); text-decoration: none; font-weight: 600; 
-        display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem;
-        padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.2);
-        background: rgba(56,189,248,0.05); transition: all 0.2s;
-    }
-    .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
-
-    /* KNAPPER */
-    button[kind="primary"] {
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
-        color: #041018 !important; border: none !important; font-weight: 750 !important;
-        border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important;
-        transition: all 0.2s ease !important;
-    }
-    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
-    button[kind="secondary"] {
-        background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
-        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 8px !important; font-weight: 600 !important;
-    }
-    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: #38bdf8 !important; color: #38bdf8 !important; }
-
-    /* INPUTS */
-    .stTextInput input, .stNumberInput input, .stTextArea textarea {
-        background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
-    }
-    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-        border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important;
-    }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
-        color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
-    }
-    
-    div[data-testid="stExpander"] {
-        background: rgba(16, 30, 46, 0.5); border: 1px solid rgba(120,145,170,0.2); border-radius: 12px; margin-bottom: 1rem;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# --- 4. HEADER ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
-home_link = '<a href="Project" target="_self" class="back-btn">← Tilbake til SSOT</a>'
-
-render_html(f"""
-<div class="top-shell">
-    <div>{logo_html}</div>
-    <div>{home_link}</div>
-</div>
-""")
-
-st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
-
-# --- 5. KARTKATALOGEN API ---
+# --- KARTVERKET API ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
@@ -159,27 +80,40 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
     if adr_clean:
         if kom_clean: queries.append(f"{adr_clean} {kom_clean}")
         queries.append(adr_clean) 
-    
+        base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
+        if base_num != adr_clean: queries.append(base_num)
+            
     for q in queries:
         adr_tekst, kom, nord, ost = api_call(q)
         if nord and ost: return f"✅ Lokasjon bekreftet (N {nord}, Ø {ost}).", nord, ost
 
-    return "❌ Fant ingen treff i Kartverket. Vennligst last opp kart manuelt.", None, None
+    if kom_clean:
+        url_sted = f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={urllib.parse.quote(kom_clean)}&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url_sted, timeout=5)
+            if resp.status_code == 200 and resp.json().get('navn'):
+                hit = resp.json()['navn'][0]
+                nord, ost = hit.get('representasjonspunkt', {}).get('nord'), hit.get('representasjonspunkt', {}).get('øst')
+                if nord and ost: return f"⚠️ Bruker senter av {kom_clean} (N {nord}, Ø {ost}).", nord, ost
+        except Exception: pass
+
+    return "❌ Fant ingen treff i Kartverket. Last opp kart manuelt.", None, None
 
 def fetch_kartverket_flyfoto(nord, ost):
     try:
-        min_x, max_x = float(ost) - 100, float(ost) + 100
-        min_y, max_y = float(nord) - 100, float(nord) + 100
+        if not nord or not ost: return None, "Mangler koordinater"
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
         headers = {'User-Agent': 'Mozilla/5.0'}
         url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        
-        r1 = requests.get(url_orto, headers=headers, timeout=6)
-        if r1.status_code == 200 and len(r1.content) > 5000:
-            return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Ortofoto (Norge i Bilder)"
+        try:
+            r1 = requests.get(url_orto, headers=headers, timeout=6)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Ortofoto (Flyfoto)"
+        except Exception: pass
     except Exception: pass
-    return None, "Feil"
+    return None, "Feil ved nedlasting"
 
-# --- 6. DATA EXTRACTOR ---
 def extract_drill_data(files):
     extracted_text = ""
     for f in files:
@@ -191,29 +125,18 @@ def extract_drill_data(files):
                 extracted_text += f"\n[Feil ved lesing av {f.name}: {e}]\n"
     return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
 
-# --- 7. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
-            self.set_y(15)
-            self.set_font('Helvetica', 'B', 10)
-            self.set_text_color(26, 43, 72)
+            self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
             self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIG-M-001"), 0, 1, 'R')
-            self.set_draw_color(200, 200, 200)
-            self.line(25, 25, 185, 25)
-            self.set_y(30)
-
+            self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
     def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.set_text_color(150, 150, 150)
+        self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
         self.cell(0, 10, clean_pdf_text(f'UTKAST - KREVER FAGLIG KONTROLL | Side {self.page_no()}'), 0, 0, 'C')
-
     def check_space(self, height):
         if self.get_y() + height > 270: 
-            self.add_page()
-            self.set_margins(25, 25, 25)
-            self.set_x(25)
+            self.add_page(); self.set_margins(25, 25, 25); self.set_x(25)
 
 def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text):
     pdf = BuiltlyProPDF()
@@ -221,40 +144,24 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
-    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 15, clean_pdf_text("GEOTEKNISK & MILJØTEKNISK RAPPORT"), 0, 1, 'L')
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L')
-    pdf.ln(30)
+    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
     
-    metadata = [
-        ("OPPDRAGSGIVER:", client), 
-        ("DATO:", datetime.now().strftime("%d. %m. %Y")), 
-        ("UTARBEIDET AV:", "Builtly RIG-M AI Engine"), 
-        ("REGELVERK:", pd_state.get('land', 'Ukjent'))
-    ]
-    for l, v in metadata:
+    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RIG-M AI Engine"), ("REGELVERK:", pd_state.get('land', 'Ukjent'))]:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    # INNHOLDSFORTEGNELSE
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
-    toc = [
-        "1. SAMMENDRAG OG KONKLUSJON", "2. INNLEDNING OG PROSJEKTBESKRIVELSE", 
-        "3. KARTVERKET OG HISTORISK LOKASJON", "4. UTFØRTE GRUNNUNDERSØKELSER (METODIKK)", 
-        "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING", "6. GEOTEKNISKE VURDERINGER", 
-        "7. TILTAKSPLAN OG MASSEHÅNDTERING"
-    ]
-    pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
-    for t in toc:
-        pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1)
-        pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+    
+    for t in ["1. SAMMENDRAG OG KONKLUSJON", "2. INNLEDNING OG PROSJEKTBESKRIVELSE", "3. KARTVERKET OG HISTORISK LOKASJON", "4. UTFØRTE GRUNNUNDERSØKELSER", "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING", "6. GEOTEKNISKE VURDERINGER", "7. TILTAKSPLAN OG MASSEHÅNDTERING"]:
+        pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
-    # INNHOLD
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
@@ -264,47 +171,30 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
             pdf.check_space(180); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(4)
             
-            # MAGIEN: Plasserer bildene side om side hvis begge finnes
             if recent_img and hist_img:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t1, tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t2:
-                    recent_img.save(t1.name, format="PNG")
-                    hist_img.save(t2.name, format="PNG")
+                    recent_img.save(t1.name, format="PNG"); hist_img.save(t2.name, format="PNG")
                     y_pos = pdf.get_y()
-                    pdf.image(t1.name, x=25, y=y_pos, w=75)
-                    pdf.image(t2.name, x=110, y=y_pos, w=75)
-                    img_h = 75 * (recent_img.height / recent_img.width)
-                    pdf.set_y(y_pos + img_h + 5)
+                    pdf.image(t1.name, x=25, y=y_pos, w=75); pdf.image(t2.name, x=110, y=y_pos, w=75)
+                    pdf.set_y(y_pos + 75 * (recent_img.height / recent_img.width) + 5)
                     pdf.set_font('Helvetica', 'I', 8); pdf.set_text_color(100, 100, 100); pdf.set_x(25)
-                    pdf.cell(75, 5, clean_pdf_text("Fig 1: Nyere situasjon (Ortofoto)"), 0, 0, 'C')
-                    pdf.set_x(110)
-                    pdf.cell(75, 5, clean_pdf_text("Fig 2: Historisk situasjon (Vurdering av forurensning)"), 0, 1, 'C')
-                    pdf.ln(5)
+                    pdf.cell(75, 5, clean_pdf_text("Fig 1: Nyere situasjon"), 0, 0, 'C'); pdf.set_x(110); pdf.cell(75, 5, clean_pdf_text("Fig 2: Historisk situasjon"), 0, 1, 'C'); pdf.ln(5)
             elif recent_img:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t1:
                     recent_img.save(t1.name, format="PNG")
-                    img_h = 120 * (recent_img.height / recent_img.width)
                     pdf.image(t1.name, x=45, y=pdf.get_y(), w=120)
-                    pdf.set_y(pdf.get_y() + img_h + 5)
-                    pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(100, 100, 100); pdf.set_x(25)
-                    pdf.cell(0, 5, clean_pdf_text(f"Figur 1: Kartgrunnlag. Kilde: {source_text}"), 0, 1, 'C')
-                    pdf.ln(5)
+                    pdf.set_y(pdf.get_y() + 120 * (recent_img.height / recent_img.width) + 5)
+                    pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(100, 100, 100); pdf.set_x(25); pdf.cell(0, 5, clean_pdf_text(f"Figur 1: Kartgrunnlag. Kilde: {source_text}"), 0, 1, 'C'); pdf.ln(5)
             else:
-                pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(150, 0, 0); pdf.set_x(25)
-                pdf.cell(0, 5, f"Merknad: Intet kartgrunnlag er innhentet eller lastet opp.", 0, 1, 'L'); pdf.ln(5)
-                
-            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-            continue
+                pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(150, 0, 0); pdf.set_x(25); pdf.cell(0, 5, f"Merknad: Intet kartgrunnlag er innhentet.", 0, 1, 'L'); pdf.ln(5)
+            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0); continue
             
-        elif line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
+        elif line.startswith('# '):
             pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2)
-            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         elif line.startswith('##'):
             pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-            
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         else:
             pdf.set_font('Helvetica', '', 10)
             safe_text = ironclad_text_formatter(line)
@@ -318,22 +208,22 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                 
     return bytes(pdf.output(dest='S'))
 
-# --- 8. UI FOR GEO MODUL ---
+# --- UI ---
+st.title("🌍 Builtly RIG/RIM AI (Geoteknikk & Miljø)")
 st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra Master Setup.")
 
 with st.expander("1. Prosjekt & Lokasjon (SSOT)", expanded=False):
-    st.info("Disse dataene hentes fra Project Setup og kan ikke endres her.")
+    st.info("Disse dataene hentes fra Project Setup.")
     c1, c2 = st.columns(2)
     st.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
     st.text_input("Gnr/Bnr", value=f"{pd_state['gnr']} / {pd_state['bnr']}", disabled=True)
 
-# --- KARTGRUNNLAG (API + MANUELL UPLOAD FALLBACK) ---
 with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
     st.markdown("For å vurdere potensialet for forurenset grunn, krever veilederen en visuell bedømming av nyere og historiske flyfoto. AI-en integrerer disse i rapporten.")
     
     col_a, col_b = st.columns(2)
     with col_a:
-        if st.button("🌐 Hent kart fra Kartverket automatisk", type="secondary"):
+        if st.button("🌐 Hent kart fra Kartverket", type="secondary"):
             with st.spinner("Søker i Matrikkel og Kartkatalog..."):
                 info, nord, ost = fetch_kartverket_data(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"])
                 if nord and ost:
@@ -342,12 +232,9 @@ with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
                         st.session_state.geo_maps["recent"] = img
                         st.session_state.geo_maps["source"] = source
                         st.success(f"✅ Hentet {source}!")
-                    else:
-                        st.error("Kunne ikke laste ned bilde fra Kartverket. Vennligst last opp manuelt.")
-                else:
-                    st.error("Fant ikke koordinater. Vennligst last opp kart manuelt.")
+                    else: st.error("Kunne ikke laste ned bilde fra Kartverket. Vennligst last opp manuelt.")
+                else: st.error("Fant ikke koordinater. Vennligst last opp kart manuelt.")
                     
-        # Viser det hentede kartet hvis det finnes
         if st.session_state.geo_maps["recent"]:
             st.image(st.session_state.geo_maps["recent"], caption=f"Valgt: {st.session_state.geo_maps['source']}", use_container_width=True)
 
@@ -359,19 +246,15 @@ with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
             st.session_state.geo_maps["source"] = "Manuelt opplastet"
             
         man_hist = st.file_uploader("Last opp historisk flyfoto (F.eks. fra 1950 for å sjekke tidl. industri)", type=['png', 'jpg', 'jpeg'])
-        if man_hist:
-            st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
+        if man_hist: st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
 
 with st.expander("3. Laboratoriedata & Borerapport", expanded=True):
-    st.info("Last opp Excel/CSV fra miljølaboratorium (f.eks. ALS, Eurofins) eller borerigg. AI-en analyserer tilstandsklasser automatisk.")
+    st.info("Last opp Excel/CSV fra miljølaboratorium. AI-en analyserer tilstandsklasser automatisk.")
     files = st.file_uploader("Slipp Excel/CSV-filer her", accept_multiple_files=True, type=['xlsx', 'csv'])
 
-st.markdown("<br>", unsafe_allow_html=True)
-
 if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", use_container_width=True):
-    
     if not st.session_state.geo_maps["recent"] and not st.session_state.geo_maps["historical"]:
-        st.error("🛑 **Stopp:** Du må enten hente kart automatisk eller laste opp manuelt i Steg 2 før du kan generere rapporten.")
+        st.error("🛑 **Stopp:** Du må enten hente kart automatisk eller laste opp manuelt i Steg 2.")
         st.stop()
         
     with st.spinner("📊 Analyserer lab-data og prosjektkontekst..."):
@@ -381,12 +264,11 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             valgt_modell = 'models/gemini-1.5-pro' if 'models/gemini-1.5-pro' in valid_models else valid_models[0]
         except:
-            st.error("Kunne ikke koble til Google AI. Sjekk API-nøkkel.")
+            st.error("Kunne ikke koble til Google AI.")
             st.stop()
         
         model = genai.GenerativeModel(valgt_modell)
-
-        hist_tekst = "Et historisk flyfoto er vedlagt rapporten." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, baser vurderingen på generell mistanke."
+        hist_tekst = "Et historisk flyfoto er vedlagt rapporten." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler."
 
         prompt = f"""
         Du er Builtly RIG-M AI, en fagekspert innen geoteknikk og miljøteknikk.
@@ -404,14 +286,14 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         
         INSTRUKSER (Min 1500 ord, formelt fagspråk):
         - Bruk rådataene for å vurdere grunnforhold og forurensning i Kap 5.
-        - Skriv konkrete tiltak for håndtering, graving og levering til godkjent deponi i Kap 7.
+        - Skriv konkrete tiltak for håndtering og levering til deponi i Kap 7.
         - Ta utgangspunkt i regelverket ({pd_state['land']}).
         
         STRUKTUR (Bruk KUN disse eksakte overskriftene):
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
         # 3. KARTVERKET OG HISTORISK LOKASJON
-        # 4. UTFØRTE GRUNNUNDERSØKELSER (METODIKK)
+        # 4. UTFØRTE GRUNNUNDERSØKELSER
         # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
         # 6. GEOTEKNISKE VURDERINGER
         # 7. TILTAKSPLAN OG MASSEHÅNDTERING
@@ -419,16 +301,8 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         
         try:
             res = model.generate_content(prompt)
-            with st.spinner("Kompilerer profesjonell PDF med kart og bilder..."):
-                pdf_data = create_full_report_pdf(
-                    pd_state['p_name'], 
-                    pd_state['c_name'], 
-                    res.text, 
-                    st.session_state.geo_maps["recent"], 
-                    st.session_state.geo_maps["historical"],
-                    st.session_state.geo_maps["source"]
-                )
-            
+            with st.spinner("Kompilerer profesjonell PDF med kart..."):
+                pdf_data = create_full_report_pdf(pd_state['p_name'], pd_state['c_name'], res.text, st.session_state.geo_maps["recent"], st.session_state.geo_maps["historical"], st.session_state.geo_maps["source"])
             st.success("✅ Komplett geoteknisk utredning og tiltaksplan er ferdigstilt!")
             st.download_button("📄 Last ned Builtly RIG/RIM-rapport", pdf_data, f"Builtly_GEO_{pd_state['p_name'].replace(' ', '_')}.pdf", type="primary")
         except Exception as e: 
