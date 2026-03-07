@@ -22,8 +22,7 @@ PAGES = {
     "konstruksjon": "pages/Konstruksjon.py",
     "brann": "pages/Brannkonsept.py",
     "akustikk": "pages/Akustikk.py",
-    "trafikk": "pages/trafikk.py", # Pass på at filen heter trafikk.py med liten t i mappen
-    "project": "pages/Project.py",
+    "trafikk": "pages/Trafikk.py",
     "review": "pages/Review.py",
 }
 
@@ -46,7 +45,7 @@ def nav_link(page_key: str, label: str, icon: str = None, help_text: str = None)
         )
 
 # -------------------------------------------------
-# 3) CSS
+# 3) CSS (Inkludert responsiv Flexbox Header)
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -91,27 +90,15 @@ st.markdown("""
         border-bottom: 1px solid var(--stroke);
         width: 100%;
     }
-    
-    /* KNAPPE-DESIGN */
-    .btn-group {
+    .topbar-left {
         display: flex;
-        gap: 12px;
         align-items: center;
+        gap: 1.5rem;
     }
-    .setup-btn {
-        background-color: transparent;
-        border: 1px solid rgba(120, 145, 170, 0.4);
-        border-radius: 8px;
-        padding: 8px 16px;
-        color: var(--muted) !important;
-        text-decoration: none !important;
-        font-size: 0.95rem;
-        font-weight: 600;
-        transition: all 0.2s;
-    }
-    .setup-btn:hover {
-        background-color: rgba(255,255,255,0.05);
-        color: var(--text) !important;
+    .brand-kicker {
+        display: inline-flex; align-items: center; padding: 0.45rem 0.8rem;
+        border: 1px solid rgba(56,194,201,0.24); background: rgba(56,194,201,0.08);
+        border-radius: 999px; font-size: 0.82rem; color: var(--accent-2); letter-spacing: 0.02em; margin: 0;
     }
     .qa-btn {
         background-color: rgba(56,194,201,0.1);
@@ -136,12 +123,13 @@ st.markdown("""
 
     /* MOBIL-TILPASNINGER */
     @media (max-width: 768px) {
-        .custom-topbar { flex-direction: column; gap: 1.5rem; align-items: flex-start; margin-bottom: 1.5rem; padding-bottom: 0.8rem; }
+        .hidden-mobile { display: none !important; } 
+        .custom-topbar { margin-bottom: 1.5rem; padding-bottom: 0.8rem; }
         .hero-title { font-size: 2.5rem !important; }
         .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr !important; }
     }
 
-    /* Resten av CSS (Uendret fra ditt perfekte design) */
+    /* Resten av CSS */
     .hero { position: relative; overflow: hidden; background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96)); border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl); padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem; }
     .hero::before { content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px; background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none; }
     .eyebrow { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem; font-weight: 700; margin-bottom: 1rem; }
@@ -201,33 +189,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 4) LÅST RESPONSIV HEADER (Henter nå logo-white.png)
+# 4) LÅST RESPONSIV HEADER (Løser mobil-problemet!)
 # -------------------------------------------------
 logo_html = '<h2 style="margin:0; color:white;">Builtly</h2>'
-
-# Sjekker etter logo-white.png, faller tilbake til logo.png hvis den ikke finnes
-logo_path = "logo-white.png"
-if not os.path.exists(logo_path) and os.path.exists("logo.png"):
-    logo_path = "logo.png"
-
-if os.path.exists(logo_path):
+if os.path.exists("logo.png"):
     try:
-        with open(logo_path, "rb") as img_file:
+        with open("logo.png", "rb") as img_file:
             b64_logo = base64.b64encode(img_file.read()).decode()
         logo_html = f'<img src="data:image/png;base64,{b64_logo}" style="height: 52px; object-fit: contain;">'
     except Exception:
         pass
 
-# Teksten "AI-Assisted Engineering" er fjernet!
 st.markdown(f"""
 <div class="custom-topbar">
-    <div>
+    <div class="topbar-left">
         {logo_html}
+        <div class="brand-kicker hidden-mobile">AI-Assisted Engineering · Compliance-Grade</div>
     </div>
-    <div class="btn-group">
-        <a href="Project" target="_self" class="setup-btn">⚙️ Project Setup</a>
-        <a href="Review" target="_self" class="qa-btn">✅ QA & Sign-off</a>
-    </div>
+    <a href="Review" target="_self" class="qa-btn">✅ QA & Sign-off</a>
 </div>
 """, unsafe_allow_html=True)
 
@@ -401,6 +380,10 @@ with module_cols[2]:
 """, unsafe_allow_html=True)
     nav_link("brann", "Open Fire Strategy", icon="🔥")
 
+# -------------------------------------------------
+# Her legger vi inn TRAFIKK som det 6. kortet!
+# Byttet til 3 kolonner for perfekt symmetri på rad 2.
+# -------------------------------------------------
 module_cols_2 = st.columns(3, gap="large")
 
 with module_cols_2[0]:
@@ -463,16 +446,5 @@ st.markdown("""
     <div class="cta-desc">
         Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations, generate drafts, execute QA, and download the signed documentation package.
     </div>
-</div>
-""", unsafe_allow_html=True)
-
-# -------------------------------------------------
-# 10) FOOTER (Slogan og Copyright)
-# -------------------------------------------------
-st.markdown("""
-<div style="text-align: center; margin-top: 4rem; padding-top: 2rem; border-top: 1px solid rgba(120, 145, 170, 0.18);">
-    <h3 style="font-size: 1.1rem; color: #f5f7fb; margin-bottom: 0.5rem; font-weight: 600;">Builtly AS</h3>
-    <p style="color: #9fb0c3; font-size: 0.9rem; margin-bottom: 0.5rem;">Building the future of compliance-grade engineering.</p>
-    <p style="color: rgba(159, 176, 195, 0.5); font-size: 0.8rem;">© 2026 Builtly. All rights reserved.</p>
 </div>
 """, unsafe_allow_html=True)
