@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- 2. ANTI-BUG RENDERER & LOGO ---
+# --- 2. ANTI-BUG RENDERER, LOGO & SIDE-SØKER ---
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
@@ -33,55 +33,7 @@ def find_page(base_name: str) -> str:
             return str(p)
     return ""
 
-# --- 3. SESSION STATE LOGIKK (SSOT) ---
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {
-        "land": "Norge (TEK17 / Kartverket)",
-        "p_name": "",
-        "c_name": "",
-        "p_desc": "",
-        "adresse": "",
-        "kommune": "",
-        "gnr": "",
-        "bnr": "",
-        "b_type": "Næring / Kontor",
-        "etasjer": 4,
-        "bta": 2500,
-        "last_sync": "Ikke synket enda"
-    }
-
-pd = st.session_state.project_data
-
-# Kalkulerer data-kompletthet automatisk
-fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta"]
-filled_fields = sum(1 for field in fields_to_check if bool(pd[field]))
-completeness = int((filled_fields / len(fields_to_check)) * 100)
-sync_status = "Draft" if completeness < 100 else "Ready"
-progress_color = "#38bdf8" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
-
-# --- 4. KARTVERKET API ---
-def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
-    params = {'treffPerSide': 1, 'utkoordsys': 25833}
-    if sok_adresse: params['sok'] = sok_adresse
-    if kommune: params['kommunenavn'] = kommune
-    if gnr: params['gardsnummer'] = gnr
-    if bnr: params['bruksnummer'] = bnr
-
-    try:
-        r = requests.get("https://ws.geonorge.no/adresser/v1/sok", params=params, timeout=5)
-        if r.status_code == 200 and r.json().get('adresser'):
-            hit = r.json()['adresser'][0]
-            return {
-                "adresse": hit.get('adressetekst', ''),
-                "kommune": hit.get('kommunenavn', ''),
-                "gnr": str(hit.get('gardsnummer', '')),
-                "bnr": str(hit.get('bruksnummer', ''))
-            }
-    except Exception:
-        return None
-    return None
-
-# --- 5. PREMIUM CSS ---
+# --- 3. PREMIUM CSS (Lastes ALLTID først) ---
 st.markdown(
     """
 <style>
@@ -98,20 +50,13 @@ st.markdown(
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
     
-    /* --- FIKSET TILBAKE-KNAPP (Likt som forsiden) --- */
-    .topbar-right {
-        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
-        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
+    .back-btn {
+        color: var(--accent); text-decoration: none; font-weight: 600; 
+        display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem;
+        padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.2);
+        background: rgba(56,189,248,0.05); transition: all 0.2s;
     }
-    .top-link {
-        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
-        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
-        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
-        white-space: nowrap;
-    }
-    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
-    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
+    .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
 
     /* KNAPPE-DESIGN */
     button[kind="primary"] {
@@ -184,15 +129,63 @@ st.markdown(
 </style>
 """, unsafe_allow_html=True)
 
+
+# --- 4. SESSION STATE LOGIKK (Hjernen i SSOT) ---
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {
+        "land": "Norge (TEK17 / Kartverket)",
+        "p_name": "",
+        "c_name": "",
+        "p_desc": "",
+        "adresse": "",
+        "kommune": "",
+        "gnr": "",
+        "bnr": "",
+        "b_type": "Næring / Kontor",
+        "etasjer": 4,
+        "bta": 2500,
+        "last_sync": "Ikke synket enda"
+    }
+
+pd = st.session_state.project_data
+
+# Kalkulerer data-kompletthet
+fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta"]
+filled_fields = sum(1 for field in fields_to_check if bool(pd[field]))
+completeness = int((filled_fields / len(fields_to_check)) * 100)
+sync_status = "Draft" if completeness < 100 else "Ready"
+progress_color = "#38bdf8" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
+
+# --- 5. KARTVERKET API ---
+def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
+    params = {'treffPerSide': 1, 'utkoordsys': 25833}
+    if sok_adresse: params['sok'] = sok_adresse
+    if kommune: params['kommunenavn'] = kommune
+    if gnr: params['gardsnummer'] = gnr
+    if bnr: params['bruksnummer'] = bnr
+
+    try:
+        r = requests.get("https://ws.geonorge.no/adresser/v1/sok", params=params, timeout=5)
+        if r.status_code == 200 and r.json().get('adresser'):
+            hit = r.json()['adresser'][0]
+            return {
+                "adresse": hit.get('adressetekst', ''),
+                "kommune": hit.get('kommunenavn', ''),
+                "gnr": str(hit.get('gardsnummer', '')),
+                "bnr": str(hit.get('bruksnummer', ''))
+            }
+    except Exception:
+        return None
+    return None
+
 # --- 6. HEADER & DASHBOARD UI ---
 logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
+home_link = '<a href="/" target="_self" class="back-btn">← Tilbake til Portal</a>'
 
 render_html(f"""
 <div class="top-shell">
     <div>{logo_html}</div>
-    <div class="topbar-right">
-        <a href="/" target="_self" class="top-link ghost">← Tilbake til Portal</a>
-    </div>
+    <div>{home_link}</div>
 </div>
 
 <div class="dash-grid">
@@ -251,7 +244,7 @@ render_html(f"""
 
 # --- 7. INPUT SEKSJON & LIVE SNAPSHOT ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
-st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fanene under for å etablere prosjektdata. Feltene er nå designet for optimal lesbarhet.</p>", unsafe_allow_html=True)
+st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fanene under for å etablere prosjektdata.</p>", unsafe_allow_html=True)
 
 input_col, snap_col = st.columns([2, 1], gap="large")
 
@@ -260,4 +253,98 @@ with input_col:
     
     with tab1:
         st.markdown("<br>", unsafe_allow_html=True)
-        land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (
+        land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
+        try: l_idx = land_options.index(pd["land"])
+        except: l_idx = 0
+        new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
+        
+        c1, c2 = st.columns(2)
+        new_p_name = c1.text_input("Prosjektnavn", value=pd["p_name"], placeholder="F.eks. Fjordbyen Kontorpark")
+        new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd["c_name"], placeholder="F.eks. Eiendomsutvikling AS")
+        
+        new_p_desc = st.text_area(
+            "Prosjektbeskrivelse / Narrativ", 
+            value=pd["p_desc"],
+            height=140,
+            placeholder="Beskriv prosjektet kort her..."
+        )
+
+    with tab2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if "Norge" in new_land:
+            st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
+            
+        c3, c4 = st.columns(2)
+        new_adresse = c3.text_input("Gateadresse", value=pd["adresse"])
+        new_kommune = c4.text_input("Kommune", value=pd["kommune"])
+        
+        c5, c6 = st.columns(2)
+        new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd["gnr"])
+        new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd["bnr"])
+        
+        if "Norge" in new_land:
+            if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
+                with st.spinner("Henter fra Nasjonalt Adresseregister..."):
+                    res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
+                    if res:
+                        st.success(f"✅ Fant eiendom: {res['adresse']}, {res['kommune']} (Gnr {res['gnr']}/Bnr {res['bnr']})")
+                        new_adresse, new_kommune, new_gnr, new_bnr = res['adresse'], res['kommune'], res['gnr'], res['bnr']
+                    else:
+                        st.warning("Fant ingen treff i Matrikkelen. Sjekk skrivemåten.")
+
+    with tab3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        c7, c8, c9 = st.columns(3)
+        type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
+        try: default_idx = type_options.index(pd["b_type"])
+        except: default_idx = 1
+        
+        new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
+        new_etasjer = c8.number_input("Antall Etasjer", value=int(pd["etasjer"]), min_value=1)
+        new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd["bta"]), step=100)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
+        st.session_state.project_data.update({
+            "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
+            "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
+            "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta,
+            "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
+        })
+        st.success(f"✅ Data lagret! Prosjektet '{new_p_name}' er nå synkronisert med alle AI-moduler.")
+        st.rerun()
+
+with snap_col:
+    render_html(f"""
+    <div class="card" style="padding: 1.5rem; height: 100%;">
+        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
+        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i minnet akkurat nå.</p>
+        
+        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd["land"].split(' ')[0]}</div></div>
+        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd["p_name"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd["c_name"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd["adresse"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd["kommune"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd["gnr"], pd["bnr"]])) or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd["b_type"]}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum</div><div class="snap-val">{pd["etasjer"]} etg / {pd["bta"]} m²</div></div>
+    </div>
+    """)
+
+# --- 8. LAUNCHPAD (Neste steg - dukker opp når data er fylt ut) ---
+if completeness > 30:
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align:center; margin-bottom: 1.5rem;'>🚀 Prosjektet er synkronisert! Hvor vil du starte?</h3>", unsafe_allow_html=True)
+    
+    lp1, lp2, lp3 = st.columns(3)
+    
+    with lp1: 
+        if find_page("Mulighetsstudie"): st.page_link(find_page("Mulighetsstudie"), label="📐 Mulighetsstudie", icon="")
+        if find_page("Geo"): st.page_link(find_page("Geo"), label="🌍 Geo & Miljø", icon="")
+    with lp2:
+        if find_page("Akustikk"): st.page_link(find_page("Akustikk"), label="🔊 Akustikk", icon="")
+        if find_page("Brannkonsept"): st.page_link(find_page("Brannkonsept"), label="🔥 Brannkonsept", icon="")
+    with lp3:
+        if find_page("Konstruksjon"): st.page_link(find_page("Konstruksjon"), label="🏢 Konstruksjon (RIB)", icon="")
+        if find_page("Trafikk"): st.page_link(find_page("Trafikk"), label="🚦 Trafikk & Mobilitet", icon="")
