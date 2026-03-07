@@ -13,7 +13,11 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- 2. LOGO-HENTER ---
+# --- 2. ANTI-BUG RENDERER & LOGO HENTER ---
+# Dette er magien som hindrer Streamlit i å lage "hvite kodebokser" av HTML-en!
+def render_html(html_string: str):
+    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
+
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
         if os.path.exists(candidate):
@@ -23,10 +27,10 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
-# --- 3. SESSION STATE LOGIKK (SSOT Hjernen) ---
+# --- 3. SESSION STATE LOGIKK (Hjernen i SSOT) ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {
-        "land": "Norge",
+        "land": "Norge (TEK17 / Kartverket)",
         "p_name": "Nytt Prosjekt",
         "c_name": "",
         "p_desc": "",
@@ -42,14 +46,14 @@ if "project_data" not in st.session_state:
 
 pd = st.session_state.project_data
 
-# Kalkulerer data-kompletthet (Hvor mange prosent er utfylt?)
+# Kalkulerer data-kompletthet automatisk
 fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta"]
 filled_fields = sum(1 for field in fields_to_check if bool(pd[field]))
 completeness = int((filled_fields / len(fields_to_check)) * 100)
 sync_status = "Draft" if completeness < 100 else "Ready"
 progress_color = "#38bdf8" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
 
-# --- 4. API FUNKSJONER (Norge / Kartverket) ---
+# --- 4. KARTVERKET API ---
 def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
     params = {'treffPerSide': 1, 'utkoordsys': 25833}
     if sok_adresse: params['sok'] = sok_adresse
@@ -65,15 +69,13 @@ def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
                 "adresse": hit.get('adressetekst', ''),
                 "kommune": hit.get('kommunenavn', ''),
                 "gnr": str(hit.get('gardsnummer', '')),
-                "bnr": str(hit.get('bruksnummer', '')),
-                "nord": hit.get('representasjonspunkt', {}).get('nord', ''),
-                "ost": hit.get('representasjonspunkt', {}).get('øst', '')
+                "bnr": str(hit.get('bruksnummer', ''))
             }
-    except Exception as e:
+    except Exception:
         return None
     return None
 
-# --- 5. PREMIUM CSS (Fra det nye designet ditt) ---
+# --- 5. PREMIUM CSS ---
 st.markdown(
     """
 <style>
@@ -85,13 +87,12 @@ st.markdown(
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
-    .block-container { max-width: 1300px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
 
-    /* Top Logo */
     .top-shell { margin-bottom: 2rem; }
     .brand-logo { height: 60px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
 
-    /* DASHBOARD CARDS */
+    /* DASHBOARD BOKSER */
     .dash-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
     .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; margin-bottom: 2.5rem; }
     
@@ -99,7 +100,7 @@ st.markdown(
     .card-hero { background: linear-gradient(135deg, rgba(16,30,46,0.9), rgba(6,17,26,0.9)); position: relative; overflow: hidden; }
     .card-hero::after { content: ""; position: absolute; top: -50%; right: -20%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(56,189,248,0.1) 0%, transparent 60%); pointer-events: none; }
     
-    .hero-kicker { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 1rem; border: 1px solid var(--stroke); padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,0.02); }
+    .hero-kicker { display: inline-flex; align-items: center; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 1rem; border: 1px solid var(--stroke); padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,0.02); }
     .hero-title { font-size: 2.8rem; font-weight: 800; margin: 0 0 0.5rem 0; letter-spacing: -0.03em; color: #fff; }
     .hero-sub { color: var(--soft); font-size: 1.05rem; line-height: 1.6; max-width: 50ch; margin-bottom: 1.5rem; }
     
@@ -121,17 +122,20 @@ st.markdown(
     .stat-value { font-size: 1.8rem; font-weight: 750; color: #fff; margin-bottom: 0.3rem; }
     .stat-desc { font-size: 0.85rem; color: var(--soft); line-height: 1.4; }
 
-    /* Snapshot Grid */
+    /* Live Snapshot */
     .snap-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 0.8rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.9rem; }
     .snap-label { color: var(--muted); width: 35%; flex-shrink: 0; }
     .snap-val { color: var(--text); font-weight: 500; text-align: right; width: 65%; word-wrap: break-word;}
 
+    /* Styling av Streamlit Tabs */
+    div[data-baseweb="tab-list"] { background-color: transparent; gap: 8px; }
+    div[data-baseweb="tab"] { background-color: rgba(255,255,255,0.03); border: 1px solid rgba(120,145,170,0.15); border-radius: 8px; padding: 10px 16px; color: var(--muted); }
+    div[data-baseweb="tab"][aria-selected="true"] { background-color: rgba(56,189,248,0.1); border-color: var(--accent); color: #fff; }
+    div[data-baseweb="tab-highlight"] { display: none; }
+
     @media (max-width: 1024px) {
         .dash-grid { grid-template-columns: 1fr; }
         .stat-grid { grid-template-columns: repeat(2, 1fr); }
-    }
-    @media (max-width: 600px) {
-        .stat-grid { grid-template-columns: 1fr; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -139,16 +143,15 @@ st.markdown(
 # --- 6. HEADER & DASHBOARD UI ---
 logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
 
-# FLUSH LEFT F-STRINGS FOR Å UNNGÅ STREAMLIT KODEBLOKK BUG!
-st.markdown(
-f"""
+# Vi bruker render_html for å beskytte mot Streamlits hvite kodeboks-bug!
+render_html(f"""
 <div class="top-shell">{logo_html}</div>
 
 <div class="dash-grid">
     <div class="card card-hero">
         <div class="hero-kicker">✦ Builtly AI • Project SSOT</div>
         <h1 class="hero-title">Project Configuration</h1>
-        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Oppdater disse feltene én gang, og la Builtly synke kontekst til analyse, kalkyle, konseptutvikling og dokumentasjon.</div>
+        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Oppdater disse feltene én gang, og la Builtly synke kontekst til analyse, kalkyle og dokumentasjon.</div>
         <div class="tag-container">
             <div class="tag">AI-native proptech UX</div>
             <div class="tag">Enterprise-grade dataflyt</div>
@@ -196,24 +199,24 @@ f"""
         <div class="stat-desc">Ca. {int(pd["bta"]/max(1, pd["etasjer"]))} m² per etasje.</div>
     </div>
 </div>
-""", unsafe_allow_html=True)
-
+""")
 
 # --- 7. INPUT SEKSJON & LIVE SNAPSHOT ---
-# Deler nedre del i to kolonner: Venstre for input, høyre for "Live Snapshot"
+st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
+st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fanene under for å etablere prosjektdata. Disse mates automatisk inn i alle AI-agenter for å sikre samsvar i dokumentasjonen.</p>", unsafe_allow_html=True)
+
 input_col, snap_col = st.columns([2, 1], gap="large")
 
 with input_col:
-    st.markdown("<h3 style='margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fanene under for å etablere prosjektdata. Disse mates automatisk inn i alle AI-agenter for å sikre samsvar i dokumentasjonen.</p>", unsafe_allow_html=True)
-    
-    # Streamlit Tabs for ryddig input
     tab1, tab2, tab3 = st.tabs(["📌 01 Generelt", "🌍 02 Lokasjon & API", "🏢 03 Byggdata"])
     
     with tab1:
         st.markdown("<br>", unsafe_allow_html=True)
-        # Språk/Land selector som påvirker API
-        new_land = st.selectbox("Land / Lokalt Regelverk", ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"], index=0)
+        # Språk/Land Selector
+        land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
+        try: l_idx = land_options.index(pd["land"])
+        except: l_idx = 0
+        new_land = st.selectbox("Land / Lokalt Regelverk", land_options, index=l_idx)
         
         c1, c2 = st.columns(2)
         new_p_name = c1.text_input("Prosjektnavn", value=pd["p_name"])
@@ -222,7 +225,7 @@ with input_col:
         new_p_desc = st.text_area(
             "Prosjektbeskrivelse / Narrativ (Viktig for AI)", 
             value=pd["p_desc"],
-            height=130,
+            height=140,
             placeholder="Beskriv prosjektet kort... (f.eks. 'Oppføring av 4-etasjers kontorbygg med underjordisk parkering og kantine på gateplan.')"
         )
 
@@ -230,7 +233,7 @@ with input_col:
         st.markdown("<br>", unsafe_allow_html=True)
         
         if "Norge" in new_land:
-            st.info("💡 **Kartverket Integrasjon:** Du kan skrive inn adresse ELLER Gnr/Bnr og trykke 'Søk i Matrikkel' for å fylle ut resten automatisk.")
+            st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk Søk for å autoutfylle resten.")
             
         c3, c4 = st.columns(2)
         new_adresse = c3.text_input("Gateadresse", value=pd["adresse"])
@@ -245,11 +248,11 @@ with input_col:
                 with st.spinner("Henter fra Nasjonalt Adresseregister..."):
                     res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
                     if res:
-                        st.success(f"Fant eiendom: {res['adresse']}, {res['kommune']} (Gnr {res['gnr']}/Bnr {res['bnr']})")
-                        # Pre-fill for user
+                        st.success(f"✅ Fant eiendom: {res['adresse']}, {res['kommune']} (Gnr {res['gnr']}/Bnr {res['bnr']})")
+                        # Pre-fill
                         new_adresse, new_kommune, new_gnr, new_bnr = res['adresse'], res['kommune'], res['gnr'], res['bnr']
                     else:
-                        st.warning("Fant ingen treff i Matrikkelen på disse dataene.")
+                        st.warning("Fant ingen treff i Matrikkelen. Sjekk skrivemåten.")
 
     with tab3:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -261,7 +264,7 @@ with input_col:
         
         new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
         new_etasjer = c8.number_input("Antall Etasjer", value=int(pd["etasjer"]), min_value=1)
-        new_bta = c9.number_input("Bruttoareal (BTA m2)", value=int(pd["bta"]), step=100)
+        new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd["bta"]), step=100)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
@@ -280,46 +283,47 @@ with input_col:
             "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
         })
         st.success(f"✅ Data lagret! Prosjektet '{new_p_name}' er nå synkronisert med alle AI-moduler.")
-        st.rerun() # Laster siden på nytt for å oppdatere dashboardet på toppen!
+        st.rerun()
 
 with snap_col:
-    # --- FIKSET BUG HER: Absolutt ingen innrykk i HTML koden for Live Snapshot ---
-    st.markdown(
-f"""<div class="card" style="padding: 1.5rem;">
-<h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Live Snapshot</h3>
-<p style="color:var(--muted); font-size:0.85rem; margin-bottom:1.5rem;">Et raskt overblikk over SSOT-dataene slik de ligger i minnet akkurat nå.</p>
-<div class="snap-row">
-<div class="snap-label">Regelverk</div>
-<div class="snap-val" style="color:var(--accent);">{pd["land"].split(' ')[0]}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Prosjekt</div>
-<div class="snap-val">{pd["p_name"] or '-'}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Oppdragsgiver</div>
-<div class="snap-val">{pd["c_name"] or '-'}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Adresse</div>
-<div class="snap-val">{pd["adresse"] or '-'}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Kommune</div>
-<div class="snap-val">{pd["kommune"] or '-'}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Gnr / Bnr</div>
-<div class="snap-val">{' / '.join(filter(None, [pd["gnr"], pd["bnr"]])) or '-'}</div>
-</div>
-<div class="snap-row">
-<div class="snap-label">Type</div>
-<div class="snap-val">{pd["b_type"]}</div>
-</div>
-<div class="snap-row" style="border-bottom:none;">
-<div class="snap-label">Volum</div>
-<div class="snap-val">{pd["etasjer"]} etg / {pd["bta"]} m²</div>
-</div>
-</div>""", 
-        unsafe_allow_html=True
-    )
+    # Live Snapshot via render_html for å unngå hvit boks-bug!
+    render_html(f"""
+    <div class="card" style="padding: 1.5rem; height: 100%;">
+        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
+        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i minnet akkurat nå.</p>
+        
+        <div class="snap-row">
+            <div class="snap-label">Regelverk</div>
+            <div class="snap-val" style="color:var(--accent);">{pd["land"].split(' ')[0]}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Prosjekt</div>
+            <div class="snap-val">{pd["p_name"] or '-'}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Oppdragsgiver</div>
+            <div class="snap-val">{pd["c_name"] or '-'}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Adresse</div>
+            <div class="snap-val">{pd["adresse"] or '-'}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Kommune</div>
+            <div class="snap-val">{pd["kommune"] or '-'}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Gnr / Bnr</div>
+            <div class="snap-val">{' / '.join(filter(None, [pd["gnr"], pd["bnr"]])) or '-'}</div>
+        </div>
+        <div class="snap-row">
+            <div class="snap-label">Type</div>
+            <div class="snap-val">{pd["b_type"]}</div>
+        </div>
+        <div class="snap-row" style="border-bottom:none;">
+            <div class="snap-label">Volum</div>
+            <div class="snap-val">{pd["etasjer"]} etg / {pd["bta"]} m²</div>
+        </div>
+    </div>
+    """)
