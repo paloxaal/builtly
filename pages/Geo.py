@@ -11,7 +11,7 @@ import requests
 import urllib.parse
 import io
 from PIL import Image
-from pathlib import Path  # <--- DET VAR DENNE SOM MANGLET HOS DEG!
+from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT & ANTI-BUG RENDERER ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
@@ -49,7 +49,7 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS (Må lastes først for å unngå hvit skjerm!) ---
+# --- 2. PREMIUM CSS ---
 st.markdown("""
 <style>
     :root {
@@ -62,30 +62,25 @@ st.markdown("""
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
 
-    /* HEADER & KNAPPER */
+    /* HEADER & PILLE-KNAPPER */
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
+    .brand-left { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
     
-    .back-btn {
-        color: var(--accent); text-decoration: none; font-weight: 600; 
-        display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem;
-        padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.2);
-        background: rgba(56,189,248,0.05); transition: all 0.2s;
+    .topbar-right {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
+        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
     }
-    .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
-
-    /* PILLEDESIGN FOR TOPPKNAPPER */
     .top-link {
         display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
         padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
         font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
         white-space: nowrap;
     }
-    .top-link.primary {
-        color: #041018 !important;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border-color: rgba(120,220,225,0.45);
-    }
+    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
+    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
+    .top-link.primary { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)); border-color: rgba(120,220,225,0.45); color: #041018 !important; }
     .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
 
     /* STREAMLIT NATIVE KNAPPER */
@@ -115,23 +110,32 @@ st.markdown("""
     }
     
     div[data-testid="stExpander"] { background: rgba(16, 30, 46, 0.5); border: 1px solid rgba(120,145,170,0.2); border-radius: 12px; margin-bottom: 1rem; }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; }
+    div[data-testid="stExpander"] summary:hover { background: rgba(255,255,255,0.02) !important; }
     
+    [data-testid="stFileDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; padding: 2rem !important; }
+    [data-testid="stFileDropzone"]:hover { border-color: #38bdf8 !important; background-color: rgba(56, 189, 248, 0.05) !important; }
+    [data-testid="stFileDropzone"] * { color: #c8d3df !important; }
+
     .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 3. HEADER UI (ALLTID SYNLIG) ---
 logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-home_link = '<a href="Project" target="_self" class="back-btn">← Tilbake til SSOT</a>'
 
 render_html(f"""
 <div class="top-shell">
-    <div>{logo_html}</div>
-    <div>{home_link}</div>
+    <div class="brand-left">
+        {logo_html}
+    </div>
+    <div class="topbar-right">
+        <a href="Project" target="_self" class="top-link ghost">← Tilbake til SSOT</a>
+    </div>
 </div>
 """)
 
-# --- 4. GUARDRAIL LÅS (PREMIUM DESIGN) ---
+# --- 4. GUARDRAIL LÅS ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     render_html("""
     <div style="display: flex; justify-content: center; margin-top: 4rem;">
@@ -141,7 +145,7 @@ if "project_data" not in st.session_state or st.session_state.project_data.get("
             <p style="color: #9fb0c3; line-height: 1.7; font-size: 1.05rem; margin-bottom: 2.5rem;">
                 For at AI-agenten skal kunne koble seg på riktig regelverk og analysere riktig bygningsmasse, må du definere prosjektet i Master Data (SSOT) først.
             </p>
-            <div style="display: inline-flex; align-items: center; gap: 0.65rem; padding: 0.4rem; border-radius: 18px; background: rgba(255,255,255,0.025); border: 1px solid rgba(120,145,170,0.12);">
+            <div class="topbar-right" style="justify-content: center; border: none; background: transparent;">
                 <a href="Project" target="_self" class="top-link primary" style="font-size: 1.05rem; padding: 0.8rem 1.5rem;">⚙️ Åpne Project Setup</a>
             </div>
         </div>
@@ -156,7 +160,6 @@ if "geo_maps" not in st.session_state:
 
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
-
 
 # --- 5. KARTKATALOGEN API ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
