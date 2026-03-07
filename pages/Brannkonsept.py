@@ -38,14 +38,22 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. HENT DATA FRA SSOT (Project Setup) ---
-if "project_data" in st.session_state:
-    pd_state = st.session_state.project_data
-else:
-    pd_state = {
-        "p_name": "", "c_name": "", "p_desc": "",
-        "adresse": "", "kommune": "", "gnr": "", "bnr": "",
-        "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500
+# --- 2. HENT DATA FRA SSOT (Med Guardrail Lås) ---
+# Sjekker om brukeren har lagret data i Project Setup. Hvis ikke, stoppes de.
+if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    st.info("AI-agenten trenger kontekst om bygget (areal, etasjer, adresse og regelverk) for å kunne generere en faglig og juridisk korrekt rapport.")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    # Viser en stor knapp som sender dem til Project Setup
+    st.page_link("pages/Project.py", label="Gå til Project Setup", icon="⚙️")
+    
+    # MAGIEN: Stanser scriptet her. Ingen av UI-elementene for Brann/Akustikk/Geo under denne linjen vil vises!
+    st.stop() 
+
+# Hvis de har fylt ut data, lastes de inn og koden fortsetter som normalt
+pd_state = st.session_state.project_data
     }
 
 # --- 3. KONSEPTUELL BRANNCELLE-TEGNER ---
