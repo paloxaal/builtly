@@ -10,8 +10,8 @@ import re
 # --- 1. GRUNNINNSTILLINGER ---
 st.set_page_config(page_title="GEO / ENV | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
-if os.path.exists("logo.png"):
-    st.logo("logo.png", size="large")
+if os.path.exists("logo-white.png"):
+    st.logo("logo-white.png", size="large")
 
 # --- 2. PREMIUM DARK MODE CSS (Samme som forsiden) ---
 st.markdown("""
