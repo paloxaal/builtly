@@ -7,40 +7,119 @@ from datetime import datetime
 import tempfile
 import re
 
-# --- 1. GRUNNINNSTILLINGER & DARK MODE CSS ---
-st.set_page_config(page_title="GEO / ENV | Builtly", layout="wide")
+# --- 1. GRUNNINNSTILLINGER ---
+st.set_page_config(page_title="GEO / ENV | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 if os.path.exists("logo.png"):
     st.logo("logo.png", size="large")
 
+# --- 2. PREMIUM DARK MODE CSS (Samme som forsiden) ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    .stApp { background-color: #050505 !important; font-family: 'Inter', sans-serif; color: #e4e4e7; }
-    header {visibility: hidden;}
-    [data-testid="stSidebar"] { background-color: #0a0a0b !important; border-right: 1px solid #1f1f22 !important; }
-    .block-container { padding-top: 3rem !important; max-width: 1200px !important; }
-    
-    .stTextInput>div>div>input, .stSelectbox>div>div>select, .stNumberInput>div>div>input {
-        background-color: #18181b !important;
-        color: #fafafa !important;
-        border: 1px solid #27272a !important;
-        border-radius: 6px;
+    :root {
+        --bg: #06111a;
+        --panel: rgba(13, 27, 42, 0.6);
+        --stroke: rgba(120, 145, 170, 0.2);
+        --text: #f5f7fb;
+        --muted: #9fb0c3;
+        --accent-2: #78dce1;
     }
-    .stTextInput>div>div>input:focus { border-color: #38bdf8 !important; box-shadow: 0 0 0 1px #38bdf8 !important; }
-    label { color: #a1a1aa !important; font-weight: 500 !important; }
+
+    html, body, [class*="css"] {
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+
+    /* Lik bakgrunn som forsiden */
+    .stApp {
+        background: radial-gradient(1100px 500px at 15% -5%, rgba(56,194,201,0.12), transparent 50%),
+                    radial-gradient(900px 500px at 100% 0%, rgba(64,170,255,0.08), transparent 45%),
+                    linear-gradient(180deg, #071018 0%, #08131d 35%, #071018 100%) !important;
+        color: var(--text);
+    }
     
-    .streamlit-expanderHeader { background-color: #09090b !important; color: #fafafa !important; border-bottom: 1px solid #27272a; }
-    .streamlit-expanderContent { border: 1px solid #27272a; border-top: none; background-color: #09090b; }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
+    .block-container { max-width: 1000px !important; padding-top: 3rem !important; padding-bottom: 4rem !important; }
+
+    /* Custom Header Design */
+    .mod-title { font-size: 2.8rem; font-weight: 800; color: #ffffff; letter-spacing: -0.03em; margin-bottom: 0.5rem; }
+    .mod-sub { color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem; border-bottom: 1px solid var(--stroke); padding-bottom: 1.5rem; line-height: 1.6;}
+
+    /* TVINGER INPUTS TIL DARK MODE */
+    [data-testid="stTextInput"] input, 
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+        background-color: rgba(255,255,255,0.03) !important;
+        border: 1px solid var(--stroke) !important;
+        color: var(--text) !important;
+        border-radius: 8px !important;
+    }
+    [data-testid="stTextInput"] input:focus, 
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent-2) !important;
+    }
     
-    .mod-title { font-size: 2.2rem; font-weight: 700; color: #ffffff; margin-bottom: 0.5rem; letter-spacing: -0.02em; }
-    .mod-sub { color: #a1a1aa; font-size: 1rem; margin-bottom: 2rem; border-bottom: 1px solid #27272a; padding-bottom: 1.5rem; }
+    /* TVINGER EXPANDERS TIL DARK MODE */
+    [data-testid="stExpander"] {
+        background-color: var(--panel) !important;
+        border: 1px solid var(--stroke) !important;
+        border-radius: 12px !important;
+        margin-bottom: 1rem;
+    }
+    [data-testid="stExpander"] summary {
+        background-color: transparent !important;
+        padding: 1rem !important;
+    }
+    [data-testid="stExpander"] summary p {
+        font-size: 1.1rem !important;
+        font-weight: 600 !important;
+        color: var(--accent-2) !important;
+    }
+    [data-testid="stExpanderDetails"] {
+        background-color: transparent !important;
+        padding: 0 1rem 1rem 1rem !important;
+    }
+
+    /* TVINGER FILE UPLOADER TIL DARK MODE */
+    [data-testid="stFileUploadDropzone"] {
+        background-color: rgba(255,255,255,0.02) !important;
+        border: 1px dashed rgba(56,194,201,0.4) !important;
+        border-radius: 12px !important;
+        padding: 2rem !important;
+        transition: all 0.3s ease;
+    }
+    [data-testid="stFileUploadDropzone"]:hover {
+        background-color: rgba(56,194,201,0.05) !important;
+        border-color: var(--accent-2) !important;
+    }
+    [data-testid="stFileUploadDropzone"] div { color: var(--text) !important; }
+    [data-testid="stFileUploadDropzone"] small { color: var(--muted) !important; }
     
-    /* File uploader styling */
-    [data-testid="stFileUploadDropzone"] { background-color: #09090b !important; border: 1px dashed #3f3f46 !important; }
+    /* PRIMARY BUTTON (Generate) */
+    [data-testid="baseButton-primary"] {
+        background: linear-gradient(135deg, rgba(56,194,201,0.8), rgba(18,49,76,0.9)) !important;
+        border: 1px solid rgba(56,194,201,0.5) !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-radius: 12px !important;
+        padding: 1.5rem !important;
+        font-size: 1.1rem !important;
+        transition: all 0.3s ease;
+    }
+    [data-testid="baseButton-primary"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 20px rgba(56,194,201,0.2) !important;
+    }
+    
+    /* Typografi for labels */
+    label, .stMarkdown p { color: var(--muted) !important; font-size: 0.95rem; }
+
+    /* Footer */
+    .builtly-footer { text-align: center; color: #71717a; font-size: 0.9rem; margin-top: 4rem; padding-top: 2rem; border-top: 1px solid var(--stroke); }
+    .builtly-footer strong { color: #a1a1aa; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
+# --- 3. GOOGLE AI SETUP ---
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key: genai.configure(api_key=google_key)
 else: st.error("Missing Google API Key.")
@@ -59,7 +138,7 @@ def ironclad_text_formatter(text):
     text = re.sub(r'[-|=]{3,}', ' ', text)
     return clean_pdf_text(text)
 
-# --- 2. DYNAMISK PDF MOTOR ---
+# --- 4. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -140,9 +219,9 @@ def create_geo_report_pdf(name, client, content):
                 
     return bytes(pdf.output(dest='S'))
 
-# --- 3. UI & LOGIKK ---
+# --- 5. UI & LOGIKK ---
 st.markdown("<div class='mod-title'>GEO / ENV — Ground Conditions</div>", unsafe_allow_html=True)
-st.markdown("<div class='mod-sub'>Analyze lab files and excavation plans. Outputs soil classification and disposal action plans.</div>", unsafe_allow_html=True)
+st.markdown("<div class='mod-sub'>Agent specialized in analyzing laboratory test files and excavation plans. Calculates soil classification according to local regulations and generates detailed disposal action plans.</div>", unsafe_allow_html=True)
 
 # THE MAGIC: Compliance & Language Selector
 region = st.selectbox("🌍 Compliance Region & Output Language", 
@@ -164,16 +243,17 @@ with st.expander("1. Project Details", expanded=True):
     kommune = c4.text_input("City/Municipality", "Trondheim")
 
 with st.expander("2. Data Ingestion (Raw Files)", expanded=True):
-    st.markdown("Upload environmental laboratory results (Excel/CSV) and optional site plans (PDF).")
-    lab_files = st.file_uploader("Upload Lab Data (e.g. ALS, Eurofins)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
+    st.markdown("Upload environmental laboratory results (Excel/CSV) and optional site plans (PDF). The AI agent will parse the tables and highlight toxic hotspots automatically.")
+    lab_files = st.file_uploader("Upload Lab Data (ALS, Eurofins etc.)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
     plan_files = st.file_uploader("Upload Excavation / Site Plans (PDF)", accept_multiple_files=True, type=['pdf'])
 
-if st.button("Generate Environmental Action Plan", type="primary", use_container_width=True):
+st.write("") # Luft før knappen
+
+if st.button("Calculate & Generate Action Plan", type="primary", use_container_width=True):
     
     extracted_data = ""
     
     with st.spinner("Extracting and parsing raw data..."):
-        # Les lab-data (Excel/CSV)
         if lab_files:
             for f in lab_files:
                 try:
@@ -183,7 +263,6 @@ if st.button("Generate Environmental Action Plan", type="primary", use_container
                 except Exception as e:
                     st.warning(f"Could not parse {f.name}: {e}")
         
-        # Les planer (PDF)
         if plan_files and fitz:
             for f in plan_files:
                 try:
@@ -195,13 +274,12 @@ if st.button("Generate Environmental Action Plan", type="primary", use_container
                     pass
                     
     if not extracted_data:
-        st.warning("Please upload at least one lab file or PDF to generate the report based on actual data.")
+        st.warning("Please upload at least one lab file or PDF to generate the report based on actual data. Generating template...")
         extracted_data = "No file data provided. Generate a generic template based on best practices."
                 
     with st.spinner(f"Classifying soil and generating compliance report for {region}..."):
         model = genai.GenerativeModel('gemini-1.5-pro' if 'gemini-1.5-pro' in [m.name for m in genai.list_models()] else 'gemini-1.5-flash')
 
-        # DYNAMISK SPRÅK OG REGELVERK FOR MILJØ
         if "Norway" in region:
             lang_instruction = "Skriv på profesjonell, teknisk Norsk."
             code_instruction = "Bruk Forurensningsforskriften kapittel 2 og Miljødirektoratets veileder for klassifisering av forurenset grunn (Tilstandsklasse 1-5)."
@@ -253,3 +331,11 @@ if st.button("Generate Environmental Action Plan", type="primary", use_container
             st.download_button("📄 Download Action Plan Package", pdf_data, f"Builtly_GEO_{p_name}.pdf")
         except Exception as e: 
             st.error(f"Generation failed: {e}")
+
+# --- FOOTER ---
+st.markdown("""
+<div class="builtly-footer">
+    <strong>&copy; 2026 Builtly Engineering AS.</strong> All rights reserved.<br>
+    <span style="font-size: 0.8rem; margin-top: 5px; display: inline-block;">Setting the global standard for compliance-grade engineering deliverables.</span>
+</div>
+""", unsafe_allow_html=True)
