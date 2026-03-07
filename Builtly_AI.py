@@ -75,11 +75,24 @@ st.markdown("""
     [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
     .block-container { max-width: 1280px !important; padding-top: 2rem !important; padding-bottom: 4rem !important; }
 
+    .hero-container {
+        display: grid;
+        grid-template-columns: 1.35fr 0.8fr;
+        gap: 2rem;
+        margin-bottom: 2rem;
+        align-items: stretch;
+    }
+
     .hero {
         position: relative; overflow: hidden;
         background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
         border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl);
-        padding: 2.2rem; margin-bottom: 1.25rem;
+        padding: 2.8rem; 
+        display: flex; flex-direction: column; justify-content: center;
+    }
+    .hero::before {
+        content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px;
+        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none;
     }
     .eyebrow { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem; font-weight: 700; margin-bottom: 1rem; }
     .hero-title { font-size: clamp(2.5rem, 5vw, 4.2rem); line-height: 1.05; letter-spacing: -0.04em; font-weight: 800; margin: 0; color: var(--text); max-width: 14ch; }
@@ -87,9 +100,14 @@ st.markdown("""
     .hero-subtitle { margin-top: 1.2rem; max-width: 60ch; font-size: 1.08rem; line-height: 1.8; color: var(--soft); }
     .hero-note { margin-top: 1rem; font-size: 0.95rem; color: var(--muted); }
 
-    .hero-panel { background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); border-radius: 22px; padding: 1.25rem; height: 100%; }
-    .panel-title { font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.85rem; }
-    .mini-stat { background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); border-radius: 16px; padding: 0.95rem 1rem; margin-bottom: 0.75rem; }
+    .hero-panel { 
+        background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); 
+        border-radius: var(--radius-xl); padding: 2.8rem; 
+        display: flex; flex-direction: column; justify-content: center;
+    }
+    .panel-title { font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 1.2rem; }
+    .mini-stat { background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); border-radius: 16px; padding: 1.2rem; margin-bottom: 1rem; }
+    .mini-stat:last-child { margin-bottom: 0; }
     .mini-stat-value { font-size: 1.35rem; font-weight: 700; color: var(--text); line-height: 1.1; }
     .mini-stat-label { margin-top: 0.25rem; color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
 
@@ -99,7 +117,7 @@ st.markdown("""
     .section-subtitle { margin-top: 0.35rem; color: var(--muted); line-height: 1.75; max-width: 72ch; }
 
     .loop-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-top: 0.8rem; }
-    .loop-card { background: var(--panel-2); border: 1px solid var(--stroke); border-radius: 18px; padding: 1rem; min-height: 160px; }
+    .loop-card { background: var(--panel-2); border: 1px solid var(--stroke); border-radius: 18px; padding: 1.5rem; min-height: 160px; }
     .loop-number { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: rgba(56,194,201,0.12); border: 1px solid rgba(56,194,201,0.22); color: var(--accent-2); font-weight: 700; font-size: 0.92rem; margin-bottom: 0.8rem; }
     .loop-title { font-size: 1rem; font-weight: 650; color: var(--text); margin-bottom: 0.45rem; }
     .loop-desc { font-size: 0.92rem; line-height: 1.65; color: var(--muted); }
@@ -115,7 +133,7 @@ st.markdown("""
         flex-direction: column;
         text-decoration: none !important;
         transition: all 0.3s ease;
-        height: 100%; /* Dette sikrer symmetri */
+        height: 100%; 
     }
     .module-card:hover {
         border-color: rgba(56,194,201,0.5);
@@ -130,8 +148,6 @@ st.markdown("""
         border: 1px solid rgba(56,194,201,0.18); color: var(--accent-2); font-size: 1.5rem; 
     }
     .module-title { font-size: 1.15rem; font-weight: 700; color: #ffffff !important; margin: 0; }
-    
-    /* flex-grow: 1 dytter meta-data ned, så boksene blir identiske i høyde */
     .module-desc { font-size: 0.95rem; line-height: 1.6; color: var(--muted) !important; flex-grow: 1; }
     
     .module-meta { 
@@ -139,19 +155,39 @@ st.markdown("""
         padding-top: 1rem; border-top: 1px solid rgba(120,145,170,0.14); margin-top: 1rem; 
     }
     
+    /* --- NY STYLING FOR QA KNAPPEN --- */
     .review-btn {
-        display: inline-block; padding: 0.5rem 1rem; background-color: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; color: #ffffff !important;
-        text-decoration: none !important; font-weight: 600; font-size: 0.9rem; text-align: center;
-        transition: all 0.2s;
+        display: inline-flex; 
+        align-items: center; 
+        gap: 8px;
+        padding: 0.6rem 1.4rem; 
+        background: rgba(15, 23, 42, 0.6);
+        border: 1px solid rgba(56, 194, 201, 0.3); 
+        border-radius: 999px; /* Gjør den elegant oval (pill-shape) */
+        color: #f8fafc !important;
+        text-decoration: none !important; 
+        font-weight: 500; 
+        font-size: 0.95rem; 
+        transition: all 0.3s ease;
+        backdrop-filter: blur(10px);
     }
-    .review-btn:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
+    .review-btn:hover { 
+        border-color: rgba(56, 194, 201, 0.8); 
+        background: rgba(15, 23, 42, 0.9);
+        box-shadow: 0 0 20px rgba(56, 194, 201, 0.15); /* Subtil cyan glow */
+        transform: translateY(-2px); 
+    }
+    .review-icon {
+        color: #38c2c9; /* Farger haken i portalens egen cyan-farge */
+        font-weight: 800;
+        font-size: 1.1rem;
+    }
 
-    .cta-band { margin-top: 3rem; margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28)); border: 1px solid rgba(56,194,201,0.18); border-radius: 24px; padding: 1.4rem; }
-    .cta-title { font-size: 1.3rem; font-weight: 700; color: var(--text); margin-bottom: 0.3rem; }
+    .cta-band { margin-top: 3rem; margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28)); border: 1px solid rgba(56,194,201,0.18); border-radius: 24px; padding: 2rem; }
+    .cta-title { font-size: 1.5rem; font-weight: 700; color: var(--text); margin-bottom: 0.5rem; }
     .cta-desc { color: var(--muted); line-height: 1.7; max-width: 80ch; }
 
-    @media (max-width: 1000px) { .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 1000px) { .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .hero-container { grid-template-columns: 1fr; } }
     @media (max-width: 600px) { .module-grid { grid-template-columns: 1fr; } .loop-grid { grid-template-columns: 1fr; } }
 </style>
 """, unsafe_allow_html=True)
@@ -165,16 +201,15 @@ with top_left:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=280)
 with top_right:
-    st.markdown('<div style="margin-top: 10px;"><a href="Review" target="_self" class="review-btn">✅ QA & Sign-off</a></div>', unsafe_allow_html=True)
+    # Bytter ut emojien med den nye .review-icon klassen
+    st.markdown('<div style="margin-top: 15px; text-align: right;"><a href="Review" target="_self" class="review-btn"><span class="review-icon">✓</span> QA & Sign-off</a></div>', unsafe_allow_html=True)
 st.write("")
 
 # -------------------------------------------------
-# 5) HERO
+# 5) HERO SECTION 
 # -------------------------------------------------
-left, right = st.columns([1.35, 0.8], gap="large")
-
-with left:
-    st.markdown("""
+st.markdown("""
+<div class="hero-container">
 <div class="hero">
 <div class="eyebrow">The Builtly Loop</div>
 <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
@@ -183,10 +218,6 @@ A self-serve portal that turns raw project inputs into signed, submission-ready 
 </div>
 <div class="hero-note">Designed for engineering analysis, complex calculations, and professional compliance. Builtly is a regulated production system, not "just a chat UI".</div>
 </div>
-""", unsafe_allow_html=True)
-
-with right:
-    st.markdown("""
 <div class="hero-panel">
 <div class="panel-title">Why Builtly?</div>
 <div class="mini-stat">
@@ -200,6 +231,7 @@ with right:
 <div class="mini-stat" style="margin-bottom:0;">
 <div class="mini-stat-value">Immutable Log</div>
 <div class="mini-stat-label">Full audit trail of versions, code references, and signatures</div>
+</div>
 </div>
 </div>
 """, unsafe_allow_html=True)
@@ -240,7 +272,7 @@ A deterministic four-step process taking you from fragmented project data to a f
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 7) MODULES (Ingen innrykk, 100% trygt for Markdown)
+# 7) MODULES
 # -------------------------------------------------
 st.markdown("""
 <div class="section-head" style="margin-top: 4rem;">
@@ -250,10 +282,6 @@ st.markdown("""
 Select a specialized agent below. Each module features dedicated data ingestion and local regulatory frameworks.
 </div>
 </div>
-""", unsafe_allow_html=True)
-
-# Absolutt ingen mellomrom foran HTML-taggene her!
-st.markdown("""
 <div class="module-grid">
 <a href="Geo" target="_self" class="module-card">
 <div class="module-top">
