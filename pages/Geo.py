@@ -11,8 +11,9 @@ import requests
 import urllib.parse
 import io
 from PIL import Image
+from pathlib import Path  # <--- DET VAR DENNE SOM MANGLET HOS DEG!
 
-# --- 1. TEKNISK OPPSETT ---
+# --- 1. TEKNISK OPPSETT & ANTI-BUG RENDERER ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
@@ -23,6 +24,7 @@ else:
     st.stop()
 
 def render_html(html_string: str):
+    """Forhindrer at Streamlit lager hvite kodebokser av HTML."""
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
 def logo_data_uri() -> str:
@@ -72,7 +74,7 @@ st.markdown("""
     }
     .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
 
-    /* PILLEDESIGN FOR TOPPKNAPPER (Samme som forside) */
+    /* PILLEDESIGN FOR TOPPKNAPPER */
     .top-link {
         display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
         padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
@@ -129,7 +131,7 @@ render_html(f"""
 </div>
 """)
 
-# --- 4. GUARDRAIL LÅS (NÅ MED PREMIUM DESIGN) ---
+# --- 4. GUARDRAIL LÅS (PREMIUM DESIGN) ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     render_html("""
     <div style="display: flex; justify-content: center; margin-top: 4rem;">
@@ -243,6 +245,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
+    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
@@ -260,6 +263,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
+    # INNHOLDSFORTEGNELSE
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     toc = [
@@ -272,6 +276,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     for t in toc:
         pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
+    # INNHOLD
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
