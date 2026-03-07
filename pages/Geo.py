@@ -10,16 +10,13 @@ import re
 # --- 1. GRUNNINNSTILLINGER ---
 st.set_page_config(page_title="GEO / ENV | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
-if os.path.exists("logo-white.png"):
-    st.logo("logo-white.png", size="large")
-
-# --- 2. PREMIUM DARK MODE CSS (Samme som forsiden) ---
+# --- 2. AGGRESSIV PREMIUM DARK MODE CSS ---
 st.markdown("""
 <style>
     :root {
         --bg: #06111a;
         --panel: rgba(13, 27, 42, 0.6);
-        --stroke: rgba(120, 145, 170, 0.2);
+        --stroke: rgba(120, 145, 170, 0.3);
         --text: #f5f7fb;
         --muted: #9fb0c3;
         --accent-2: #78dce1;
@@ -29,7 +26,7 @@ st.markdown("""
         font-family: Inter, ui-sans-serif, system-ui, sans-serif;
     }
 
-    /* Lik bakgrunn som forsiden */
+    /* Bakgrunn */
     .stApp {
         background: radial-gradient(1100px 500px at 15% -5%, rgba(56,194,201,0.12), transparent 50%),
                     radial-gradient(900px 500px at 100% 0%, rgba(64,170,255,0.08), transparent 45%),
@@ -41,85 +38,108 @@ st.markdown("""
     [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
     .block-container { max-width: 1000px !important; padding-top: 3rem !important; padding-bottom: 4rem !important; }
 
-    /* Custom Header Design */
     .mod-title { font-size: 2.8rem; font-weight: 800; color: #ffffff; letter-spacing: -0.03em; margin-bottom: 0.5rem; }
     .mod-sub { color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem; border-bottom: 1px solid var(--stroke); padding-bottom: 1.5rem; line-height: 1.6;}
 
-    /* TVINGER INPUTS TIL DARK MODE */
-    [data-testid="stTextInput"] input, 
-    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-        background-color: rgba(255,255,255,0.03) !important;
-        border: 1px solid var(--stroke) !important;
-        color: var(--text) !important;
+    /* --- TVINGER INPUT-FELT TIL Å BLI MØRKE --- */
+    div[data-baseweb="base-input"] > div, 
+    div[data-baseweb="select"] > div {
+        background-color: rgba(15, 23, 42, 0.8) !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
         border-radius: 8px !important;
     }
-    [data-testid="stTextInput"] input:focus, 
-    [data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {
-        border-color: var(--accent-2) !important;
+    div[data-baseweb="base-input"] input, 
+    div[data-baseweb="select"] div {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     
-    /* TVINGER EXPANDERS TIL DARK MODE */
+    /* --- TVINGER EXPANDERS TIL Å BLI MØRKE --- */
     [data-testid="stExpander"] {
-        background-color: var(--panel) !important;
+        background-color: rgba(15, 23, 42, 0.6) !important;
         border: 1px solid var(--stroke) !important;
         border-radius: 12px !important;
         margin-bottom: 1rem;
     }
-    [data-testid="stExpander"] summary {
-        background-color: transparent !important;
-        padding: 1rem !important;
-    }
-    [data-testid="stExpander"] summary p {
-        font-size: 1.1rem !important;
-        font-weight: 600 !important;
-        color: var(--accent-2) !important;
-    }
-    [data-testid="stExpanderDetails"] {
-        background-color: transparent !important;
-        padding: 0 1rem 1rem 1rem !important;
-    }
-
-    /* TVINGER FILE UPLOADER TIL DARK MODE */
+    [data-testid="stExpander"] summary { padding: 1rem !important; }
+    [data-testid="stExpander"] summary p { font-size: 1.1rem !important; font-weight: 600 !important; color: var(--accent-2) !important; }
+    
+    /* --- FIKSER FILE UPLOADER OG BROWSE-KNAPPEN --- */
     [data-testid="stFileUploadDropzone"] {
-        background-color: rgba(255,255,255,0.02) !important;
-        border: 1px dashed rgba(56,194,201,0.4) !important;
+        background-color: rgba(15, 23, 42, 0.6) !important;
+        border: 1px dashed rgba(56,194,201,0.5) !important;
         border-radius: 12px !important;
         padding: 2rem !important;
-        transition: all 0.3s ease;
     }
-    [data-testid="stFileUploadDropzone"]:hover {
-        background-color: rgba(56,194,201,0.05) !important;
-        border-color: var(--accent-2) !important;
-    }
-    [data-testid="stFileUploadDropzone"] div { color: var(--text) !important; }
+    [data-testid="stFileUploadDropzone"] div { color: #ffffff !important; }
     [data-testid="stFileUploadDropzone"] small { color: var(--muted) !important; }
     
-    /* PRIMARY BUTTON (Generate) */
-    [data-testid="baseButton-primary"] {
-        background: linear-gradient(135deg, rgba(56,194,201,0.8), rgba(18,49,76,0.9)) !important;
+    /* Den usynlige Browse-knappen gjøres tydelig */
+    [data-testid="stFileUploadDropzone"] button {
+        background-color: rgba(56,194,201,0.15) !important;
+        color: #78dce1 !important;
         border: 1px solid rgba(56,194,201,0.5) !important;
-        color: white !important;
+        border-radius: 8px !important;
+        padding: 0.5rem 1rem !important;
+        font-weight: 600 !important;
+    }
+    [data-testid="stFileUploadDropzone"] button:hover {
+        background-color: rgba(56,194,201,0.3) !important;
+        color: #ffffff !important;
+    }
+    
+    /* --- FIKSER DEN RØDE HOVEDKNAPPEN --- */
+    div.stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, rgba(18, 49, 76, 0.9), rgba(15, 23, 42, 0.9)) !important;
+        border: 1px solid rgba(56,194,201,0.6) !important;
+        color: #78dce1 !important;
         font-weight: 600 !important;
         border-radius: 12px !important;
         padding: 1.5rem !important;
         font-size: 1.1rem !important;
         transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3) !important;
     }
-    [data-testid="baseButton-primary"]:hover {
+    div.stButton > button[kind="primary"]:hover {
+        background: linear-gradient(135deg, rgba(56,194,201,0.8), rgba(18,49,76,0.9)) !important;
+        color: #ffffff !important;
+        border-color: #ffffff !important;
         transform: translateY(-2px);
         box-shadow: 0 10px 20px rgba(56,194,201,0.2) !important;
     }
     
-    /* Typografi for labels */
-    label, .stMarkdown p { color: var(--muted) !important; font-size: 0.95rem; }
+    /* Styling for den native Streamlit link-knappen */
+    [data-testid="stPageLink-NavLink"] {
+        background-color: transparent !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 8px !important;
+        padding: 0.4rem 1rem !important;
+        transition: all 0.2s ease;
+    }
+    [data-testid="stPageLink-NavLink"] p { color: var(--muted) !important; font-weight: 500 !important; }
+    [data-testid="stPageLink-NavLink"]:hover { border-color: var(--accent-2) !important; background-color: rgba(255,255,255,0.05) !important; }
+    [data-testid="stPageLink-NavLink"]:hover p { color: #ffffff !important; }
 
-    /* Footer */
+    label, .stMarkdown p { color: var(--muted) !important; font-size: 0.95rem; }
     .builtly-footer { text-align: center; color: #71717a; font-size: 0.9rem; margin-top: 4rem; padding-top: 2rem; border-top: 1px solid var(--stroke); }
     .builtly-footer strong { color: #a1a1aa; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. GOOGLE AI SETUP ---
+# -------------------------------------------------
+# 3. TOP / BRAND MED TILBAKE-KNAPP
+# -------------------------------------------------
+st.write("")
+top_left, top_right = st.columns([0.85, 0.15])
+with top_left:
+    if os.path.exists("logo-white.png"):
+        st.image("logo-white.png", width=200)
+with top_right:
+    # Ekte Streamlit Page Link for å gå tilbake til forsiden
+    st.page_link("Builtly_AI.py", label="Back to Home", icon="⬅️")
+st.write("---")
+
+# --- 4. GOOGLE AI SETUP ---
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key: genai.configure(api_key=google_key)
 else: st.error("Missing Google API Key.")
@@ -138,7 +158,7 @@ def ironclad_text_formatter(text):
     text = re.sub(r'[-|=]{3,}', ' ', text)
     return clean_pdf_text(text)
 
-# --- 4. DYNAMISK PDF MOTOR ---
+# --- 5. DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -167,6 +187,11 @@ def create_geo_report_pdf(name, client, content):
     pdf.set_auto_page_break(True, 25)
     
     pdf.add_page()
+    
+    # Henter inn logo.png (den mørke) til selve PDF-rapporten
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=25, y=25, w=50)
+        
     pdf.set_y(80)
     pdf.set_font('Helvetica', 'B', 24)
     pdf.set_text_color(26, 43, 72)
@@ -219,7 +244,7 @@ def create_geo_report_pdf(name, client, content):
                 
     return bytes(pdf.output(dest='S'))
 
-# --- 5. UI & LOGIKK ---
+# --- 6. UI & LOGIKK ---
 st.markdown("<div class='mod-title'>GEO / ENV — Ground Conditions</div>", unsafe_allow_html=True)
 st.markdown("<div class='mod-sub'>Agent specialized in analyzing laboratory test files and excavation plans. Calculates soil classification according to local regulations and generates detailed disposal action plans.</div>", unsafe_allow_html=True)
 
@@ -247,8 +272,9 @@ with st.expander("2. Data Ingestion (Raw Files)", expanded=True):
     lab_files = st.file_uploader("Upload Lab Data (ALS, Eurofins etc.)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv'])
     plan_files = st.file_uploader("Upload Excavation / Site Plans (PDF)", accept_multiple_files=True, type=['pdf'])
 
-st.write("") # Luft før knappen
+st.write("") 
 
+# Nå fanger CSS-en opp denne primary-knappen skikkelig!
 if st.button("Calculate & Generate Action Plan", type="primary", use_container_width=True):
     
     extracted_data = ""
@@ -332,7 +358,7 @@ if st.button("Calculate & Generate Action Plan", type="primary", use_container_w
         except Exception as e: 
             st.error(f"Generation failed: {e}")
 
-# --- FOOTER ---
+# --- 7. FOOTER ---
 st.markdown("""
 <div class="builtly-footer">
     <strong>&copy; 2026 Builtly Engineering AS.</strong> All rights reserved.<br>
