@@ -14,8 +14,6 @@ st.set_page_config(
 
 # -------------------------------------------------
 # 2) PAGE MAP
-# st.page_link() uses file paths relative to the main script.
-# (Keeping your Norwegian file names for routing, so nothing breaks)
 # -------------------------------------------------
 PAGES = {
     "mulighetsstudie": "pages/Mulighetsstudie.py",
@@ -23,6 +21,9 @@ PAGES = {
     "konstruksjon": "pages/Konstruksjon.py",
     "brann": "pages/Brannkonsept.py",
     "akustikk": "pages/Akustikk.py",
+    "trafikk": "pages/trafikk.py", # Liten 't' basert på ditt GitHub-skjermbilde!
+    "project": "pages/Project.py",
+    "review": "pages/Review.py",
 }
 
 # -------------------------------------------------
@@ -146,6 +147,7 @@ st.markdown("""
     .disabled-link { width: 100%; margin-top: 0.45rem; display: flex; align-items: center; justify-content: space-between; border: 1px dashed rgba(120,145,170,0.22); border-radius: 12px; padding: 0.8rem 0.95rem; color: var(--muted); font-size: 0.92rem; background: rgba(255,255,255,0.02); }
     .disabled-tag { font-size: 0.75rem; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; border-radius: 4px;}
 
+    /* Styling for Streamlit's native page links so they look like our buttons */
     [data-testid="stPageLink-NavLink"] {
         background-color: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; padding: 8px 12px; transition: all 0.2s; margin-top: 8px;
     }
@@ -154,19 +156,28 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 5) TOP / BRAND
+# 5) TOP / BRAND (Løst med native Streamlit kolonner)
 # -------------------------------------------------
-# Fjernet "Review"-knappen og gjorde plass til stor logo
-top_left, top_right = st.columns([0.85, 0.15])
+# Vi deler toppen inn i 3 kolonner. Logo til venstre, og de to knappene til høyre.
+top_left, top_mid, top_right = st.columns([0.6, 0.2, 0.2])
 
 with top_left:
-    brand_cols = st.columns([0.2, 0.8])
-    with brand_cols[0]:
-        if os.path.exists("logo.png"):
-            # Mye større logo (160px i stedet for 68px)
-            st.image("logo.png", width=160)
-    with brand_cols[1]:
-        st.markdown('<div class="brand-kicker" style="margin-top: 10px;">AI-Assisted Engineering · Human-Verified · Compliance-Grade</div>', unsafe_allow_html=True)
+    # Sjekker aktivt etter logo-white.png først!
+    if os.path.exists("logo-white.png"):
+        st.image("logo-white.png", width=160)
+    elif os.path.exists("logo.png"):
+        st.image("logo.png", width=160)
+    else:
+        st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
+
+with top_mid:
+    # Spacer for å justere knappen ned mot midten av logoen
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    nav_link("project", "Project Setup", icon="⚙️")
+
+with top_right:
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    nav_link("review", "QA & Sign-off", icon="✅")
 
 # -------------------------------------------------
 # 6) HERO
@@ -182,7 +193,7 @@ with left:
         Builtly is the client portal for AI-assisted engineering and documentation. 
         Upload raw data, let the platform handle analysis, compliance checks, and drafting — before junior QA and senior sign-off ensure fast, consistent, and traceable delivery.
     </div>
-    <div class="hero-note">Designed for building applications, execution, and professional compliance — not just another AI wrapper.</div>
+    <div class="hero-note">Designed for building applications, execution, and professional compliance.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -217,7 +228,7 @@ st.markdown("""
     <div class="section-kicker">Core Value Proposition</div>
     <h2 class="section-title">Portal First. Modules Attached.</h2>
     <div class="section-subtitle">
-        Builtly provides a secure, traceable portal for uploads, validation, AI processing, QA, and signed delivery — scalable across local regulations.
+        Builtly provides a secure, traceable portal for uploads, validation, AI processing, QA, and signed delivery.
     </div>
 </div>
 <div class="trust-grid">
@@ -282,9 +293,6 @@ st.markdown("""
 <div class="section-head">
     <div class="section-kicker">Modules & Roadmap</div>
     <h2 class="section-title">Specialized Agents in One Platform</h2>
-    <div class="section-subtitle">
-        Each module features dedicated data ingestion and local regulatory frameworks, sharing a unified backend for validation and QA.
-    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -332,7 +340,6 @@ with module_cols[2]:
         <div class="module-badge">Phase 2</div>
     </div>
     <div class="module-title">FIRE — Safety Strategy</div>
-    <div class="module-title" style="font-size:0px;"></div>
     <div class="module-desc">Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and strategy.</div>
     <div class="module-meta">
         <strong>Input:</strong> Architectural drawings + class<br/>
@@ -342,7 +349,8 @@ with module_cols[2]:
 """, unsafe_allow_html=True)
     nav_link("brann", "Open Fire Strategy", icon="🔥")
 
-module_cols_2 = st.columns(2, gap="large")
+# BYTTET FRA 2 TIL 3 KOLONNER FOR Å FÅ PLASS TIL TRAFIKK!
+module_cols_2 = st.columns(3, gap="large") 
 
 with module_cols_2[0]:
     st.markdown("""
@@ -378,14 +386,30 @@ with module_cols_2[1]:
 """, unsafe_allow_html=True)
     nav_link("konstruksjon", "Open Structural", icon="🏢")
 
+with module_cols_2[2]:
+    st.markdown("""
+<div class="module-card">
+    <div class="module-top">
+        <div class="module-icon">🚦</div>
+        <div class="module-badge">Roadmap</div>
+    </div>
+    <div class="module-title">TRAFFIC — Mobility</div>
+    <div class="module-desc">Traffic generation (ÅDT), parking requirements, access control (N100), and soft mobility planning.</div>
+    <div class="module-meta">
+        <strong>Input:</strong> Site plans, local norms<br/>
+        <strong>Output:</strong> Traffic memo, mobility plan
+    </div>
+</div>
+""", unsafe_allow_html=True)
+    nav_link("trafikk", "Open Traffic & Mobility", icon="🚦")
+
 # -------------------------------------------------
-# 10) CTA BAND
+# 10) FOOTER (Slogan og Copyright)
 # -------------------------------------------------
 st.markdown("""
-<div class="cta-band">
-    <div class="cta-title">Not just analysis. Actual deliverables.</div>
-    <div class="cta-desc">
-        Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations, generate drafts, execute QA, and download the signed documentation package.
-    </div>
+<div style="text-align: center; margin-top: 4rem; padding-top: 2rem; border-top: 1px solid rgba(120, 145, 170, 0.18);">
+    <h3 style="font-size: 1.1rem; color: #f5f7fb; margin-bottom: 0.5rem; font-weight: 600;">Builtly AS</h3>
+    <p style="color: #9fb0c3; font-size: 0.9rem; margin-bottom: 0.5rem;">Building the future of compliance-grade engineering.</p>
+    <p style="color: rgba(159, 176, 195, 0.5); font-size: 0.8rem;">© 2026 Builtly. All rights reserved.</p>
 </div>
 """, unsafe_allow_html=True)
