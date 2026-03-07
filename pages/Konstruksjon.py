@@ -3,35 +3,52 @@ import pandas as pd
 import google.generativeai as genai
 from fpdf import FPDF
 import os
+import base64
 from datetime import datetime
 import tempfile
 import re
-import requests
-import urllib.parse
 import io
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import numpy as np
+from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Konstruksjonsteknikk (RIB) | Builtly Portal", layout="wide")
+st.set_page_config(page_title="Konstruksjon (RIB) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key: 
+if google_key:
     genai.configure(api_key=google_key)
-else: 
+else:
     st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
     st.stop()
 
-try: 
-    import fitz # PyMuPDF for å lese PDF-tegninger
-except ImportError: 
+try:
+    import fitz  
+except ImportError:
     fitz = None
+
+def render_html(html_string: str):
+    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
+
+def logo_data_uri() -> str:
+    for candidate in ["logo-white.png", "logo.png"]:
+        if os.path.exists(candidate):
+            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
+            with open(candidate, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/{suffix};base64,{encoded}"
+    return ""
+
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists(): return str(p)
+    return ""
 
 def clean_pdf_text(text):
     if not text: return ""
-    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*", "²": "2", "³": "3"}
-    for old, new in rep.items(): 
-        text = text.replace(old, new)
+    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*"}
+    for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
@@ -40,343 +57,233 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. HENT DATA FRA SSOT (Project Setup) ---
-# Dette er magien som gjør at feltene fyller seg ut selv!
-if "project_data" in st.session_state:
-    pd_state = st.session_state.project_data
-else:
-    # Sikkerhetsnett hvis kunden hopper rett inn i RIB uten å gå via Project Setup
-    pd_state = {
-        "p_name": "", "c_name": "", "p_desc": "",
-        "adresse": "", "kommune": "", "gnr": "", "bnr": "",
-        "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500
+# --- 2. PREMIUM CSS MED FIX FOR HVITE BOKSER ---
+st.markdown("""
+<style>
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
     }
-
-# --- 3. KARTVERKET API (For klimadata som snø og vind) ---
-def fetch_kartverket_data(adresse, kommune, gnr, bnr):
-    adr = adresse.replace(',', '').strip() if adresse else ""
-    kom = kommune.replace(',', '').strip() if kommune else ""
-    g = gnr.strip() if gnr else ""
-    b = bnr.strip() if bnr else ""
-
-    def make_request(params):
-        params['utkoordsys'] = '25833'
-        params['treffPerSide'] = 1
-        try:
-            resp = requests.get("https://ws.geonorge.no/adresser/v1/sok", params=params, timeout=8)
-            if resp.status_code == 200 and resp.json().get('adresser'):
-                hit = resp.json()['adresser'][0]
-                return hit.get('representasjonspunkt', {}).get('nord'), hit.get('representasjonspunkt', {}).get('øst'), hit.get('adressetekst', ''), hit.get('kommunenavn', '')
-        except: pass
-        return None, None, None, None
-
-    if g and b and kom:
-        n, o, a, k = make_request({'gardsnummer': g, 'bruksnummer': b, 'kommunenavn': kom})
-        if n and o: return f"✅ Lokasjon bekreftet (Gnr/Bnr). Brukes til å bestemme snø- og vindlaster i Eurokode.", n, o
-
-    if adr and kom:
-        n, o, a, k = make_request({'sok': adr, 'kommunenavn': kom, 'fuzzy': 'true'})
-        if n and o: return f"✅ Lokasjon bekreftet ({a}, {k}). Brukes til å bestemme snø- og vindlaster i Eurokode.", n, o
-
-    return "❌ Fant ingen nøyaktig lokasjon. Standard nasjonale laster vil bli brukt.", None, None
-
-def fetch_kartverket_flyfoto(nord, ost):
-    if not nord or not ost: return None, ""
-    min_x, max_x = float(ost) - 150, float(ost) + 150
-    min_y, max_y = float(nord) - 150, float(nord) + 150
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        url = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/jpeg"
-        r = requests.get(url, headers=headers, timeout=8)
-        if r.status_code == 200 and len(r.content) > 5000:
-            return Image.open(io.BytesIO(r.content)).convert('RGB'), "Ortofoto"
-    except: pass
-    return None, ""
-
-# --- 4. AI SØYLENETT TEGNER ---
-def generate_structural_grid(img, material):
-    w, h = img.size
-    draw_img = img.convert("RGBA")
-    overlay = Image.new("RGBA", draw_img.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
-    try: font_large = ImageFont.truetype("arial.ttf", int(h/35))
-    except: font_large = ImageFont.load_default()
-    try: font_small = ImageFont.truetype("arial.ttf", int(h/50))
-    except: font_small = ImageFont.load_default()
+    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
 
-    gray_array = np.array(img.convert("L"))
-    margin = int(w * 0.1)
+    /* KNAPPER */
+    button[kind="primary"] {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important; border: none !important; font-weight: 750 !important;
+        border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important;
+        transition: all 0.2s ease !important;
+    }
+    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
     
-    dark_y, dark_x = np.where(gray_array[margin:h-margin, margin:w-margin] < 230)
+    button[kind="secondary"] {
+        background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
+        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; 
+        font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s;
+    }
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
+
+    /* INPUTS & BOKSER */
+    .stTextInput input, .stNumberInput input, .stTextArea textarea {
+        background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+        border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important;
+    }
+    div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    div[data-baseweb="select"] span { color: #ffffff !important; }
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
+        color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
+    }
     
-    if len(dark_x) > 100:
-        min_x = np.min(dark_x) + margin
-        max_x = np.max(dark_x) + margin
-        min_y = np.min(dark_y) + margin
-        max_y = np.max(dark_y) + margin
-        
-        spenn_deler = 4 if material == "Massivtre (CLT / Trekonstruksjon)" else 3
-        step_x = (max_x - min_x) // spenn_deler
-        step_y = (max_y - min_y) // spenn_deler
-        
-        for y in range(min_y, max_y + 1, step_y):
-            draw.line([(min_x, y), (max_x, y)], fill=(56, 189, 248, 180), width=int(w/150))
-            
-        r = int(w/120)
-        for x in range(min_x, max_x + 1, step_x):
-            for y in range(min_y, max_y + 1, step_y):
-                draw.ellipse([x-r, y-r, x+r, y+r], fill=(239, 68, 68, 255), outline=(153,27,27,255), width=2)
-
-    box_w, box_h = int(w*0.4), int(h*0.22)
-    draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(15, 23, 42, 240), outline="#38bdf8", width=3)
-    draw.text((w-box_w+20, h-box_h+20), "KONSEPTUELT BÆRESYSTEM", fill="#f8fafc", font=font_large)
-    draw.text((w-box_w+20, h-box_h+60), f"Hovedmateriale: {material}", fill="#94a3b8", font=font_small)
+    /* --- FIX FOR HVITE BOKSER --- */
+    div[data-testid="stExpander"] { background: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; margin-bottom: 1rem !important; }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
+    div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
     
-    draw.ellipse([w-box_w+20, h-box_h+100, w-box_w+20+r*2, h-box_h+100+r*2], fill=(239, 68, 68, 255))
-    draw.text((w-box_w+50, h-box_h+100), "= Bærende søyle / Knutepunkt", fill="#e2e8f0", font=font_small)
+    [data-testid="stFileUploaderDropzone"] { 
+        background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; 
+        border-radius: 12px !important; padding: 2rem !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
+    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
+    
+    [data-testid="stAlert"] { background-color: rgba(56, 189, 248, 0.05) !important; border: 1px solid rgba(56, 189, 248, 0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] * { color: #f5f7fb !important; }
+    
+    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
+</style>
+""", unsafe_allow_html=True)
 
-    out = Image.alpha_composite(draw_img, overlay)
-    return out.convert("RGB")
+# --- 3. GUARDRAIL LÅS MED NATIVE STREAMLIT NAVIGATION ---
+if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
+    
+    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    st.info("AI-agenten trenger kontekst om bygget (areal, etasjer, adresse og regelverk) for å kunne generere en faglig og juridisk korrekt rapport.")
+    
+    if find_page("Project"):
+        if st.button("⚙️ Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
+    st.stop()
 
-# --- 5. DYNAMISK PDF MOTOR (RIB) ---
+# --- 4. HEADER (MED NATIVE TILBAKEKNAPP SOM BEVARER MINNET) ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
+
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+
+pd_state = st.session_state.project_data
+
+# --- DYNAMISK PDF MOTOR (RIB) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
-            self.set_y(15)
-            self.set_font('Helvetica', 'B', 10)
-            self.set_text_color(26, 43, 72)
+            self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
             self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIB-001"), 0, 1, 'R')
-            self.set_draw_color(200, 200, 200)
-            self.line(25, 25, 185, 25)
-            self.set_y(30)
-
+            self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
     def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.set_text_color(150, 150, 150)
+        self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
         self.cell(0, 10, clean_pdf_text(f'UTKAST - KREVER FAGLIG KONTROLL | Side {self.page_no()}'), 0, 0, 'C')
-
     def check_space(self, height):
         if self.get_y() + height > 270: 
-            self.add_page()
-            self.set_margins(25, 25, 25)
-            self.set_x(25)
+            self.add_page(); self.set_margins(25, 25, 25); self.set_x(25)
 
-def create_full_report_pdf(name, client, content, maps, aerial_photo, map_type):
+def create_full_report_pdf(name, client, content, maps):
     pdf = BuiltlyProPDF()
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
     pdf.add_page()
-    if os.path.exists("logo.png"): 
-        pdf.image("logo.png", x=25, y=20, w=50) 
+    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
-    pdf.set_y(100)
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', 'B', 24)
-    pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("KONSEPTUELL KONSTRUKSJONSANALYSE (RIB)"), 0, 1, 'L')
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', '', 16)
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 1, 'L')
-    pdf.ln(30)
+    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
+    pdf.cell(0, 15, clean_pdf_text("KONSEPTNOTAT: KONSTRUKSJON OG BYGNINGSFYSIKK (RIB)"), 0, 1, 'L')
+    pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
     
-    metadata = [
-        ("OPPDRAGSGIVER:", client), 
-        ("DATO:", datetime.now().strftime("%d. %m. %Y")), 
-        ("UTARBEIDET AV:", "Builtly RIB AI Engine"), 
-        ("KONTROLLERT AV:", "[Ansvarlig Konstruksjonstekniker]")
-    ]
-    
-    for l, v in metadata:
-        pdf.set_x(25)
-        pdf.set_font('Helvetica', 'B', 10)
-        pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
-        pdf.set_font('Helvetica', '', 10)
-        pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
+    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RIB AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
+        pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
+        pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    pdf.add_page()
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', 'B', 16)
-    pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1)
-    pdf.ln(5)
+    pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
+    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
     toc = [
         "1. SAMMENDRAG OG KONKLUSJON", 
-        "2. PROSJEKTBESKRIVELSE OG REGELVERK", 
-        "3. LOKASJON OG MILJØLASTER", 
-        "4. KONSEPT FOR HOVEDBÆRESYSTEM", 
-        "5. FUNDAMENTERING OG AVSTIVNING", 
-        "6. MATERIALVALG OG KLIMAGASS", 
-        "VEDLEGG: KONSEPTUELL SØYLEPLAN"
+        "2. PROSJEKTBESKRIVELSE OG FORUTSETNINGER", 
+        "3. LASTER OG LASTTILFELLER (SNØ, VIND, NYTTELAST)", 
+        "4. KONSEPT FOR BÆRESYSTEM OG MATERIALVALG", 
+        "5. BYGNINGSFYSIKK (ISOLASJON & KULDEBROER)", 
+        "6. OVERORDNET KLIMAGASSFOTAVTRYKK", 
+        "VEDLEGG: VURDERT TEGNINGSGRUNNLAG"
     ]
-    pdf.set_font('Helvetica', '', 11)
-    pdf.set_text_color(0, 0, 0)
     for t in toc:
-        pdf.set_x(25)
-        pdf.cell(0, 10, clean_pdf_text(t), 0, 1)
-        pdf.set_draw_color(220, 220, 220)
-        pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+        pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: 
-            pdf.ln(4)
-            continue
-            
-        if line.startswith('# 3. LOKASJON'):
-            pdf.check_space(120) 
-            pdf.ln(8)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 14)
-            pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.ln(4)
-            
-            if aerial_photo:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    aerial_photo.save(tmp.name, format="PNG")
-                    img_w = 120
-                    img_h = img_w * (aerial_photo.height / aerial_photo.width)
-                    x_center = (210 - img_w) / 2
-                    pdf.image(tmp.name, x=x_center, y=pdf.get_y(), w=img_w)
-                    pdf.set_y(pdf.get_y() + img_h + 5)
-                    pdf.set_font('Helvetica', 'I', 9)
-                    pdf.set_text_color(100, 100, 100)
-                    pdf.set_x(25)
-                    pdf.cell(0, 5, clean_pdf_text("Figur 1: Kartgrunnlag for snø- og vindlaster."), 0, 1, 'C')
-                    pdf.ln(8)
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-            continue
-            
-        elif line.startswith('# '):
-            pdf.check_space(30)
-            pdf.ln(8)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 14)
-            pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.ln(2)
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-        
+        if not line: pdf.ln(4); continue
+        if line.startswith('# '):
+            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         elif line.startswith('##'):
-            pdf.check_space(20)
-            pdf.ln(6)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 12)
-            pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-            
+            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         else:
             pdf.set_font('Helvetica', '', 10)
             safe_text = ironclad_text_formatter(line)
             if safe_text.strip() == "": continue
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30)
-                    pdf.multi_cell(145, 5, safe_text)
-                    pdf.set_x(25)
+                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
                 else:
-                    pdf.set_x(25)
-                    pdf.multi_cell(150, 5, safe_text)
-            except Exception:
-                pdf.ln(2)
+                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
+            except Exception: pdf.ln(2)
 
     if maps:
-        pdf.add_page()
-        pdf.set_x(25)
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 20, "VEDLEGG: KONSEPTUELL SØYLEPLAN", 0, 1)
+        pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT BILDEDOKUMENTASJON", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                m.save(tmp.name)
+                m.save(tmp.name, format="PNG")
                 img_h = 160 * (m.height / m.width)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.set_y(pdf.get_y() + img_h + 5)
-                pdf.set_x(25)
-                pdf.set_font('Helvetica', 'I', 10)
-                pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: AI-generert grid- og søyleplan."), 0, 1, 'C')
+                if img_h > 240: 
+                    img_h = 240
+                    img_w = 240 * (m.width / m.height)
+                    pdf.image(tmp.name, x=105-(img_w/2), y=pdf.get_y(), w=img_w)
+                else:
+                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 
+                pdf.set_y(pdf.get_y() + img_h + 5)
+                pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
+                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt analysert av RIB-agenten."), 0, 1, 'C')
+
     return bytes(pdf.output(dest='S'))
 
-# --- 6. STREAMLIT UI ---
-st.title("🏗️ RIB — Konstruksjon (AI-Assisted)")
+# --- STREAMLIT UI ---
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🏢 RIB — Konstruksjon & Bygningsfysikk</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for konseptuell dimensjonering, lastnedføring og energivurdering.</p>", unsafe_allow_html=True)
 
-if pd_state["p_name"]:
-    st.success("✅ Prosjektdata er automatisk synkronisert fra Master Setup (SSOT).")
+st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"])
-    c_name = c2.text_input("Oppdragsgiver", value=pd_state["c_name"])
-    
-    st.markdown("##### Kartverket Lokasjon (For Eurokode Laster)")
+    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
+    b_type = c2.text_input("Formål / Bygningstype", value=pd_state["b_type"], disabled=True)
+    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
+    st.info(f"📍 **Regelverk & Laster:** Agenten vil bruke **{pd_state.get('land', 'Norge')}** for å vurdere snølaster, vindlaster og nasjonale annex for Eurokoder.")
+
+with st.expander("2. Valg av Bæresystem & Grunnforhold", expanded=True):
     c3, c4 = st.columns(2)
-    adresse = c3.text_input("Gatenavn og nummer", value=pd_state["adresse"])
-    kommune = c4.text_input("Kommune", value=pd_state["kommune"])
-    
-    c5, c6 = st.columns(2)
-    gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd_state["gnr"])
-    bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state["bnr"])
+    material_valg = c3.selectbox("Foretrukket hovedbæresystem", ["Massivtre (Krysslimt tre / CLT)", "Stål og Hulldekker", "Plasstøpt Betong", "Prefabrikkert Betong", "Hybrid / Kombinasjon"])
+    fundamentering = c4.selectbox("Forventet fundamenteringsmetode", ["Direkte fundamentering (fjell/faste masser)", "Peling til fjell", "Sålefundament / Kompensert fundamentering", "Uavklart - Vurderes basert på bygg"])
 
-with st.expander("2. Bygningsegenskaper (Auto-synced)", expanded=True):
-    col1, col2, col3 = st.columns(3)
-    b_type = col1.selectbox("Konsekvensklasse (CC)", ["CC1 (Småhus)", "CC2 (Vanlige bygg under 4 etg)", "CC3 (Store bygg)"], index=1)
-    etasjer = col2.number_input("Antall etasjer", value=int(pd_state["etasjer"]))
-    bta = col3.number_input("Bruttoareal (BTA m2)", value=int(pd_state["bta"]))
-    
-    materiale = st.radio("Foretrukket hovedbæresystem:", ["Massivtre (CLT / Trekonstruksjon)", "Plass-støpt Betong", "Stålkonstruksjon / Kompositt"], index=0)
+with st.expander("3. Visuelt Grunnlag (Arkitektur / Snitt)", expanded=True):
+    st.info("Viktig: Last opp plantegninger og snitt. Agenten vil analysere bygningsvolumet for å foreslå grid-system (spennvidder for dekker), søyleplassering, stabiliserende kjerner og potensielle kuldebroer.")
+    files = st.file_uploader("Last opp tegninger (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
-with st.expander("3. Arkitektur & Plantegninger", expanded=True):
-    files = st.file_uploader("Last opp arkitekttegninger for å generere søylenett-skisse (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
-
-if st.button("Kjør Konstruksjonsanalyse (RIB)", type="primary"):
+st.markdown("<br>", unsafe_allow_html=True)
+if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_container_width=True):
     
-    kartverket_info = ""
-    nord = ost = None
-    aerial_photo = None
-    map_type = "Kart ikke tilgjengelig"
+    images_for_ai = [] 
     
-    with st.spinner("🌍 Slår opp lokasjon for klimadata..."):
-        kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, gnr, bnr)
-        if nord and ost:
-            st.success(kartverket_info)
-            aerial_photo, map_type = fetch_kartverket_flyfoto(nord, ost)
-        else:
-            st.warning(kartverket_info)
-    
-    processed_maps = []
     if files:
-        with st.spinner("📐 Arkitekt-AI tegner konseptuelt søylenett..."):
+        with st.spinner("📐 Henter ut bilder for visuell AI-analyse av bærekonstruksjon og klimaskjerm..."):
             try:
-                for f in files[:1]: 
+                for f in files: 
                     if f.name.lower().endswith('pdf'):
                         if fitz is None: st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
-                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        for page_num in range(min(3, len(doc))): 
+                            pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                            images_for_ai.append(img)
                         doc.close() 
                     else:
-                        img = Image.open(f)
-                    
-                    m = generate_structural_grid(img, materiale)
-                    processed_maps.append(m)
-            except Exception as e:
-                pass
+                        img = Image.open(f).convert("RGB")
+                        images_for_ai.append(img)
+            except Exception as e: 
+                st.error(f"Feil under bildebehandling: {e}")
                 
-    with st.spinner("🤖 Genererer omfattende RIB-rapport etter Eurokodesystemet..."):
+    with st.spinner(f"🤖 Analyserer tegninger og beregner konseptuelle laster for {pd_state.get('land', 'Norge')}..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -385,48 +292,53 @@ if st.button("Kjør Konstruksjonsanalyse (RIB)", type="primary"):
 
         valgt_modell = valid_models[0]
         for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if fav in valid_models:
-                valgt_modell = fav
-                break
+            if fav in valid_models: valgt_modell = fav; break
         
         model = genai.GenerativeModel(valgt_modell)
 
-        prompt = f"""
-        Du er Builtly RIB AI, en senior sivilingeniør innen bygg- og konstruksjonsteknikk.
-        Skriv et "Konseptuelt konstruksjonsdesign (Forprosjekt)" for et nytt byggeprosjekt.
+        prompt_text = f"""
+        Du er Builtly RIB AI, en fagekspert innen konstruksjonsteknikk og bygningsfysikk.
+        Skriv et formelt "Konseptnotat for Bæresystem og Bygningsfysikk" for prosjektet:
         
-        PROSJEKT: {p_name}
-        LOKASJON: {adresse}, {kommune}. {kartverket_info}
+        PROSJEKT: {p_name} ({b_type}, {pd_state['bta']} m2, {pd_state['etasjer']} etasjer). 
+        LOKASJON: {adresse}.
+        FORETRUKKET MATERIALE: {material_valg}.
+        FUNDAMENTERING: {fundamentering}.
         
-        KUNDENS PROSJEKTBESKRIVELSE (KONTEKST):
+        REGELVERK: {pd_state.get('land', 'Norge (TEK17 / Eurokoder)')}. Referer til Eurokoder med nasjonale annex for dette landet.
+        
+        KUNDENS PROSJEKTBESKRIVELSE: 
         "{pd_state['p_desc']}"
         
-        BYGNINGSDATA:
-        - Konsekvensklasse: {b_type}
-        - Antall etasjer: {etasjer} (BTA {bta} m2)
-        - Foretrukket hovedbæresystem: {materiale}
+        VISUELL ANALYSE AV VEDLAGTE DOKUMENTER (Plantegninger / Snitt):
+        Jeg har lagt ved bilder av bygget. Din oppgave er å analysere den strukturelle logikken:
+        1. Vurder spennvidder og grid-system (avstand mellom bærelinjer).
+        2. Identifiser hvor vertikallaster (søyler/vegger) kan føres ned til grunn.
+        3. Vurder bygningens stabilitet mot vind/seismikk (hvor bør heis- eller trappekjerner plasseres?).
+        4. Identifiser kritiske punkter for bygningsfysikk (f.eks. store utkraginger, takterrasser eller overganger som kan skape kuldebroer).
         
-        INSTRUKSER (Skriv formelt, teknisk tungt og presist, min 1200 ord):
-        - Bruk Eurokodene (NS-EN) som referanser.
-        - Kap 3: Vurder miljølaster basert på kommunen (snø, vind, seismikk).
-        - Kap 4: Vurder {materiale} som bæresystem. Hva er fordelene og ulempene for dette bygget?
-        - Kap 6: Diskuter bærekraft og klimagassregnskap knyttet til materialvalget.
+        INSTRUKSER (Skriv formelt, teknisk og presist, min 1200 ord):
+        - Flett inn dine spesifikke observasjoner fra bildene i teksten.
+        - Diskuter estimerte snølaster og vindlaster for lokasjonen.
+        - Redgjør for fordeler og ulemper ved det foretrukne materialvalget ({material_valg}) og hvordan det påvirker klimagassfotavtrykket.
         
         STRUKTUR (Bruk KUN disse nøyaktige overskriftene):
         # 1. SAMMENDRAG OG KONKLUSJON
-        # 2. PROSJEKTBESKRIVELSE OG REGELVERK
-        # 3. LOKASJON OG MILJØLASTER
-        # 4. KONSEPT FOR HOVEDBÆRESYSTEM
-        # 5. FUNDAMENTERING OG AVSTIVNING
-        # 6. MATERIALVALG OG KLIMAGASS
+        # 2. PROSJEKTBESKRIVELSE OG FORUTSETNINGER
+        # 3. LASTER OG LASTTILFELLER (SNØ, VIND, NYTTELAST)
+        # 4. KONSEPT FOR BÆRESYSTEM OG MATERIALVALG (Inkluder observasjoner fra tegninger)
+        # 5. BYGNINGSFYSIKK (ISOLASJON & KULDEBROER)
+        # 6. OVERORDNET KLIMAGASSFOTAVTRYKK
         """
         
+        prompt_parts = [prompt_text] + images_for_ai
+
         try:
-            res = model.generate_content(prompt)
-            with st.spinner("Kompilerer konstruksjons-PDF..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, processed_maps, aerial_photo, map_type)
+            res = model.generate_content(prompt_parts)
             
-            st.success("✅ RIB Konstruksjonsanalyse er ferdigstilt!")
-            st.download_button("📄 Last ned Builtly RIB-rapport", pdf_data, f"Builtly_RIB_{p_name}.pdf")
+            with st.spinner("Kompilerer RIB-PDF med vedlagte dokumenter..."):
+                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
+            st.success("✅ Konstruksjons- og bygningsfysikknotat er ferdigstilt!")
+            st.download_button("📄 Last ned RIB-rapport", pdf_data, f"Builtly_RIB_{p_name}.pdf", type="primary")
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
