@@ -13,7 +13,7 @@ import io
 from PIL import Image
 from pathlib import Path
 
-# --- 1. TEKNISK OPPSETT & ANTI-BUG RENDERER ---
+# --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
@@ -24,7 +24,6 @@ else:
     st.stop()
 
 def render_html(html_string: str):
-    """Forhindrer at Streamlit lager hvite kodebokser av HTML."""
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
 def logo_data_uri() -> str:
@@ -36,11 +35,16 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists(): return str(p)
+    return ""
+
 def clean_pdf_text(text):
     if not text: return ""
-    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*", "²": "2", "³": "3"}
-    for old, new in rep.items(): 
-        text = text.replace(old, new)
+    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*"}
+    for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
@@ -49,41 +53,22 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS ---
+# --- 2. PREMIUM CSS MED FIX FOR HVITE BOKSER ---
 st.markdown("""
 <style>
     :root {
         --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3;
         --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
     }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
-
-    /* HEADER & PILLE-KNAPPER */
-    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
-    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-    .brand-left { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
     
-    .topbar-right {
-        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
-        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
-    }
-    .top-link {
-        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
-        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
-        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
-        white-space: nowrap;
-    }
-    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
-    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
-    .top-link.primary { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)); border-color: rgba(120,220,225,0.45); color: #041018 !important; }
-    .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
+    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
 
-    /* STREAMLIT NATIVE KNAPPER */
+    /* KNAPPER */
     button[kind="primary"] {
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
@@ -91,11 +76,13 @@ st.markdown("""
         transition: all 0.2s ease !important;
     }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
+    
     button[kind="secondary"] {
         background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
-        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 8px !important; font-weight: 600 !important;
+        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; 
+        font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s;
     }
-    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: #38bdf8 !important; color: #38bdf8 !important; }
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
     /* INPUTS & BOKSER */
     .stTextInput input, .stNumberInput input, .stTextArea textarea {
@@ -105,53 +92,51 @@ st.markdown("""
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
         border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important;
     }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
-        color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
+    
+    /* --- FIX FOR HVITE BOKSER --- */
+    div[data-testid="stExpander"] { background: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; margin-bottom: 1rem !important; }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
+    div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
+    
+    [data-testid="stFileUploaderDropzone"] { 
+        background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; 
+        border-radius: 12px !important; padding: 2rem !important;
     }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
+    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
     
-    div[data-testid="stExpander"] { background: rgba(16, 30, 46, 0.5); border: 1px solid rgba(120,145,170,0.2); border-radius: 12px; margin-bottom: 1rem; }
-    div[data-testid="stExpanderDetails"] { background: transparent !important; }
-    div[data-testid="stExpander"] summary:hover { background: rgba(255,255,255,0.02) !important; }
+    [data-testid="stAlert"] { background-color: rgba(56, 189, 248, 0.05) !important; border: 1px solid rgba(56, 189, 248, 0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] * { color: #f5f7fb !important; }
     
-    [data-testid="stFileDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; padding: 2rem !important; }
-    [data-testid="stFileDropzone"]:hover { border-color: #38bdf8 !important; background-color: rgba(56, 189, 248, 0.05) !important; }
-    [data-testid="stFileDropzone"] * { color: #c8d3df !important; }
-
     .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. HEADER UI (ALLTID SYNLIG) ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-
-render_html(f"""
-<div class="top-shell">
-    <div class="brand-left">
-        {logo_html}
-    </div>
-    <div class="topbar-right">
-        <a href="Project" target="_self" class="top-link ghost">← Tilbake til SSOT</a>
-    </div>
-</div>
-""")
-
-# --- 4. GUARDRAIL LÅS ---
+# --- 3. GUARDRAIL LÅS MED NATIVE STREAMLIT NAVIGATION ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
-    render_html("""
-    <div style="display: flex; justify-content: center; margin-top: 4rem;">
-        <div class="card" style="max-width: 600px; text-align: center; padding: 4rem 3rem; border-color: rgba(244, 191, 79, 0.3);">
-            <div style="font-size: 4rem; margin-bottom: 1rem;">🚧</div>
-            <h2 style="color: #f5f7fb; font-size: 2.2rem; font-weight: 800; margin-bottom: 1rem; letter-spacing: -0.03em;">Prosjektdata mangler</h2>
-            <p style="color: #9fb0c3; line-height: 1.7; font-size: 1.05rem; margin-bottom: 2.5rem;">
-                For at AI-agenten skal kunne koble seg på riktig regelverk og analysere riktig bygningsmasse, må du definere prosjektet i Master Data (SSOT) først.
-            </p>
-            <div class="topbar-right" style="justify-content: center; border: none; background: transparent;">
-                <a href="Project" target="_self" class="top-link primary" style="font-size: 1.05rem; padding: 0.8rem 1.5rem;">⚙️ Åpne Project Setup</a>
-            </div>
-        </div>
-    </div>
-    """)
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
+    
+    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    st.info("AI-agenten trenger kontekst om bygget for å kunne generere en faglig og juridisk korrekt rapport.")
+    
+    if find_page("Project"):
+        if st.button("⚙️ Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
     st.stop()
+
+# --- 4. HEADER (MED NATIVE TILBAKEKNAPP SOM BEVARER MINNET) ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
+
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 
 # --- FORBEREDER DATA ---
 pd_state = st.session_state.project_data
@@ -188,16 +173,6 @@ def fetch_kartverket_data(adresse, kommune, gnr, bnr):
     for q in queries:
         adr_tekst, kom, nord, ost = api_call(q)
         if nord and ost: return f"✅ Lokasjon bekreftet (N {nord}, Ø {ost}).", nord, ost
-
-    if kom_clean:
-        url_sted = f"https://ws.geonorge.no/stedsnavn/v1/navn?sok={urllib.parse.quote(kom_clean)}&utkoordsys=25833&treffPerSide=1"
-        try:
-            resp = requests.get(url_sted, timeout=5)
-            if resp.status_code == 200 and resp.json().get('navn'):
-                hit = resp.json()['navn'][0]
-                nord, ost = hit.get('representasjonspunkt', {}).get('nord'), hit.get('representasjonspunkt', {}).get('øst')
-                if nord and ost: return f"⚠️ Bruker senter av {kom_clean} (N {nord}, Ø {ost}).", nord, ost
-        except Exception: pass
 
     return "❌ Fant ingen treff i Kartverket. Last opp kart manuelt.", None, None
 
@@ -248,7 +223,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
-    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
@@ -266,7 +240,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    # INNHOLDSFORTEGNELSE
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     toc = [
@@ -279,7 +252,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     for t in toc:
         pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
-    # INNHOLD
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
