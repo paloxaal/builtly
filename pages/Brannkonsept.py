@@ -38,7 +38,7 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. HENT DATA FRA SSOT (Med Guardrail Lås) ---
+# --- 2. HENT DATA FRA SSOT (MED GUARDRAIL LÅS) ---
 # Sjekker om brukeren har lagret data i Project Setup. Hvis ikke, stoppes de.
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     st.markdown("<br><br>", unsafe_allow_html=True)
@@ -46,15 +46,11 @@ if "project_data" not in st.session_state or st.session_state.project_data.get("
     st.info("AI-agenten trenger kontekst om bygget (areal, etasjer, adresse og regelverk) for å kunne generere en faglig og juridisk korrekt rapport.")
     
     st.markdown("<br>", unsafe_allow_html=True)
-    # Viser en stor knapp som sender dem til Project Setup
     st.page_link("pages/Project.py", label="Gå til Project Setup", icon="⚙️")
-    
-    # MAGIEN: Stanser scriptet her. Ingen av UI-elementene for Brann/Akustikk/Geo under denne linjen vil vises!
-    st.stop() 
+    st.stop() # Stopper all videre kjøring av modulen!
 
-# Hvis de har fylt ut data, lastes de inn og koden fortsetter som normalt
+# Hvis de har fylt ut data, lastes de inn og koden fortsetter
 pd_state = st.session_state.project_data
-    }
 
 # --- 3. KONSEPTUELL BRANNCELLE-TEGNER ---
 def generate_fire_diagram(img):
@@ -71,7 +67,6 @@ def generate_fire_diagram(img):
     gray_array = np.array(img.convert("L"))
     margin = int(w * 0.1)
     
-    # Finn omrisset av bygget (mørke piksler)
     dark_y, dark_x = np.where(gray_array[margin:h-margin, margin:w-margin] < 230)
     
     if len(dark_x) > 100:
@@ -80,21 +75,18 @@ def generate_fire_diagram(img):
         min_y = np.min(dark_y) + margin
         max_y = np.max(dark_y) + margin
         
-        # Tegn brannskiller (Røde, tykke linjer)
         mid_x = min_x + (max_x - min_x) // 2
         mid_y = min_y + (max_y - min_y) // 2
         
         draw.line([(min_x, mid_y), (max_x, mid_y)], fill=(239, 68, 68, 200), width=int(w/100))
         draw.line([(mid_x, min_y), (mid_x, max_y)], fill=(239, 68, 68, 200), width=int(w/100))
         
-        # Tegn rømningsveier (Grønne piler/linjer)
         draw.line([(mid_x, mid_y), (max_x, max_y)], fill=(34, 197, 94, 255), width=int(w/150))
         draw.line([(mid_x, mid_y), (min_x, max_y)], fill=(34, 197, 94, 255), width=int(w/150))
 
-    # Infoboks
     box_w, box_h = int(w*0.45), int(h*0.22)
     draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(15, 23, 42, 240), outline="#ef4444", width=3)
-    draw.text((w-box_w+20, h-box_h+20), "BRANNKONSTRUKSJON (TEK17)", fill="#f8fafc", font=font_large)
+    draw.text((w-box_w+20, h-box_h+20), f"BRANNKONSTRUKSJON ({pd_state.get('land', 'Norge').split(' ')[0]})", fill="#f8fafc", font=font_large)
     
     draw.line([(w-box_w+20, h-box_h+75), (w-box_w+50, h-box_h+75)], fill=(239, 68, 68, 255), width=6)
     draw.text((w-box_w+60, h-box_h+65), "= Branncellebegrensende vegg", fill="#e2e8f0", font=font_small)
@@ -173,8 +165,8 @@ def create_full_report_pdf(name, client, content, maps):
     
     toc = [
         "1. SAMMENDRAG OG KONKLUSJON", 
-        "2. PROSJEKTBESKRIVELSE OG REGELVERK (TEK17)", 
-        "3. RISIKOKLASSE OG BRANNKLASSE", 
+        "2. PROSJEKTBESKRIVELSE OG REGELVERK", 
+        "3. KLASSIFISERING", 
         "4. RØMNINGSFORHOLD OG LEDESYSTEM", 
         "5. BRANNCELLER OG BRANNMOTSTAND", 
         "6. SLOKKEUTSTYR OG REDNINGSBRANNVESEN",
@@ -254,16 +246,17 @@ def create_full_report_pdf(name, client, content, maps):
 # --- 5. STREAMLIT UI ---
 st.title("🔥 RIBr — Brannkonsept")
 
-if pd_state["p_name"]:
-    st.success("✅ Prosjektdata er automatisk synkronisert fra Single Source of Truth (SSOT).")
+st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert fra Master Setup (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
     p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"])
     c_name = c2.text_input("Oppdragsgiver", value=pd_state["c_name"])
-    adresse = st.text_input("Adresse", value=pd_state["adresse"] + ", " + pd_state["kommune"])
+    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}")
+    
+    st.info(f"📍 **Regelverk:** Agenten vil bruke {pd_state.get('land', 'Norge')} som utgangspunkt.")
 
-with st.expander("2. Bygningsdata & Klassifisering (Auto-synced)", expanded=True):
+with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
     c3, c4, c5 = st.columns(3)
     b_type = c3.text_input("Formål", value=pd_state["b_type"])
     etasjer = c4.number_input("Antall etasjer", value=int(pd_state["etasjer"]))
@@ -271,8 +264,8 @@ with st.expander("2. Bygningsdata & Klassifisering (Auto-synced)", expanded=True
     
     st.markdown("##### Brannteknisk Klassifisering")
     c6, c7 = st.columns(2)
-    risikoklasse = c6.selectbox("Risikoklasse (TEK17)", ["RKL 1 (Garasjer/Lager)", "RKL 2 (Kontor)", "RKL 4 (Bolig)", "RKL 6 (Sykehus/Hotell)"], index=1)
-    brannklasse = c7.selectbox("Brannklasse (BKL)", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=1)
+    risikoklasse = c6.selectbox("Risikoklasse / Verksamhetsklass", ["RKL 1 (Garasjer/Lager)", "RKL 2 (Kontor)", "RKL 4 (Bolig)", "RKL 6 (Sykehus/Hotell)"], index=1)
+    brannklasse = c7.selectbox("Brannklasse / Byggnadsklass", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=1)
 
 with st.expander("3. Arkitektur & Plantegninger", expanded=True):
     files = st.file_uploader("Last opp arkitekttegninger for rømnings-skisse (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
@@ -298,7 +291,7 @@ if st.button("Kjør Brannteknisk Analyse (RIBr)", type="primary"):
             except Exception as e:
                 pass
                 
-    with st.spinner("🤖 Genererer brannstrategi etter TEK17..."):
+    with st.spinner(f"🤖 Genererer brannstrategi etter gjeldende regelverk for {pd_state.get('land', 'Norge')}..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -321,20 +314,22 @@ if st.button("Kjør Brannteknisk Analyse (RIBr)", type="primary"):
         KLASSIFISERING: {risikoklasse}, {brannklasse}.
         LOKASJON: {adresse}.
         
+        REGELVERK: {pd_state.get('land', 'Norge (TEK17)')}
+        Skriv på språket og referer til det nasjonale regelverket som er angitt over (f.eks svensk BBR hvis det står Sverige, eller norsk TEK17 hvis det står Norge).
+        
         KUNDENS PROSJEKTBESKRIVELSE (KONTEKST): 
         "{pd_state['p_desc']}"
         
         INSTRUKSER (Skriv formelt, teknisk tungt og presist, min 1200 ord):
-        - Skriv teknisk iht. veiledning til TEK17.
         - Vurder rømning, brannceller og slokkeutstyr spesifikt basert på kundens beskrivelse og formålet ({b_type}).
         
         STRUKTUR (Bruk KUN disse nøyaktige overskriftene):
         # 1. SAMMENDRAG OG KONKLUSJON
-        # 2. PROSJEKTBESKRIVELSE OG LOVER (TEK17)
-        # 3. RISIKOKLASSE OG BRANNKLASSE
+        # 2. PROSJEKTBESKRIVELSE OG REGELVERK
+        # 3. KLASSIFISERING
         # 4. RØMNINGSFORHOLD OG LEDESYSTEM
         # 5. BRANNCELLER OG BRANNMOTSTAND
-        # 6. SLOKKEUTSTYR OG TILRETTELEGGING FOR REDNINGSBRANNVESEN
+        # 6. SLOKKEUTSTYR OG REDNINGSBRANNVESEN
         """
         
         try:
