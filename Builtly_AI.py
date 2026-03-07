@@ -1,5 +1,4 @@
 import os
-import base64
 from pathlib import Path
 import streamlit as st
 
@@ -15,6 +14,8 @@ st.set_page_config(
 
 # -------------------------------------------------
 # 2) PAGE MAP
+# st.page_link() uses file paths relative to the main script.
+# (Keeping your Norwegian file names for routing, so nothing breaks)
 # -------------------------------------------------
 PAGES = {
     "mulighetsstudie": "pages/Mulighetsstudie.py",
@@ -22,10 +23,11 @@ PAGES = {
     "konstruksjon": "pages/Konstruksjon.py",
     "brann": "pages/Brannkonsept.py",
     "akustikk": "pages/Akustikk.py",
-    "trafikk": "pages/Trafikk.py",
-    "review": "pages/Review.py",
 }
 
+# -------------------------------------------------
+# 3) HELPERS
+# -------------------------------------------------
 def page_exists(page_path: str) -> bool:
     return Path(page_path).exists()
 
@@ -45,7 +47,7 @@ def nav_link(page_key: str, label: str, icon: str = None, help_text: str = None)
         )
 
 # -------------------------------------------------
-# 3) CSS (Inkludert responsiv Flexbox Header)
+# 4) CSS
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -60,9 +62,12 @@ st.markdown("""
         --accent: #38c2c9;
         --accent-2: #78dce1;
         --accent-3: #112c3f;
+        --ok: #7ee081;
         --warn: #f4bf4f;
         --shadow: 0 20px 80px rgba(0,0,0,0.35);
         --radius-xl: 28px;
+        --radius-lg: 18px;
+        --radius-md: 14px;
     }
 
     html, body, [class*="css"] {
@@ -78,60 +83,24 @@ st.markdown("""
 
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
-    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
+    .block-container { max-width: 1280px !important; padding-top: 2rem !important; padding-bottom: 4rem !important; }
 
-    /* NY RESPONSIV HEADER */
-    .custom-topbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 2.5rem;
-        padding-bottom: 1rem;
-        border-bottom: 1px solid var(--stroke);
-        width: 100%;
-    }
-    .topbar-left {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-    }
     .brand-kicker {
-        display: inline-flex; align-items: center; padding: 0.45rem 0.8rem;
+        display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.8rem;
         border: 1px solid rgba(56,194,201,0.24); background: rgba(56,194,201,0.08);
-        border-radius: 999px; font-size: 0.82rem; color: var(--accent-2); letter-spacing: 0.02em; margin: 0;
-    }
-    .qa-btn {
-        background-color: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.3);
-        border-radius: 8px;
-        padding: 8px 16px;
-        color: var(--text) !important;
-        text-decoration: none !important;
-        font-size: 0.95rem;
-        font-weight: 600;
-        transition: all 0.2s;
-        white-space: nowrap;
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-    }
-    .qa-btn:hover {
-        background-color: rgba(56,194,201,0.2);
-        border-color: rgba(56,194,201,0.6);
-        color: #ffffff !important;
+        border-radius: 999px; font-size: 0.82rem; color: var(--accent-2); letter-spacing: 0.02em;
     }
 
-    /* MOBIL-TILPASNINGER */
-    @media (max-width: 768px) {
-        .hidden-mobile { display: none !important; } 
-        .custom-topbar { margin-bottom: 1.5rem; padding-bottom: 0.8rem; }
-        .hero-title { font-size: 2.5rem !important; }
-        .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr !important; }
+    .hero {
+        position: relative; overflow: hidden;
+        background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
+        border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl);
+        padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem;
     }
-
-    /* Resten av CSS */
-    .hero { position: relative; overflow: hidden; background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96)); border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl); padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem; }
-    .hero::before { content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px; background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none; }
+    .hero::before {
+        content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px;
+        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none;
+    }
     .eyebrow { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem; font-weight: 700; margin-bottom: 1rem; }
     .hero-title { font-size: clamp(2.5rem, 5vw, 4.2rem); line-height: 1.05; letter-spacing: -0.04em; font-weight: 800; margin: 0; color: var(--text); max-width: 14ch; }
     .hero-title .accent { color: var(--accent-2); }
@@ -177,41 +146,30 @@ st.markdown("""
     .disabled-link { width: 100%; margin-top: 0.45rem; display: flex; align-items: center; justify-content: space-between; border: 1px dashed rgba(120,145,170,0.22); border-radius: 12px; padding: 0.8rem 0.95rem; color: var(--muted); font-size: 0.92rem; background: rgba(255,255,255,0.02); }
     .disabled-tag { font-size: 0.75rem; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; border-radius: 4px;}
 
-    [data-testid="stPageLink-NavLink"] { background-color: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; padding: 8px 12px; transition: all 0.2s; margin-top: 8px; }
-    [data-testid="stPageLink-NavLink"]:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
-
-    @media (max-width: 1100px) {
-        .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    [data-testid="stPageLink-NavLink"] {
+        background-color: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; padding: 8px 12px; transition: all 0.2s; margin-top: 8px;
     }
+    [data-testid="stPageLink-NavLink"]:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 4) LÅST RESPONSIV HEADER (Løser mobil-problemet!)
+# 5) TOP / BRAND
 # -------------------------------------------------
-logo_html = '<h2 style="margin:0; color:white;">Builtly</h2>'
-if os.path.exists("logo.png"):
-    try:
-        with open("logo.png", "rb") as img_file:
-            b64_logo = base64.b64encode(img_file.read()).decode()
-        logo_html = f'<img src="data:image/png;base64,{b64_logo}" style="height: 52px; object-fit: contain;">'
-    except Exception:
-        pass
+# Fjernet "Review"-knappen og gjorde plass til stor logo
+top_left, top_right = st.columns([0.85, 0.15])
 
-st.markdown(f"""
-<div class="custom-topbar">
-    <div class="topbar-left">
-        {logo_html}
-        <div class="brand-kicker hidden-mobile">AI-Assisted Engineering · Compliance-Grade</div>
-    </div>
-    <a href="Review" target="_self" class="qa-btn">✅ QA & Sign-off</a>
-</div>
-""", unsafe_allow_html=True)
+with top_left:
+    brand_cols = st.columns([0.2, 0.8])
+    with brand_cols[0]:
+        if os.path.exists("logo.png"):
+            # Mye større logo (160px i stedet for 68px)
+            st.image("logo.png", width=160)
+    with brand_cols[1]:
+        st.markdown('<div class="brand-kicker" style="margin-top: 10px;">AI-Assisted Engineering · Human-Verified · Compliance-Grade</div>', unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 5) HERO
+# 6) HERO
 # -------------------------------------------------
 left, right = st.columns([1.35, 0.8], gap="large")
 
@@ -224,7 +182,7 @@ with left:
         Builtly is the client portal for AI-assisted engineering and documentation. 
         Upload raw data, let the platform handle analysis, compliance checks, and drafting — before junior QA and senior sign-off ensure fast, consistent, and traceable delivery.
     </div>
-    <div class="hero-note">Designed for building applications, execution, and professional compliance.</div>
+    <div class="hero-note">Designed for building applications, execution, and professional compliance — not just another AI wrapper.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -252,14 +210,14 @@ with right:
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 6) TRUST SECTION
+# 7) TRUST SECTION
 # -------------------------------------------------
 st.markdown("""
 <div class="section-head">
     <div class="section-kicker">Core Value Proposition</div>
     <h2 class="section-title">Portal First. Modules Attached.</h2>
     <div class="section-subtitle">
-        Builtly provides a secure, traceable portal for uploads, validation, AI processing, QA, and signed delivery.
+        Builtly provides a secure, traceable portal for uploads, validation, AI processing, QA, and signed delivery — scalable across local regulations.
     </div>
 </div>
 <div class="trust-grid">
@@ -283,7 +241,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 7) BUILTLY LOOP
+# 8) BUILTLY LOOP
 # -------------------------------------------------
 st.markdown("""
 <div class="section-head">
@@ -318,12 +276,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 8) MODULES
+# 9) MODULES
 # -------------------------------------------------
 st.markdown("""
 <div class="section-head">
     <div class="section-kicker">Modules & Roadmap</div>
     <h2 class="section-title">Specialized Agents in One Platform</h2>
+    <div class="section-subtitle">
+        Each module features dedicated data ingestion and local regulatory frameworks, sharing a unified backend for validation and QA.
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -371,6 +332,7 @@ with module_cols[2]:
         <div class="module-badge">Phase 2</div>
     </div>
     <div class="module-title">FIRE — Safety Strategy</div>
+    <div class="module-title" style="font-size:0px;"></div>
     <div class="module-desc">Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and strategy.</div>
     <div class="module-meta">
         <strong>Input:</strong> Architectural drawings + class<br/>
@@ -380,11 +342,7 @@ with module_cols[2]:
 """, unsafe_allow_html=True)
     nav_link("brann", "Open Fire Strategy", icon="🔥")
 
-# -------------------------------------------------
-# Her legger vi inn TRAFIKK som det 6. kortet!
-# Byttet til 3 kolonner for perfekt symmetri på rad 2.
-# -------------------------------------------------
-module_cols_2 = st.columns(3, gap="large")
+module_cols_2 = st.columns(2, gap="large")
 
 with module_cols_2[0]:
     st.markdown("""
@@ -420,25 +378,8 @@ with module_cols_2[1]:
 """, unsafe_allow_html=True)
     nav_link("konstruksjon", "Open Structural", icon="🏢")
 
-with module_cols_2[2]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">🚦</div>
-        <div class="module-badge">Roadmap</div>
-    </div>
-    <div class="module-title">TRAFFIC — Mobility</div>
-    <div class="module-desc">Traffic generation (ÅDT), parking requirements, access control (N100), and soft mobility planning.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> Site plans, local norms<br/>
-        <strong>Output:</strong> Traffic memo, mobility plan
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("trafikk", "Open Traffic & Mobility", icon="🚦")
-
 # -------------------------------------------------
-# 9) CTA BAND
+# 10) CTA BAND
 # -------------------------------------------------
 st.markdown("""
 <div class="cta-band">
