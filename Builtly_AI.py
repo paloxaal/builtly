@@ -21,7 +21,7 @@ PAGES = {
     "konstruksjon": "pages/Konstruksjon.py",
     "brann": "pages/Brannkonsept.py",
     "akustikk": "pages/Akustikk.py",
-    "trafikk": "pages/trafikk.py", # Liten 't' basert på ditt GitHub-skjermbilde!
+    "trafikk": "pages/Trafikk.py", # FIKSET: Stor 'T' for å matche filnavnet
     "project": "pages/Project.py",
     "review": "pages/Review.py",
 }
@@ -132,7 +132,14 @@ st.markdown("""
     .loop-desc { font-size: 0.92rem; line-height: 1.65; color: var(--muted); }
 
     .module-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0.8rem; }
-    .module-card { background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)); border: 1px solid var(--stroke); border-radius: 22px; padding: 1.15rem; min-height: 270px; box-shadow: 0 12px 38px rgba(0,0,0,0.18); }
+    .module-card { 
+        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)); 
+        border: 1px solid var(--stroke); 
+        border-radius: 22px; 
+        padding: 1.15rem; 
+        min-height: 300px; /* FIKSET: Økt høyde slik at alle er i perfekt symmetri */
+        box-shadow: 0 12px 38px rgba(0,0,0,0.18); 
+    }
     .module-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.85rem; }
     .module-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.32rem 0.6rem; border-radius: 999px; border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03); color: var(--muted); font-size: 0.75rem; font-weight: 600; }
     .module-icon { width: 44px; height: 44px; border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; background: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.18); color: var(--accent-2); font-size: 1.3rem; }
@@ -147,31 +154,46 @@ st.markdown("""
     .disabled-link { width: 100%; margin-top: 0.45rem; display: flex; align-items: center; justify-content: space-between; border: 1px dashed rgba(120,145,170,0.22); border-radius: 12px; padding: 0.8rem 0.95rem; color: var(--muted); font-size: 0.92rem; background: rgba(255,255,255,0.02); }
     .disabled-tag { font-size: 0.75rem; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; border-radius: 4px;}
 
-    /* Styling for Streamlit's native page links so they look like our buttons */
-    [data-testid="stPageLink-NavLink"] {
-        background-color: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; padding: 8px 12px; transition: all 0.2s; margin-top: 8px;
+    /* FIKSET: Knappene blir hvite, pene og leselige! */
+    [data-testid="stPageLink-NavLink"] { 
+        background-color: rgba(56,194,201,0.1); 
+        border: 1px solid rgba(56,194,201,0.3); 
+        border-radius: 8px; 
+        padding: 8px 12px; 
+        transition: all 0.2s; 
+        margin-top: 8px; 
     }
-    [data-testid="stPageLink-NavLink"]:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
+    [data-testid="stPageLink-NavLink"]:hover { 
+        background-color: rgba(56,194,201,0.2); 
+        border-color: rgba(56,194,201,0.6); 
+    }
+    [data-testid="stPageLink-NavLink"] p, 
+    [data-testid="stPageLink-NavLink"] span {
+        color: #f5f7fb !important; /* Tvinger teksten hvit */
+        font-weight: 600 !important;
+    }
+
+    @media (max-width: 1100px) {
+        .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 5) TOP / BRAND (Løst med native Streamlit kolonner)
+# 5) TOP / BRAND (FIKSET!)
 # -------------------------------------------------
-# Vi deler toppen inn i 3 kolonner. Logo til venstre, og de to knappene til høyre.
-top_left, top_mid, top_right = st.columns([0.6, 0.2, 0.2])
+top_left, top_mid, top_right = st.columns([0.65, 0.15, 0.20])
 
 with top_left:
-    # Sjekker aktivt etter logo-white.png først!
-    if os.path.exists("logo-white.png"):
-        st.image("logo-white.png", width=160)
-    elif os.path.exists("logo.png"):
-        st.image("logo.png", width=160)
+    if os.path.exists("logo.png"):
+        # FIKSET: Gjort massiv, og fjernet teksten ved siden av!
+        st.image("logo.png", width=280)
     else:
         st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
 
 with top_mid:
-    # Spacer for å justere knappen ned mot midten av logoen
     st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
     nav_link("project", "Project Setup", icon="⚙️")
 
@@ -349,8 +371,7 @@ with module_cols[2]:
 """, unsafe_allow_html=True)
     nav_link("brann", "Open Fire Strategy", icon="🔥")
 
-# BYTTET FRA 2 TIL 3 KOLONNER FOR Å FÅ PLASS TIL TRAFIKK!
-module_cols_2 = st.columns(3, gap="large") 
+module_cols_2 = st.columns(3, gap="large")
 
 with module_cols_2[0]:
     st.markdown("""
@@ -404,9 +425,16 @@ with module_cols_2[2]:
     nav_link("trafikk", "Open Traffic & Mobility", icon="🚦")
 
 # -------------------------------------------------
-# 10) FOOTER (Slogan og Copyright)
+# 10) CTA BAND & FOOTER
 # -------------------------------------------------
 st.markdown("""
+<div class="cta-band">
+    <div class="cta-title">Not just analysis. Actual deliverables.</div>
+    <div class="cta-desc">
+        Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations, generate drafts, execute QA, and download the signed documentation package.
+    </div>
+</div>
+
 <div style="text-align: center; margin-top: 4rem; padding-top: 2rem; border-top: 1px solid rgba(120, 145, 170, 0.18);">
     <h3 style="font-size: 1.1rem; color: #f5f7fb; margin-bottom: 0.5rem; font-weight: 600;">Builtly AS</h3>
     <p style="color: #9fb0c3; font-size: 0.9rem; margin-bottom: 0.5rem;">Building the future of compliance-grade engineering.</p>
