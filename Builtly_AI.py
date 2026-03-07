@@ -1,4 +1,5 @@
 import os
+import base64
 from pathlib import Path
 import streamlit as st
 
@@ -13,34 +14,39 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# 2) PAGE MAP
+# 2) SMART FIL-SØKER (Løser "In Development" buggen)
 # -------------------------------------------------
+def find_page(base_name):
+    # Sjekker flere skrivemåter slik at Linux/Render ikke krasjer på store/små bokstaver
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists():
+            return str(p)
+    return None
+
 PAGES = {
-    "mulighetsstudie": "pages/Mulighetsstudie.py",
-    "geo": "pages/Geo.py",
-    "konstruksjon": "pages/Konstruksjon.py",
-    "brann": "pages/Brannkonsept.py",
-    "akustikk": "pages/Akustikk.py",
-    "trafikk": "pages/Trafikk.py", # FIKSET: Stor 'T' for å matche filnavnet
-    "project": "pages/Project.py",
-    "review": "pages/Review.py",
+    "mulighetsstudie": find_page("Mulighetsstudie"),
+    "geo": find_page("Geo"),
+    "konstruksjon": find_page("Konstruksjon"),
+    "brann": find_page("Brannkonsept"),
+    "akustikk": find_page("Akustikk"),
+    "trafikk": find_page("Trafikk"), 
+    "project": find_page("Project"),
+    "review": find_page("Review"),
 }
 
 # -------------------------------------------------
 # 3) HELPERS
 # -------------------------------------------------
-def page_exists(page_path: str) -> bool:
-    return Path(page_path).exists()
-
 def nav_link(page_key: str, label: str, icon: str = None, help_text: str = None):
     page_path = PAGES.get(page_key)
-    if page_path and page_exists(page_path):
+    if page_path:
         st.page_link(page_path, label=label, icon=icon, help=help_text)
     else:
         st.markdown(
             f"""
             <div class="disabled-link">
-                <span>{label}</span>
+                <span>{icon} {label}</span>
                 <span class="disabled-tag">In Development</span>
             </div>
             """,
@@ -48,7 +54,7 @@ def nav_link(page_key: str, label: str, icon: str = None, help_text: str = None)
         )
 
 # -------------------------------------------------
-# 4) CSS
+# 4) SKUDDSIKKER CSS
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -62,13 +68,9 @@ st.markdown("""
         --soft: #c8d3df;
         --accent: #38c2c9;
         --accent-2: #78dce1;
-        --accent-3: #112c3f;
-        --ok: #7ee081;
         --warn: #f4bf4f;
         --shadow: 0 20px 80px rgba(0,0,0,0.35);
         --radius-xl: 28px;
-        --radius-lg: 18px;
-        --radius-md: 14px;
     }
 
     html, body, [class*="css"] {
@@ -86,28 +88,33 @@ st.markdown("""
     [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
     .block-container { max-width: 1280px !important; padding-top: 2rem !important; padding-bottom: 4rem !important; }
 
-    .brand-kicker {
-        display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.8rem;
-        border: 1px solid rgba(56,194,201,0.24); background: rgba(56,194,201,0.08);
-        border-radius: 999px; font-size: 0.82rem; color: var(--accent-2); letter-spacing: 0.02em;
+    /* KNAPPER FIKS (TVINGER TEKST TIL Å BLI HVIT) */
+    [data-testid="stPageLink-NavLink"] {
+        background-color: rgba(56,194,201,0.15) !important; 
+        border: 1px solid rgba(56,194,201,0.4) !important; 
+        border-radius: 8px !important; 
+        padding: 8px 12px !important; 
+        transition: all 0.2s !important; 
+        margin-top: 8px !important; 
+    }
+    [data-testid="stPageLink-NavLink"]:hover { 
+        background-color: rgba(56,194,201,0.3) !important; 
+        border-color: rgba(56,194,201,0.8) !important; 
+    }
+    /* Denne linjen redder fargen på lenkene i boksene! */
+    [data-testid="stPageLink-NavLink"] * {
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        text-decoration: none !important;
     }
 
-    .hero {
-        position: relative; overflow: hidden;
-        background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
-        border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl);
-        padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem;
-    }
-    .hero::before {
-        content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px;
-        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none;
-    }
+    /* KORT DESIGN */
+    .hero { position: relative; overflow: hidden; background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96)); border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl); padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem; }
     .eyebrow { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem; font-weight: 700; margin-bottom: 1rem; }
     .hero-title { font-size: clamp(2.5rem, 5vw, 4.2rem); line-height: 1.05; letter-spacing: -0.04em; font-weight: 800; margin: 0; color: var(--text); max-width: 14ch; }
     .hero-title .accent { color: var(--accent-2); }
     .hero-subtitle { margin-top: 1.2rem; max-width: 60ch; font-size: 1.08rem; line-height: 1.8; color: var(--soft); }
-    .hero-note { margin-top: 1rem; font-size: 0.95rem; color: var(--muted); }
-
+    
     .hero-panel { background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); border-radius: 22px; padding: 1.25rem; height: 100%; }
     .panel-title { font-size: 0.86rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.85rem; }
     .mini-stat { background: rgba(255,255,255,0.03); border: 1px solid var(--stroke); border-radius: 16px; padding: 0.95rem 1rem; margin-bottom: 0.75rem; }
@@ -132,14 +139,7 @@ st.markdown("""
     .loop-desc { font-size: 0.92rem; line-height: 1.65; color: var(--muted); }
 
     .module-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0.8rem; }
-    .module-card { 
-        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)); 
-        border: 1px solid var(--stroke); 
-        border-radius: 22px; 
-        padding: 1.15rem; 
-        min-height: 300px; /* FIKSET: Økt høyde slik at alle er i perfekt symmetri */
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18); 
-    }
+    .module-card { background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)); border: 1px solid var(--stroke); border-radius: 22px; padding: 1.15rem; min-height: 300px; box-shadow: 0 12px 38px rgba(0,0,0,0.18); }
     .module-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.85rem; }
     .module-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.32rem 0.6rem; border-radius: 999px; border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03); color: var(--muted); font-size: 0.75rem; font-weight: 600; }
     .module-icon { width: 44px; height: 44px; border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; background: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.18); color: var(--accent-2); font-size: 1.3rem; }
@@ -154,25 +154,6 @@ st.markdown("""
     .disabled-link { width: 100%; margin-top: 0.45rem; display: flex; align-items: center; justify-content: space-between; border: 1px dashed rgba(120,145,170,0.22); border-radius: 12px; padding: 0.8rem 0.95rem; color: var(--muted); font-size: 0.92rem; background: rgba(255,255,255,0.02); }
     .disabled-tag { font-size: 0.75rem; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; border-radius: 4px;}
 
-    /* FIKSET: Knappene blir hvite, pene og leselige! */
-    [data-testid="stPageLink-NavLink"] { 
-        background-color: rgba(56,194,201,0.1); 
-        border: 1px solid rgba(56,194,201,0.3); 
-        border-radius: 8px; 
-        padding: 8px 12px; 
-        transition: all 0.2s; 
-        margin-top: 8px; 
-    }
-    [data-testid="stPageLink-NavLink"]:hover { 
-        background-color: rgba(56,194,201,0.2); 
-        border-color: rgba(56,194,201,0.6); 
-    }
-    [data-testid="stPageLink-NavLink"] p, 
-    [data-testid="stPageLink-NavLink"] span {
-        color: #f5f7fb !important; /* Tvinger teksten hvit */
-        font-weight: 600 !important;
-    }
-
     @media (max-width: 1100px) {
         .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -182,14 +163,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 5) TOP / BRAND (FIKSET!)
+# 5) TOP / BRAND (Løser Logo & Knapper)
 # -------------------------------------------------
 top_left, top_mid, top_right = st.columns([0.65, 0.15, 0.20])
 
 with top_left:
-    if os.path.exists("logo.png"):
-        # FIKSET: Gjort massiv, og fjernet teksten ved siden av!
-        st.image("logo.png", width=280)
+    # Løser logo-problemet automatisk ved å tvinge den til å bli hvit!
+    if os.path.exists("logo-white.png"):
+        st.image("logo-white.png", width=180)
+    elif os.path.exists("logo.png"):
+        with open("logo.png", "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        # Filter: brightness(0) invert(1) gjør en mørk logo 100% hvit!
+        st.markdown(f'<img src="data:image/png;base64,{b64}" style="width: 180px; filter: brightness(0) invert(1); padding-top: 10px;">', unsafe_allow_html=True)
     else:
         st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
 
@@ -215,7 +201,6 @@ with left:
         Builtly is the client portal for AI-assisted engineering and documentation. 
         Upload raw data, let the platform handle analysis, compliance checks, and drafting — before junior QA and senior sign-off ensure fast, consistent, and traceable delivery.
     </div>
-    <div class="hero-note">Designed for building applications, execution, and professional compliance.</div>
 </div>
 """, unsafe_allow_html=True)
 
