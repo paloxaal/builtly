@@ -33,7 +33,7 @@ def find_page(base_name: str) -> str:
             return str(p)
     return ""
 
-# --- 3. PREMIUM CSS (Med nye, ultra-tydelige faner!) ---
+# --- 3. PREMIUM CSS (Fjernet Tab-styling, optimalisert for flyt) ---
 st.markdown(
     """
 <style>
@@ -84,36 +84,6 @@ st.markdown(
     }
     button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; }
 
-    /* --- TYDELIGE TABS (FANER) --- */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 12px;
-        padding-bottom: 8px;
-        background-color: transparent !important;
-    }
-    .stTabs [data-baseweb="tab-list"] button {
-        background-color: rgba(255, 255, 255, 0.08) !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important;
-        border-radius: 12px !important;
-        color: #e2e8f0 !important; /* Mye hvitere tekst for synlighet */
-        font-weight: 650 !important;
-        font-size: 1.05rem !important;
-        padding: 12px 24px !important;
-        transition: all 0.2s ease !important;
-    }
-    .stTabs [data-baseweb="tab-list"] button:hover {
-        background-color: rgba(56, 194, 201, 0.15) !important;
-        border-color: rgba(120, 220, 225, 0.8) !important;
-        color: #ffffff !important;
-        transform: translateY(-2px);
-    }
-    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
-        background: linear-gradient(135deg, rgba(56,194,201,0.25), rgba(120,220,225,0.15)) !important;
-        border: 1px solid rgba(120, 220, 225, 0.8) !important;
-        color: #ffffff !important;
-        box-shadow: 0 4px 15px rgba(56,194,201,0.2) !important;
-    }
-    .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
-
     /* INPUT-FELT DESIGN */
     .stTextInput input, .stNumberInput input, .stTextArea textarea {
         background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
@@ -133,7 +103,8 @@ st.markdown(
     .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; margin-bottom: 2.5rem; }
     .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
     .card-hero { background: linear-gradient(135deg, rgba(16,30,46,0.9), rgba(6,17,26,0.9)); position: relative; overflow: hidden; }
-    .card-hero::after { content: ""; position: absolute; top: -50%; right: -20%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(56,194,201,0.1) 0%, transparent 60%); pointer-events: none; }
+    .card-hero::after { content: ""; position: absolute; top: -50%; right: -20%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(56,189,248,0.1) 0%, transparent 60%); pointer-events: none; }
+    
     .hero-kicker { display: inline-flex; align-items: center; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 1rem; border: 1px solid var(--stroke); padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,0.02); }
     .hero-title { font-size: 2.8rem; font-weight: 800; margin: 0 0 0.5rem 0; letter-spacing: -0.03em; color: #fff; }
     .hero-sub { color: var(--soft); font-size: 1.05rem; line-height: 1.6; max-width: 50ch; margin-bottom: 1.5rem; }
@@ -286,68 +257,94 @@ render_html(f"""
 </div>
 """)
 
-# --- 7. INPUT SEKSJON & LIVE SNAPSHOT ---
+# --- 7. INPUT SEKSJON (Fjernet faner for bedre flyt!) ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
-st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fanene under for å etablere prosjektdata.</p>", unsafe_allow_html=True)
+st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
 
 input_col, snap_col = st.columns([2, 1], gap="large")
 
 with input_col:
-    # --- NYE FANER ---
-    tab1, tab2, tab3 = st.tabs(["📌 01 Generelt", "🌍 02 Lokasjon & API", "🏢 03 Byggdata"])
+    # --- SEKSJON 1: GENERELT ---
+    st.markdown("""
+    <div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <h4 style="color: #f5f7fb; margin: 0;">📌 01 Generelt</h4>
+    </div>
+    """, unsafe_allow_html=True)
     
-    with tab1:
-        st.markdown("<br>", unsafe_allow_html=True)
-        land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
-        try: l_idx = land_options.index(pd["land"])
-        except: l_idx = 0
-        new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
-        
-        c1, c2 = st.columns(2)
-        new_p_name = c1.text_input("Prosjektnavn", value=pd["p_name"], placeholder="F.eks. Fjordbyen Kontorpark")
-        new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd["c_name"], placeholder="F.eks. Eiendomsutvikling AS")
-        
-        new_p_desc = st.text_area(
-            "Prosjektbeskrivelse / Narrativ", 
-            value=pd["p_desc"], height=140,
-            placeholder="Beskriv prosjektet kort her..."
-        )
-
-    with tab2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if "Norge" in new_land:
-            st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
-            
-        c3, c4 = st.columns(2)
-        new_adresse = c3.text_input("Gateadresse", value=pd["adresse"])
-        new_kommune = c4.text_input("Kommune", value=pd["kommune"])
-        
-        c5, c6 = st.columns(2)
-        new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd["gnr"])
-        new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd["bnr"])
-        
-        if "Norge" in new_land:
-            if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
-                with st.spinner("Henter fra Nasjonalt Adresseregister..."):
-                    res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
-                    if res:
-                        st.success(f"✅ Fant eiendom: {res['adresse']}, {res['kommune']} (Gnr {res['gnr']}/Bnr {res['bnr']})")
-                        new_adresse, new_kommune, new_gnr, new_bnr = res['adresse'], res['kommune'], res['gnr'], res['bnr']
-                    else:
-                        st.warning("Fant ingen treff i Matrikkelen. Sjekk skrivemåten.")
-
-    with tab3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        c7, c8, c9 = st.columns(3)
-        type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
-        try: default_idx = type_options.index(pd["b_type"])
-        except: default_idx = 1
-        
-        new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
-        new_etasjer = c8.number_input("Antall Etasjer", value=int(pd["etasjer"]), min_value=1)
-        new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd["bta"]), step=100)
+    land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
+    try: l_idx = land_options.index(pd["land"])
+    except: l_idx = 0
+    new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
+    
+    c1, c2 = st.columns(2)
+    new_p_name = c1.text_input("Prosjektnavn", value=pd["p_name"], placeholder="F.eks. Fjordbyen Kontorpark")
+    new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd["c_name"], placeholder="F.eks. Eiendomsutvikling AS")
+    
+    new_p_desc = st.text_area(
+        "Prosjektbeskrivelse / Narrativ", 
+        value=pd["p_desc"], height=140,
+        placeholder="Beskriv prosjektet kort her..."
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- SEKSJON 2: LOKASJON ---
+    st.markdown("""
+    <div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <h4 style="color: #f5f7fb; margin: 0;">🌍 02 Lokasjon & API</h4>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if "Norge" in new_land:
+        st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
+        
+    c3, c4 = st.columns(2)
+    new_adresse = c3.text_input("Gateadresse", value=pd["adresse"])
+    new_kommune = c4.text_input("Kommune", value=pd["kommune"])
+    
+    c5, c6 = st.columns(2)
+    new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd["gnr"])
+    new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd["bnr"])
+    
+    if "Norge" in new_land:
+        if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
+            # Mellomlagrer dataene du nettopp tastet inn slik at de ikke slettes ved oppdatering
+            pd.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
+            
+            with st.spinner("Henter fra Nasjonalt Adresseregister..."):
+                res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
+                if res:
+                    # Oppdaterer minnet direkte med fasit fra Kartverket
+                    pd["adresse"] = res['adresse']
+                    pd["kommune"] = res['kommune']
+                    pd["gnr"] = res['gnr']
+                    pd["bnr"] = res['bnr']
+                    st.success(f"✅ Fant eiendom: {res['adresse']}, {res['kommune']} (Gnr {res['gnr']}/Bnr {res['bnr']})")
+                    st.rerun() # Tvinger siden til å oppdatere tekstfeltene med de nye verdiene
+                else:
+                    st.warning("Fant ingen treff i Matrikkelen. Sjekk skrivemåten.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- SEKSJON 3: BYGGDATA ---
+    st.markdown("""
+    <div style="margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <h4 style="color: #f5f7fb; margin: 0;">🏢 03 Byggdata</h4>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    c7, c8, c9 = st.columns(3)
+    type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
+    try: default_idx = type_options.index(pd["b_type"])
+    except: default_idx = 1
+    
+    new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
+    new_etasjer = c8.number_input("Antall Etasjer", value=int(pd["etasjer"]), min_value=1)
+    new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd["bta"]), step=100)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # --- LAGRE ---
     if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
         st.session_state.project_data.update({
             "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
@@ -360,7 +357,7 @@ with input_col:
 
 with snap_col:
     render_html(f"""
-    <div class="card" style="padding: 1.5rem; height: 100%;">
+    <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
         <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
         <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
         <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i minnet akkurat nå.</p>
@@ -376,7 +373,7 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD ---
+# --- 8. LAUNCHPAD (Neste steg) ---
 if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 1.5rem;'>🚀 Prosjektet er synkronisert! Hvor vil du starte?</h3>", unsafe_allow_html=True)
