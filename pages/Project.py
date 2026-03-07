@@ -33,7 +33,7 @@ def find_page(base_name: str) -> str:
             return str(p)
     return ""
 
-# --- 3. PREMIUM CSS (Lastes ALLTID først) ---
+# --- 3. PREMIUM CSS (Med eksakt samme knappedesign som forsiden) ---
 st.markdown(
     """
 <style>
@@ -47,18 +47,30 @@ st.markdown(
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
 
+    /* HEADER & PILLE-KNAPPER */
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
     
-    .back-btn {
-        color: var(--accent); text-decoration: none; font-weight: 600; 
-        display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem;
-        padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.2);
-        background: rgba(56,189,248,0.05); transition: all 0.2s;
+    .topbar-right {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
+        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
     }
-    .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
+    .top-link {
+        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
+        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
+        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
+    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
+    .top-link.primary {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important; border-color: rgba(120,220,225,0.45);
+    }
+    .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
 
-    /* KNAPPE-DESIGN */
+    /* STREAMLIT NATIVE KNAPPER (LAGRE OSV) */
     button[kind="primary"] {
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
@@ -120,6 +132,7 @@ st.markdown(
     div[data-baseweb="tab"][aria-selected="true"] { background-color: rgba(56,189,248,0.1); border-color: var(--accent); color: #fff; }
     div[data-baseweb="tab-highlight"] { display: none; }
     
+    /* Launchpad knapper (Fjernet icon kravet for Streamlit!) */
     [data-testid="stPageLink-NavLink"] {
         background-color: rgba(16, 30, 46, 0.8); border: 1px solid rgba(56,194,201,0.3); border-radius: 12px; padding: 16px; transition: all 0.2s; margin-top: 8px;
         display: flex; justify-content: center; text-align: center;
@@ -179,13 +192,18 @@ def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
     return None
 
 # --- 6. HEADER & DASHBOARD UI ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
-home_link = '<a href="/" target="_self" class="back-btn">← Tilbake til Portal</a>'
+logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 
+# PILLE-MENYEN FRA FORSIDEN ER NÅ LAGT INN HER!
 render_html(f"""
 <div class="top-shell">
-    <div>{logo_html}</div>
-    <div>{home_link}</div>
+    <div class="brand-left">
+        {logo_html}
+    </div>
+    <div class="topbar-right">
+        <a href="/" target="_self" class="top-link ghost">← Tilbake til Portal</a>
+        <a href="Review" target="_self" class="top-link primary">QA & Sign-off</a>
+    </div>
 </div>
 
 <div class="dash-grid">
@@ -264,8 +282,7 @@ with input_col:
         
         new_p_desc = st.text_area(
             "Prosjektbeskrivelse / Narrativ", 
-            value=pd["p_desc"],
-            height=140,
+            value=pd["p_desc"], height=140,
             placeholder="Beskriv prosjektet kort her..."
         )
 
@@ -332,7 +349,7 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD (Neste steg - dukker opp når data er fylt ut) ---
+# --- 8. LAUNCHPAD (Neste steg - NÅ LØST UTEN ICON-FEIL) ---
 if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 1.5rem;'>🚀 Prosjektet er synkronisert! Hvor vil du starte?</h3>", unsafe_allow_html=True)
@@ -340,11 +357,11 @@ if completeness > 30:
     lp1, lp2, lp3 = st.columns(3)
     
     with lp1: 
-        if find_page("Mulighetsstudie"): st.page_link(find_page("Mulighetsstudie"), label="📐 Mulighetsstudie", icon="")
-        if find_page("Geo"): st.page_link(find_page("Geo"), label="🌍 Geo & Miljø", icon="")
+        if find_page("Mulighetsstudie"): st.page_link(find_page("Mulighetsstudie"), label="📐 Mulighetsstudie")
+        if find_page("Geo"): st.page_link(find_page("Geo"), label="🌍 Geo & Miljø")
     with lp2:
-        if find_page("Akustikk"): st.page_link(find_page("Akustikk"), label="🔊 Akustikk", icon="")
-        if find_page("Brannkonsept"): st.page_link(find_page("Brannkonsept"), label="🔥 Brannkonsept", icon="")
+        if find_page("Akustikk"): st.page_link(find_page("Akustikk"), label="🔊 Akustikk")
+        if find_page("Brannkonsept"): st.page_link(find_page("Brannkonsept"), label="🔥 Brannkonsept")
     with lp3:
-        if find_page("Konstruksjon"): st.page_link(find_page("Konstruksjon"), label="🏢 Konstruksjon (RIB)", icon="")
-        if find_page("Trafikk"): st.page_link(find_page("Trafikk"), label="🚦 Trafikk & Mobilitet", icon="")
+        if find_page("Konstruksjon"): st.page_link(find_page("Konstruksjon"), label="🏢 Konstruksjon (RIB)")
+        if find_page("Trafikk"): st.page_link(find_page("Trafikk"), label="🚦 Trafikk & Mobilitet")
