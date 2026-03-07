@@ -3,19 +3,17 @@ import pandas as pd
 import google.generativeai as genai
 from fpdf import FPDF
 import os
+import base64
 from datetime import datetime
 import tempfile
 import re
-import numpy as np
 import io
-import math
-import gc
-import requests
-import urllib.parse
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
+import numpy as np
+from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Mulighetsstudie Pro | Builtly AI", layout="wide")
+st.set_page_config(page_title="Mulighetsstudie (ARK) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -25,15 +23,32 @@ else:
     st.stop()
 
 try:
-    import fitz  # PyMuPDF
+    import fitz  
 except ImportError:
     fitz = None
+
+def render_html(html_string: str):
+    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
+
+def logo_data_uri() -> str:
+    for candidate in ["logo-white.png", "logo.png"]:
+        if os.path.exists(candidate):
+            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
+            with open(candidate, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/{suffix};base64,{encoded}"
+    return ""
+
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists(): return str(p)
+    return ""
 
 def clean_pdf_text(text):
     if not text: return ""
     rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*", "²": "2", "³": "3"}
-    for old, new in rep.items(): 
-        text = text.replace(old, new)
+    for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def ironclad_text_formatter(text):
@@ -42,443 +57,313 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTVERKET DOBBEL-API (FLYFOTO + TOPOKART) ---
-def fetch_kartverket_data(adresse, kommune, gnr, bnr):
-    adr_clean = adresse.replace(',', '').strip() if adresse else ""
-    kom_clean = kommune.replace(',', '').strip() if kommune else ""
-    gnr_clean = gnr.strip() if gnr else ""
-    bnr_clean = bnr.strip() if bnr else ""
-
-    def api_call(query_string):
-        if not query_string.strip(): return None, None, None, None
-        safe_query = urllib.parse.quote(query_string)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&utkoordsys=25833&treffPerSide=1"
-        try:
-            resp = requests.get(url, timeout=5)
-            if resp.status_code == 200 and resp.json().get('adresser'):
-                hit = resp.json()['adresser'][0]
-                nord = hit.get('representasjonspunkt', {}).get('nord', None)
-                ost = hit.get('representasjonspunkt', {}).get('øst', None)
-                kom = hit.get('kommunenavn', 'Ukjent')
-                adr_tekst = hit.get('adressetekst', query_string)
-                return adr_tekst, kom, nord, ost
-        except Exception: pass
-        return None, None, None, None
-
-    queries = []
-    if adr_clean and kom_clean:
-        queries.append(f"{adr_clean} {kom_clean}")
-        base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
-        if base_num != adr_clean: queries.append(f"{base_num} {kom_clean}")
-        street_only = re.sub(r'\d+.*', '', adr_clean).strip()
-        if street_only: queries.append(f"{street_only} {kom_clean}")
-    if gnr_clean and bnr_clean:
-        queries.append(f"{kom_clean} {gnr_clean}/{bnr_clean}")
-
-    for q in queries:
-        adr_tekst, kom, nord, ost = api_call(q)
-        if nord and ost:
-            return f"✅ Bekreftet i Kartverket: {adr_tekst}, {kom}. (Koordinater: N {nord}, Ø {ost}).", nord, ost
-
-    return "Fant ingen eksakte treff i Kartverket. Bruker generiske data for rapporten.", None, None
-
-def fetch_maps_from_kartverket(nord, ost):
-    if not nord or not ost: return None, None
-    min_x, max_x = float(ost) - 200, float(ost) + 200
-    min_y, max_y = float(nord) - 200, float(nord) + 200
+# --- 2. PREMIUM CSS MED FIX FOR HVITE BOKSER ---
+st.markdown("""
+<style>
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
+    }
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
-    wms_ortho = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-    wms_topo = f"https://opencache.statkart.no/gatekeeper/gk/gk.open_wms?service=WMS&request=GetMap&version=1.1.1&layers=topo4&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-    
-    img_ortho = img_topo = None
-    try:
-        resp_ortho = requests.get(wms_ortho, timeout=10)
-        if resp_ortho.status_code == 200: img_ortho = Image.open(io.BytesIO(resp_ortho.content))
-        
-        resp_topo = requests.get(wms_topo, timeout=10)
-        if resp_topo.status_code == 200: img_topo = Image.open(io.BytesIO(resp_topo.content))
-    except Exception: pass
-    
-    return img_ortho, img_topo
+    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
 
-# --- 3. BEREGNINGSMOTOR (VOLUMSTUDIE) ---
-def generate_volume_study(img, is_bolig):
-    w, h = img.size
-    draw_img = img.convert("RGBA")
-    overlay = Image.new("RGBA", draw_img.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
-    
-    try: 
-        font_large = ImageFont.truetype("arial.ttf", int(h/35))
-        font_small = ImageFont.truetype("arial.ttf", int(h/50))
-    except: 
-        font_large = ImageFont.load_default()
-        font_small = ImageFont.load_default()
+    /* PILLE-KNAPPER (TOPP) */
+    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .brand-left { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
+    .topbar-right {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
+        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
+    }
+    .top-link {
+        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
+        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
+        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
+    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
+    .top-link.primary { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)); border-color: rgba(120,220,225,0.45); color: #041018 !important; }
+    .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
 
-    cx, cy = w // 2, h // 2
+    /* KNAPPER */
+    button[kind="primary"] {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important; border: none !important; font-weight: 750 !important;
+        border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important;
+        transition: all 0.2s ease !important;
+    }
+    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
     
-    # Byggeområde
-    bw, bh = int(w*0.3), int(h*0.2)
-    b_rect = [cx - bw//2, cy - bh//2, cx + bw//2, cy + bh//2]
-    draw.rectangle(b_rect, fill=(220, 50, 50, 140), outline=(200, 0, 0, 255), width=4)
-    draw.text((cx - bw//4, cy - 10), "VOLUM 1 / BYGGEGRENSE", fill=(255,255,255,255), font=font_large)
+    button[kind="secondary"] {
+        background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
+        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; 
+        font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s;
+    }
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
-    # Utomhus / MUA
-    gw, gh = int(w*0.2), int(h*0.15)
-    g_rect = [cx - bw//2, cy + bh//2 + 20, cx - bw//2 + gw, cy + bh//2 + 20 + gh]
-    draw.rectangle(g_rect, fill=(50, 200, 50, 120), outline=(0, 150, 0, 255), width=3)
+    /* INPUTS & BOKSER */
+    .stTextInput input, .stNumberInput input, .stTextArea textarea {
+        background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+        border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important;
+    }
+    div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    div[data-baseweb="select"] span { color: #ffffff !important; }
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
+        color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
+    }
     
-    green_label = "MUA / UTEOPPHOLD" if is_bolig else "GRØNTSTRUKTUR / OVERVANN"
-    draw.text((g_rect[0] + 10, g_rect[1] + gh//3), green_label, fill=(0,100,0,255), font=font_small)
-
-    # Adkomst / Logistikk
-    aw, ah = int(w*0.15), int(h*0.1)
-    a_rect = [cx + bw//2 - aw, cy + bh//2 + 20, cx + bw//2, cy + bh//2 + 20 + ah]
-    draw.rectangle(a_rect, fill=(50, 50, 220, 120), outline=(0, 0, 150, 255), width=3)
+    /* --- FIX FOR HVITE BOKSER --- */
+    div[data-testid="stExpander"] { background: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; margin-bottom: 1rem !important; }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
+    div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
     
-    blue_label = "ADKOMST / P-PLASS" if is_bolig else "LOGISTIKK / VAREMOTTAK"
-    draw.text((a_rect[0] + 10, a_rect[1] + ah//3), blue_label, fill=(0,0,100,255), font=font_small)
-
-    # Boks
-    box_w, box_h = int(w*0.35), int(h*0.2)
-    draw.rectangle([w-box_w, h-box_h, w-10, h-10], fill=(255,255,255,240), outline="black", width=3)
-    draw.text((w-box_w+20, h-box_h+20), "KONSEPTUELL VOLUMSKISSE", fill="black", font=font_large)
-    draw.text((w-box_w+20, h-box_h+60), "Fase: Mulighetsstudie", fill=(100,100,100), font=font_small)
+    [data-testid="stFileUploaderDropzone"] { 
+        background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; 
+        border-radius: 12px !important; padding: 2rem !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
+    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
     
-    out = Image.alpha_composite(draw_img, overlay)
-    return out.convert("RGB")
+    [data-testid="stAlert"] { background-color: rgba(56, 189, 248, 0.05) !important; border: 1px solid rgba(56, 189, 248, 0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] * { color: #f5f7fb !important; }
+    
+    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
+</style>
+""", unsafe_allow_html=True)
 
-# --- 4. DYNAMISK PDF MOTOR ---
+# --- 3. GUARDRAIL LÅS MED NATIVE STREAMLIT NAVIGATION ---
+if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
+    
+    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    st.info("Arkitekt-agenten trenger kontekst om bygget (areal, formål, adresse) for å kunne gjøre en mulighetsstudie og tomteanalyse.")
+    
+    if find_page("Project"):
+        if st.button("⚙️ Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
+    st.stop()
+
+# --- 4. HEADER (MED NATIVE TILBAKEKNAPP SOM BEVARER MINNET) ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
+
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+
+pd_state = st.session_state.project_data
+
+# --- DYNAMISK PDF MOTOR (ARK) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
-            self.set_y(15)
-            self.set_font('Helvetica', 'B', 10)
-            self.set_text_color(26, 43, 72)
+            self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
             self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: ARK-001"), 0, 1, 'R')
-            self.set_draw_color(200, 200, 200)
-            self.line(25, 25, 185, 25)
-            self.set_y(30)
-
+            self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
     def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.set_text_color(150, 150, 150)
+        self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
         self.cell(0, 10, clean_pdf_text(f'UTKAST - KREVER FAGLIG KONTROLL | Side {self.page_no()}'), 0, 0, 'C')
-
     def check_space(self, height):
         if self.get_y() + height > 270: 
-            self.add_page()
-            self.set_margins(25, 25, 25)
-            self.set_x(25)
+            self.add_page(); self.set_margins(25, 25, 25); self.set_x(25)
 
-def create_full_report_pdf(name, client, content, maps, img_ortho, img_topo):
+def create_full_report_pdf(name, client, content, maps):
     pdf = BuiltlyProPDF()
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
     pdf.add_page()
-    if os.path.exists("logo.png"): 
-        pdf.image("logo.png", x=25, y=20, w=50)
-    pdf.set_y(100)
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', 'B', 26)
-    pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("MULIGHETSSTUDIE OG VOLUMANALYSE"), 0, 1, 'L')
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', '', 16)
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"PROSJEKT: {pdf.p_name}"), 0, 1, 'L')
-    pdf.ln(30)
+    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
-    metadata = [
-        ("OPPDRAGSGIVER:", client), 
-        ("DATO:", datetime.now().strftime("%d. %m. %Y")), 
-        ("UTARBEIDET AV:", "Builtly Arkitektur AI Engine"), 
-        ("KONTROLLERT AV:", "[Ansvarlig Sivilarkitekt / Utvikler]")
-    ]
+    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
+    pdf.cell(0, 15, clean_pdf_text("MULIGHETSSTUDIE OG TOMTEANALYSE (ARK)"), 0, 1, 'L')
+    pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, clean_pdf_text(f"KONSEPTVURDERING: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
     
-    for l, v in metadata:
-        pdf.set_x(25)
-        pdf.set_font('Helvetica', 'B', 10)
-        pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
-        pdf.set_font('Helvetica', '', 10)
-        pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
+    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly ARK AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
+        pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
+        pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    pdf.add_page()
-    pdf.set_x(25)
-    pdf.set_font('Helvetica', 'B', 16)
-    pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1)
-    pdf.ln(5)
+    pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
+    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
     toc = [
         "1. SAMMENDRAG OG KONKLUSJON", 
-        "2. EIENDOMSANALYSE OG KARTVERKET", 
-        "3. KRAV I KOMMUNEPLAN (KPA) OG UTNYTTELSE", 
-        "4. AREALANALYSE OG LØNNSOMHET (BTA / NETTO)",
-        "5. UTOMHUSPLAN OG GRØNTSTRUKTUR", 
-        "6. SOL, SKYGGE OG OMGIVELSER", 
-        "7. ANBEFALING FOR VIDERE PROSJEKTERING", 
-        "VEDLEGG: KONSEPTUELL VOLUMSKISSE"
+        "2. PROSJEKT- OG TOMTEBESKRIVELSE", 
+        "3. REGULERINGSMESSIGE RAMMEBETINGELSER", 
+        "4. VOLUMSTUDIE OG UTNYTTELSE", 
+        "5. SOL, SKYGGE OG STØY (OVERORDNET)", 
+        "6. ANBEFALT KONSEPT OG VEIEN VIDERE", 
+        "VEDLEGG: VURDERT KART- OG TEGNINGSGRUNNLAG"
     ]
-    pdf.set_font('Helvetica', '', 11)
-    pdf.set_text_color(0, 0, 0)
     for t in toc:
-        pdf.set_x(25)
-        pdf.cell(0, 10, clean_pdf_text(t), 0, 1)
-        pdf.set_draw_color(220, 220, 220)
-        pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+        pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: 
-            pdf.ln(4)
-            continue
-            
-        if line.startswith('# 2. EIENDOMSANALYSE'):
-            pdf.check_space(220) 
-            pdf.ln(8)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 14)
-            pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.ln(4)
-            
-            if img_ortho and img_topo:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp1, tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp2:
-                    img_ortho.save(tmp1.name)
-                    img_topo.save(tmp2.name)
-                    pdf.image(tmp1.name, x=25, y=pdf.get_y(), w=75)
-                    pdf.image(tmp2.name, x=110, y=pdf.get_y(), w=75)
-                    pdf.set_y(pdf.get_y() + 80)
-                    pdf.set_font('Helvetica', 'I', 9)
-                    pdf.set_text_color(100, 100, 100)
-                    pdf.set_x(25)
-                    pdf.cell(0, 5, clean_pdf_text("Figur 1: Ortofoto (venstre) og Norgeskart (høyre) hentet via Kartverket WMS."), 0, 1, 'C')
-                    pdf.ln(5)
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-            continue
-            
-        elif line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
-            pdf.check_space(30)
-            pdf.ln(8)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 14)
-            pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.ln(2)
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-        
+        if not line: pdf.ln(4); continue
+        if line.startswith('# '):
+            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         elif line.startswith('##'):
-            pdf.check_space(20)
-            pdf.ln(6)
-            pdf.set_x(25)
-            pdf.set_font('Helvetica', 'B', 12)
-            pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip()))
-            pdf.set_font('Helvetica', '', 10)
-            pdf.set_text_color(0, 0, 0)
-            
+            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         else:
             pdf.set_font('Helvetica', '', 10)
             safe_text = ironclad_text_formatter(line)
             if safe_text.strip() == "": continue
             try:
                 if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30)
-                    pdf.multi_cell(145, 5, safe_text)
-                    pdf.set_x(25)
+                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
                 else:
-                    pdf.set_x(25)
-                    pdf.multi_cell(150, 5, safe_text)
-            except Exception:
-                pdf.ln(2)
+                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
+            except Exception: pdf.ln(2)
 
     if maps:
-        pdf.add_page()
-        pdf.set_x(25)
-        pdf.set_font('Helvetica', 'B', 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 20, "VEDLEGG: KONSEPTUELL VOLUMSKISSE", 0, 1)
+        pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT KART- OG TEGNINGSGRUNNLAG", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                m.save(tmp.name)
+                m.save(tmp.name, format="PNG")
                 img_h = 160 * (m.height / m.width)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.set_y(pdf.get_y() + img_h + 5)
-                pdf.set_x(25)
-                pdf.set_font('Helvetica', 'I', 10)
-                pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: AI-generert mulighetsstudie og volumallokering."), 0, 1, 'C')
+                if img_h > 240: 
+                    img_h = 240
+                    img_w = 240 * (m.width / m.height)
+                    pdf.image(tmp.name, x=105-(img_w/2), y=pdf.get_y(), w=img_w)
+                else:
+                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 
+                pdf.set_y(pdf.get_y() + img_h + 5)
+                pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
+                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt analysert av ARK-agenten."), 0, 1, 'C')
+
     return bytes(pdf.output(dest='S'))
 
-# --- 5. STREAMLIT UI ---
-st.title("🏗️ Builtly Arkitektur AI (Mulighetsstudie)")
-st.info("Genererer profesjonelle mulighetsstudier for Bolig og Næring. Inkluderer arealberegninger etter ny NS 3940:2023.")
+# --- STREAMLIT UI ---
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>📐 ARK — Mulighetsstudie</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for tidligfase tomteanalyse, volumberegning og reguleringsvurdering.</p>", unsafe_allow_html=True)
 
-prosjekttype = st.radio("Hovedformål for prosjektet:", ["Bolig", "Næring (Kontor/Handel/Lager)"], horizontal=True)
-is_bolig = prosjekttype == "Bolig"
+st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert (SSOT).")
 
-with st.expander("Prosjekt & Geografi", expanded=True):
+with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", "Saga Park")
-    c_name = c2.text_input("Oppdragsgiver", "Saga Park AS")
-    
+    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
+    b_type = c2.text_input("Formål / Bygningstype", value=pd_state["b_type"], disabled=True)
+    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
+    bta = st.number_input("Ønsket Bruttoareal (BTA m2)", value=int(pd_state["bta"]), disabled=True)
+
+with st.expander("2. Reguleringsbestemmelser (Utnyttelse & Høyder)", expanded=True):
+    st.info("Legg inn begrensninger fra gjeldende reguleringsplan for å sjekke om ønsket volum er realistisk.")
     c3, c4 = st.columns(2)
-    adresse = c3.text_input("Gatenavn og nummer", "Industriveien 1")
-    kommune = c4.text_input("Kommune", "Trondheim")
+    utnyttelsesgrad = c3.text_input("Tillatt utnyttelsesgrad (f.eks. %-BYA=30% eller BRA=2000 m2)", placeholder="F.eks. %-BYA = 35%")
+    max_hoyde = c4.text_input("Maks tillatt byggehøyde / gesimshøyde", placeholder="F.eks. Kote +45 eller 12m")
+    
+    planstatus = st.selectbox("Status for regulering", ["Uregulert (Kommuneplan gjelder)", "Eldre reguleringsplan (Må muligens omreguleres)", "Ferdig regulert (Klar for rammesøknad)"], index=2)
 
-with st.expander("Arealberegning & Utnyttelse (NS 3940:2023)", expanded=True):
-    st.markdown(f"**(BTA = Bruttoareal | BRA = Bruksareal | {'BRA-i = Salgbart Boligareal' if is_bolig else 'UBA = Utleibart areal'})**")
-    
-    col1, col2, col3 = st.columns(3)
-    tomt_m2 = col1.number_input("Tomteareal (m²)", value=5000)
-    bygg_bya = col2.number_input("Ønsket fotavtrykk BYA (m²)", value=1500)
-    etasjer = col3.number_input("Antall etasjer (Snitt)", value=4)
-    
-    col4, col5 = st.columns(2)
-    bta_bra_faktor = col4.slider("Konvertering BTA til BRA", 0.70, 0.95, 0.85, 0.01, help="Korrigerer for yttervegger og sjakter")
-    
-    if is_bolig:
-        bra_netto_faktor = col5.slider("Konvertering BRA til BRA-i", 0.70, 0.95, 0.82, 0.01, help="Korrigerer for fellesganger. Gir salgbart areal.")
-        
-        col6, col7, col8 = st.columns(3)
-        boenheter = col6.number_input("Antall boenheter", value=50)
-        kommune_max_bya = col7.number_input("Kommunes maks tillatt %-BYA", value=35)
-        kommune_mua_krav = col8.number_input("MUA-krav (m² uteopphold pr enhet)", value=15)
-    else:
-        bra_netto_faktor = col5.slider("Konvertering BRA til UBA (Utleibart)", 0.70, 0.98, 0.90, 0.01, help="Næring har ofte høyere konvertering til UBA.")
-        
-        col6, col7 = st.columns(2)
-        kommune_max_bya = col6.number_input("Kommunes maks tillatt %-BYA", value=60)
-        kommune_gront_krav = col7.number_input("Krav til grøntareal (% av tomt)", value=10)
+with st.expander("3. Visuelt Grunnlag (Reguleringskart / Skisser)", expanded=True):
+    st.info("Viktig: Last opp utsnitt av reguleringskart, ortofoto eller enkle volumskisser. Agenten vil analysere byggegrenser, naboskap og tomtens form.")
+    files = st.file_uploader("Last opp kart/skisser (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
-files = st.file_uploader("Last opp et blankt kart (PDF/Bilde) for AI volumskisse", accept_multiple_files=True)
-
-if st.button("GENERER MULIGHETSSTUDIE OG AREALANALYSE", type="primary"):
+st.markdown("<br>", unsafe_allow_html=True)
+if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_width=True):
     
-    # Matematikk-motor
-    bya_prosent = (bygg_bya / tomt_m2) * 100 if tomt_m2 > 0 else 0
-    bta_tot = bygg_bya * etasjer
-    bra_tot = bta_tot * bta_bra_faktor
-    netto_tot = bra_tot * bra_netto_faktor # Enten BRA-i eller UBA
-    total_netto_brutto = (netto_tot / bta_tot) * 100 if bta_tot > 0 else 0
+    images_for_ai = [] 
     
-    kartverket_info = ""
-    img_ortho = img_topo = None
-    
-    with st.spinner("🌍 Kobler til Geonorge API for Ortofoto og Norgeskart..."):
-        kartverket_info, nord, ost = fetch_kartverket_data(adresse, kommune, "", "")
-        if nord and ost:
-            st.success(kartverket_info)
-            img_ortho, img_topo = fetch_maps_from_kartverket(nord, ost)
-        else:
-            st.warning(kartverket_info)
-    
-    processed_maps = []
     if files:
-        with st.spinner("📐 Arkitekt-AI tegner konseptuelle volumskisser..."):
+        with st.spinner("📐 Henter ut kart og skisser for visuell AI-analyse..."):
             try:
-                valid_image_files = [f for f in files if f.name.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg'))]
-                for i in range(min(len(valid_image_files), 1)): 
-                    f = valid_image_files[i]
+                for f in files: 
                     if f.name.lower().endswith('pdf'):
                         if fitz is None: st.stop()
                         doc = fitz.open(stream=f.read(), filetype="pdf")
-                        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        for page_num in range(min(3, len(doc))): 
+                            pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                            images_for_ai.append(img)
                         doc.close() 
                     else:
-                        img = Image.open(f)
-                    
-                    m = generate_volume_study(img, is_bolig)
-                    processed_maps.append(m)
-            except Exception as e:
-                pass
+                        img = Image.open(f).convert("RGB")
+                        images_for_ai.append(img)
+            except Exception as e: 
+                st.error(f"Feil under bildebehandling: {e}")
                 
-    with st.spinner("🤖 Genererer omfattende byplanleggingsrapport..."):
-        gyldige_modeller = []
+    with st.spinner(f"🤖 Analyserer tomtens potensial og genererer mulighetsstudie for {pd_state.get('land', 'Norge')}..."):
         try:
-            for mod in genai.list_models():
-                if 'generateContent' in mod.supported_generation_methods:
-                    gyldige_modeller.append(mod.name)
+            valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
             st.error("Kunne ikke koble til Google AI.")
             st.stop()
 
-        valgt_modell = gyldige_modeller[0]
-        for favoritt in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if favoritt in gyldige_modeller:
-                valgt_modell = favoritt
-                break
+        valgt_modell = valid_models[0]
+        for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+            if fav in valid_models: valgt_modell = fav; break
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # Skreddersydd tekst basert på Bolig vs Næring
-        if is_bolig:
-            snitt_pr_enhet = netto_tot / boenheter if boenheter > 0 else 0
-            mua_behov = boenheter * kommune_mua_krav
-            areal_tekst = f"""
-            - Salgbart areal (Internt bruksareal BRA-i): {netto_tot:.0f} m2
-            - Prosjektets totale Brutto/Netto-faktor: {total_netto_brutto:.1f} % av BTA er salgbart areal.
-            - Antall boenheter: {boenheter} (Gir en snittstørrelse på {snitt_pr_enhet:.0f} m2 BRA-i pr. enhet)
-            - MUA-krav (Uteoppholdsareal): Trenger minimum {mua_behov} m2 for å tilfredsstille kommunens krav.
-            """
-            rolle_tekst = "Fokuser på bokvalitet, salgbarhet, løsning av MUA, og fortetting i tråd med KPA."
-        else:
-            gront_behov = tomt_m2 * (kommune_gront_krav / 100)
-            areal_tekst = f"""
-            - Utleibart areal (UBA): {netto_tot:.0f} m2
-            - Prosjektets totale Brutto/Netto-faktor: {total_netto_brutto:.1f} % av BTA er utleibart.
-            - Grøntarealkrav: Kommunen krever {kommune_gront_krav}% av tomt ({gront_behov:.0f} m2).
-            """
-            rolle_tekst = "Fokuser på næringsutvikling, Yield/leiepotensial (UBA), rasjonell logistikk/adkomst, og overvannshåndtering/grøntareal."
-
-        prompt = f"""
-        Du er Builtly Arkitektur AI, en kommersielt anlagt sivilarkitekt og eiendomsutvikler.
-        Skriv en mulighetsstudie for et nytt prosjekt av type: {prosjekttype.upper()}.
-        Bruk ny NS 3940:2023 for arealbegrepene.
+        prompt_text = f"""
+        Du er Builtly ARK AI, en seniorarkitekt og byplanlegger med ekspertise innen eiendomsutvikling.
+        Skriv en formell og profesjonell "Mulighetsstudie og Tomteanalyse" for prosjektet:
         
         PROSJEKT: {p_name}
-        LOKASJON: {adresse}, {kommune}. {kartverket_info}
+        ØNSKET FORMÅL: {b_type}
+        ØNSKET VOLUM: {bta} m2 fordelt på {pd_state['etasjer']} etasjer.
+        LOKASJON: {adresse} (Kommune: {pd_state['kommune']}).
         
-        NØKKELTALL BEREGNET AV SYSTEMET (Må integreres og drøftes!):
-        - Tomtestørrelse: {tomt_m2} m2
-        - Fotavtrykk (Bebygd Areal - BYA): {bygg_bya} m2
-        - Utnyttelsesgrad: {bya_prosent:.1f} %-BYA (Kommuneplanens grense er satt til {kommune_max_bya} %)
-        - Bruttoareal (BTA): {bta_tot:.0f} m2 ({etasjer} etasjer)
-        - Bruksareal (BRA): {bra_tot:.0f} m2 
-        {areal_tekst}
+        REGULERINGSMESSIGE BEGRENSNINGER OPPGITT AV KUNDE:
+        - Status: {planstatus}
+        - Tillatt utnyttelse: {utnyttelsesgrad}
+        - Maks byggehøyde: {max_hoyde}
+        - Regelverk: {pd_state.get('land', 'Norge (TEK17)')}
         
-        INSTRUKSER:
-        - {rolle_tekst}
-        - Skriv formelt og teknisk korrekt (Minimum 1500 ord).
-        - Bruk kapittel 4 til å drøfte prosjektets lønnsomhet i lys av konverteringen fra BTA til {('BRA-i' if is_bolig else 'UBA')}. 
-        - Er en brutto/netto-faktor på {total_netto_brutto:.1f}% god nok for denne typen eiendom?
+        KUNDENS PROSJEKTBESKRIVELSE / VISJON: 
+        "{pd_state['p_desc']}"
+        
+        VISUELL ANALYSE AV VEDLAGTE KART/SKISSER:
+        Jeg har lagt ved bilder av tomten/reguleringskart. Din oppgave er å NØYE analysere disse:
+        1. Vurder tomtens form, adkomstmuligheter og naboskap.
+        2. Vurder hvor det er best solforhold for uteplasser/fasader.
+        3. Identifiser eventuelle utfordringer (byggegrenser, trang tomt, eksisterende bebyggelse).
+        
+        INSTRUKSER (Skriv formelt, selgende, men teknisk og presist. Min 1200 ord):
+        - Flett inn dine spesifikke observasjoner fra bildene.
+        - Diskuter om kundens ønskede volum ({bta} m2) virker realistisk i forhold til oppgitt utnyttelsesgrad ({utnyttelsesgrad}).
+        - Anbefal et arkitektonisk hovedkonsept (hvordan bør bygget plasseres og formes på tomten?).
         
         STRUKTUR (Bruk KUN disse nøyaktige overskriftene):
         # 1. SAMMENDRAG OG KONKLUSJON
-        # 2. EIENDOMSANALYSE OG KARTVERKET
-        # 3. KRAV I KOMMUNEPLAN (KPA) OG UTNYTTELSE
-        # 4. AREALANALYSE OG LØNNSOMHET (BTA / NETTO)
-        # 5. UTOMHUSPLAN OG GRØNTSTRUKTUR
-        # 6. SOL, SKYGGE OG OMGIVELSER
-        # 7. ANBEFALING FOR VIDERE PROSJEKTERING
+        # 2. PROSJEKT- OG TOMTEBESKRIVELSE
+        # 3. REGULERINGSMESSIGE RAMMEBETINGELSER
+        # 4. VOLUMSTUDIE OG UTNYTTELSE (Vurder {bta} m2 opp mot {utnyttelsesgrad})
+        # 5. SOL, SKYGGE OG STØY (OVERORDNET)
+        # 6. ANBEFALT KONSEPT OG VEIEN VIDERE
         """
         
+        prompt_parts = [prompt_text] + images_for_ai
+
         try:
-            res = model.generate_content(prompt)
-            with st.spinner("Kompilerer arkitekt-PDF..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, processed_maps, img_ortho, img_topo)
+            res = model.generate_content(prompt_parts)
             
+            with st.spinner("Kompilerer ARK-PDF med vedlagte kart og skisser..."):
+                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
             st.success("✅ Mulighetsstudie er ferdigstilt!")
-            st.download_button("📄 Last ned Builtly ARKITEKTUR-rapport", pdf_data, f"Builtly_MULIGHET_{p_name}.pdf")
+            st.download_button("📄 Last ned Mulighetsstudie (ARK)", pdf_data, f"Builtly_ARK_{p_name}.pdf", type="primary")
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
