@@ -33,14 +33,14 @@ def find_page(base_name: str) -> str:
             return str(p)
     return ""
 
-# --- 3. PREMIUM CSS (Med eksakt samme knappedesign som forsiden) ---
+# --- 3. PREMIUM CSS (Med nye, ultra-tydelige faner!) ---
 st.markdown(
     """
 <style>
     :root {
         --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --panel-2: rgba(13, 27, 42, 0.94);
         --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-xl: 24px; --radius-lg: 16px;
+        --accent: #38c2c9; --radius-xl: 24px; --radius-lg: 16px;
     }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
@@ -82,7 +82,37 @@ st.markdown(
         background: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
         border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 8px !important; font-weight: 600 !important;
     }
-    button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: #38bdf8 !important; color: #38bdf8 !important; }
+    button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; }
+
+    /* --- TYDELIGE TABS (FANER) --- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 12px;
+        padding-bottom: 8px;
+        background-color: transparent !important;
+    }
+    .stTabs [data-baseweb="tab-list"] button {
+        background-color: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 12px !important;
+        color: #e2e8f0 !important; /* Mye hvitere tekst for synlighet */
+        font-weight: 650 !important;
+        font-size: 1.05rem !important;
+        padding: 12px 24px !important;
+        transition: all 0.2s ease !important;
+    }
+    .stTabs [data-baseweb="tab-list"] button:hover {
+        background-color: rgba(56, 194, 201, 0.15) !important;
+        border-color: rgba(120, 220, 225, 0.8) !important;
+        color: #ffffff !important;
+        transform: translateY(-2px);
+    }
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
+        background: linear-gradient(135deg, rgba(56,194,201,0.25), rgba(120,220,225,0.15)) !important;
+        border: 1px solid rgba(120, 220, 225, 0.8) !important;
+        color: #ffffff !important;
+        box-shadow: 0 4px 15px rgba(56,194,201,0.2) !important;
+    }
+    .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
 
     /* INPUT-FELT DESIGN */
     .stTextInput input, .stNumberInput input, .stTextArea textarea {
@@ -90,7 +120,7 @@ st.markdown(
         border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
     }
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-        border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important;
+        border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
     }
     div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     div[data-baseweb="select"] span { color: #ffffff !important; }
@@ -103,7 +133,7 @@ st.markdown(
     .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; margin-bottom: 2.5rem; }
     .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
     .card-hero { background: linear-gradient(135deg, rgba(16,30,46,0.9), rgba(6,17,26,0.9)); position: relative; overflow: hidden; }
-    .card-hero::after { content: ""; position: absolute; top: -50%; right: -20%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(56,189,248,0.1) 0%, transparent 60%); pointer-events: none; }
+    .card-hero::after { content: ""; position: absolute; top: -50%; right: -20%; width: 400px; height: 400px; background: radial-gradient(circle, rgba(56,194,201,0.1) 0%, transparent 60%); pointer-events: none; }
     .hero-kicker { display: inline-flex; align-items: center; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 1rem; border: 1px solid var(--stroke); padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,0.02); }
     .hero-title { font-size: 2.8rem; font-weight: 800; margin: 0 0 0.5rem 0; letter-spacing: -0.03em; color: #fff; }
     .hero-sub { color: var(--soft); font-size: 1.05rem; line-height: 1.6; max-width: 50ch; margin-bottom: 1.5rem; }
@@ -126,19 +156,16 @@ st.markdown(
     .snap-row { display: flex; justify-content: space-between; align-items: flex-start; padding: 0.8rem 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.9rem; }
     .snap-label { color: var(--muted); width: 35%; flex-shrink: 0; }
     .snap-val { color: var(--text); font-weight: 500; text-align: right; width: 65%; word-wrap: break-word;}
-
-    div[data-baseweb="tab-list"] { background-color: transparent; gap: 8px; }
-    div[data-baseweb="tab"] { background-color: rgba(255,255,255,0.03); border: 1px solid rgba(120,145,170,0.15); border-radius: 8px; padding: 10px 16px; color: var(--muted); }
-    div[data-baseweb="tab"][aria-selected="true"] { background-color: rgba(56,189,248,0.1); border-color: var(--accent); color: #fff; }
-    div[data-baseweb="tab-highlight"] { display: none; }
     
-    /* Launchpad knapper (Fjernet icon kravet for Streamlit!) */
+    /* Launchpad knapper */
     [data-testid="stPageLink-NavLink"] {
         background-color: rgba(16, 30, 46, 0.8); border: 1px solid rgba(56,194,201,0.3); border-radius: 12px; padding: 16px; transition: all 0.2s; margin-top: 8px;
         display: flex; justify-content: center; text-align: center;
     }
     [data-testid="stPageLink-NavLink"]:hover { background-color: rgba(56,194,201,0.15); border-color: rgba(56,194,201,0.8); transform: translateY(-2px); }
     [data-testid="stPageLink-NavLink"] * { color: #ffffff !important; font-weight: 650 !important; font-size: 1.05rem !important;}
+
+    @media (max-width: 1024px) { .dash-grid { grid-template-columns: 1fr; } .stat-grid { grid-template-columns: repeat(2, 1fr); } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -167,7 +194,7 @@ fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "b
 filled_fields = sum(1 for field in fields_to_check if bool(pd[field]))
 completeness = int((filled_fields / len(fields_to_check)) * 100)
 sync_status = "Draft" if completeness < 100 else "Ready"
-progress_color = "#38bdf8" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
+progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
 
 # --- 5. KARTVERKET API ---
 def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
@@ -194,7 +221,6 @@ def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
 # --- 6. HEADER & DASHBOARD UI ---
 logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 
-# PILLE-MENYEN FRA FORSIDEN ER NÅ LAGT INN HER!
 render_html(f"""
 <div class="top-shell">
     <div class="brand-left">
@@ -267,6 +293,7 @@ st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Naviger gjennom fa
 input_col, snap_col = st.columns([2, 1], gap="large")
 
 with input_col:
+    # --- NYE FANER ---
     tab1, tab2, tab3 = st.tabs(["📌 01 Generelt", "🌍 02 Lokasjon & API", "🏢 03 Byggdata"])
     
     with tab1:
@@ -349,7 +376,7 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD (Neste steg - NÅ LØST UTEN ICON-FEIL) ---
+# --- 8. LAUNCHPAD ---
 if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 1.5rem;'>🚀 Prosjektet er synkronisert! Hvor vil du starte?</h3>", unsafe_allow_html=True)
