@@ -20,16 +20,16 @@ st.markdown("""
     .header-sub { color: #a1a1aa; font-size: 1rem; margin-bottom: 2rem; border-bottom: 1px solid #27272a; padding-bottom: 1.5rem; }
     
     /* Styling av knapper og paneler */
-    div[data-testid="stExpander"] { background: rgba(24, 24, 27, 0.4); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+    div[data-testid="stExpander"] { background: rgba(24, 24, 27, 0.4); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; margin-bottom: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 3. SESSION STATE LOGIKK (Hjernen i SSOT) ---
-# Hvis prosjektdata ikke finnes i minnet enda, opprett en blank mal
 if "project_data" not in st.session_state:
     st.session_state.project_data = {
         "p_name": "Nytt Prosjekt",
         "c_name": "",
+        "p_desc": "", # <--- Her lagres prosjektbeskrivelsen!
         "adresse": "",
         "kommune": "",
         "gnr": "",
@@ -49,6 +49,14 @@ with st.expander("📝 General Project Info", expanded=True):
     c1, c2 = st.columns(2)
     new_p_name = c1.text_input("Project Name", value=pd["p_name"])
     new_c_name = c2.text_input("Client / Developer", value=pd["c_name"])
+    
+    # NYTT: Stort tekstfelt for prosjektbeskrivelse
+    new_p_desc = st.text_area(
+        "Project Description / Narrative", 
+        value=pd["p_desc"],
+        height=150,
+        placeholder="Describe the project scope, main functions, special requirements, or architectural vision... (e.g. 'A 4-story office building with an underground parking garage and a public cafeteria on the ground floor.')"
+    )
 
 with st.expander("🌍 Location & Cadastral Data (Matrikkel)", expanded=True):
     c3, c4 = st.columns(2)
@@ -62,7 +70,6 @@ with st.expander("🌍 Location & Cadastral Data (Matrikkel)", expanded=True):
 with st.expander("🏢 Building Metrics", expanded=True):
     c7, c8, c9 = st.columns(3)
     
-    # Finn index for dropdown basert på lagret verdi
     type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
     try: default_idx = type_options.index(pd["b_type"])
     except: default_idx = 1
@@ -75,10 +82,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 5. LAGRE-KNAPP ---
 if st.button("💾 Save & Sync Master Data", type="primary", use_container_width=True):
-    # Oppdaterer minnet med de nye verdiene
     st.session_state.project_data.update({
         "p_name": new_p_name,
         "c_name": new_c_name,
+        "p_desc": new_p_desc, # <--- Sender teksten til minnet
         "adresse": new_adresse,
         "kommune": new_kommune,
         "gnr": new_gnr,
@@ -87,5 +94,5 @@ if st.button("💾 Save & Sync Master Data", type="primary", use_container_width
         "etasjer": new_etasjer,
         "bta": new_bta
     })
-    st.success(f"✅ Success! **{new_p_name}** is now globally synced. Open any engineering module (Fire, Traffic, Geo) and the data will be pre-filled.")
+    st.success(f"✅ Success! **{new_p_name}** is now globally synced. Open any engineering module and the data will be pre-filled.")
     st.balloons()
