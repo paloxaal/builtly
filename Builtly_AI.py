@@ -1,7 +1,8 @@
-import os
 import base64
+import html
+import os
 from pathlib import Path
-from typing import Optional
+from textwrap import dedent
 
 import streamlit as st
 
@@ -16,1011 +17,956 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# 2) PAGE MAP & SMART SØKER
+# 2) ROUTES
+# Update only if your deployed page paths differ.
 # -------------------------------------------------
-def find_page(base_name: str) -> str:
-    # Løser Linux-problemet med store/små bokstaver
-    for name in [base_name, base_name.lower(), base_name.capitalize()]:
-        p = Path(f"pages/{name}.py")
-        if p.exists():
-            return str(p)
-    return f"pages/{base_name}.py"
-
 PAGES = {
-    "mulighetsstudie": find_page("Mulighetsstudie"),
-    "geo": find_page("Geo"),
-    "konstruksjon": find_page("Konstruksjon"),
-    "brann": find_page("Brannkonsept"),
-    "akustikk": find_page("Akustikk"),
-    "trafikk": find_page("Trafikk"), # Løser Trafikk-linken!
-    "project": find_page("Project"),
-    "review": find_page("Review"),
+    "mulighetsstudie": {"route": "Mulighetsstudie"},
+    "geo": {"route": "Geo"},
+    "konstruksjon": {"route": "Konstruksjon"},
+    "brann": {"route": "Brannkonsept"},
+    "akustikk": {"route": "Akustikk"},
+    "trafikk": {"route": "Trafikk.py"},
+    "project": {"route": "Project"},
+    "review": {"route": "Review"},
 }
 
+
+def page_url(page_key: str) -> str:
+    route = PAGES[page_key]["route"]
+    if route.startswith("http://") or route.startswith("https://"):
+        return route
+    if route.startswith("/"):
+        return route
+    return f"/{route}"
+
+
 # -------------------------------------------------
-# 3) HELPERS & ANTI-BUG RENDERER
+# 3) HELPERS
 # -------------------------------------------------
-def page_exists(page_path: str) -> bool:
-    return Path(page_path).exists()
+def clean_html(markup: str) -> str:
+    lines = dedent(markup).splitlines()
+    return "\n".join(line.strip() for line in lines if line.strip())
 
-def page_route(page_key: str) -> Optional[str]:
-    page_path = PAGES.get(page_key)
-    if not page_path or not page_exists(page_path):
-        return None
-    return Path(page_path).stem
 
-def href_or_none(page_key: str) -> Optional[str]:
-    return page_route(page_key)
 
-def top_link(page_key: str, label: str, kind: str = "ghost") -> str:
-    href = href_or_none(page_key)
-    if href:
-        return f'<a href="{href}" target="_self" class="top-link {kind}">{label}</a>'
-    return f'<span class="top-link {kind} disabled">{label}</span>'
+def logo_markup() -> str:
+    for candidate in ("logo-white.png", "logo.png"):
+        if os.path.exists(candidate):
+            ext = Path(candidate).suffix.lower().replace(".", "") or "png"
+            mime = "image/png" if ext == "png" else f"image/{ext}"
+            data = base64.b64encode(Path(candidate).read_bytes()).decode("utf-8")
+            return (
+                f'<img src="data:{mime};base64,{data}" '
+                'alt="Builtly" class="brand-logo-img"/>'
+            )
+    return '<div class="brand-fallback">Builtly</div>'
 
-def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
-    href = href_or_none(page_key)
-    if href:
-        return f'<a href="{href}" target="_self" class="hero-action {kind}">{label}</a>'
-    return f'<span class="hero-action {kind} disabled">{label}</span>'
 
-# DETTE ER MAGIEN: Fjerner linjeskift så Streamlit aldri lager "hvite kodebokser" av HTML-en vår.
-def render_html(html_string: str):
-    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
+
+def top_button(label: str, href: str, primary: bool = False) -> str:
+    cls = "top-button top-button-primary" if primary else "top-button top-button-secondary"
+    return f'<a class="{cls}" href="{html.escape(href)}" target="_self">{html.escape(label)}</a>'
+
+
+
+def workflow_card(number: int, title: str, desc: str) -> str:
+    return clean_html(
+        f"""
+        <div class="workflow-card">
+            <div class="workflow-number">{number}</div>
+            <div class="workflow-title">{html.escape(title)}</div>
+            <div class="workflow-desc">{html.escape(desc)}</div>
+        </div>
+        """
+    )
+
+
 
 def module_card(
-    page_key: str,
-    icon: str,
-    badge: str,
-    badge_class: str,
     title: str,
+    eyebrow: str,
+    icon: str,
     description: str,
     input_text: str,
     output_text: str,
     cta_label: str,
+    href: str,
 ) -> str:
-    href = href_or_none(page_key)
-    action_html = (
-        f'<a href="{href}" target="_self" class="module-cta">{cta_label}</a>'
-        if href
-        else '<span class="module-cta disabled">In development</span>'
-    )
-
-    return f"""
-        <div class="module-card">
-            <div class="module-header">
+    return clean_html(
+        f"""
+        <a href="{html.escape(href)}" target="_self" class="module-card">
+            <div class="module-top">
                 <div class="module-icon">{icon}</div>
-                <div class="module-badge {badge_class}">{badge}</div>
+                <div class="module-eyebrow">{html.escape(eyebrow)}</div>
             </div>
-            <div class="module-title">{title}</div>
-            <div class="module-desc">{description}</div>
+            <div class="module-title">{html.escape(title)}</div>
+            <div class="module-desc">{html.escape(description)}</div>
             <div class="module-spacer"></div>
             <div class="module-meta">
-                <strong>Input:</strong> {input_text}<br/>
-                <strong>Output:</strong> {output_text}
+                <div><strong>Input</strong> {html.escape(input_text)}</div>
+                <div><strong>Output</strong> {html.escape(output_text)}</div>
             </div>
             <div class="module-cta-wrap">
-                {action_html}
+                <span class="module-cta">{html.escape(cta_label)}</span>
             </div>
-        </div>
-    """
+        </a>
+        """
+    )
 
-def logo_data_uri() -> str:
-    for candidate in ["logo-white.png", "logo.png"]:
-        if os.path.exists(candidate):
-            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
-            with open(candidate, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("utf-8")
-            return f"data:image/{suffix};base64,{encoded}"
-    return ""
 
 # -------------------------------------------------
-# 4) CSS (Uendret - Denne satt perfekt!)
+# 4) CSS
 # -------------------------------------------------
 st.markdown(
-    """
-<style>
-    :root {
-        --bg: #06111a;
-        --panel: rgba(10, 22, 35, 0.78);
-        --panel-2: rgba(13, 27, 42, 0.94);
-        --stroke: rgba(120, 145, 170, 0.18);
-        --stroke-strong: rgba(120, 145, 170, 0.28);
-        --text: #f5f7fb;
-        --muted: #9fb0c3;
-        --soft: #c8d3df;
-        --accent: #38c2c9;
-        --accent-2: #78dce1;
-        --accent-3: #112c3f;
-        --ok: #7ee081;
-        --warn: #f4bf4f;
-        --shadow: 0 24px 90px rgba(0,0,0,0.35);
-        --radius-xl: 28px;
-        --radius-lg: 22px;
-        --radius-md: 14px;
-    }
-
-    html, body, [class*="css"] {
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
-    .stApp {
-        background:
-            radial-gradient(1100px 500px at 15% -5%, rgba(56,194,201,0.18), transparent 50%),
-            radial-gradient(900px 500px at 100% 0%, rgba(64,170,255,0.12), transparent 45%),
-            linear-gradient(180deg, #071018 0%, #08131d 35%, #071018 100%);
-        color: var(--text);
-    }
-
-    header[data-testid="stHeader"] {
-        visibility: hidden;
-        height: 0;
-    }
-
-    [data-testid="stSidebar"] {
-        background: rgba(7, 16, 24, 0.96);
-        border-right: 1px solid var(--stroke);
-    }
-
-    .block-container {
-        max-width: 1300px !important;
-        padding-top: 1.35rem !important;
-        padding-bottom: 4rem !important;
-    }
-
-    .top-shell {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1.25rem;
-        margin-bottom: 2rem;
-    }
-
-    .brand-left {
-        display: flex;
-        align-items: center;
-        gap: 0.9rem;
-        min-width: 0;
-    }
-
-    .brand-logo {
-        display: block;
-        height: 85px; 
-        width: auto;
-        flex-shrink: 0;
-        filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
-    }
-
-    .brand-name {
-        color: var(--text);
-        font-weight: 750;
-        font-size: 1.5rem;
-        line-height: 1.1;
-        letter-spacing: -0.02em;
-    }
-
-    .topbar-right {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 0.65rem;
-        padding: 0.35rem;
-        border-radius: 18px;
-        background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(120,145,170,0.12);
-        flex-wrap: nowrap !important;
-    }
-
-    .top-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 42px;
-        padding: 0.72rem 1.2rem;
-        border-radius: 12px;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.93rem;
-        transition: all 0.2s ease;
-        border: 1px solid transparent;
-        white-space: nowrap;
-    }
-
-    .top-link.ghost {
-        color: var(--soft) !important;
-        background: rgba(255,255,255,0.04);
-        border-color: rgba(120,145,170,0.18);
-    }
-
-    .top-link.ghost:hover {
-        color: #ffffff !important;
-        border-color: rgba(56,194,201,0.38);
-        background: rgba(255,255,255,0.06);
-    }
-
-    .top-link.primary {
-        color: #041018 !important;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border-color: rgba(120,220,225,0.45);
-    }
-
-    .top-link.primary:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 10px 24px rgba(56,194,201,0.18);
-    }
-
-    .top-link.disabled,
-    .hero-action.disabled,
-    .module-cta.disabled {
-        opacity: 0.45;
-        pointer-events: none;
-        cursor: default;
-    }
-
-    .hero {
-        position: relative;
-        overflow: hidden;
-        background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: var(--radius-xl);
-        padding: 2.5rem;
-        box-shadow: var(--shadow);
-        margin-bottom: 1.25rem;
-        height: 560px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-
-    .hero-panel {
-        background: rgba(20, 35, 50, 0.4);
-        border: 1px solid var(--stroke);
-        border-radius: var(--radius-xl);
-        padding: 2.5rem;
-        height: 560px;
-        display: flex;
-        flex-direction: column;
-    }
-
-    .hero::before {
-        content: "";
-        position: absolute;
-        inset: -80px -120px auto auto;
-        width: 420px;
-        height: 420px;
-        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%);
-        pointer-events: none;
-    }
-
-    .eyebrow {
-        color: var(--accent-2);
-        text-transform: uppercase;
-        letter-spacing: 0.14em;
-        font-size: 0.78rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
-    }
-
-    .hero-title {
-        font-size: clamp(2.55rem, 5vw, 4.35rem);
-        line-height: 1.05;
-        letter-spacing: -0.03em;
-        font-weight: 800;
-        margin: 0 0 1rem 0;
-        color: var(--text);
-        max-width: none;
-    }
-
-    .hero-title .accent {
-        color: var(--accent-2);
-    }
-
-    .hero-subtitle {
-        max-width: 58ch;
-        font-size: 1.08rem;
-        line-height: 1.8;
-        color: var(--soft);
-        margin-bottom: 1.5rem;
-    }
-
-    .hero-actions {
-        display: flex;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        margin-bottom: 1.5rem;
-    }
-
-    .hero-action {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 46px;
-        padding: 0.78rem 1rem;
-        border-radius: 12px;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.95rem;
-        transition: all 0.2s ease;
-        border: 1px solid transparent;
-    }
-
-    .hero-action.primary {
-        color: #041018 !important;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border-color: rgba(120,220,225,0.45);
-    }
-
-    .hero-action.secondary {
-        color: #ffffff !important;
-        background: rgba(255,255,255,0.05);
-        border-color: rgba(120,145,170,0.22);
-    }
-
-    .hero-action:hover,
-    .module-cta:hover {
-        transform: translateY(-1px);
-    }
-
-    .proof-strip {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.55rem;
-    }
-
-    .proof-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        padding: 0.42rem 0.7rem;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(120,145,170,0.16);
-        color: var(--soft);
-        font-size: 0.82rem;
-    }
-
-    .panel-title {
-        font-size: 0.86rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--muted);
-        margin-bottom: 0.85rem;
-    }
-
-    .mini-stat {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid var(--stroke);
-        border-radius: 16px;
-        padding: 1.1rem 1.2rem;
-        margin-bottom: 0.8rem;
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-
-    .mini-stat:last-child {
-        margin-bottom: 0;
-    }
-
-    .mini-stat-value {
-        font-size: 1.35rem;
-        font-weight: 750;
-        color: var(--text);
-        line-height: 1.1;
-    }
-
-    .mini-stat-label {
-        margin-top: 0.25rem;
-        color: var(--muted);
-        font-size: 0.88rem;
-        line-height: 1.5;
-    }
-
-    .section-head {
-        margin-top: 2.25rem;
-        margin-bottom: 1rem;
-    }
-
-    .section-kicker {
-        color: var(--accent-2);
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        font-size: 0.74rem;
-        font-weight: 700;
-        margin-bottom: 0.4rem;
-    }
-
-    .section-title {
-        font-size: 1.86rem;
-        font-weight: 750;
-        letter-spacing: -0.03em;
-        color: var(--text);
-        margin: 0;
-    }
-
-    .section-subtitle {
-        margin-top: 0.35rem;
-        color: var(--muted);
-        line-height: 1.75;
-        max-width: 74ch;
-    }
-
-    .trust-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 1rem;
-        margin-top: 0.8rem;
-    }
-
-    .trust-card {
-        background: var(--panel);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.2rem;
-        min-height: 136px;
-    }
-
-    .trust-title {
-        font-size: 1.05rem;
-        font-weight: 650;
-        color: var(--text);
-        margin-bottom: 0.45rem;
-    }
-
-    .trust-desc {
-        font-size: 0.92rem;
-        line-height: 1.65;
-        color: var(--muted);
-    }
-
-    .loop-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 1rem;
-        margin-top: 0.8rem;
-    }
-
-    .loop-card {
-        background: var(--panel-2);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.2rem;
-        min-height: 172px;
-    }
-
-    .loop-number {
-        width: 34px;
-        height: 34px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 999px;
-        background: rgba(56,194,201,0.12);
-        border: 1px solid rgba(56,194,201,0.22);
-        color: var(--accent-2);
-        font-weight: 700;
-        font-size: 0.92rem;
-        margin-bottom: 0.8rem;
-    }
-
-    .loop-title {
-        font-size: 1.05rem;
-        font-weight: 650;
-        color: var(--text);
-        margin-bottom: 0.45rem;
-    }
-
-    .loop-desc {
-        font-size: 0.92rem;
-        line-height: 1.65;
-        color: var(--muted);
-    }
-
-    .subsection-title {
-        margin-top: 1.5rem;
-        margin-bottom: 0.9rem;
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: var(--text);
-    }
-
-    .module-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 1.2rem;
-        align-items: stretch;
-        margin-top: 0.8rem;
-    }
-
-    .module-card {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
-        border: 1px solid var(--stroke);
-        border-radius: 22px;
-        padding: 1.25rem;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
-        display: flex;
-        flex-direction: column;
-        min-height: 360px;
-        height: 100%;
-    }
-
-    .module-card:hover {
-        border-color: rgba(56,194,201,0.24);
-        box-shadow: 0 16px 42px rgba(0,0,0,0.24);
-    }
-
-    .module-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        margin-bottom: 1rem;
-    }
-
-    .module-badge {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0.32rem 0.62rem;
-        border-radius: 999px;
-        border: 1px solid rgba(120,145,170,0.18);
-        background: rgba(255,255,255,0.03);
-        color: var(--muted);
-        font-size: 0.75rem;
-        font-weight: 650;
-        letter-spacing: 0.01em;
-        white-space: nowrap;
-    }
-
-    .badge-priority {
-        color: #8ef0c0;
-        border-color: rgba(142,240,192,0.25);
-        background: rgba(126,224,129,0.08);
-    }
-
-    .badge-phase2 {
-        color: #9fe7ff;
-        border-color: rgba(120,220,225,0.22);
-        background: rgba(56,194,201,0.08);
-    }
-
-    .badge-early {
-        color: #d7def7;
-        border-color: rgba(215,222,247,0.18);
-        background: rgba(255,255,255,0.03);
-    }
-
-    .badge-roadmap {
-        color: #f4bf4f;
-        border-color: rgba(244,191,79,0.22);
-        background: rgba(244,191,79,0.08);
-    }
-
-    .module-icon {
-        width: 46px;
-        height: 46px;
-        border-radius: 14px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.18);
-        color: var(--accent-2);
-        font-size: 1.32rem;
-        flex-shrink: 0;
-    }
-
-    .module-title {
-        font-size: 1.08rem;
-        font-weight: 720;
-        line-height: 1.35;
-        color: var(--text);
-        margin-bottom: 0.5rem;
-    }
-
-    .module-desc {
-        font-size: 0.95rem;
-        line-height: 1.72;
-        color: var(--muted);
-    }
-
-    .module-spacer {
-        flex: 1;
-        min-height: 1rem;
-    }
-
-    .module-meta {
-        font-size: 0.86rem;
-        line-height: 1.75;
-        color: var(--soft);
-        padding-top: 0.95rem;
-        border-top: 1px solid rgba(120,145,170,0.14);
-    }
-
-    .module-cta-wrap {
-        margin-top: 1rem;
-    }
-
-    .module-cta {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 100%;
-        min-height: 46px;
-        padding: 0.78rem 1rem;
-        border-radius: 12px;
-        background: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.28);
-        color: #f5f7fb !important;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.94rem;
-        transition: all 0.2s ease;
-    }
-
-    .cta-band {
-        margin-top: 3rem;
-        margin-bottom: 1.5rem;
-        background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28));
-        border: 1px solid rgba(56,194,201,0.18);
-        border-radius: 24px;
-        padding: 1.8rem;
-    }
-
-    .cta-title {
-        font-size: 1.35rem;
-        font-weight: 750;
-        color: var(--text);
-        margin-bottom: 0.35rem;
-    }
-
-    .cta-desc {
-        color: var(--muted);
-        line-height: 1.78;
-        max-width: 72ch;
-    }
-
-    .footer-block {
-        text-align: center;
-        margin-top: 3.6rem;
-        padding-top: 2rem;
-        border-top: 1px solid rgba(120,145,170,0.18);
-    }
-
-    .footer-name {
-        font-size: 1.02rem;
-        color: var(--text);
-        margin-bottom: 0.35rem;
-        font-weight: 650;
-    }
-
-    .footer-copy {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin-bottom: 0.35rem;
-    }
-
-    .footer-meta {
-        color: rgba(159,176,195,0.55);
-        font-size: 0.8rem;
-    }
-
-    @media (max-width: 1180px) {
-        .top-shell {
-            flex-direction: column;
-            align-items: flex-start;
+    clean_html(
+        """
+        <style>
+        :root {
+            --bg-0: #050d16;
+            --bg-1: #071220;
+            --bg-2: #081727;
+            --panel: rgba(9, 19, 31, 0.94);
+            --panel-2: rgba(12, 25, 39, 0.94);
+            --panel-3: rgba(14, 30, 46, 0.88);
+            --stroke: rgba(127, 152, 180, 0.18);
+            --stroke-strong: rgba(127, 152, 180, 0.28);
+            --text: #f3f7fb;
+            --muted: #9fb2c6;
+            --soft: #cad5e0;
+            --accent: #50d4e1;
+            --accent-2: #7be7f0;
+            --accent-3: #123146;
+            --shadow-xl: 0 30px 90px rgba(0, 0, 0, 0.42);
+            --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.28);
+            --radius-xl: 28px;
+            --radius-lg: 22px;
+            --radius-md: 16px;
+            --radius-sm: 12px;
         }
-        .topbar-right {
-            width: 100%;
-            justify-content: flex-start;
-        }
-        .trust-grid, .loop-grid, .module-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-    }
 
-    @media (max-width: 760px) {
-        .trust-grid, .loop-grid, .module-grid {
-            grid-template-columns: 1fr;
+        html, body, [class*="css"] {
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
-        .hero, .hero-panel {
+
+        .stApp {
+            background:
+                radial-gradient(1200px 520px at 10% 0%, rgba(80, 212, 225, 0.14), transparent 52%),
+                radial-gradient(1000px 540px at 100% 0%, rgba(32, 118, 201, 0.10), transparent 42%),
+                linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+            color: var(--text);
+        }
+
+        header[data-testid="stHeader"] {
+            visibility: hidden;
+            height: 0;
+        }
+
+        [data-testid="stSidebar"] {
+            background: rgba(7, 16, 24, 0.96);
+            border-right: 1px solid var(--stroke);
+        }
+
+        .block-container {
+            max-width: 1360px !important;
+            padding-top: 1.35rem !important;
+            padding-bottom: 4rem !important;
+        }
+
+        .topbar {
+            display: grid;
+            grid-template-columns: minmax(220px, 380px) 1fr auto;
+            align-items: center;
+            gap: 1.25rem;
+            margin-bottom: 1.35rem;
+        }
+
+        .brand-wrap {
+            display: flex;
+            align-items: center;
+            min-height: 80px;
+        }
+
+        .brand-logo-img {
+            width: min(330px, 100%);
             height: auto;
-            min-height: auto;
+            display: block;
+            filter: drop-shadow(0 10px 28px rgba(0,0,0,0.16));
         }
-        .hero-title {
-            max-width: none;
+
+        .brand-fallback {
+            font-size: 1.8rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            color: var(--text);
         }
-        .topbar-right {
-            flex-direction: row;
-            width: 100%;
+
+        .topbar-chip {
+            justify-self: center;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             gap: 0.5rem;
+            min-height: 54px;
+            padding: 0 1rem;
+            border-radius: 999px;
+            border: 1px solid rgba(80, 212, 225, 0.22);
+            background: rgba(80, 212, 225, 0.07);
+            color: var(--accent-2);
+            font-size: 0.92rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            text-align: center;
+            white-space: nowrap;
         }
-        .top-link {
-            flex: 1;
-            padding: 0.7rem 0.4rem;
-            font-size: 0.85rem;
+
+        .topbar-actions {
+            justify-self: end;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 22px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--stroke);
+            box-shadow: var(--shadow-lg);
         }
-        .brand-logo {
-            height: 60px;
+
+        .top-button {
+            min-height: 56px;
+            padding: 0.9rem 1.2rem;
+            border-radius: 16px;
+            text-decoration: none !important;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.96rem;
+            font-weight: 700;
+            transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+            border: 1px solid transparent;
         }
-    }
-</style>
-""",
+
+        .top-button:hover {
+            transform: translateY(-1px);
+        }
+
+        .top-button-secondary {
+            background: linear-gradient(180deg, rgba(20, 32, 47, 0.98), rgba(13, 23, 36, 0.98));
+            border-color: var(--stroke);
+            color: var(--text) !important;
+        }
+
+        .top-button-secondary:hover {
+            border-color: var(--stroke-strong);
+        }
+
+        .top-button-primary {
+            background: linear-gradient(135deg, rgba(92, 221, 232, 0.96), rgba(72, 209, 225, 0.96));
+            border-color: rgba(92, 221, 232, 0.4);
+            color: #04131d !important;
+            box-shadow: 0 14px 34px rgba(80, 212, 225, 0.18);
+        }
+
+        .hero-grid {
+            display: grid;
+            grid-template-columns: 1.62fr 0.88fr;
+            gap: 1.35rem;
+            align-items: stretch;
+            margin-bottom: 3rem;
+        }
+
+        .hero-card,
+        .value-card {
+            min-height: 760px;
+            height: 100%;
+            border-radius: 32px;
+            border: 1px solid rgba(127, 152, 180, 0.16);
+            box-shadow: var(--shadow-xl);
+        }
+
+        .hero-card {
+            position: relative;
+            overflow: hidden;
+            background:
+                radial-gradient(600px 600px at 82% 22%, rgba(80, 212, 225, 0.18), transparent 48%),
+                linear-gradient(180deg, rgba(9, 22, 36, 0.98), rgba(7, 17, 28, 0.98));
+            padding: 2.6rem 2.35rem 2.15rem 2.35rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .hero-card::after {
+            content: "";
+            position: absolute;
+            inset: auto -120px -180px auto;
+            width: 420px;
+            height: 420px;
+            background: radial-gradient(circle, rgba(80, 212, 225, 0.10) 0%, transparent 62%);
+            pointer-events: none;
+        }
+
+        .hero-inner {
+            position: relative;
+            z-index: 1;
+        }
+
+        .eyebrow {
+            color: var(--accent-2);
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            font-size: 0.82rem;
+            font-weight: 800;
+            margin-bottom: 1.15rem;
+        }
+
+        .hero-title {
+            margin: 0;
+            color: var(--text);
+            font-size: clamp(3rem, 5.3vw, 5rem);
+            line-height: 0.97;
+            letter-spacing: -0.055em;
+            font-weight: 850;
+            max-width: 9ch;
+        }
+
+        .hero-title .accent {
+            color: var(--accent-2);
+        }
+
+        .hero-subtitle {
+            margin-top: 1.6rem;
+            max-width: 15ch;
+            color: var(--soft);
+            font-size: 1.17rem;
+            line-height: 1.86;
+            letter-spacing: -0.01em;
+        }
+
+        .hero-note {
+            margin-top: 1.15rem;
+            color: var(--muted);
+            font-size: 1.01rem;
+            line-height: 1.75;
+            max-width: 15ch;
+        }
+
+        .hero-actions {
+            margin-top: 1.7rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .hero-cta {
+            min-height: 58px;
+            padding: 0.95rem 1.25rem;
+            border-radius: 18px;
+            text-decoration: none !important;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.98rem;
+            font-weight: 750;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+            border: 1px solid transparent;
+        }
+
+        .hero-cta:hover {
+            transform: translateY(-1px);
+        }
+
+        .hero-cta-primary {
+            background: linear-gradient(135deg, rgba(92, 221, 232, 0.96), rgba(72, 209, 225, 0.96));
+            border-color: rgba(92, 221, 232, 0.4);
+            color: #04131d !important;
+            box-shadow: 0 16px 36px rgba(80, 212, 225, 0.18);
+        }
+
+        .hero-cta-secondary {
+            background: rgba(255,255,255,0.035);
+            border-color: var(--stroke);
+            color: var(--text) !important;
+        }
+
+        .hero-cta-secondary:hover {
+            border-color: var(--stroke-strong);
+        }
+
+        .proof-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.65rem;
+            margin-top: 1.4rem;
+        }
+
+        .proof-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 40px;
+            padding: 0.5rem 0.78rem;
+            border-radius: 999px;
+            border: 1px solid rgba(127, 152, 180, 0.16);
+            background: rgba(255,255,255,0.035);
+            color: var(--soft);
+            font-size: 0.84rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+        }
+
+        .value-card {
+            background: linear-gradient(180deg, rgba(12, 24, 38, 0.96), rgba(9, 18, 29, 0.96));
+            padding: 1.45rem;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .value-title {
+            color: var(--soft);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            font-size: 0.8rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+        }
+
+        .metric-stack {
+            display: grid;
+            gap: 0.95rem;
+            height: 100%;
+        }
+
+        .metric-card {
+            background: linear-gradient(180deg, rgba(28, 39, 54, 0.78), rgba(19, 31, 45, 0.78));
+            border: 1px solid rgba(127, 152, 180, 0.16);
+            border-radius: 24px;
+            padding: 1.35rem 1.25rem;
+            min-height: 132px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        .metric-value {
+            color: var(--text);
+            font-size: 1.28rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            margin-bottom: 0.35rem;
+        }
+
+        .metric-label {
+            color: var(--muted);
+            font-size: 0.98rem;
+            line-height: 1.65;
+        }
+
+        .section-block {
+            margin-top: 3.1rem;
+        }
+
+        .section-kicker {
+            color: var(--accent-2);
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            font-size: 0.8rem;
+            font-weight: 800;
+            margin-bottom: 0.55rem;
+        }
+
+        .section-title {
+            color: var(--text);
+            font-size: clamp(2rem, 3.3vw, 3rem);
+            line-height: 1.06;
+            letter-spacing: -0.045em;
+            font-weight: 820;
+            margin: 0;
+        }
+
+        .section-subtitle {
+            margin-top: 0.95rem;
+            color: var(--muted);
+            font-size: 1.04rem;
+            line-height: 1.85;
+            max-width: 74ch;
+        }
+
+        .workflow-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 1rem;
+            margin-top: 1.25rem;
+        }
+
+        .workflow-card {
+            min-height: 250px;
+            background: linear-gradient(180deg, rgba(11, 22, 35, 0.98), rgba(8, 18, 29, 0.98));
+            border: 1px solid rgba(127, 152, 180, 0.16);
+            border-radius: 24px;
+            padding: 1.25rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .workflow-number {
+            width: 42px;
+            height: 42px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: rgba(80, 212, 225, 0.10);
+            border: 1px solid rgba(80, 212, 225, 0.22);
+            color: var(--accent-2);
+            font-size: 1rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+        }
+
+        .workflow-title {
+            color: var(--text);
+            font-size: 1.02rem;
+            font-weight: 760;
+            margin-bottom: 0.5rem;
+        }
+
+        .workflow-desc {
+            color: var(--muted);
+            font-size: 0.97rem;
+            line-height: 1.72;
+        }
+
+        .modules-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 1.2rem;
+            margin-top: 1.35rem;
+        }
+
+        .module-card {
+            min-height: 392px;
+            background: linear-gradient(180deg, rgba(11, 22, 35, 0.98), rgba(8, 18, 29, 0.98));
+            border: 1px solid rgba(127, 152, 180, 0.16);
+            border-radius: 26px;
+            padding: 1.28rem;
+            box-shadow: var(--shadow-lg);
+            text-decoration: none !important;
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .module-card:hover {
+            transform: translateY(-3px);
+            border-color: rgba(80, 212, 225, 0.26);
+            box-shadow: 0 24px 54px rgba(0, 0, 0, 0.32);
+        }
+
+        .module-top {
+            display: flex;
+            align-items: center;
+            gap: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        .module-icon {
+            width: 50px;
+            height: 50px;
+            flex: 0 0 50px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 16px;
+            background: rgba(80, 212, 225, 0.10);
+            border: 1px solid rgba(80, 212, 225, 0.18);
+            color: var(--accent-2);
+            font-size: 1.35rem;
+        }
+
+        .module-eyebrow {
+            color: var(--accent-2);
+            font-size: 0.79rem;
+            font-weight: 750;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .module-title {
+            color: var(--text);
+            font-size: 1.17rem;
+            line-height: 1.28;
+            letter-spacing: -0.02em;
+            font-weight: 780;
+            margin-bottom: 0.6rem;
+        }
+
+        .module-desc {
+            color: var(--muted);
+            font-size: 0.99rem;
+            line-height: 1.8;
+        }
+
+        .module-spacer {
+            flex: 1 1 auto;
+            min-height: 0.9rem;
+        }
+
+        .module-meta {
+            margin-top: 0.5rem;
+            padding-top: 0.9rem;
+            border-top: 1px solid rgba(127, 152, 180, 0.12);
+            color: var(--soft);
+            font-size: 0.9rem;
+            line-height: 1.8;
+        }
+
+        .module-meta strong {
+            color: var(--text);
+            display: inline-block;
+            min-width: 58px;
+        }
+
+        .module-cta-wrap {
+            margin-top: 1rem;
+        }
+
+        .module-cta {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 48px;
+            padding: 0.75rem 0.95rem;
+            border-radius: 14px;
+            border: 1px solid rgba(80, 212, 225, 0.22);
+            background: rgba(80, 212, 225, 0.08);
+            color: var(--accent-2);
+            font-size: 0.92rem;
+            font-weight: 730;
+            letter-spacing: 0.01em;
+            text-decoration: none !important;
+        }
+
+        .band-card {
+            margin-top: 1.5rem;
+            background: linear-gradient(135deg, rgba(80, 212, 225, 0.10), rgba(17, 36, 54, 0.62));
+            border: 1px solid rgba(80, 212, 225, 0.16);
+            border-radius: 30px;
+            padding: 1.65rem 1.6rem;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .band-title {
+            color: var(--text);
+            font-size: 1.55rem;
+            line-height: 1.15;
+            letter-spacing: -0.03em;
+            font-weight: 800;
+            margin-bottom: 0.45rem;
+        }
+
+        .band-desc {
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.8;
+            max-width: 78ch;
+        }
+
+        .footer {
+            margin-top: 2.4rem;
+            padding-top: 1.7rem;
+            border-top: 1px solid rgba(127, 152, 180, 0.12);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        .footer strong {
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        @media (max-width: 1220px) {
+            .hero-grid {
+                grid-template-columns: 1fr;
+            }
+            .hero-card,
+            .value-card {
+                min-height: auto;
+            }
+            .workflow-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .modules-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .topbar {
+                grid-template-columns: 1fr;
+            }
+            .topbar-chip {
+                justify-self: start;
+            }
+            .topbar-actions {
+                justify-self: start;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .block-container {
+                padding-top: 1rem !important;
+            }
+            .workflow-grid,
+            .modules-grid {
+                grid-template-columns: 1fr;
+            }
+            .hero-card {
+                padding: 1.55rem 1.25rem;
+            }
+            .value-card {
+                padding: 1rem;
+            }
+            .hero-title {
+                max-width: 10ch;
+            }
+            .hero-subtitle,
+            .hero-note {
+                max-width: none;
+            }
+            .topbar-actions {
+                width: 100%;
+                justify-content: stretch;
+            }
+            .top-button {
+                flex: 1 1 auto;
+            }
+            .footer {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+        </style>
+        """
+    ),
     unsafe_allow_html=True,
 )
 
 # -------------------------------------------------
-# 5) TOP BAR
+# 5) TOPBAR
 # -------------------------------------------------
-logo_html = ""
-logo_uri = logo_data_uri()
-if logo_uri:
-    logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />'
-else:
-    logo_html = '<div class="brand-name">Builtly</div>'
-
-render_html(
-    f"""
-    <div class="top-shell">
-        <div class="brand-left">
-            {logo_html}
-        </div>
-        <div class="topbar-right">
-            {top_link('project', 'Project Setup', 'ghost')}
-            {top_link('review', 'QA & Sign-off', 'primary')}
-        </div>
-    </div>
-    """
-)
-
-# -------------------------------------------------
-# 6) HERO (50/50 Symmetri)
-# -------------------------------------------------
-left, right = st.columns([1.2, 0.8], gap="large")
-
-with left:
-    render_html(
+st.markdown(
+    clean_html(
         f"""
-        <div class="hero">
-            <div class="eyebrow">The Builtly Loop</div>
-            <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
-            <div class="hero-subtitle">
-                Builtly is the customer portal for compliance-grade engineering delivery.
-                Upload project inputs, let the platform validate, calculate, check rules, and draft the report -
-                before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
-            </div>
-            <div class="hero-actions">
-                {hero_action('project', 'Open project setup', 'primary')}
-                {hero_action('review', 'Open QA and sign-off', 'secondary')}
-            </div>
-            <div class="proof-strip">
-                <div class="proof-chip">Rules-first</div>
-                <div class="proof-chip">Audit trail</div>
-                <div class="proof-chip">PDF + DOCX output</div>
-                <div class="proof-chip">Digital sign-off</div>
-                <div class="proof-chip">Structured QA workflow</div>
+        <div class="topbar">
+            <div class="brand-wrap">{logo_markup()}</div>
+            <div class="topbar-chip">Customer portal • Rules-first workflows • Signed outputs</div>
+            <div class="topbar-actions">
+                {top_button("Project Setup", page_url("project"), primary=False)}
+                {top_button("QA & Sign-off", page_url("review"), primary=True)}
             </div>
         </div>
         """
-    )
+    ),
+    unsafe_allow_html=True,
+)
 
-with right:
-    render_html(
+# -------------------------------------------------
+# 6) HERO + VALUE PANEL
+# -------------------------------------------------
+st.markdown(
+    clean_html(
+        f"""
+        <div class="hero-grid">
+            <div class="hero-card">
+                <div class="hero-inner">
+                    <div class="eyebrow">The Builtly Loop</div>
+                    <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
+                    <div class="hero-subtitle">
+                        Builtly is the customer portal for compliance-grade engineering delivery. Upload project inputs,
+                        let the platform validate, calculate, apply rule checks, and draft the deliverable - before junior QA
+                        and senior sign-off turn it into a consistent, traceable, submission-ready package.
+                    </div>
+                    <div class="hero-note">
+                        Built for building applications, execution, and professional compliance - designed as a production workflow,
+                        not a showcase UI.
+                    </div>
+                </div>
+                <div class="hero-inner">
+                    <div class="hero-actions">
+                        <a href="{html.escape(page_url('project'))}" target="_self" class="hero-cta hero-cta-primary">Open project setup</a>
+                        <a href="{html.escape(page_url('review'))}" target="_self" class="hero-cta hero-cta-secondary">Open QA and sign-off</a>
+                    </div>
+                    <div class="proof-row">
+                        <div class="proof-chip">Rules-first</div>
+                        <div class="proof-chip">Audit trail</div>
+                        <div class="proof-chip">PDF + DOCX output</div>
+                        <div class="proof-chip">Digital sign-off</div>
+                        <div class="proof-chip">Structured QA workflow</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="value-card">
+                <div class="value-title">Why Builtly?</div>
+                <div class="metric-stack">
+                    <div class="metric-card">
+                        <div class="metric-value">80-90%</div>
+                        <div class="metric-label">Reduction in manual drafting and repetitive report production</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">Junior + Senior</div>
+                        <div class="metric-label">Human-in-the-loop QA, technical control, and digital sign-off</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">PDF + DOCX</div>
+                        <div class="metric-label">Complete report packages with appendices and traceability</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-value">Full Traceability</div>
+                        <div class="metric-label">Inputs, versions, compliance checks, and signatures logged end-to-end</div>
+                    </div>
+                </div>
+            </div>
+        </div>
         """
-        <div class="hero-panel">
-            <div class="panel-title">Why Builtly?</div>
-            <div class="mini-stat">
-                <div class="mini-stat-value">80-90%</div>
-                <div class="mini-stat-label">Reduction in manual drafting and repetitive report production</div>
+    ),
+    unsafe_allow_html=True,
+)
+
+# -------------------------------------------------
+# 7) WORKFLOW
+# -------------------------------------------------
+workflow_cards = "".join(
+    [
+        workflow_card(1, "Input", "Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place."),
+        workflow_card(2, "Validate and analyze", "The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable."),
+        workflow_card(3, "QA and sign-off", "Junior review, senior technical assessment, and digital sign-off - with version control throughout."),
+        workflow_card(4, "Output", "Finalized documentation package in standard formats, ready for municipal submission or execution."),
+    ]
+)
+
+st.markdown(
+    clean_html(
+        f"""
+        <div class="section-block">
+            <div class="section-kicker">Workflow</div>
+            <h2 class="section-title">A deterministic delivery engine</h2>
+            <div class="section-subtitle">
+                The Builtly Loop moves a project from fragmented raw material to structured output through one controlled,
+                repeatable production flow.
             </div>
-            <div class="mini-stat">
-                <div class="mini-stat-value">Junior + Senior</div>
-                <div class="mini-stat-label">Human-in-the-loop QA, technical control, and digital sign-off</div>
+            <div class="workflow-grid">{workflow_cards}</div>
+        </div>
+        """
+    ),
+    unsafe_allow_html=True,
+)
+
+# -------------------------------------------------
+# 8) MODULES
+# -------------------------------------------------
+modules_html = "".join(
+    [
+        module_card(
+            title="Geo / Env - Ground Conditions",
+            eyebrow="Site and mass handling",
+            icon="🌍",
+            description="Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.",
+            input_text="XLSX / CSV / PDF + plans",
+            output_text="Environmental action plan, logs",
+            cta_label="Open Geo & Env",
+            href=page_url("geo"),
+        ),
+        module_card(
+            title="Acoustics - Noise & Sound",
+            eyebrow="Facade and room performance",
+            icon="🔊",
+            description="Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.",
+            input_text="Noise map + floor plan",
+            output_text="Acoustics report, facade evaluation",
+            cta_label="Open Acoustics",
+            href=page_url("akustikk"),
+        ),
+        module_card(
+            title="Fire - Safety Strategy",
+            eyebrow="Escape and code logic",
+            icon="🔥",
+            description="Evaluate architectural drawings against building code logic. Generates escape routes, fire cell division, and deviations.",
+            input_text="Architectural drawings + class",
+            output_text="Fire strategy concept, deviations",
+            cta_label="Open Fire Strategy",
+            href=page_url("brann"),
+        ),
+        module_card(
+            title="Traffic - Mobility",
+            eyebrow="Access and movement",
+            icon="🚦",
+            description="Traffic generation, parking requirements, access control, and soft mobility planning from project and site inputs.",
+            input_text="Site plans, local norms",
+            output_text="Traffic memo, mobility plan",
+            cta_label="Open Traffic & Mobility",
+            href=page_url("trafikk"),
+        ),
+        module_card(
+            title="Structural - Concept",
+            eyebrow="Load and system concepts",
+            icon="🏢",
+            description="Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.",
+            input_text="Models, load parameters",
+            output_text="Concept memo, grid layouts",
+            cta_label="Open Structural",
+            href=page_url("konstruksjon"),
+        ),
+        module_card(
+            title="ARK - Feasibility Study",
+            eyebrow="Early-phase site intelligence",
+            icon="📐",
+            description="Site screening, utilization analysis, and early-phase decision support before full engineering design.",
+            input_text="Site data, zoning plans",
+            output_text="Feasibility report, utilization metrics",
+            cta_label="Open Feasibility",
+            href=page_url("mulighetsstudie"),
+        ),
+    ]
+)
+
+st.markdown(
+    clean_html(
+        f"""
+        <div class="section-block">
+            <div class="section-kicker">Modules and roadmap</div>
+            <h2 class="section-title">Specialized agents in one platform</h2>
+            <div class="section-subtitle">
+                Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same
+                portal, validation, QA, and sign-off backbone.
             </div>
-            <div class="mini-stat">
-                <div class="mini-stat-value">PDF + DOCX</div>
-                <div class="mini-stat-label">Complete report packages with appendices and traceability</div>
-            </div>
-            <div class="mini-stat" style="margin-bottom:0;">
-                <div class="mini-stat-value">Full Traceability</div>
-                <div class="mini-stat-label">Inputs, versions, compliance checks, and signatures logged end-to-end</div>
+            <div class="modules-grid">{modules_html}</div>
+            <div class="band-card">
+                <div class="band-title">Not just analysis. Actual deliverables.</div>
+                <div class="band-desc">
+                    Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations,
+                    generate drafts, execute QA, and download the signed documentation package.
+                </div>
             </div>
         </div>
         """
-    )
-
-# -------------------------------------------------
-# 7) VALUE PROPOSITION
-# -------------------------------------------------
-render_html(
-    """
-    <div class="section-head">
-        <div class="section-kicker">Core value proposition</div>
-        <h2 class="section-title">Portal first. Modules under.</h2>
-        <div class="section-subtitle">
-            Builtly is not a collection of disconnected tools. It is one secure portal for project setup,
-            data ingestion, validation, AI processing, review, sign-off, and final delivery.
-        </div>
-    </div>
-    <div class="trust-grid">
-        <div class="trust-card">
-            <div class="trust-title">Client portal</div>
-            <div class="trust-desc">Project creation, input uploads, missing-data follow-up, document generation, and audit trails in one workflow.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">Rules-first AI</div>
-            <div class="trust-desc">AI operates inside explicit regulatory guardrails, checklists, and standard templates - not as free-form guesswork.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">QA and sign-off</div>
-            <div class="trust-desc">Junior engineers validate plausibility and structure. Senior engineers provide final review and certification.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">Scalable delivery</div>
-            <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
-        </div>
-    </div>
-    """
+    ),
+    unsafe_allow_html=True,
 )
 
 # -------------------------------------------------
-# 8) WORKFLOW
+# 9) FOOTER
 # -------------------------------------------------
-render_html(
-    """
-    <div class="section-head">
-        <div class="section-kicker">Workflow</div>
-        <h2 class="section-title">The Builtly Loop</h2>
-        <div class="section-subtitle">
-            A deterministic four-step workflow that takes you from fragmented project data to a reviewable,
-            compliant engineering package.
+st.markdown(
+    clean_html(
+        """
+        <div class="footer">
+            <div><strong>Builtly AS</strong> · Compliance-grade engineering delivery</div>
+            <div>© 2026 Builtly. All rights reserved.</div>
         </div>
-    </div>
-    <div class="loop-grid">
-        <div class="loop-card">
-            <div class="loop-number">1</div>
-            <div class="loop-title">Input</div>
-            <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">2</div>
-            <div class="loop-title">Validate and analyze</div>
-            <div class="loop-desc">The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">3</div>
-            <div class="loop-title">QA and sign-off</div>
-            <div class="loop-desc">Junior review, senior technical assessment, and digital sign-off - with version control throughout.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">4</div>
-            <div class="loop-title">Output</div>
-            <div class="loop-desc">Finalized documentation package in standard formats, ready for municipal submission or execution.</div>
-        </div>
-    </div>
-    """
-)
-
-# -------------------------------------------------
-# 9) MODULES
-# -------------------------------------------------
-available_cards = [
-    module_card(
-        "geo",
-        "🌍",
-        "Phase 1 - Priority",
-        "badge-priority",
-        "GEO / ENV - Ground Conditions",
-        "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.",
-        "XLSX / CSV / PDF + plans",
-        "Environmental action plan, logs",
-        "Open Geo & Env",
+        """
     ),
-    module_card(
-        "akustikk",
-        "🔊",
-        "Phase 2",
-        "badge-phase2",
-        "ACOUSTICS - Noise & Sound",
-        "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.",
-        "Noise map + floor plan",
-        "Acoustics report, facade evaluation",
-        "Open Acoustics",
-    ),
-    module_card(
-        "brann",
-        "🔥",
-        "Phase 2",
-        "badge-phase2",
-        "FIRE - Safety Strategy",
-        "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.",
-        "Architectural drawings + class",
-        "Fire strategy concept, deviations",
-        "Open Fire Strategy",
-    ),
-]
-
-roadmap_cards = [
-    module_card(
-        "mulighetsstudie",
-        "📐",
-        "Early phase",
-        "badge-early",
-        "ARK - Feasibility Study",
-        "Site screening, volume analysis, and early-phase decision support before full engineering design.",
-        "Site data, zoning plans",
-        "Feasibility report, utilization metrics",
-        "Open Feasibility",
-    ),
-    module_card(
-        "konstruksjon",
-        "🏢",
-        "Roadmap",
-        "badge-roadmap",
-        "STRUC - Structural Concept",
-        "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.",
-        "Models, load parameters",
-        "Concept memo, grid layouts",
-        "Open Structural",
-    ),
-    module_card(
-        "trafikk",
-        "🚦",
-        "Roadmap",
-        "badge-roadmap",
-        "TRAFFIC - Mobility",
-        "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.",
-        "Site plans, local norms",
-        "Traffic memo, mobility plan",
-        "Open Traffic & Mobility",
-    ),
-]
-
-render_html(
-    f"""
-    <div class="section-head">
-        <div class="section-kicker">Modules and roadmap</div>
-        <h2 class="section-title">Specialized agents in one platform</h2>
-        <div class="section-subtitle">
-            Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
-        </div>
-    </div>
-
-    <div class="subsection-title">Available now and pilot-ready</div>
-    <div class="module-grid">{''.join(available_cards)}</div>
-
-    <div class="subsection-title">Roadmap and early-phase tools</div>
-    <div class="module-grid">{''.join(roadmap_cards)}</div>
-    """
-)
-
-# -------------------------------------------------
-# 10) CTA BAND
-# -------------------------------------------------
-render_html(
-    f"""
-    <div class="cta-band">
-        <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
-        <div class="cta-desc">
-            Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
-        </div>
-        <div class="hero-actions" style="margin-top:1rem;">
-            {hero_action('project', 'Start in project setup', 'primary')}
-            {hero_action('review', 'Go to review queue', 'secondary')}
-        </div>
-    </div>
-    """
-)
-
-# -------------------------------------------------
-# 11) FOOTER
-# -------------------------------------------------
-render_html(
-    """
-    <div class="footer-block">
-        <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
-        <div class="footer-meta">© 2026 Builtly Engineering AS. All rights reserved.</div>
-    </div>
-    """
+    unsafe_allow_html=True,
 )
