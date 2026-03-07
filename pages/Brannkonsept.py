@@ -57,25 +57,36 @@ st.markdown("""
 <style>
     :root {
         --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3;
-        --accent: #38bdf8; --radius-lg: 16px;
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
     }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
 
+    /* HEADER & PILLE-KNAPPER */
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
+    .brand-left { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
     
-    .back-btn {
-        color: var(--accent); text-decoration: none; font-weight: 600; 
-        display: inline-flex; align-items: center; gap: 8px; font-size: 1.05rem;
-        padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.2);
-        background: rgba(56,189,248,0.05); transition: all 0.2s;
+    .topbar-right {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
+        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
     }
-    .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
+    .top-link {
+        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
+        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
+        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
+    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
+    .top-link.primary { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)); border-color: rgba(120,220,225,0.45); color: #041018 !important; }
+    .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
 
+    /* STREAMLIT NATIVE KNAPPER */
     button[kind="primary"] {
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
@@ -96,20 +107,59 @@ st.markdown("""
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
         color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
     }
-    div[data-testid="stExpander"] { background: rgba(16, 30, 46, 0.5); border: 1px solid rgba(120,145,170,0.2); border-radius: 12px; margin-bottom: 1rem; }
+    
+    /* --- FIX: FJERNER HVITE BOKSER I EXPANDERS --- */
+    div[data-testid="stExpander"] { 
+        background: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; 
+        border-radius: 12px !important; margin-bottom: 1rem !important; 
+    }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; }
+    div[data-testid="stExpander"] summary:hover { background: rgba(255,255,255,0.02) !important; }
+    
+    /* --- FIX: FJERNER HVIT OPPLASTINGSBOKS --- */
+    [data-testid="stFileDropzone"] { 
+        background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.4) !important; 
+        border-radius: 8px !important; padding: 2rem !important;
+    }
+    [data-testid="stFileDropzone"]:hover { 
+        border-color: #38bdf8 !important; background-color: rgba(56, 189, 248, 0.05) !important; 
+    }
+    [data-testid="stFileDropzone"] * { color: #c8d3df !important; }
+    
+    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. GUARDRAIL: SJEKKER OM PROSJEKT ER SATT OPP ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
-home_link = '<a href="Project" target="_self" class="back-btn">← Tilbake til SSOT</a>'
+# --- 3. HEADER UI ---
+logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 
+render_html(f"""
+<div class="top-shell">
+    <div class="brand-left">
+        {logo_html}
+    </div>
+    <div class="topbar-right">
+        <a href="Project" target="_self" class="top-link ghost">← Tilbake til SSOT</a>
+    </div>
+</div>
+""")
+
+# --- 4. GUARDRAIL LÅS (PREMIUM DESIGN) ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
-    render_html(f"""<div class="top-shell"><div>{logo_html}</div></div>""")
-    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    st.info("AI-agenten trenger kontekst om bygget (areal, etasjer, adresse og regelverk) for å kunne generere en faglig og juridisk korrekt rapport.")
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.page_link("pages/Project.py", label="Gå til Project Setup", icon="⚙️")
+    render_html("""
+    <div style="display: flex; justify-content: center; margin-top: 4rem;">
+        <div class="card" style="max-width: 600px; text-align: center; padding: 4rem 3rem; border-color: rgba(244, 191, 79, 0.3);">
+            <div style="font-size: 4rem; margin-bottom: 1rem;">🚧</div>
+            <h2 style="color: #f5f7fb; font-size: 2.2rem; font-weight: 800; margin-bottom: 1rem; letter-spacing: -0.03em;">Prosjektdata mangler</h2>
+            <p style="color: #9fb0c3; line-height: 1.7; font-size: 1.05rem; margin-bottom: 2.5rem;">
+                For at AI-agenten skal kunne koble seg på riktig regelverk og analysere riktig bygningsmasse, må du definere prosjektet i Master Data (SSOT) først.
+            </p>
+            <div class="topbar-right" style="justify-content: center; border: none; background: transparent;">
+                <a href="Project" target="_self" class="top-link primary" style="font-size: 1.05rem; padding: 0.8rem 1.5rem;">⚙️ Åpne Project Setup</a>
+            </div>
+        </div>
+    </div>
+    """)
     st.stop()
 
 pd_state = st.session_state.project_data
@@ -226,13 +276,12 @@ def create_full_report_pdf(name, client, content, maps):
     return bytes(pdf.output(dest='S'))
 
 # --- STREAMLIT UI ---
-render_html(f"""<div class="top-shell"><div>{logo_html}</div><div>{home_link}</div></div>""")
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🔥 RIBr — Brannkonsept</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for generering av teknisk brannkonsept basert på arkitektur.</p>", unsafe_allow_html=True)
 
 st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert.")
 
-with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=False):
+with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
     p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
     c_name = c2.text_input("Oppdragsgiver", value=pd_state["c_name"], disabled=True)
