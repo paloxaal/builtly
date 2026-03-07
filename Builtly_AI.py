@@ -1,6 +1,5 @@
 import os
 import base64
-import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +38,7 @@ PAGES = {
 }
 
 # -------------------------------------------------
-# 3) HELPERS
+# 3) HELPERS & ANTI-BUG RENDERER
 # -------------------------------------------------
 def page_exists(page_path: str) -> bool:
     return Path(page_path).exists()
@@ -49,9 +48,6 @@ def page_route(page_key: str) -> Optional[str]:
     if not page_path or not page_exists(page_path):
         return None
     return Path(page_path).stem
-
-def html_dedent(s: str) -> str:
-    return textwrap.dedent(s).strip()
 
 def href_or_none(page_key: str) -> Optional[str]:
     return page_route(page_key)
@@ -67,6 +63,10 @@ def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
     if href:
         return f'<a href="{href}" target="_self" class="hero-action {kind}">{label}</a>'
     return f'<span class="hero-action {kind} disabled">{label}</span>'
+
+# DETTE ER MAGIEN: Fjerner linjeskift så Streamlit aldri lager "hvite kodebokser" av HTML-en vår.
+def render_html(html_string: str):
+    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
 def module_card(
     page_key: str,
@@ -86,8 +86,7 @@ def module_card(
         else '<span class="module-cta disabled">In development</span>'
     )
 
-    return html_dedent(
-        f"""
+    return f"""
         <div class="module-card">
             <div class="module-header">
                 <div class="module-icon">{icon}</div>
@@ -104,8 +103,7 @@ def module_card(
                 {action_html}
             </div>
         </div>
-        """
-    )
+    """
 
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
@@ -116,9 +114,8 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
-
 # -------------------------------------------------
-# 4) CSS (Optimalisert for Symmetri!)
+# 4) CSS (Uendret - Denne satt perfekt!)
 # -------------------------------------------------
 st.markdown(
     """
@@ -138,7 +135,7 @@ st.markdown(
         --ok: #7ee081;
         --warn: #f4bf4f;
         --shadow: 0 24px 90px rgba(0,0,0,0.35);
-        --radius-xl: 28px; /* Standardisert for begge bokser */
+        --radius-xl: 28px;
         --radius-lg: 22px;
         --radius-md: 14px;
     }
@@ -188,7 +185,7 @@ st.markdown(
 
     .brand-logo {
         display: block;
-        height: 85px; /* ØKT STØRRELSE PÅ LOGO */
+        height: 85px; 
         width: auto;
         flex-shrink: 0;
         filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
@@ -211,7 +208,7 @@ st.markdown(
         border-radius: 18px;
         background: rgba(255,255,255,0.025);
         border: 1px solid rgba(120,145,170,0.12);
-        flex-wrap: nowrap !important; /* TVINGER KNAPPENE SAMMEN */
+        flex-wrap: nowrap !important;
     }
 
     .top-link {
@@ -252,17 +249,24 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(56,194,201,0.18);
     }
 
-    /* --- HERO BOKSER MED PERFEKT SYMMETRI --- */
+    .top-link.disabled,
+    .hero-action.disabled,
+    .module-cta.disabled {
+        opacity: 0.45;
+        pointer-events: none;
+        cursor: default;
+    }
+
     .hero {
         position: relative;
         overflow: hidden;
         background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
         border: 1px solid rgba(120,145,170,0.16);
         border-radius: var(--radius-xl);
-        padding: 2.5rem; /* Standardisert padding */
+        padding: 2.5rem;
         box-shadow: var(--shadow);
         margin-bottom: 1.25rem;
-        height: 560px; /* LÅST FAST HØYDE */
+        height: 560px;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -271,9 +275,9 @@ st.markdown(
     .hero-panel {
         background: rgba(20, 35, 50, 0.4);
         border: 1px solid var(--stroke);
-        border-radius: var(--radius-xl); /* Matcher venstre side */
-        padding: 2.5rem; /* Matcher venstre side */
-        height: 560px; /* LÅST FAST HØYDE */
+        border-radius: var(--radius-xl);
+        padding: 2.5rem;
+        height: 560px;
         display: flex;
         flex-direction: column;
     }
@@ -304,7 +308,7 @@ st.markdown(
         font-weight: 800;
         margin: 0 0 1rem 0;
         color: var(--text);
-        max-width: none; /* FJERNED: Slik at den kan strekke seg over færre linjer! */
+        max-width: none;
     }
 
     .hero-title .accent {
@@ -387,9 +391,9 @@ st.markdown(
         background: rgba(255,255,255,0.02);
         border: 1px solid var(--stroke);
         border-radius: 16px;
-        padding: 1.1rem 1.2rem; /* Litt mer luft innvendig */
+        padding: 1.1rem 1.2rem;
         margin-bottom: 0.8rem;
-        flex: 1; /* Lar boksene strekke seg og fylle plassen jevnt! */
+        flex: 1;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -703,18 +707,43 @@ st.markdown(
     }
 
     @media (max-width: 1180px) {
-        .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .top-shell {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        .topbar-right {
+            width: 100%;
+            justify-content: flex-start;
+        }
+        .trust-grid, .loop-grid, .module-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
     }
 
     @media (max-width: 760px) {
-        .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr; }
-        .top-shell { flex-direction: column; align-items: flex-start; }
-        .topbar-right { justify-content: flex-start; width: 100%; flex-wrap: nowrap !important; }
-        .top-link { flex: 1; padding: 0.7rem 0.5rem; font-size: 0.85rem; }
-        .hero, .hero-panel { height: auto; min-height: auto; padding: 1.8rem; }
-        .brand-logo { height: 60px; }
+        .trust-grid, .loop-grid, .module-grid {
+            grid-template-columns: 1fr;
+        }
+        .hero, .hero-panel {
+            height: auto;
+            min-height: auto;
+        }
+        .hero-title {
+            max-width: none;
+        }
+        .topbar-right {
+            flex-direction: row;
+            width: 100%;
+            gap: 0.5rem;
+        }
+        .top-link {
+            flex: 1;
+            padding: 0.7rem 0.4rem;
+            font-size: 0.85rem;
+        }
+        .brand-logo {
+            height: 60px;
+        }
     }
 </style>
 """,
@@ -722,7 +751,7 @@ st.markdown(
 )
 
 # -------------------------------------------------
-# 5) TOP BAR (Fjernet tekst, store logo)
+# 5) TOP BAR
 # -------------------------------------------------
 logo_html = ""
 logo_uri = logo_data_uri()
@@ -731,151 +760,146 @@ if logo_uri:
 else:
     logo_html = '<div class="brand-name">Builtly</div>'
 
-st.markdown(
+render_html(
     f"""
-<div class="top-shell">
-    <div class="brand-left">
-        {logo_html}
+    <div class="top-shell">
+        <div class="brand-left">
+            {logo_html}
+        </div>
+        <div class="topbar-right">
+            {top_link('project', 'Project Setup', 'ghost')}
+            {top_link('review', 'QA & Sign-off', 'primary')}
+        </div>
     </div>
-    <div class="topbar-right">
-        {top_link('project', 'Project Setup', 'ghost')}
-        {top_link('review', 'QA & Sign-off', 'primary')}
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
+    """
 )
 
 # -------------------------------------------------
-# 6) HERO (Justert til [1.2, 0.8] for perfekt visuell balanse)
+# 6) HERO (50/50 Symmetri)
 # -------------------------------------------------
 left, right = st.columns([1.2, 0.8], gap="large")
 
 with left:
-    st.markdown(
+    render_html(
         f"""
-<div class="hero">
-    <div class="eyebrow">The Builtly Loop</div>
-    <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
-    <div class="hero-subtitle">
-        Builtly is the customer portal for compliance-grade engineering delivery.
-        Upload project inputs, let the platform validate, calculate, check rules, and draft the report -
-        before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
-    </div>
-    <div class="hero-actions">
-        {hero_action('project', 'Open project setup', 'primary')}
-        {hero_action('review', 'Open QA and sign-off', 'secondary')}
-    </div>
-    <div class="proof-strip">
-        <div class="proof-chip">Rules-first</div>
-        <div class="proof-chip">Audit trail</div>
-        <div class="proof-chip">PDF + DOCX output</div>
-        <div class="proof-chip">Digital sign-off</div>
-        <div class="proof-chip">Structured QA workflow</div>
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
+        <div class="hero">
+            <div class="eyebrow">The Builtly Loop</div>
+            <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
+            <div class="hero-subtitle">
+                Builtly is the customer portal for compliance-grade engineering delivery.
+                Upload project inputs, let the platform validate, calculate, check rules, and draft the report -
+                before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
+            </div>
+            <div class="hero-actions">
+                {hero_action('project', 'Open project setup', 'primary')}
+                {hero_action('review', 'Open QA and sign-off', 'secondary')}
+            </div>
+            <div class="proof-strip">
+                <div class="proof-chip">Rules-first</div>
+                <div class="proof-chip">Audit trail</div>
+                <div class="proof-chip">PDF + DOCX output</div>
+                <div class="proof-chip">Digital sign-off</div>
+                <div class="proof-chip">Structured QA workflow</div>
+            </div>
+        </div>
+        """
     )
 
 with right:
-    st.markdown(
+    render_html(
         """
-<div class="hero-panel">
-    <div class="panel-title">Why Builtly?</div>
-    <div class="mini-stat">
-        <div class="mini-stat-value">80-90%</div>
-        <div class="mini-stat-label">Reduction in manual drafting and repetitive report production</div>
-    </div>
-    <div class="mini-stat">
-        <div class="mini-stat-value">Junior + Senior</div>
-        <div class="mini-stat-label">Human-in-the-loop QA, technical control, and digital sign-off</div>
-    </div>
-    <div class="mini-stat">
-        <div class="mini-stat-value">PDF + DOCX</div>
-        <div class="mini-stat-label">Complete report packages with appendices and traceability</div>
-    </div>
-    <div class="mini-stat" style="margin-bottom:0;">
-        <div class="mini-stat-value">Full Traceability</div>
-        <div class="mini-stat-label">Inputs, versions, compliance checks, and signatures logged end-to-end</div>
-    </div>
-</div>
-""",
-        unsafe_allow_html=True,
+        <div class="hero-panel">
+            <div class="panel-title">Why Builtly?</div>
+            <div class="mini-stat">
+                <div class="mini-stat-value">80-90%</div>
+                <div class="mini-stat-label">Reduction in manual drafting and repetitive report production</div>
+            </div>
+            <div class="mini-stat">
+                <div class="mini-stat-value">Junior + Senior</div>
+                <div class="mini-stat-label">Human-in-the-loop QA, technical control, and digital sign-off</div>
+            </div>
+            <div class="mini-stat">
+                <div class="mini-stat-value">PDF + DOCX</div>
+                <div class="mini-stat-label">Complete report packages with appendices and traceability</div>
+            </div>
+            <div class="mini-stat" style="margin-bottom:0;">
+                <div class="mini-stat-value">Full Traceability</div>
+                <div class="mini-stat-label">Inputs, versions, compliance checks, and signatures logged end-to-end</div>
+            </div>
+        </div>
+        """
     )
 
 # -------------------------------------------------
 # 7) VALUE PROPOSITION
 # -------------------------------------------------
-st.markdown(
+render_html(
     """
-<div class="section-head">
-    <div class="section-kicker">Core value proposition</div>
-    <h2 class="section-title">Portal first. Modules under.</h2>
-    <div class="section-subtitle">
-        Builtly is not a collection of disconnected tools. It is one secure portal for project setup,
-        data ingestion, validation, AI processing, review, sign-off, and final delivery.
+    <div class="section-head">
+        <div class="section-kicker">Core value proposition</div>
+        <h2 class="section-title">Portal first. Modules under.</h2>
+        <div class="section-subtitle">
+            Builtly is not a collection of disconnected tools. It is one secure portal for project setup,
+            data ingestion, validation, AI processing, review, sign-off, and final delivery.
+        </div>
     </div>
-</div>
-<div class="trust-grid">
-    <div class="trust-card">
-        <div class="trust-title">Client portal</div>
-        <div class="trust-desc">Project creation, input uploads, missing-data follow-up, document generation, and audit trails in one workflow.</div>
+    <div class="trust-grid">
+        <div class="trust-card">
+            <div class="trust-title">Client portal</div>
+            <div class="trust-desc">Project creation, input uploads, missing-data follow-up, document generation, and audit trails in one workflow.</div>
+        </div>
+        <div class="trust-card">
+            <div class="trust-title">Rules-first AI</div>
+            <div class="trust-desc">AI operates inside explicit regulatory guardrails, checklists, and standard templates - not as free-form guesswork.</div>
+        </div>
+        <div class="trust-card">
+            <div class="trust-title">QA and sign-off</div>
+            <div class="trust-desc">Junior engineers validate plausibility and structure. Senior engineers provide final review and certification.</div>
+        </div>
+        <div class="trust-card">
+            <div class="trust-title">Scalable delivery</div>
+            <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
+        </div>
     </div>
-    <div class="trust-card">
-        <div class="trust-title">Rules-first AI</div>
-        <div class="trust-desc">AI operates inside explicit regulatory guardrails, checklists, and standard templates - not as free-form guesswork.</div>
-    </div>
-    <div class="trust-card">
-        <div class="trust-title">QA and sign-off</div>
-        <div class="trust-desc">Junior engineers validate plausibility and structure. Senior engineers provide final review and certification.</div>
-    </div>
-    <div class="trust-card">
-        <div class="trust-title">Scalable delivery</div>
-        <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
+    """
 )
 
 # -------------------------------------------------
 # 8) WORKFLOW
 # -------------------------------------------------
-st.markdown(
+render_html(
     """
-<div class="section-head">
-    <div class="section-kicker">Workflow</div>
-    <h2 class="section-title">The Builtly Loop</h2>
-    <div class="section-subtitle">
-        A deterministic four-step workflow that takes you from fragmented project data to a reviewable,
-        compliant engineering package.
+    <div class="section-head">
+        <div class="section-kicker">Workflow</div>
+        <h2 class="section-title">The Builtly Loop</h2>
+        <div class="section-subtitle">
+            A deterministic four-step workflow that takes you from fragmented project data to a reviewable,
+            compliant engineering package.
+        </div>
     </div>
-</div>
-<div class="loop-grid">
-    <div class="loop-card">
-        <div class="loop-number">1</div>
-        <div class="loop-title">Input</div>
-        <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.</div>
+    <div class="loop-grid">
+        <div class="loop-card">
+            <div class="loop-number">1</div>
+            <div class="loop-title">Input</div>
+            <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.</div>
+        </div>
+        <div class="loop-card">
+            <div class="loop-number">2</div>
+            <div class="loop-title">Validate and analyze</div>
+            <div class="loop-desc">The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable.</div>
+        </div>
+        <div class="loop-card">
+            <div class="loop-number">3</div>
+            <div class="loop-title">QA and sign-off</div>
+            <div class="loop-desc">Junior review, senior technical assessment, and digital sign-off - with version control throughout.</div>
+        </div>
+        <div class="loop-card">
+            <div class="loop-number">4</div>
+            <div class="loop-title">Output</div>
+            <div class="loop-desc">Finalized documentation package in standard formats, ready for municipal submission or execution.</div>
+        </div>
     </div>
-    <div class="loop-card">
-        <div class="loop-number">2</div>
-        <div class="loop-title">Validate and analyze</div>
-        <div class="loop-desc">The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable.</div>
-    </div>
-    <div class="loop-card">
-        <div class="loop-number">3</div>
-        <div class="loop-title">QA and sign-off</div>
-        <div class="loop-desc">Junior review, senior technical assessment, and digital sign-off - with version control throughout.</div>
-    </div>
-    <div class="loop-card">
-        <div class="loop-number">4</div>
-        <div class="loop-title">Output</div>
-        <div class="loop-desc">Finalized documentation package in standard formats, ready for municipal submission or execution.</div>
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
+    """
 )
 
 # -------------------------------------------------
@@ -953,56 +977,51 @@ roadmap_cards = [
     ),
 ]
 
-st.markdown(
-    html_dedent(
-        f"""
-        <div class="section-head">
-            <div class="section-kicker">Modules and roadmap</div>
-            <h2 class="section-title">Specialized agents in one platform</h2>
-            <div class="section-subtitle">
-                Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
-            </div>
+render_html(
+    f"""
+    <div class="section-head">
+        <div class="section-kicker">Modules and roadmap</div>
+        <h2 class="section-title">Specialized agents in one platform</h2>
+        <div class="section-subtitle">
+            Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
         </div>
+    </div>
 
-        <div class="subsection-title">Available now and pilot-ready</div>
-        <div class="module-grid">{''.join(available_cards)}</div>
+    <div class="subsection-title">Available now and pilot-ready</div>
+    <div class="module-grid">{''.join(available_cards)}</div>
 
-        <div class="subsection-title">Roadmap and early-phase tools</div>
-        <div class="module-grid">{''.join(roadmap_cards)}</div>
-        """
-    ),
-    unsafe_allow_html=True,
+    <div class="subsection-title">Roadmap and early-phase tools</div>
+    <div class="module-grid">{''.join(roadmap_cards)}</div>
+    """
 )
 
 # -------------------------------------------------
 # 10) CTA BAND
 # -------------------------------------------------
-st.markdown(
+render_html(
     f"""
-<div class="cta-band">
-    <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
-    <div class="cta-desc">
-        Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
+    <div class="cta-band">
+        <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
+        <div class="cta-desc">
+            Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
+        </div>
+        <div class="hero-actions" style="margin-top:1rem;">
+            {hero_action('project', 'Start in project setup', 'primary')}
+            {hero_action('review', 'Go to review queue', 'secondary')}
+        </div>
     </div>
-    <div class="hero-actions" style="margin-top:1rem;">
-        {hero_action('project', 'Start in project setup', 'primary')}
-        {hero_action('review', 'Go to review queue', 'secondary')}
-    </div>
-</div>
-""",
-    unsafe_allow_html=True,
+    """
 )
 
 # -------------------------------------------------
 # 11) FOOTER
 # -------------------------------------------------
-st.markdown(
+render_html(
     """
-<div class="footer-block">
-    <div class="footer-name">Builtly Engineering AS</div>
-    <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
-    <div class="footer-meta">© 2026 Builtly. All rights reserved.</div>
-</div>
-""",
-    unsafe_allow_html=True,
+    <div class="footer-block">
+        <div class="footer-name">Builtly AS</div>
+        <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
+        <div class="footer-meta">© 2026 Builtly. All rights reserved.</div>
+    </div>
+    """
 )
