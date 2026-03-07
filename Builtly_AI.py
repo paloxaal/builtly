@@ -73,7 +73,13 @@ st.markdown("""
 
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     [data-testid="stSidebar"] { background: rgba(7, 16, 24, 0.96); border-right: 1px solid var(--stroke); }
-    .block-container { max-width: 1280px !important; padding-top: 2rem !important; padding-bottom: 4rem !important; }
+    .block-container { max-width: 1280px !important; padding-top: 2rem !important; padding-bottom: 2rem !important; }
+
+    /* --- TOPP KNAPP CONTAINER --- */
+    .qa-container {
+        text-align: right;
+        margin-top: 15px;
+    }
 
     .hero-container {
         display: grid;
@@ -155,40 +161,50 @@ st.markdown("""
         padding-top: 1rem; border-top: 1px solid rgba(120,145,170,0.14); margin-top: 1rem; 
     }
     
-    /* --- NY STYLING FOR QA KNAPPEN --- */
     .review-btn {
-        display: inline-flex; 
-        align-items: center; 
-        gap: 8px;
-        padding: 0.6rem 1.4rem; 
-        background: rgba(15, 23, 42, 0.6);
-        border: 1px solid rgba(56, 194, 201, 0.3); 
-        border-radius: 999px; /* Gjør den elegant oval (pill-shape) */
-        color: #f8fafc !important;
-        text-decoration: none !important; 
-        font-weight: 500; 
-        font-size: 0.95rem; 
-        transition: all 0.3s ease;
-        backdrop-filter: blur(10px);
+        display: inline-flex; align-items: center; gap: 8px; padding: 0.6rem 1.4rem; 
+        background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(56, 194, 201, 0.3); 
+        border-radius: 999px; color: #f8fafc !important; text-decoration: none !important; 
+        font-weight: 500; font-size: 0.95rem; transition: all 0.3s ease; backdrop-filter: blur(10px);
     }
     .review-btn:hover { 
-        border-color: rgba(56, 194, 201, 0.8); 
-        background: rgba(15, 23, 42, 0.9);
-        box-shadow: 0 0 20px rgba(56, 194, 201, 0.15); /* Subtil cyan glow */
-        transform: translateY(-2px); 
+        border-color: rgba(56, 194, 201, 0.8); background: rgba(15, 23, 42, 0.9);
+        box-shadow: 0 0 20px rgba(56, 194, 201, 0.15); transform: translateY(-2px); 
     }
-    .review-icon {
-        color: #38c2c9; /* Farger haken i portalens egen cyan-farge */
-        font-weight: 800;
-        font-size: 1.1rem;
-    }
+    .review-icon { color: #38c2c9; font-weight: 800; font-size: 1.1rem; }
 
     .cta-band { margin-top: 3rem; margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28)); border: 1px solid rgba(56,194,201,0.18); border-radius: 24px; padding: 2rem; }
     .cta-title { font-size: 1.5rem; font-weight: 700; color: var(--text); margin-bottom: 0.5rem; }
     .cta-desc { color: var(--muted); line-height: 1.7; max-width: 80ch; }
 
-    @media (max-width: 1000px) { .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .hero-container { grid-template-columns: 1fr; } }
-    @media (max-width: 600px) { .module-grid { grid-template-columns: 1fr; } .loop-grid { grid-template-columns: 1fr; } }
+    /* --- FOOTER CSS --- */
+    .builtly-footer {
+        text-align: center;
+        color: #71717a;
+        font-size: 0.9rem;
+        margin-top: 5rem;
+        padding-top: 2rem;
+        border-top: 1px solid rgba(120, 145, 170, 0.18);
+    }
+    .builtly-footer strong { color: #a1a1aa; font-weight: 600; }
+
+    /* --- MOBILTILPASNING --- */
+    @media (max-width: 1000px) { 
+        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } 
+        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } 
+        .hero-container { grid-template-columns: 1fr; } 
+    }
+    @media (max-width: 600px) { 
+        .module-grid { grid-template-columns: 1fr; } 
+        .loop-grid { grid-template-columns: 1fr; } 
+        
+        /* Her skjer magien for QA-knappen på mobil! */
+        .qa-container { 
+            text-align: left; /* Trekker den mot venstre */
+            margin-top: -15px; /* Drar den tett opp under logoen */
+            margin-bottom: 25px; /* Skaper litt luft ned til teksten under */
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -201,8 +217,7 @@ with top_left:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=280)
 with top_right:
-    # Bytter ut emojien med den nye .review-icon klassen
-    st.markdown('<div style="margin-top: 15px; text-align: right;"><a href="Review" target="_self" class="review-btn"><span class="review-icon">✓</span> QA & Sign-off</a></div>', unsafe_allow_html=True)
+    st.markdown('<div class="qa-container"><a href="Review" target="_self" class="review-btn"><span class="review-icon">✓</span> QA & Sign-off</a></div>', unsafe_allow_html=True)
 st.write("")
 
 # -------------------------------------------------
@@ -350,5 +365,15 @@ st.markdown("""
 <div class="cta-desc">
 A platform where customers self-serve inputs and professionals certify outputs. Create a project, upload raw data, execute QA, and download the signed documentation package.
 </div>
+</div>
+""", unsafe_allow_html=True)
+
+# -------------------------------------------------
+# 9) FOOTER
+# -------------------------------------------------
+st.markdown("""
+<div class="builtly-footer">
+    <strong>&copy; 2026 Builtly AI AS.</strong> All rights reserved.<br>
+    <span style="font-size: 0.8rem; margin-top: 5px; display: inline-block;">Setting the global standard for compliance-grade engineering deliverables.</span>
 </div>
 """, unsafe_allow_html=True)
