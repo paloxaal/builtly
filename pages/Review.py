@@ -1,159 +1,182 @@
 import streamlit as st
 import os
-import time
+import base64
+from pathlib import Path
 
-# --- 1. GRUNNINNSTILLINGER ---
-st.set_page_config(page_title="QA & Sign-off | Builtly", page_icon="✍️", layout="wide", initial_sidebar_state="expanded")
+# --- 1. TEKNISK OPPSETT ---
+st.set_page_config(page_title="QA & Sign-off | Builtly", page_icon="✅", layout="wide", initial_sidebar_state="collapsed")
 
-# Låser logoen øverst til venstre
-if os.path.exists("logo.png"):
-    st.logo("logo.png", size="large")
+def render_html(html_string: str):
+    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
-# --- 2. SESSION STATE (For å huske signaturer mens du tester) ---
-if "signed_projects" not in st.session_state:
-    st.session_state.signed_projects = []
-if "viewing_project" not in st.session_state:
-    st.session_state.viewing_project = None
+def logo_data_uri() -> str:
+    for candidate in ["logo-white.png", "logo.png"]:
+        if os.path.exists(candidate):
+            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
+            with open(candidate, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/{suffix};base64,{encoded}"
+    return ""
 
-# --- 3. PREMIUM DARK MODE CSS ---
+# --- 2. PREMIUM CSS FOR QA-DASHBOARD ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    .stApp { background-color: #050505 !important; font-family: 'Inter', sans-serif; color: #e4e4e7; }
-    header {visibility: hidden;}
-    [data-testid="stSidebar"] { background-color: #0a0a0b !important; border-right: 1px solid #1f1f22 !important; }
-    .block-container { padding-top: 3rem !important; max-width: 1200px !important; }
-    
-    .header-title { font-size: 2.2rem; font-weight: 700; color: #ffffff; letter-spacing: -0.02em; margin-bottom: 0.2rem; }
-    .header-sub { color: #a1a1aa; font-size: 1rem; margin-bottom: 2rem; border-bottom: 1px solid #27272a; padding-bottom: 1.5rem; }
-    
-    /* Tabell-design for pending reviews */
-    .task-row {
-        background: rgba(24, 24, 27, 0.4); border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 8px; padding: 1.2rem; margin-bottom: 0.8rem;
-        display: flex; justify-content: space-between; align-items: center;
-        transition: all 0.2s ease;
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
     }
-    .task-row:hover { background: rgba(24, 24, 27, 0.8); border-color: rgba(56, 189, 248, 0.4); transform: translateX(4px); }
-    .task-info h4 { margin: 0 0 0.3rem 0; color: #fafafa; font-size: 1.1rem; }
-    .task-info p { margin: 0; color: #71717a; font-size: 0.9rem; }
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
-    /* Badges */
-    .badge { padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
-    .badge-pending { background: rgba(245, 158, 11, 0.1); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.2); }
-    .badge-signed { background: rgba(16, 185, 129, 0.1); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.2); }
-    .badge-module { background: #18181b; color: #a1a1aa; border: 1px solid #27272a; }
+    /* TOP SHELL & LOGO */
+    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
+    
+    /* TILBAKE-KNAPP */
+    .topbar-right {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem;
+        padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important;
+    }
+    .top-link {
+        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
+        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
+        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
+    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
 
-    /* Review Interface */
-    .review-panel { background: #09090b; border: 1px solid #27272a; border-radius: 12px; padding: 2rem; }
-    .doc-preview { background: #ffffff; border-radius: 8px; padding: 2rem; color: #000000; height: 500px; overflow-y: auto; font-family: 'Times New Roman', serif; }
-    .check-item { display: flex; align-items: center; gap: 10px; margin-bottom: 1rem; color: #e4e4e7; font-size: 0.95rem; }
+    /* STATISTIKK KORT */
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-bottom: 3rem; }
+    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 1.5rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
+    .stat-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.8rem; }
+    .stat-value { font-size: 2.2rem; font-weight: 750; color: #fff; margin-bottom: 0.3rem; line-height: 1; }
+
+    /* --- MAGISK CSS FOR REVIEW-KORTENE --- */
+    /* Gjør om Streamlits kolonne til et solid, mørkt kort */
+    [data-testid="column"]:has(.review-card-hook) {
+        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
+        border: 1px solid rgba(120, 145, 170, 0.18) !important;
+        border-radius: 16px !important;
+        padding: 1.8rem 2rem !important;
+        margin-bottom: 1.2rem !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.15) !important;
+        transition: all 0.2s ease !important;
+    }
+    [data-testid="column"]:has(.review-card-hook):hover {
+        border-color: rgba(56,194,201,0.3) !important;
+        box-shadow: 0 12px 32px rgba(0,0,0,0.25) !important;
+        transform: translateY(-2px);
+    }
     
+    /* Fjerner den gigantiske hvite rammen rundt standard-knappen */
+    [data-testid="column"]:has(.review-card-hook) [data-testid="stButton"] {
+        margin-top: 0.5rem !important;
+    }
+    [data-testid="column"]:has(.review-card-hook) button[kind="secondary"] {
+        background: rgba(255,255,255,0.05) !important;
+        border: 1px solid rgba(120,145,170,0.3) !important;
+        color: #f5f7fb !important;
+        border-radius: 8px !important;
+        padding: 8px 24px !important;
+        font-weight: 650 !important;
+        font-size: 0.95rem !important;
+        transition: all 0.2s ease !important;
+    }
+    [data-testid="column"]:has(.review-card-hook) button[kind="secondary"]:hover {
+        background: rgba(56,194,201,0.1) !important;
+        border-color: rgba(56,194,201,0.8) !important;
+        color: #ffffff !important;
+    }
+
+    /* BADGES (STATUS) */
+    .status-badge {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 14px; border-radius: 999px;
+        font-size: 0.75rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .badge-pending { background: rgba(244, 191, 79, 0.1); border: 1px solid rgba(244, 191, 79, 0.3); color: #f4bf4f; }
+    .badge-approved { background: rgba(126, 224, 129, 0.1); border: 1px solid rgba(126, 224, 129, 0.3); color: #7ee081; }
+
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. DATA MOCKUP ---
-mock_projects = {
-    "PRJ-2026-A1": {"name": "Saga Park Næringsbygg", "module": "RIG-M (Miljø)", "date": "07. Mar 2026", "drafter": "Builtly AI", "qa": "Ola Nordmann (Junior)"},
-    "PRJ-2026-B4": {"name": "Fjordveien Boligsameie", "module": "RIBr (Brann)", "date": "06. Mar 2026", "drafter": "Builtly AI", "qa": "Kari Nilsen (Junior)"},
-    "PRJ-2026-C2": {"name": "Sentrumsterminalen", "module": "RIB (Konstruksjon)", "date": "05. Mar 2026", "drafter": "Builtly AI", "qa": "Ola Nordmann (Junior)"}
-}
+# --- 3. HEADER UI ---
+logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 
-# --- 5. LOGIKK FOR Å VISE DETALJER ELLER LISTE ---
+render_html(f"""
+<div class="top-shell">
+    <div>{logo_html}</div>
+    <div class="topbar-right">
+        <a href="/" target="_self" class="top-link ghost">← Tilbake til Portal</a>
+    </div>
+</div>
+""")
 
-# Funksjon for å "gå tilbake"
-def go_back():
-    st.session_state.viewing_project = None
+st.markdown("<h1 style='font-size: 2.8rem; margin-bottom: 0.2rem; letter-spacing: -0.02em;'>QA & Sign-off Dashboard</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem;'>Kvalitetssikring av AI-genererte dokumenter før endelig leveranse.</p>", unsafe_allow_html=True)
 
-# Funksjon for å signere
-def sign_document(p_id):
-    with st.spinner("Krypterer og påfører digital signatur..."):
-        time.sleep(1.5) # Fake forsinkelse for å se ut som systemet jobber
-    st.session_state.signed_projects.append(p_id)
-    st.session_state.viewing_project = None
-    st.balloons() # Litt konfetti for en god følelse!
-    st.success(f"✅ Dokument for {mock_projects[p_id]['name']} ble godkjent og signert!")
+# --- 4. TOPP STATISTIKK ---
+render_html("""
+<div class="stat-grid">
+    <div class="card">
+        <div class="stat-title">Pending Sign-offs</div>
+        <div class="stat-value">3</div>
+    </div>
+    <div class="card">
+        <div class="stat-title">Signed Today</div>
+        <div class="stat-value">0</div>
+    </div>
+    <div class="card">
+        <div class="stat-title">AI Confidence Avg.</div>
+        <div class="stat-value" style="color: var(--accent);">97.2%</div>
+    </div>
+</div>
+""")
 
-# --- VISNING 1: DETALJERT REVIEW INTERFACE ---
-if st.session_state.viewing_project:
-    p_id = st.session_state.viewing_project
-    proj = mock_projects[p_id]
-    
-    st.button("← Tilbake til Dashboard", on_click=go_back)
-    
-    st.markdown(f"<div class='header-title'>Review: {proj['name']}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='header-sub'>Dokument-ID: {p_id} | Modul: <span class='badge badge-module'>{proj['module']}</span></div>", unsafe_allow_html=True)
-    
-    c1, c2 = st.columns([0.65, 0.35], gap="large")
-    
-    with c1:
-        st.markdown("### AI-Generert Utkast")
-        st.markdown("""
-        <div class="doc-preview">
-            <h2 style="color: #1a2b4c; border-bottom: 2px solid #ccc; padding-bottom: 10px;">SAMMENDRAG OG KONKLUSJON</h2>
-            <p><strong>Dato:</strong> 07. Mars 2026<br>
-            <strong>Utarbeidet av:</strong> Builtly AI Engine<br>
-            <strong>Kontrollert av:</strong> Venter på Senior Sign-off</p>
-            <p>Basert på de opplastede laboratorieanalysene fra ALS Laboratory Group, er grunnforholdene vurdert i henhold til forurensningsforskriften kapittel 2. Prøvene viser forhøyede verdier av bly (Pb) i prøvepunkt BP1-3, som tilsvarer tilstandsklasse 3 (Moderat forurenset).</p>
-            <p><strong>Anbefalt tiltak:</strong> Massene må håndteres som forurenset og leveres til godkjent deponi. Det anbefales en dedikert tiltaksplan for gravearbeidene.</p>
-            <br>
-            <h3 style="color: #1a2b4c;">KVALITETSSIKRING (HUMAN-IN-THE-LOOP)</h3>
-            <p><em>Notat fra Junioringeniør (Ola Nordmann):</em> Har krysssjekket lab-verdiene mot tabellverdiene i Miljødirektoratets veileder. AI-en har hentet ut riktig tilstandsklasse. Anbefaler godkjenning.</p>
-        </div>
-        """, unsafe_allow_html=True)
+st.markdown("<h2 style='font-size: 1.6rem; margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem;'>Dokumenter til behandling</h2>", unsafe_allow_html=True)
 
-    with c2:
-        st.markdown("### Compliance Check")
-        st.info("💡 Builtly AI Confidence Score: **98.4%**")
-        
-        st.markdown("<div class='review-panel'>", unsafe_allow_html=True)
-        st.markdown("#### Sjekkliste for Godkjenning")
-        st.checkbox("Rådata fra lab er verifisert mot uttrekk", value=True, disabled=True)
-        st.checkbox("Regelverksreferanser (TEK17/Miljødir) er korrekte", value=True, disabled=True)
-        st.checkbox("Plausibilitetskontroll utført av Junior", value=True, disabled=True)
-        
-        st.markdown("---")
-        st.markdown("#### Digital Sign-off")
-        st.markdown("<p style='font-size: 0.9rem; color: #a1a1aa;'>Ved å klikke under, bekrefter du faglig ansvar for innholdet og påfører din kryptografiske signatur på PDF-en.</p>", unsafe_allow_html=True)
-        
-        if st.button("✍️ Godkjenn og Signer Dokument", type="primary", use_container_width=True):
-            sign_document(p_id)
-        
-        st.button("Avvis og send tilbake til Junior", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# --- VISNING 2: DASHBOARD (LISTE OVER OPPGAVER) ---
-else:
-    st.markdown("<div class='header-title'>QA & Sign-off Dashboard</div>", unsafe_allow_html=True)
-    st.markdown("<div class='header-sub'>Kvalitetssikring av AI-genererte dokumenter før endelig leveranse.</div>", unsafe_allow_html=True)
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Pending Sign-offs", len(mock_projects) - len(st.session_state.signed_projects))
-    c2.metric("Signed Today", len(st.session_state.signed_projects))
-    c3.metric("AI Confidence Avg.", "97.2%")
-    
-    st.markdown("### Dokumenter til behandling")
-    
-    for p_id, proj in mock_projects.items():
-        is_signed = p_id in st.session_state.signed_projects
-        
-        badge_html = "<span class='badge badge-signed'>✅ Approved & Signed</span>" if is_signed else "<span class='badge badge-pending'>⏳ Pending Senior Review</span>"
-        
+# --- 5. KØ (REVIEW CARDS) ---
+def review_card(title, doc_id, module, drafter, reviewer, status_text, status_class, btn_key):
+    """En funksjon som tvinger Streamlit til å tegne et feilfritt mørkt kort med en innfødt knapp"""
+    # Vi putter alt inni én kolonne for å kunne fange den opp med CSS :has()
+    col, _ = st.columns([1, 0.001])
+    with col:
+        st.markdown('<div class="review-card-hook"></div>', unsafe_allow_html=True)
         st.markdown(f"""
-        <div class="task-row">
-            <div class="task-info">
-                <h4>{proj['name']}</h4>
-                <p>ID: {p_id} • Modul: {proj['module']} • Draftet: {proj['drafter']} • Sjekket av: {proj['qa']}</p>
-            </div>
-            <div>
-                {badge_html}
-            </div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+            <div style="font-size: 1.35rem; font-weight: 750; color: #fff;">{title}</div>
+            <div class="status-badge {status_class}">⏳ {status_text}</div>
+        </div>
+        <div style="color: #9fb0c3; font-size: 0.95rem; line-height: 1.6; margin-bottom: 0.5rem;">
+            <strong>ID:</strong> {doc_id} &nbsp;&bull;&nbsp; <strong>Modul:</strong> {module} <br>
+            <strong>Draftet:</strong> {drafter} &nbsp;&bull;&nbsp; <strong>Sjekket av:</strong> {reviewer}
         </div>
         """, unsafe_allow_html=True)
         
-        # Hvis den IKKE er signert, gi en knapp for å åpne den
-        if not is_signed:
-            if st.button(f"Åpne for kontroll", key=f"btn_{p_id}"):
-                st.session_state.viewing_project = p_id
-                st.rerun()
+        # En innfødt Streamlit knapp som nå har perfekt mørkt design takket være CSS-en på toppen!
+        if st.button("🔍 Åpne for kontroll", key=btn_key, type="secondary"):
+            st.toast(f"Åpner dokument '{title}' for sign-off...", icon="⏳")
+
+# Rendring av elementene i køen
+review_card(
+    "Saga Park Næringsbygg", 
+    "PRJ-2026-A1", "RIG-M (Miljø)", "Builtly AI", "Ola Nordmann (Junior)", 
+    "Pending Senior Review", "badge-pending", "btn_saga"
+)
+
+review_card(
+    "Fjordveien Boligsameie", 
+    "PRJ-2026-B4", "RIBr (Brann)", "Builtly AI", "Kari Nilsen (Junior)", 
+    "Pending Senior Review", "badge-pending", "btn_fjord"
+)
+
+review_card(
+    "Sentrumsterminalen", 
+    "PRJ-2026-C2", "RIB (Konstruksjon)", "Builtly AI", "Ola Nordmann (Junior)", 
+    "Pending Senior Review", "badge-pending", "btn_sentrum"
+)
