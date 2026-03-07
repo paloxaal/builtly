@@ -74,7 +74,6 @@ def module_card(
         else '<span class="module-cta disabled">In development</span>'
     )
 
-    # Bruker textwrap.dedent for å forhindre at Markdown gjør HTML-en om til en kodeblokk!
     return textwrap.dedent(f"""
     <div class="module-card">
         <div class="module-header">
@@ -161,7 +160,7 @@ st.markdown(
         align-items: center;
         justify-content: flex-end;
         gap: 0.75rem;
-        flex-wrap: nowrap; /* Tvinger dem på én linje */
+        flex-wrap: nowrap; /* Tvinger knapper på én linje */
     }
 
     .top-link {
@@ -176,7 +175,7 @@ st.markdown(
         font-size: 0.92rem;
         transition: all 0.2s ease;
         border: 1px solid transparent;
-        white-space: nowrap; /* Forhindrer at teksten brekker */
+        white-space: nowrap;
     }
 
     .top-link.ghost {
@@ -202,14 +201,7 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(56,194,201,0.18);
     }
 
-    .top-link.disabled,
-    .hero-action.disabled,
-    .module-cta.disabled {
-        opacity: 0.45;
-        pointer-events: none;
-        cursor: default;
-    }
-
+    /* --- PERFEKT SYMMETRI PÅ HERO-BOKSENE --- */
     .hero {
         position: relative;
         overflow: hidden;
@@ -219,7 +211,10 @@ st.markdown(
         padding: 2.3rem;
         box-shadow: var(--shadow);
         margin-bottom: 1.25rem;
-        min-height: 100%;
+        min-height: 560px; /* Låst høyde for symmetri */
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
     }
 
     .hero::before {
@@ -230,6 +225,18 @@ st.markdown(
         height: 420px;
         background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%);
         pointer-events: none;
+    }
+
+    .hero-panel {
+        background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); /* Samme gradient som venstre */
+        border: 1px solid rgba(120,145,170,0.16);
+        border-radius: var(--radius-xl); /* Samme hjørner som venstre */
+        padding: 2.3rem; /* Samme padding som venstre */
+        box-shadow: var(--shadow);
+        margin-bottom: 1.25rem;
+        min-height: 560px; /* Låst høyde for symmetri */
+        display: flex;
+        flex-direction: column;
     }
 
     .eyebrow {
@@ -325,28 +332,24 @@ st.markdown(
         font-size: 0.82rem;
     }
 
-    .hero-panel {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid var(--stroke);
-        border-radius: 22px;
-        padding: 1.25rem;
-        min-height: 100%;
-    }
-
     .panel-title {
         font-size: 0.86rem;
         text-transform: uppercase;
         letter-spacing: 0.08em;
         color: var(--muted);
-        margin-bottom: 0.85rem;
+        margin-bottom: 1.2rem;
     }
 
     .mini-stat {
-        background: rgba(255,255,255,0.03);
+        background: rgba(255,255,255,0.02);
         border: 1px solid var(--stroke);
         border-radius: 16px;
-        padding: 0.95rem 1rem;
-        margin-bottom: 0.75rem;
+        padding: 1.1rem 1.2rem;
+        margin-bottom: 0.8rem;
+        flex: 1; /* Strekker boksene slik at de fyller høyden likt */
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
     }
 
     .mini-stat-value {
@@ -669,14 +672,15 @@ st.markdown(
         .topbar { flex-direction: column; align-items: flex-start; }
         .topbar-right { 
             justify-content: flex-start; 
-            width: 100%;
+            width: 100%; 
+            flex-wrap: nowrap !important; 
         }
-        .top-link {
-            padding: 0.7rem 0.8rem; /* Litt mindre padding på mobil */
-            font-size: 0.88rem;
-            flex: 1; /* Lar knappene dele plassen likt på mobil */
+        .top-link { 
+            flex: 1; 
+            padding: 0.7rem 0.5rem; 
+            font-size: 0.85rem; 
         }
-        .hero-title { max-width: none; }
+        .hero, .hero-panel { min-height: auto; }
     }
 </style>
 """,
@@ -684,21 +688,19 @@ st.markdown(
 )
 
 # -------------------------------------------------
-# 5) TOP BAR (Logo + Knapper)
+# 5) TOP BAR
 # -------------------------------------------------
-logo_col, right_col = st.columns([0.5, 0.5], gap="large")
+logo_col, right_col = st.columns([0.42, 0.58], gap="large")
 
 with logo_col:
     if os.path.exists("logo-white.png"):
-        st.image("logo-white.png", width=290) # Økt størrelsen med over 30%!
+        st.image("logo-white.png", width=290)
     elif os.path.exists("logo.png"):
         st.image("logo.png", width=290)
     else:
         st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
 
 with right_col:
-    # Fjernet tagline "AI-assisted engineering...", kun knapper igjen.
-    # flex-wrap: nowrap sikrer at knappene holder seg ved siden av hverandre.
     st.markdown(
         f"""
         <div class="topbar">
@@ -714,7 +716,6 @@ with right_col:
 # -------------------------------------------------
 # 6) HERO (50/50 Symmetri)
 # -------------------------------------------------
-# Endret fra [1.42, 0.78] til [2, 2] for å gi dem nøyaktig like mye plass for perfekt symmetri.
 left, right = st.columns(2, gap="large")
 
 with left:
