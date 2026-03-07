@@ -13,41 +13,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# 2) PAGE MAP
-# st.page_link() uses file paths relative to the main script.
-# (Keeping your Norwegian file names for routing, so nothing breaks)
-# -------------------------------------------------
-PAGES = {
-    "mulighetsstudie": "pages/Mulighetsstudie.py",
-    "geo": "pages/Geo.py",
-    "konstruksjon": "pages/Konstruksjon.py",
-    "brann": "pages/Brannkonsept.py",
-    "akustikk": "pages/Akustikk.py",
-    "review": "pages/Review.py", # Denne peker nå på den nye filen din!
-}
-# -------------------------------------------------
-# 3) HELPERS
-# -------------------------------------------------
-def page_exists(page_path: str) -> bool:
-    return Path(page_path).exists()
-
-def nav_link(page_key: str, label: str, icon: str = None, help_text: str = None):
-    page_path = PAGES.get(page_key)
-    if page_path and page_exists(page_path):
-        st.page_link(page_path, label=label, icon=icon, help=help_text)
-    else:
-        st.markdown(
-            f"""
-            <div class="disabled-link">
-                <span>{label}</span>
-                <span class="disabled-tag">In Development</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-# -------------------------------------------------
-# 4) CSS
+# 2) CSS - PREMIUM DARK MODE MED KLIKKBARE KORT
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -61,17 +27,11 @@ st.markdown("""
         --soft: #c8d3df;
         --accent: #38c2c9;
         --accent-2: #78dce1;
-        --accent-3: #112c3f;
-        --ok: #7ee081;
-        --warn: #f4bf4f;
-        --shadow: 0 20px 80px rgba(0,0,0,0.35);
         --radius-xl: 28px;
-        --radius-lg: 18px;
-        --radius-md: 14px;
     }
 
     html, body, [class*="css"] {
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
     }
 
     .stApp {
@@ -95,11 +55,7 @@ st.markdown("""
         position: relative; overflow: hidden;
         background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
         border: 1px solid rgba(120,145,170,0.16); border-radius: var(--radius-xl);
-        padding: 2.2rem; box-shadow: var(--shadow); margin-bottom: 1.25rem;
-    }
-    .hero::before {
-        content: ""; position: absolute; inset: -80px -120px auto auto; width: 420px; height: 420px;
-        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%); pointer-events: none;
+        padding: 2.2rem; margin-bottom: 1.25rem;
     }
     .eyebrow { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.14em; font-size: 0.78rem; font-weight: 700; margin-bottom: 1rem; }
     .hero-title { font-size: clamp(2.5rem, 5vw, 4.2rem); line-height: 1.05; letter-spacing: -0.04em; font-weight: 800; margin: 0; color: var(--text); max-width: 14ch; }
@@ -113,63 +69,80 @@ st.markdown("""
     .mini-stat-value { font-size: 1.35rem; font-weight: 700; color: var(--text); line-height: 1.1; }
     .mini-stat-label { margin-top: 0.25rem; color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
 
-    .section-head { margin-top: 2rem; margin-bottom: 1rem; }
+    .section-head { margin-top: 3rem; margin-bottom: 1.5rem; }
     .section-kicker { color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.12em; font-size: 0.74rem; font-weight: 700; margin-bottom: 0.4rem; }
     .section-title { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.03em; color: var(--text); margin: 0; }
     .section-subtitle { margin-top: 0.35rem; color: var(--muted); line-height: 1.75; max-width: 72ch; }
 
-    .trust-grid, .loop-grid, .module-grid { display: grid; gap: 1rem; }
-    .trust-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.75rem; margin-bottom: 0.6rem; }
-    .trust-card { background: var(--panel); border: 1px solid var(--stroke); border-radius: 18px; padding: 1rem; min-height: 132px; }
-    .trust-title { font-size: 1rem; font-weight: 650; color: var(--text); margin-bottom: 0.45rem; }
-    .trust-desc { font-size: 0.92rem; line-height: 1.65; color: var(--muted); }
-
-    .loop-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.8rem; }
-    .loop-card { background: var(--panel-2); border: 1px solid var(--stroke); border-radius: 18px; padding: 1rem; min-height: 160px; position: relative; }
+    .loop-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin-top: 0.8rem; }
+    .loop-card { background: var(--panel-2); border: 1px solid var(--stroke); border-radius: 18px; padding: 1rem; min-height: 160px; }
     .loop-number { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: rgba(56,194,201,0.12); border: 1px solid rgba(56,194,201,0.22); color: var(--accent-2); font-weight: 700; font-size: 0.92rem; margin-bottom: 0.8rem; }
     .loop-title { font-size: 1rem; font-weight: 650; color: var(--text); margin-bottom: 0.45rem; }
     .loop-desc { font-size: 0.92rem; line-height: 1.65; color: var(--muted); }
 
-    .module-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 0.8rem; }
-    .module-card { background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)); border: 1px solid var(--stroke); border-radius: 22px; padding: 1.15rem; min-height: 270px; box-shadow: 0 12px 38px rgba(0,0,0,0.18); }
-    .module-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.85rem; }
-    .module-badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.32rem 0.6rem; border-radius: 999px; border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03); color: var(--muted); font-size: 0.75rem; font-weight: 600; }
-    .module-icon { width: 44px; height: 44px; border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; background: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.18); color: var(--accent-2); font-size: 1.3rem; }
-    .module-title { font-size: 1.08rem; font-weight: 700; color: var(--text); margin-bottom: 0.45rem; }
-    .module-desc { font-size: 0.93rem; line-height: 1.7; color: var(--muted); margin-bottom: 0.9rem; }
-    .module-meta { font-size: 0.85rem; line-height: 1.7; color: var(--soft); padding-top: 0.75rem; border-top: 1px solid rgba(120,145,170,0.14); }
-
-    .cta-band { margin-top: 3rem; margin-bottom: 1.5rem; background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28)); border: 1px solid rgba(56,194,201,0.18); border-radius: 24px; padding: 1.4rem; }
-    .cta-title { font-size: 1.3rem; font-weight: 700; color: var(--text); margin-bottom: 0.3rem; }
-    .cta-desc { color: var(--muted); line-height: 1.7; max-width: 70ch; }
-
-    .disabled-link { width: 100%; margin-top: 0.45rem; display: flex; align-items: center; justify-content: space-between; border: 1px dashed rgba(120,145,170,0.22); border-radius: 12px; padding: 0.8rem 0.95rem; color: var(--muted); font-size: 0.92rem; background: rgba(255,255,255,0.02); }
-    .disabled-tag { font-size: 0.75rem; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; border-radius: 4px;}
-
-    [data-testid="stPageLink-NavLink"] {
-        background-color: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; padding: 8px 12px; transition: all 0.2s; margin-top: 8px;
+    /* MODULE CARDS - Perfekt symmetri og hele kortet er klikkbart */
+    .module-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.5rem; margin-top: 1rem; }
+    
+    .module-card {
+        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96));
+        border: 1px solid var(--stroke);
+        border-radius: 22px;
+        padding: 1.8rem;
+        display: flex;
+        flex-direction: column;
+        text-decoration: none !important;
+        transition: all 0.3s ease;
+        height: 100%; /* Tvinger dem til å være like høye! */
     }
-    [data-testid="stPageLink-NavLink"]:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
+    .module-card:hover {
+        border-color: rgba(56,194,201,0.5);
+        transform: translateY(-5px);
+        box-shadow: 0 15px 35px rgba(0,0,0,0.4);
+    }
+    
+    .module-top { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.2rem; }
+    .module-icon { 
+        width: 50px; height: 50px; border-radius: 14px; display: inline-flex; 
+        align-items: center; justify-content: center; background: rgba(56,194,201,0.1); 
+        border: 1px solid rgba(56,194,201,0.18); color: var(--accent-2); font-size: 1.5rem; 
+    }
+    .module-title { font-size: 1.15rem; font-weight: 700; color: #ffffff !important; margin: 0; }
+    .module-desc { font-size: 0.95rem; line-height: 1.6; color: var(--muted) !important; flex-grow: 1; }
+    
+    .module-meta { 
+        font-size: 0.85rem; line-height: 1.7; color: var(--soft) !important; 
+        padding-top: 1rem; border-top: 1px solid rgba(120,145,170,0.14); margin-top: 1rem; 
+    }
+    
+    /* Override for the specific review button at the top */
+    .review-btn {
+        display: inline-block; padding: 0.5rem 1rem; background-color: rgba(56,194,201,0.1);
+        border: 1px solid rgba(56,194,201,0.3); border-radius: 8px; color: #ffffff !important;
+        text-decoration: none !important; font-weight: 600; font-size: 0.9rem; text-align: center;
+        transition: all 0.2s;
+    }
+    .review-btn:hover { background-color: rgba(56,194,201,0.2); border-color: rgba(56,194,201,0.6); }
+
+    @media (max-width: 1000px) { .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 600px) { .module-grid { grid-template-columns: 1fr; } .loop-grid { grid-template-columns: 1fr; } }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 5) TOP / BRAND
+# 3) TOP / BRAND (Stor logo)
 # -------------------------------------------------
-# Fjernet "Review"-knappen og gjorde plass til stor logo
+st.write("")
 top_left, top_right = st.columns([0.85, 0.15])
-
 with top_left:
-    brand_cols = st.columns([0.2, 0.8])
-    with brand_cols[0]:
-        if os.path.exists("logo.png"):
-            # Mye større logo (160px i stedet for 68px)
-            st.image("logo.png", width=160)
-    with brand_cols[1]:
-        st.markdown('<div class="brand-kicker" style="margin-top: 10px;">AI-Assisted Engineering · Human-Verified · Compliance-Grade</div>', unsafe_allow_html=True)
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=280)
+with top_right:
+    st.markdown('<div style="margin-top: 10px;"><a href="Review" target="_self" class="review-btn">✅ QA & Sign-off</a></div>', unsafe_allow_html=True)
+
+st.write("")
 
 # -------------------------------------------------
-# 6) HERO
+# 4) HERO
 # -------------------------------------------------
 left, right = st.columns([1.35, 0.8], gap="large")
 
@@ -182,7 +155,7 @@ with left:
         Builtly is the client portal for AI-assisted engineering and documentation. 
         Upload raw data, let the platform handle analysis, compliance checks, and drafting — before junior QA and senior sign-off ensure fast, consistent, and traceable delivery.
     </div>
-    <div class="hero-note">Designed for building applications, execution, and professional compliance — not just another AI wrapper.</div>
+    <div class="hero-note">Designed for building applications, execution, and professional compliance.</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -198,10 +171,6 @@ with right:
         <div class="mini-stat-value">Junior + Senior</div>
         <div class="mini-stat-label">Human-in-the-loop QA and digital sign-off</div>
     </div>
-    <div class="mini-stat">
-        <div class="mini-stat-value">PDF + DOCX</div>
-        <div class="mini-stat-label">Complete report packages with traceability</div>
-    </div>
     <div class="mini-stat" style="margin-bottom:0;">
         <div class="mini-stat-value">Audit Trail</div>
         <div class="mini-stat-label">Versions, inputs, compliance rules, and signatures logged</div>
@@ -210,38 +179,7 @@ with right:
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 7) TRUST SECTION
-# -------------------------------------------------
-st.markdown("""
-<div class="section-head">
-    <div class="section-kicker">Core Value Proposition</div>
-    <h2 class="section-title">Portal First. Modules Attached.</h2>
-    <div class="section-subtitle">
-        Builtly provides a secure, traceable portal for uploads, validation, AI processing, QA, and signed delivery — scalable across local regulations.
-    </div>
-</div>
-<div class="trust-grid">
-    <div class="trust-card">
-        <div class="trust-title">Client Portal</div>
-        <div class="trust-desc">Project creation, data ingestion, deficiency lists, document generation, and audit trails in a single workflow.</div>
-    </div>
-    <div class="trust-card">
-        <div class="trust-title">Rules-First AI</div>
-        <div class="trust-desc">AI operates within strict guardrails, combined with explicit regulatory checkpoints and standard templates.</div>
-    </div>
-    <div class="trust-card">
-        <div class="trust-title">QA & Sign-off</div>
-        <div class="trust-desc">Junior engineers validate input plausibility. Senior engineers provide final review and signature.</div>
-    </div>
-    <div class="trust-card">
-        <div class="trust-title">Scalable Delivery</div>
-        <div class="trust-desc">Deploy new engineering disciplines globally without altering the core platform infrastructure.</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# -------------------------------------------------
-# 8) BUILTLY LOOP
+# 5) BUILTLY LOOP
 # -------------------------------------------------
 st.markdown("""
 <div class="section-head">
@@ -255,7 +193,7 @@ st.markdown("""
     <div class="loop-card">
         <div class="loop-number">1</div>
         <div class="loop-title">Input</div>
-        <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, environmental data, and architectural drawings.</div>
+        <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, and architectural drawings.</div>
     </div>
     <div class="loop-card">
         <div class="loop-number">2</div>
@@ -265,127 +203,92 @@ st.markdown("""
     <div class="loop-card">
         <div class="loop-number">3</div>
         <div class="loop-title">QA & Sign-off</div>
-        <div class="loop-desc">Junior assessment, senior technical review, and digital signature — with full version control.</div>
+        <div class="loop-desc">Junior assessment, senior technical review, and digital signature.</div>
     </div>
     <div class="loop-card">
         <div class="loop-number">4</div>
         <div class="loop-title">Output</div>
-        <div class="loop-desc">Finalized document package in standard formats, ready for municipal submission or execution.</div>
+        <div class="loop-desc">Finalized document package ready for municipal submission or execution.</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 9) MODULES
+# 6) MODULES (Symmetrisk Grid)
 # -------------------------------------------------
 st.markdown("""
-<div class="section-head">
-    <div class="section-kicker">Modules & Roadmap</div>
-    <h2 class="section-title">Specialized Agents in One Platform</h2>
+<div class="section-head" style="margin-top: 4rem;">
+    <div class="section-kicker">Core Disciplines</div>
+    <h2 class="section-title">Engineering Modules</h2>
     <div class="section-subtitle">
-        Each module features dedicated data ingestion and local regulatory frameworks, sharing a unified backend for validation and QA.
+        Select a specialized agent below. Each module features dedicated data ingestion and local regulatory frameworks.
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-module_cols = st.columns(3, gap="large")
-
-with module_cols[0]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">🌍</div>
-        <div class="module-badge">Phase 1 · Priority</div>
-    </div>
-    <div class="module-title">GEO / ENV — Ground Conditions</div>
-    <div class="module-desc">Analyze lab files and excavation plans. Outputs soil classification, disposal proposals, and action plans.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> XLSX / CSV / PDF + plans<br/>
-        <strong>Output:</strong> Environmental action plan, logs
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("geo", "Open Geo & Env", icon="🌍")
-
-with module_cols[1]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">🔊</div>
-        <div class="module-badge">Phase 2</div>
-    </div>
-    <div class="module-title">ACOUSTICS — Noise & Sound</div>
-    <div class="module-desc">Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> Noise map + floor plan<br/>
-        <strong>Output:</strong> Acoustics report, facade evaluation
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("akustikk", "Open Acoustics", icon="🔊")
-
-with module_cols[2]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">🔥</div>
-        <div class="module-badge">Phase 2</div>
-    </div>
-    <div class="module-title">FIRE — Safety Strategy</div>
-    <div class="module-title" style="font-size:0px;"></div>
-    <div class="module-desc">Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and strategy.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> Architectural drawings + class<br/>
-        <strong>Output:</strong> Fire strategy concept, deviations
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("brann", "Open Fire Strategy", icon="🔥")
-
-module_cols_2 = st.columns(2, gap="large")
-
-with module_cols_2[0]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">📐</div>
-        <div class="module-badge">Early Phase</div>
-    </div>
-    <div class="module-title">ARK — Feasibility Study</div>
-    <div class="module-desc">Site screening, volume analysis, and early-phase decision support prior to full engineering design.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> Site data, zoning plans<br/>
-        <strong>Output:</strong> Feasibility report, utilization metrics
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("mulighetsstudie", "Open Feasibility", icon="📐")
-
-with module_cols_2[1]:
-    st.markdown("""
-<div class="module-card">
-    <div class="module-top">
-        <div class="module-icon">🏢</div>
-        <div class="module-badge">Roadmap</div>
-    </div>
-    <div class="module-title">STRUC — Structural Concept</div>
-    <div class="module-desc">Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.</div>
-    <div class="module-meta">
-        <strong>Input:</strong> Models, load parameters<br/>
-        <strong>Output:</strong> Concept memo, grid layouts
-    </div>
-</div>
-""", unsafe_allow_html=True)
-    nav_link("konstruksjon", "Open Structural", icon="🏢")
-
-# -------------------------------------------------
-# 10) CTA BAND
-# -------------------------------------------------
+# HELE kortet er klikkbart ved å pakke det inn i <a href="...">
 st.markdown("""
-<div class="cta-band">
-    <div class="cta-title">Not just analysis. Actual deliverables.</div>
-    <div class="cta-desc">
-        Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations, generate drafts, execute QA, and download the signed documentation package.
-    </div>
+<div class="module-grid">
+    
+    <a href="Geo" target="_self" class="module-card">
+        <div class="module-top">
+            <div class="module-icon">🌍</div>
+            <div class="module-title">GEO / ENV — Ground Conditions</div>
+        </div>
+        <div class="module-desc">Analyze lab files and excavation plans. Outputs soil classification, disposal proposals, and action plans.</div>
+        <div class="module-meta">
+            <strong>Input:</strong> XLSX / CSV / PDF + plans<br/>
+            <strong>Output:</strong> Environmental action plan
+        </div>
+    </a>
+
+    <a href="Akustikk" target="_self" class="module-card">
+        <div class="module-top">
+            <div class="module-icon">🔊</div>
+            <div class="module-title">ACOUSTICS — Noise & Sound</div>
+        </div>
+        <div class="module-desc">Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.</div>
+        <div class="module-meta">
+            <strong>Input:</strong> Noise map + floor plan<br/>
+            <strong>Output:</strong> Acoustics report
+        </div>
+    </a>
+
+    <a href="Brannkonsept" target="_self" class="module-card">
+        <div class="module-top">
+            <div class="module-icon">🔥</div>
+            <div class="module-title">FIRE — Safety Strategy</div>
+        </div>
+        <div class="module-desc">Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and strategy.</div>
+        <div class="module-meta">
+            <strong>Input:</strong> Architectural drawings<br/>
+            <strong>Output:</strong> Fire strategy concept
+        </div>
+    </a>
+
+    <a href="Konstruksjon" target="_self" class="module-card">
+        <div class="module-top">
+            <div class="module-icon">🏢</div>
+            <div class="module-title">STRUC — Structural Concept</div>
+        </div>
+        <div class="module-desc">Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.</div>
+        <div class="module-meta">
+            <strong>Input:</strong> Models, load parameters<br/>
+            <strong>Output:</strong> Concept memo, grid layouts
+        </div>
+    </a>
+    
+    <a href="Mulighetsstudie" target="_self" class="module-card">
+        <div class="module-top">
+            <div class="module-icon">📐</div>
+            <div class="module-title">ARK — Feasibility Study</div>
+        </div>
+        <div class="module-desc">Site screening, volume analysis, and early-phase decision support prior to full engineering design.</div>
+        <div class="module-meta">
+            <strong>Input:</strong> Site data, zoning plans<br/>
+            <strong>Output:</strong> Feasibility report
+        </div>
+    </a>
+
 </div>
 """, unsafe_allow_html=True)
