@@ -1,6 +1,9 @@
 import os
+import base64
 import textwrap
 from pathlib import Path
+from typing import Optional
+
 import streamlit as st
 
 # -------------------------------------------------
@@ -35,22 +38,30 @@ def page_exists(page_path: str) -> bool:
     return Path(page_path).exists()
 
 
-def page_route(page_key: str) -> str | None:
+def page_route(page_key: str) -> Optional[str]:
     page_path = PAGES.get(page_key)
     if not page_path or not page_exists(page_path):
         return None
     return Path(page_path).stem
 
 
+def html_dedent(s: str) -> str:
+    return textwrap.dedent(s).strip()
+
+
+def href_or_none(page_key: str) -> Optional[str]:
+    return page_route(page_key)
+
+
 def top_link(page_key: str, label: str, kind: str = "ghost") -> str:
-    href = page_route(page_key)
+    href = href_or_none(page_key)
     if href:
         return f'<a href="{href}" target="_self" class="top-link {kind}">{label}</a>'
     return f'<span class="top-link {kind} disabled">{label}</span>'
 
 
 def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
-    href = page_route(page_key)
+    href = href_or_none(page_key)
     if href:
         return f'<a href="{href}" target="_self" class="hero-action {kind}">{label}</a>'
     return f'<span class="hero-action {kind} disabled">{label}</span>'
@@ -67,31 +78,43 @@ def module_card(
     output_text: str,
     cta_label: str,
 ) -> str:
-    href = page_route(page_key)
+    href = href_or_none(page_key)
     action_html = (
         f'<a href="{href}" target="_self" class="module-cta">{cta_label}</a>'
         if href
         else '<span class="module-cta disabled">In development</span>'
     )
 
-    return textwrap.dedent(f"""
-    <div class="module-card">
-        <div class="module-header">
-            <div class="module-icon">{icon}</div>
-            <div class="module-badge {badge_class}">{badge}</div>
+    return html_dedent(
+        f"""
+        <div class="module-card">
+            <div class="module-header">
+                <div class="module-icon">{icon}</div>
+                <div class="module-badge {badge_class}">{badge}</div>
+            </div>
+            <div class="module-title">{title}</div>
+            <div class="module-desc">{description}</div>
+            <div class="module-spacer"></div>
+            <div class="module-meta">
+                <strong>Input:</strong> {input_text}<br/>
+                <strong>Output:</strong> {output_text}
+            </div>
+            <div class="module-cta-wrap">
+                {action_html}
+            </div>
         </div>
-        <div class="module-title">{title}</div>
-        <div class="module-desc">{description}</div>
-        <div class="module-spacer"></div>
-        <div class="module-meta">
-            <strong>Input:</strong> {input_text}<br/>
-            <strong>Output:</strong> {output_text}
-        </div>
-        <div class="module-cta-wrap">
-            {action_html}
-        </div>
-    </div>
-    """).strip()
+        """
+    )
+
+
+def logo_data_uri() -> str:
+    for candidate in ["logo-white.png", "logo.png"]:
+        if os.path.exists(candidate):
+            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
+            with open(candidate, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/{suffix};base64,{encoded}"
+    return ""
 
 
 # -------------------------------------------------
@@ -103,7 +126,7 @@ st.markdown(
     :root {
         --bg: #06111a;
         --panel: rgba(10, 22, 35, 0.78);
-        --panel-2: rgba(13, 27, 42, 0.92);
+        --panel-2: rgba(13, 27, 42, 0.94);
         --stroke: rgba(120, 145, 170, 0.18);
         --stroke-strong: rgba(120, 145, 170, 0.28);
         --text: #f5f7fb;
@@ -144,23 +167,77 @@ st.markdown(
 
     .block-container {
         max-width: 1280px !important;
-        padding-top: 1.4rem !important;
+        padding-top: 1.35rem !important;
         padding-bottom: 4rem !important;
     }
 
-    .topbar {
+    .top-shell {
         display: flex;
         align-items: center;
-        justify-content: flex-end;
+        justify-content: space-between;
+        gap: 1.25rem;
         margin-bottom: 1rem;
+    }
+
+    .brand-left {
+        display: flex;
+        align-items: center;
+        gap: 0.9rem;
+        min-width: 0;
+    }
+
+    .brand-logo {
+        display: block;
+        height: 62px;
+        width: auto;
+        flex-shrink: 0;
+        filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
+    }
+
+    .brand-text {
+        min-width: 0;
+    }
+
+    .brand-name {
+        color: var(--text);
+        font-weight: 750;
+        font-size: 1.05rem;
+        line-height: 1.1;
+        letter-spacing: -0.02em;
+    }
+
+    .brand-sub {
+        margin-top: 0.22rem;
+        color: var(--muted);
+        font-size: 0.84rem;
+        line-height: 1.45;
+    }
+
+    .brand-kicker {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.45rem;
+        padding: 0.5rem 0.95rem;
+        border: 1px solid rgba(56,194,201,0.24);
+        background: rgba(56,194,201,0.08);
+        border-radius: 999px;
+        font-size: 0.84rem;
+        color: var(--accent-2);
+        letter-spacing: 0.01em;
+        white-space: nowrap;
     }
 
     .topbar-right {
         display: flex;
         align-items: center;
         justify-content: flex-end;
-        gap: 0.75rem;
-        flex-wrap: nowrap; /* Tvinger knapper på én linje */
+        gap: 0.65rem;
+        padding: 0.35rem;
+        border-radius: 18px;
+        background: rgba(255,255,255,0.025);
+        border: 1px solid rgba(120,145,170,0.12);
+        flex-wrap: wrap;
     }
 
     .top-link {
@@ -168,11 +245,11 @@ st.markdown(
         align-items: center;
         justify-content: center;
         min-height: 42px;
-        padding: 0.7rem 0.95rem;
+        padding: 0.72rem 1rem;
         border-radius: 12px;
         text-decoration: none !important;
-        font-weight: 600;
-        font-size: 0.92rem;
+        font-weight: 650;
+        font-size: 0.93rem;
         transition: all 0.2s ease;
         border: 1px solid transparent;
         white-space: nowrap;
@@ -201,7 +278,14 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(56,194,201,0.18);
     }
 
-    /* --- PERFEKT SYMMETRI PÅ HERO-BOKSENE --- */
+    .top-link.disabled,
+    .hero-action.disabled,
+    .module-cta.disabled {
+        opacity: 0.45;
+        pointer-events: none;
+        cursor: default;
+    }
+
     .hero {
         position: relative;
         overflow: hidden;
@@ -211,10 +295,7 @@ st.markdown(
         padding: 2.3rem;
         box-shadow: var(--shadow);
         margin-bottom: 1.25rem;
-        min-height: 560px; /* Låst høyde for symmetri */
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+        min-height: 100%;
     }
 
     .hero::before {
@@ -225,18 +306,6 @@ st.markdown(
         height: 420px;
         background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%);
         pointer-events: none;
-    }
-
-    .hero-panel {
-        background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); /* Samme gradient som venstre */
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: var(--radius-xl); /* Samme hjørner som venstre */
-        padding: 2.3rem; /* Samme padding som venstre */
-        box-shadow: var(--shadow);
-        margin-bottom: 1.25rem;
-        min-height: 560px; /* Låst høyde for symmetri */
-        display: flex;
-        flex-direction: column;
     }
 
     .eyebrow {
@@ -305,11 +374,12 @@ st.markdown(
 
     .hero-action.secondary {
         color: #ffffff !important;
-        background: rgba(255,255,255,0.04);
+        background: rgba(255,255,255,0.05);
         border-color: rgba(120,145,170,0.22);
     }
 
-    .hero-action:hover {
+    .hero-action:hover,
+    .module-cta:hover {
         transform: translateY(-1px);
     }
 
@@ -332,24 +402,28 @@ st.markdown(
         font-size: 0.82rem;
     }
 
+    .hero-panel {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--stroke);
+        border-radius: 22px;
+        padding: 1.25rem;
+        min-height: 100%;
+    }
+
     .panel-title {
         font-size: 0.86rem;
         text-transform: uppercase;
         letter-spacing: 0.08em;
         color: var(--muted);
-        margin-bottom: 1.2rem;
+        margin-bottom: 0.85rem;
     }
 
     .mini-stat {
-        background: rgba(255,255,255,0.02);
+        background: rgba(255,255,255,0.03);
         border: 1px solid var(--stroke);
         border-radius: 16px;
-        padding: 1.1rem 1.2rem;
-        margin-bottom: 0.8rem;
-        flex: 1; /* Strekker boksene slik at de fyller høyden likt */
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+        padding: 0.95rem 1rem;
+        margin-bottom: 0.75rem;
     }
 
     .mini-stat-value {
@@ -367,7 +441,7 @@ st.markdown(
     }
 
     .section-head {
-        margin-top: 2.2rem;
+        margin-top: 2.25rem;
         margin-bottom: 1rem;
     }
 
@@ -611,7 +685,6 @@ st.markdown(
     .module-cta:hover {
         background: rgba(56,194,201,0.18);
         border-color: rgba(56,194,201,0.5);
-        transform: translateY(-1px);
     }
 
     .cta-band {
@@ -661,26 +734,48 @@ st.markdown(
         font-size: 0.8rem;
     }
 
-    @media (max-width: 1100px) {
-        .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    @media (max-width: 1180px) {
+        .top-shell {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        .topbar-right {
+            width: 100%;
+            justify-content: flex-start;
+        }
+        .trust-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .loop-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .module-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
     }
 
     @media (max-width: 760px) {
-        .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr; }
-        .topbar { flex-direction: column; align-items: flex-start; }
-        .topbar-right { 
-            justify-content: flex-start; 
-            width: 100%; 
-            flex-wrap: nowrap !important; 
+        .trust-grid,
+        .loop-grid,
+        .module-grid {
+            grid-template-columns: 1fr;
         }
-        .top-link { 
-            flex: 1; 
-            padding: 0.7rem 0.5rem; 
-            font-size: 0.85rem; 
+        .hero-title {
+            max-width: none;
         }
-        .hero, .hero-panel { min-height: auto; }
+        .topbar-right {
+            flex-direction: column;
+            align-items: stretch;
+        }
+        .top-link {
+            width: 100%;
+        }
+        .brand-kicker {
+            white-space: normal;
+        }
+        .brand-logo {
+            height: 54px;
+        }
     }
 </style>
 """,
@@ -690,33 +785,36 @@ st.markdown(
 # -------------------------------------------------
 # 5) TOP BAR
 # -------------------------------------------------
-logo_col, right_col = st.columns([0.42, 0.58], gap="large")
+logo_html = ""
+logo_uri = logo_data_uri()
+if logo_uri:
+    logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />'
+else:
+    logo_html = '<div class="brand-name">Builtly</div>'
 
-with logo_col:
-    if os.path.exists("logo-white.png"):
-        st.image("logo-white.png", width=290)
-    elif os.path.exists("logo.png"):
-        st.image("logo.png", width=290)
-    else:
-        st.markdown("<h2 style='margin:0; color:white;'>Builtly</h2>", unsafe_allow_html=True)
-
-with right_col:
-    st.markdown(
-        f"""
-        <div class="topbar">
-            <div class="topbar-right">
-                {top_link('project', 'Project Setup', 'ghost')}
-                {top_link('review', 'QA & Sign-off', 'primary')}
-            </div>
+st.markdown(
+    f"""
+<div class="top-shell">
+    <div class="brand-left">
+        {logo_html}
+        <div class="brand-text">
+            <div class="brand-sub">AI-assisted engineering. Human-verified.</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    <div class="brand-kicker">AI-assisted engineering · Human-verified · Compliance-grade</div>
+    <div class="topbar-right">
+        {top_link('project', 'Project Setup', 'ghost')}
+        {top_link('review', 'QA & Sign-off', 'primary')}
+    </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 # -------------------------------------------------
-# 6) HERO (50/50 Symmetri)
+# 6) HERO
 # -------------------------------------------------
-left, right = st.columns(2, gap="large")
+left, right = st.columns([1.42, 0.78], gap="large")
 
 with left:
     st.markdown(
@@ -730,7 +828,7 @@ with left:
         before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
     </div>
     <div class="hero-note">
-        Built for building applications, execution, and professional compliance - not just another AI wrapper.
+        Built for building applications, execution, and professional compliance - designed as a production workflow, not a showcase UI.
     </div>
     <div class="hero-actions">
         {hero_action('project', 'Open project setup', 'primary')}
@@ -802,7 +900,7 @@ st.markdown(
     </div>
     <div class="trust-card">
         <div class="trust-title">Scalable delivery</div>
-        <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
+        <div class="trust-desc">Each discipline plugs into the same validation, documentation, and sign-off backbone.</div>
     </div>
 </div>
 """,
@@ -924,25 +1022,23 @@ roadmap_cards = [
 ]
 
 st.markdown(
-    f"""
-<div class="section-head">
-    <div class="section-kicker">Modules and roadmap</div>
-    <h2 class="section-title">Specialized agents in one platform</h2>
-    <div class="section-subtitle">
-        Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
-    </div>
-</div>
+    html_dedent(
+        f"""
+        <div class="section-head">
+            <div class="section-kicker">Modules and roadmap</div>
+            <h2 class="section-title">Specialized agents in one platform</h2>
+            <div class="section-subtitle">
+                Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
+            </div>
+        </div>
 
-<div class="subsection-title">Available now and pilot-ready</div>
-<div class="module-grid">
-    {''.join(available_cards)}
-</div>
+        <div class="subsection-title">Available now and pilot-ready</div>
+        <div class="module-grid">{''.join(available_cards)}</div>
 
-<div class="subsection-title">Roadmap and early-phase tools</div>
-<div class="module-grid">
-    {''.join(roadmap_cards)}
-</div>
-""",
+        <div class="subsection-title">Roadmap and early-phase tools</div>
+        <div class="module-grid">{''.join(roadmap_cards)}</div>
+        """
+    ),
     unsafe_allow_html=True,
 )
 
@@ -952,9 +1048,10 @@ st.markdown(
 st.markdown(
     f"""
 <div class="cta-band">
-    <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
+    <div class="cta-title">Not just analysis. Actual deliverables.</div>
     <div class="cta-desc">
-        Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
+        Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations,
+        generate drafts, execute QA, and download the signed documentation package.
     </div>
     <div class="hero-actions" style="margin-top:1rem;">
         {hero_action('project', 'Start in project setup', 'primary')}
