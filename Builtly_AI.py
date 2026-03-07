@@ -1,5 +1,6 @@
 import os
 import base64
+import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +20,7 @@ st.set_page_config(
 # 2) PAGE MAP & SMART SØKER
 # -------------------------------------------------
 def find_page(base_name: str) -> str:
-    # Sjekker automatisk stor og liten forbokstav så serveren aldri krasjer
+    # Løser Linux-problemet med store/små bokstaver
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
         if p.exists():
@@ -32,7 +33,7 @@ PAGES = {
     "konstruksjon": find_page("Konstruksjon"),
     "brann": find_page("Brannkonsept"),
     "akustikk": find_page("Akustikk"),
-    "trafikk": find_page("Trafikk"), # Løser feilen med lenken
+    "trafikk": find_page("Trafikk"), # Løser Trafikk-linken!
     "project": find_page("Project"),
     "review": find_page("Review"),
 }
@@ -48,6 +49,9 @@ def page_route(page_key: str) -> Optional[str]:
     if not page_path or not page_exists(page_path):
         return None
     return Path(page_path).stem
+
+def html_dedent(s: str) -> str:
+    return textwrap.dedent(s).strip()
 
 def href_or_none(page_key: str) -> Optional[str]:
     return page_route(page_key)
@@ -82,24 +86,26 @@ def module_card(
         else '<span class="module-cta disabled">In development</span>'
     )
 
-    # VIKTIG: Ingen innrykk her! Dette løser den stygge "hvite kodeboksen".
-    return f"""<div class="module-card">
-<div class="module-header">
-<div class="module-icon">{icon}</div>
-<div class="module-badge {badge_class}">{badge}</div>
-</div>
-<div class="module-title">{title}</div>
-<div class="module-desc">{description}</div>
-<div class="module-spacer"></div>
-<div class="module-meta">
-<strong>Input:</strong> {input_text}<br/>
-<strong>Output:</strong> {output_text}
-</div>
-<div class="module-cta-wrap">
-{action_html}
-</div>
-</div>"""
-
+    return html_dedent(
+        f"""
+        <div class="module-card">
+            <div class="module-header">
+                <div class="module-icon">{icon}</div>
+                <div class="module-badge {badge_class}">{badge}</div>
+            </div>
+            <div class="module-title">{title}</div>
+            <div class="module-desc">{description}</div>
+            <div class="module-spacer"></div>
+            <div class="module-meta">
+                <strong>Input:</strong> {input_text}<br/>
+                <strong>Output:</strong> {output_text}
+            </div>
+            <div class="module-cta-wrap">
+                {action_html}
+            </div>
+        </div>
+        """
+    )
 
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
@@ -110,8 +116,9 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
+
 # -------------------------------------------------
-# 4) CSS
+# 4) CSS (Optimalisert for Symmetri!)
 # -------------------------------------------------
 st.markdown(
     """
@@ -131,7 +138,7 @@ st.markdown(
         --ok: #7ee081;
         --warn: #f4bf4f;
         --shadow: 0 24px 90px rgba(0,0,0,0.35);
-        --radius-xl: 28px;
+        --radius-xl: 28px; /* Standardisert for begge bokser */
         --radius-lg: 22px;
         --radius-md: 14px;
     }
@@ -159,7 +166,7 @@ st.markdown(
     }
 
     .block-container {
-        max-width: 1280px !important;
+        max-width: 1300px !important;
         padding-top: 1.35rem !important;
         padding-bottom: 4rem !important;
     }
@@ -169,17 +176,19 @@ st.markdown(
         align-items: center;
         justify-content: space-between;
         gap: 1.25rem;
-        margin-bottom: 2.5rem;
+        margin-bottom: 2rem;
     }
 
     .brand-left {
         display: flex;
         align-items: center;
+        gap: 0.9rem;
+        min-width: 0;
     }
 
     .brand-logo {
         display: block;
-        height: 85px; /* LOGO ER NÅ 30%+ STØRRE */
+        height: 85px; /* ØKT STØRRELSE PÅ LOGO */
         width: auto;
         flex-shrink: 0;
         filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
@@ -188,7 +197,7 @@ st.markdown(
     .brand-name {
         color: var(--text);
         font-weight: 750;
-        font-size: 1.05rem;
+        font-size: 1.5rem;
         line-height: 1.1;
         letter-spacing: -0.02em;
     }
@@ -202,7 +211,7 @@ st.markdown(
         border-radius: 18px;
         background: rgba(255,255,255,0.025);
         border: 1px solid rgba(120,145,170,0.12);
-        flex-wrap: nowrap !important; /* LÅSER KNAPPENE PÅ ÉN LINJE */
+        flex-wrap: nowrap !important; /* TVINGER KNAPPENE SAMMEN */
     }
 
     .top-link {
@@ -210,7 +219,7 @@ st.markdown(
         align-items: center;
         justify-content: center;
         min-height: 42px;
-        padding: 0.72rem 1rem;
+        padding: 0.72rem 1.2rem;
         border-radius: 12px;
         text-decoration: none !important;
         font-weight: 650;
@@ -243,38 +252,28 @@ st.markdown(
         box-shadow: 0 10px 24px rgba(56,194,201,0.18);
     }
 
-    .top-link.disabled,
-    .hero-action.disabled,
-    .module-cta.disabled {
-        opacity: 0.45;
-        pointer-events: none;
-        cursor: default;
-    }
-
-    /* --- PERFEKT SYMMETRI PÅ HERO-BOKSENE --- */
+    /* --- HERO BOKSER MED PERFEKT SYMMETRI --- */
     .hero {
         position: relative;
         overflow: hidden;
         background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
         border: 1px solid rgba(120,145,170,0.16);
         border-radius: var(--radius-xl);
-        padding: 2.8rem;
+        padding: 2.5rem; /* Standardisert padding */
         box-shadow: var(--shadow);
         margin-bottom: 1.25rem;
-        min-height: 520px; /* Låst høyde for symmetri */
+        height: 560px; /* LÅST FAST HØYDE */
         display: flex;
         flex-direction: column;
         justify-content: center;
     }
 
     .hero-panel {
-        background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8));
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: var(--radius-xl);
-        padding: 2.8rem;
-        box-shadow: var(--shadow);
-        margin-bottom: 1.25rem;
-        min-height: 520px; /* Låst høyde for symmetri */
+        background: rgba(20, 35, 50, 0.4);
+        border: 1px solid var(--stroke);
+        border-radius: var(--radius-xl); /* Matcher venstre side */
+        padding: 2.5rem; /* Matcher venstre side */
+        height: 560px; /* LÅST FAST HØYDE */
         display: flex;
         flex-direction: column;
     }
@@ -300,12 +299,12 @@ st.markdown(
 
     .hero-title {
         font-size: clamp(2.55rem, 5vw, 4.35rem);
-        line-height: 1.02;
-        letter-spacing: -0.045em;
+        line-height: 1.05;
+        letter-spacing: -0.03em;
         font-weight: 800;
-        margin: 0;
+        margin: 0 0 1rem 0;
         color: var(--text);
-        max-width: 12ch;
+        max-width: none; /* FJERNED: Slik at den kan strekke seg over færre linjer! */
     }
 
     .hero-title .accent {
@@ -313,24 +312,18 @@ st.markdown(
     }
 
     .hero-subtitle {
-        margin-top: 1.2rem;
         max-width: 58ch;
         font-size: 1.08rem;
         line-height: 1.8;
         color: var(--soft);
-    }
-
-    .hero-note {
-        margin-top: 0.95rem;
-        font-size: 0.95rem;
-        color: var(--muted);
+        margin-bottom: 1.5rem;
     }
 
     .hero-actions {
         display: flex;
         gap: 0.75rem;
         flex-wrap: wrap;
-        margin-top: 1.35rem;
+        margin-bottom: 1.5rem;
     }
 
     .hero-action {
@@ -368,7 +361,6 @@ st.markdown(
         display: flex;
         flex-wrap: wrap;
         gap: 0.55rem;
-        margin-top: 1rem;
     }
 
     .proof-chip {
@@ -392,19 +384,23 @@ st.markdown(
     }
 
     .mini-stat {
-        background: rgba(255,255,255,0.03);
+        background: rgba(255,255,255,0.02);
         border: 1px solid var(--stroke);
         border-radius: 16px;
-        padding: 0.95rem 1rem;
-        margin-bottom: 0.75rem;
-        flex: 1;
+        padding: 1.1rem 1.2rem; /* Litt mer luft innvendig */
+        margin-bottom: 0.8rem;
+        flex: 1; /* Lar boksene strekke seg og fylle plassen jevnt! */
         display: flex;
         flex-direction: column;
         justify-content: center;
     }
 
+    .mini-stat:last-child {
+        margin-bottom: 0;
+    }
+
     .mini-stat-value {
-        font-size: 1.38rem;
+        font-size: 1.35rem;
         font-weight: 750;
         color: var(--text);
         line-height: 1.1;
@@ -413,7 +409,7 @@ st.markdown(
     .mini-stat-label {
         margin-top: 0.25rem;
         color: var(--muted);
-        font-size: 0.9rem;
+        font-size: 0.88rem;
         line-height: 1.5;
     }
 
@@ -457,12 +453,12 @@ st.markdown(
         background: var(--panel);
         border: 1px solid var(--stroke);
         border-radius: 18px;
-        padding: 1rem;
+        padding: 1.2rem;
         min-height: 136px;
     }
 
     .trust-title {
-        font-size: 1rem;
+        font-size: 1.05rem;
         font-weight: 650;
         color: var(--text);
         margin-bottom: 0.45rem;
@@ -485,7 +481,7 @@ st.markdown(
         background: var(--panel-2);
         border: 1px solid var(--stroke);
         border-radius: 18px;
-        padding: 1rem;
+        padding: 1.2rem;
         min-height: 172px;
     }
 
@@ -505,7 +501,7 @@ st.markdown(
     }
 
     .loop-title {
-        font-size: 1rem;
+        font-size: 1.05rem;
         font-weight: 650;
         color: var(--text);
         margin-bottom: 0.45rem;
@@ -518,9 +514,9 @@ st.markdown(
     }
 
     .subsection-title {
-        margin-top: 1.1rem;
+        margin-top: 1.5rem;
         margin-bottom: 0.9rem;
-        font-size: 1.02rem;
+        font-size: 1.05rem;
         font-weight: 700;
         color: var(--text);
     }
@@ -537,7 +533,7 @@ st.markdown(
         background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
         border: 1px solid var(--stroke);
         border-radius: 22px;
-        padding: 1.15rem;
+        padding: 1.25rem;
         box-shadow: 0 12px 38px rgba(0,0,0,0.18);
         display: flex;
         flex-direction: column;
@@ -665,7 +661,7 @@ st.markdown(
         background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28));
         border: 1px solid rgba(56,194,201,0.18);
         border-radius: 24px;
-        padding: 1.5rem;
+        padding: 1.8rem;
     }
 
     .cta-title {
@@ -707,50 +703,18 @@ st.markdown(
     }
 
     @media (max-width: 1180px) {
-        .top-shell {
-            flex-direction: column;
-            align-items: flex-start;
-        }
-        .topbar-right {
-            width: 100%;
-            justify-content: flex-start;
-        }
-        .trust-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-        .loop-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-        .module-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
+        .trust-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .loop-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 
     @media (max-width: 760px) {
-        .trust-grid,
-        .loop-grid,
-        .module-grid {
-            grid-template-columns: 1fr;
-        }
-        .hero-title {
-            max-width: none;
-        }
-        .topbar-right {
-            flex-direction: row;
-            width: 100%;
-            gap: 0.5rem;
-        }
-        .top-link {
-            flex: 1; /* Lar knappene dele bredden likt på mobil */
-            padding: 0.7rem 0.4rem;
-            font-size: 0.85rem;
-        }
-        .hero, .hero-panel {
-            min-height: auto; /* Lar mobil flyte fritt */
-        }
-        .brand-logo {
-            height: 60px; /* Litt mindre logo på mobil for plass */
-        }
+        .trust-grid, .loop-grid, .module-grid { grid-template-columns: 1fr; }
+        .top-shell { flex-direction: column; align-items: flex-start; }
+        .topbar-right { justify-content: flex-start; width: 100%; flex-wrap: nowrap !important; }
+        .top-link { flex: 1; padding: 0.7rem 0.5rem; font-size: 0.85rem; }
+        .hero, .hero-panel { height: auto; min-height: auto; padding: 1.8rem; }
+        .brand-logo { height: 60px; }
     }
 </style>
 """,
@@ -765,7 +729,7 @@ logo_uri = logo_data_uri()
 if logo_uri:
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />'
 else:
-    logo_html = '<div class="brand-name" style="font-size: 2rem;">Builtly</div>'
+    logo_html = '<div class="brand-name">Builtly</div>'
 
 st.markdown(
     f"""
@@ -783,9 +747,9 @@ st.markdown(
 )
 
 # -------------------------------------------------
-# 6) HERO (Perfekt 50/50 Symmetri)
+# 6) HERO (Justert til [1.2, 0.8] for perfekt visuell balanse)
 # -------------------------------------------------
-left, right = st.columns(2, gap="large")
+left, right = st.columns([1.2, 0.8], gap="large")
 
 with left:
     st.markdown(
@@ -797,9 +761,6 @@ with left:
         Builtly is the customer portal for compliance-grade engineering delivery.
         Upload project inputs, let the platform validate, calculate, check rules, and draft the report -
         before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
-    </div>
-    <div class="hero-note">
-        Built for building applications, execution, and professional compliance - designed as a production workflow, not a showcase UI.
     </div>
     <div class="hero-actions">
         {hero_action('project', 'Open project setup', 'primary')}
@@ -871,7 +832,7 @@ st.markdown(
     </div>
     <div class="trust-card">
         <div class="trust-title">Scalable delivery</div>
-        <div class="trust-desc">Each discipline plugs into the same validation, documentation, and sign-off backbone.</div>
+        <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
     </div>
 </div>
 """,
@@ -992,25 +953,24 @@ roadmap_cards = [
     ),
 ]
 
-# INGEN INNRYKK HER PÅ HTML - Hindrer krasj i designet!
 st.markdown(
-f"""<div class="section-head">
-<div class="section-kicker">Modules and roadmap</div>
-<h2 class="section-title">Specialized agents in one platform</h2>
-<div class="section-subtitle">
-Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
-</div>
-</div>
+    html_dedent(
+        f"""
+        <div class="section-head">
+            <div class="section-kicker">Modules and roadmap</div>
+            <h2 class="section-title">Specialized agents in one platform</h2>
+            <div class="section-subtitle">
+                Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
+            </div>
+        </div>
 
-<div class="subsection-title">Available now and pilot-ready</div>
-<div class="module-grid">
-{''.join(available_cards)}
-</div>
+        <div class="subsection-title">Available now and pilot-ready</div>
+        <div class="module-grid">{''.join(available_cards)}</div>
 
-<div class="subsection-title">Roadmap and early-phase tools</div>
-<div class="module-grid">
-{''.join(roadmap_cards)}
-</div>""",
+        <div class="subsection-title">Roadmap and early-phase tools</div>
+        <div class="module-grid">{''.join(roadmap_cards)}</div>
+        """
+    ),
     unsafe_allow_html=True,
 )
 
@@ -1020,10 +980,9 @@ Each module has dedicated ingestion logic, discipline-specific rules, and output
 st.markdown(
     f"""
 <div class="cta-band">
-    <div class="cta-title">Not just analysis. Actual deliverables.</div>
+    <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
     <div class="cta-desc">
-        Builtly operates as a full-stack delivery system: create a project, upload raw data, review deviations,
-        generate drafts, execute QA, and download the signed documentation package.
+        Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
     </div>
     <div class="hero-actions" style="margin-top:1rem;">
         {hero_action('project', 'Start in project setup', 'primary')}
@@ -1040,7 +999,7 @@ st.markdown(
 st.markdown(
     """
 <div class="footer-block">
-    <div class="footer-name">Builtly AS</div>
+    <div class="footer-name">Builtly Engineering AS</div>
     <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
     <div class="footer-meta">© 2026 Builtly. All rights reserved.</div>
 </div>
