@@ -11,9 +11,8 @@ import requests
 import urllib.parse
 import io
 from PIL import Image
-from pathlib import Path
 
-# --- 1. TEKNISK OPPSETT & ANTI-BUG RENDERER ---
+# --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
@@ -48,19 +47,20 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS (MÅ VÆRE HER OPPE!) ---
+# --- 2. PREMIUM CSS (Må lastes først for å unngå hvit skjerm!) ---
 st.markdown("""
 <style>
     :root {
         --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3;
-        --accent: #38bdf8; --radius-lg: 16px;
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
     }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
 
+    /* HEADER & KNAPPER */
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
     
@@ -72,6 +72,21 @@ st.markdown("""
     }
     .back-btn:hover { background: rgba(56,189,248,0.15); transform: translateX(-2px); }
 
+    /* PILLEDESIGN FOR TOPPKNAPPER (Samme som forside) */
+    .top-link {
+        display: inline-flex; align-items: center; justify-content: center; min-height: 42px;
+        padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important;
+        font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent;
+        white-space: nowrap;
+    }
+    .top-link.primary {
+        color: #041018 !important;
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
+        border-color: rgba(120,220,225,0.45);
+    }
+    .top-link.primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(56,194,201,0.18); }
+
+    /* STREAMLIT NATIVE KNAPPER */
     button[kind="primary"] {
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
@@ -85,6 +100,7 @@ st.markdown("""
     }
     button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: #38bdf8 !important; color: #38bdf8 !important; }
 
+    /* INPUTS & BOKSER */
     .stTextInput input, .stNumberInput input, .stTextArea textarea {
         background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
         border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
@@ -97,29 +113,48 @@ st.markdown("""
     }
     
     div[data-testid="stExpander"] { background: rgba(16, 30, 46, 0.5); border: 1px solid rgba(120,145,170,0.2); border-radius: 12px; margin-bottom: 1rem; }
+    
+    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. HENT DATA FRA SSOT (MED GUARDRAIL LÅS) ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0;">Builtly</h2>'
+# --- 3. HEADER UI (ALLTID SYNLIG) ---
+logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 home_link = '<a href="Project" target="_self" class="back-btn">← Tilbake til SSOT</a>'
 
+render_html(f"""
+<div class="top-shell">
+    <div>{logo_html}</div>
+    <div>{home_link}</div>
+</div>
+""")
+
+# --- 4. GUARDRAIL LÅS (NÅ MED PREMIUM DESIGN) ---
 if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
-    render_html(f"""<div class="top-shell"><div>{logo_html}</div></div>""")
-    st.warning("⚠️ **Handling kreves: Du må sette opp prosjektet først.**")
-    st.info("Denne AI-agenten krever at adresse, bygningsdata og regelverk er satt opp i Master Data (SSOT) før den kan generere en faglig korrekt miljørapport.")
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.page_link("pages/Project.py", label="Gå til Project Setup", icon="⚙️")
+    render_html("""
+    <div style="display: flex; justify-content: center; margin-top: 4rem;">
+        <div class="card" style="max-width: 600px; text-align: center; padding: 4rem 3rem; border-color: rgba(244, 191, 79, 0.3);">
+            <div style="font-size: 4rem; margin-bottom: 1rem;">🚧</div>
+            <h2 style="color: #f5f7fb; font-size: 2.2rem; font-weight: 800; margin-bottom: 1rem; letter-spacing: -0.03em;">Prosjektdata mangler</h2>
+            <p style="color: #9fb0c3; line-height: 1.7; font-size: 1.05rem; margin-bottom: 2.5rem;">
+                For at AI-agenten skal kunne koble seg på riktig regelverk og analysere riktig bygningsmasse, må du definere prosjektet i Master Data (SSOT) først.
+            </p>
+            <div style="display: inline-flex; align-items: center; gap: 0.65rem; padding: 0.4rem; border-radius: 18px; background: rgba(255,255,255,0.025); border: 1px solid rgba(120,145,170,0.12);">
+                <a href="Project" target="_self" class="top-link primary" style="font-size: 1.05rem; padding: 0.8rem 1.5rem;">⚙️ Åpne Project Setup</a>
+            </div>
+        </div>
+    </div>
+    """)
     st.stop()
 
+# --- FORBEREDER DATA ---
 pd_state = st.session_state.project_data
 if "geo_maps" not in st.session_state:
     st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
 
-# --- 4. HEADER ---
-render_html(f"""<div class="top-shell"><div>{logo_html}</div><div>{home_link}</div></div>""")
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
+st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
+
 
 # --- 5. KARTKATALOGEN API ---
 def fetch_kartverket_data(adresse, kommune, gnr, bnr):
@@ -208,7 +243,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
-    # FORSIDE
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
@@ -226,7 +260,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
-    # INNHOLDSFORTEGNELSE
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     toc = [
@@ -239,7 +272,6 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     for t in toc:
         pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
-    # INNHOLD
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
@@ -317,7 +349,7 @@ with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
 
     with col_b:
         st.markdown("##### ⚠️ Manuell opplasting (Fallback)")
-        man_recent = st.file_uploader("Last opp nyere Ortofoto (Valgfritt)", type=['png', 'jpg', 'jpeg'])
+        man_recent = st.file_uploader("Last opp nyere Ortofoto (Valgfritt / Fallback)", type=['png', 'jpg', 'jpeg'])
         if man_recent:
             st.session_state.geo_maps["recent"] = Image.open(man_recent).convert("RGB")
             st.session_state.geo_maps["source"] = "Manuelt opplastet"
@@ -342,7 +374,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             valgt_modell = 'models/gemini-1.5-pro' if 'models/gemini-1.5-pro' in valid_models else valid_models[0]
         except:
-            st.error("Kunne ikke koble til Google AI.")
+            st.error("Kunne ikke koble til Google AI. Sjekk API-nøkkel.")
             st.stop()
         
         model = genai.GenerativeModel(valgt_modell)
