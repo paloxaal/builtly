@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Miljøoppfølging (MOP) | Builtly", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="SHA-Plan | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -48,8 +48,8 @@ def find_page(base_name: str) -> str:
 
 def clean_pdf_text(text):
     if not text: return ""
-    # Fjernet potensielt problematiske spesialtegn som krasjer Helvetica
-    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "..."}
+    # Sikkerhetsnett: Bytter ut spesialtegn inkludert det problematiske kulepunktet
+    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "-"}
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
@@ -119,7 +119,7 @@ if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
     st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    st.info("MOP-agenten trenger kontekst om prosjektet for å generere en prosjektspesifikk miljøoppfølgingsplan.")
+    st.info("SHA-agenten trenger kontekst om prosjektet for å generere prosjektspesifikke risikomomenter.")
     if find_page("Project"):
         if st.button("⚙️ Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
@@ -138,12 +138,12 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR FOR MOP (CORPORATE EDITION) ---
+# --- 5. DYNAMISK PDF MOTOR FOR SHA (CORPORATE EDITION) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
             self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
-            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: MOP-001"), 0, 1, 'R')
+            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: SHA-001"), 0, 1, 'R')
             self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
     def footer(self):
         self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
@@ -162,12 +162,12 @@ def create_full_report_pdf(name, client, content, maps):
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
     pdf.set_y(95); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(0, 12, clean_pdf_text("MILJØOPPFØLGINGSPLAN (MOP)"), 0, 'L')
+    pdf.multi_cell(0, 12, clean_pdf_text("SHA-PLAN (UTKAST)"), 0, 'L')
     pdf.ln(2)
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
     pdf.multi_cell(0, 10, clean_pdf_text(f"PROSJEKT: {pdf.p_name}"), 0, 'L'); pdf.ln(25)
     
-    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly Miljørådgiver AI"), ("REGELVERK:", "Norsk Standard / TEK")]:
+    for l, v in [("BYGGHERRE:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly SHA AI Engine"), ("REGELVERK:", "Byggherreforskriften (BHF)")]:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
@@ -175,10 +175,10 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
     toc = [
-        "1. DOKUMENTINFORMASJON", "2. PROSJEKTBESKRIVELSE OG MILJØKONTEKST", 
-        "3. MILJØMÅL OG FOKUSOMRÅDER", "4. MILJØASPEKTREGISTER", 
-        "5. TILTAKSPLAN (MOP-KJERNE)", "6. OPPFØLGING OG RAPPORTERING",
-        "7. ÅPNE AVKLARINGER", "8. HANDLINGSLISTE FOR NESTE FASE"
+        "1. DOKUMENTINFORMASJON", "2. FORMÅL OG OMFANG", "3. PROSJEKTBESKRIVELSE",
+        "4. ROLLER OG ANSVAR", "5. ORGANISASJONSKART", "6. FREMDRIFT OG KONSEKVENS",
+        "7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK", "8. RUTINER FOR OPPFØLGING",
+        "9. FORUTSETNINGER OG AVKLARINGER", "10. HANDLINGSLISTE / MANGLER"
     ]
     for t in toc:
         pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
@@ -191,7 +191,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(3)
             continue
         
-        # Fjerner markdown-stjerner som AI-en prøver å bruke
+        # Fjerner markdown-stjerner
         safe_text = line.replace('**', '').replace('_', '')
         safe_text = clean_pdf_text(safe_text)
         
@@ -205,7 +205,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
             pdf.ln(2)
             
-        # Underoverskrifter (H2/H3 - F.eks. "### Avfallshåndtering")
+        # Underoverskrifter (H2/H3 - F.eks. "### Arbeid i høyden")
         elif safe_text.startswith('## ') or safe_text.startswith('### '):
             pdf.check_space(20)
             pdf.ln(5)
@@ -216,8 +216,8 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(1)
             
         else:
-            # MAGISK CORPORATE PARSER FOR MOP NØKKELORD
-            kv_match = re.match(r'^(Miljøtema|Mål|Tiltak|Fase|Ansvarlig|Ansvar|Indikator|KPI|Kontroll|Kontrollmetode|Avvikshåndtering|Avvik|Status|Prioritet|Dokumentasjon):\s*(.*)', safe_text, re.IGNORECASE)
+            # MAGISK CORPORATE PARSER FOR SHA NØKKELORD
+            kv_match = re.match(r'^(Aktivitet|Årsak|Konsekvens|Fase|Tiltak|Forebyggende tiltak|Ansvarlig|Rolle|Status|Koordinering|Frist):\s*(.*)', safe_text, re.IGNORECASE)
             
             if kv_match:
                 key = kv_match.group(1).upper()
@@ -237,7 +237,7 @@ def create_full_report_pdf(name, client, content, maps):
                 pdf.multi_cell(0, 5, val)
                 pdf.ln(2)
                 
-            # Gjør om stygge bindestreker til sikre ASCII kulepunkter med innrykk
+            # Gjør om lister til pene ASCII-streker med innrykk (Sikker metode)
             elif safe_text.startswith('- ') or safe_text.startswith('* '):
                 pdf.check_space(10)
                 pdf.set_x(30)
@@ -272,54 +272,54 @@ def create_full_report_pdf(name, client, content, maps):
                 
                 pdf.set_y(pdf.get_y() + img_h + 5)
                 pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt vurdert for miljøpåvirkning av MOP-agenten."), 0, 1, 'C')
+                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt analysert for rigg/logistikk av SHA-agenten."), 0, 1, 'C')
 
     return bytes(pdf.output(dest='S'))
 
 # --- 6. STREAMLIT UI ---
-st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>♻️ Miljøoppfølgingsplan (MOP)</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for utarbeidelse av prosjektspesifikke miljømål, tiltak og oppfølgingsrutiner.</p>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🦺 SHA-Plan (Sikkerhet, Helse og Arbeidsmiljø)</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for generering av prosjektspesifikke SHA-plan ihht. Byggherreforskriften.</p>", unsafe_allow_html=True)
 
 st.success(f"✅ Prosjektdata for **{pd_state.get('p_name')}** er automatisk synkronisert (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
     p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
-    c_name = c2.text_input("Byggherre / Oppdragsgiver", value=pd_state.get("c_name"), disabled=True)
+    c_name = c2.text_input("Byggherre", value=pd_state.get("c_name"), disabled=True)
     adresse = st.text_input("Adresse", value=f"{pd_state.get('adresse')}, {pd_state.get('kommune')}", disabled=True)
+    bta = st.number_input("Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
 
-with st.expander("2. Miljøambisjoner & Mål", expanded=True):
-    st.info("Angi de overordnede miljømålene for prosjektet. AI-en vil oversette disse til konkrete, oppfølgingsbare tiltak i MOP-en.")
+with st.expander("2. Gjennomføringsmodell & Risikoforhold", expanded=True):
+    st.info("Angi overordnede rammer for prosjektet slik at AI-en kan vurdere grensesnitt og spesifikke tiltak.")
     c3, c4 = st.columns(2)
-    byggeplass_ambisjon = c3.selectbox("Ambisjon for byggeplass", ["Standard (Følger lovkrav)", "Fossilfri byggeplass", "Utslippsfri byggeplass (Elektrisk/Hydrogen)"], index=1)
-    avfall_sortering = c4.text_input("Mål for avfallssortering", value="Minimum 85% sorteringsgrad")
+    entrepriseform = c3.selectbox("Forventet Entrepriseform", ["Totalentreprise (Én hovedbedrift)", "Delt entreprise (Flere likestilte entreprenører)", "Generalentreprise", "Uavklart"])
+    fremdrift = c4.selectbox("Kritisk fremdrift / Fase", ["Rivning og sanering", "Grunnarbeid og fundamentering", "Råbyggsfasen", "Tett bygg og innredning", "Hele livsløpet (Flerfase)"], index=4)
     
-    st.markdown("##### Miljøfokus og Sertifiseringer")
-    fokusomrader = st.multiselect(
-        "Kryss av for prioriterte fokusområder:",
-        ["Ombruk av byggematerialer", "Reduksjon av klimagassutslipp (Klimagassregnskap)", "Bevaring av naturmangfold/trær", "Støy- og støvreduserende tiltak (Naboer)", "Bevaring av overvann/Lokal håndtering"],
-        default=["Ombruk av byggematerialer", "Reduksjon av klimagassutslipp (Klimagassregnskap)"]
+    st.markdown("##### Spesifikke Risikoforhold (Velg alle som gjelder)")
+    risiko_liste = st.multiselect(
+        "Kjente faremomenter på byggeplassen:",
+        ["Arbeid i høyden (over 2m)", "Tunge løft / Kraning", "Dype grøfter (> 2m) / Sjakter", "Nærhet til trafikkert vei", "Forurensede masser", "Asbest / PCB / Miljøgifter i eksist. bygg", "Sprengningsarbeid", "Arbeid nær høyspent", "Støy og vibrasjoner (Naboer)", "Trang riggplass / Logistikkutfordringer"],
+        default=["Arbeid i høyden (over 2m)"]
     )
 
-with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Miljørapporter)", expanded=True):
-    st.info("Last opp situasjonsplan, kart eller eksisterende miljørapporter. Agenten vurderer tomtens sårbarhet overfor nærmiljøet.")
+with st.expander("3. Visuelt Grunnlag (Riggplan / Fremdrift)", expanded=True):
+    st.info("Last opp riggplan, situasjonskart eller fremdriftsplan. Agenten vil vurdere logistikk, kranplassering og konfliktområder.")
     
-    # Henter tegninger fra harddisken
     saved_images = []
     if IMG_DIR.exists():
         for p in sorted(IMG_DIR.glob("*.jpg")):
             saved_images.append(Image.open(p).convert("RGB"))
             
     if len(saved_images) > 0:
-        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger/kart fra Project Setup. Disse inkluderes automatisk i analysen!")
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk for å vurdere bygningsvolum!")
     else:
         st.warning("Ingen felles tegninger funnet. Du bør laste opp situasjonsplan under.")
         
-    files = st.file_uploader("Last opp miljødokumenter eller kart (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    files = st.file_uploader("Last opp spesifikke SHA-dokumenter (Riggplan, Snitt, etc)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_container_width=True):
+if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_container_width=True):
     
     images_for_ai = saved_images.copy()
         
@@ -344,9 +344,9 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
                 
-    st.info(f"Klar! Sender totalt {len(images_for_ai)} filer til MOP-agenten for miljøvurdering.")
+    st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til SHA-agenten for vurdering.")
                 
-    with st.spinner(f"🤖 Vurderer miljøpåvirkning og skriver operativ MOP-plan..."):
+    with st.spinner(f"🤖 Vurderer risikoforhold og genererer SHA-plan for {pd_state.get('land', 'Norge')}..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -359,52 +359,51 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
         
         model = genai.GenerativeModel(valgt_modell)
 
-        fokus_str = ", ".join(fokusomrader) if fokusomrader else "Standard TEK-krav."
+        risiko_str = ", ".join(risiko_liste) if risiko_liste else "Ingen spesifikke krysset av."
 
-        # --- DEN NYE, STRAMME MOP-PROMPTEN FOR CORPORATE DESIGN ---
         prompt_text = f"""
-        Du er en senior miljørådgiver for bygge-, anleggs- og eiendomsprosjekter i Norge. 
-        Din oppgave er utelukkende å skrive selve innholdet til en Miljøoppfølgingsplan (MOP) for ytre miljø.
+        Du er en senior SHA-rådgiver for norske bygge- og anleggsprosjekter. Din oppgave er utelukkende å skrive innholdet i en formell SHA-plan.
 
-        PROSJEKT: {p_name} ({pd_state.get('b_type')}, Bygg {pd_state.get('bta')} m2, Tomt {pd_state.get('tomteareal')} m2).
+        PROSJEKT: {p_name} ({pd_state.get('b_type', 'Ukjent type')}, Bygg {bta} m2, Tomt {pd_state.get('tomteareal')} m2, {pd_state.get('etasjer', 1)} etasjer).
         LOKASJON: {adresse}.
-        
-        MILJØMÅL SATT AV BRUKER:
-        - Byggeplass: {byggeplass_ambisjon}
-        - Avfallssortering: {avfall_sortering}
-        - Andre fokusområder: {fokus_str}
+        ENTREPRISEFORM: {entrepriseform}.
+        KRITISK FASE: {fremdrift}.
         
         KUNDENS PROSJEKTBESKRIVELSE: 
         "{pd_state.get('p_desc', '')}"
         
-        MANDAT:
-        Lag en prosjektspesifikk miljøoppfølgingsplan som oversetter prosjektets miljømål til konkrete tiltak, ansvar, kontrollpunkter og oppfølgingsrutiner. 
-        Identifiser faktiske miljøpåvirkninger basert på de vedlagte tegningene (f.eks. sårbar natur i nærheten, trang tomt som gir mye trafikk).
+        IDENTIFISERTE RISIKOFORHOLD AV BRUKER:
+        {risiko_str}
         
         EKSTREMT VIKTIGE REGLER FOR FORMATERING:
-        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". 
-        2. IKKE skriv noen form for introduksjon, hilsen, eller "Her er planen". Ikke forklar hvem du er.
-        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. 
-        4. For underoverskrifter (f.eks. spesifikke miljøtemaer), bruk alltid ### foran (f.eks. "### Avfallshåndtering").
-        5. For utdyping av tiltak og mål under hvert tema, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
+        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". IKKE skriv noen form for introduksjon, hilsen, forbehold eller bekreftelse.
+        2. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
+        3. For underoverskrifter (f.eks. spesifikke risikoforhold), bruk alltid ### foran (f.eks. "### Arbeid i høyden").
+        4. For utdyping av risikoer og tiltak, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
         
-        Mål: [Tekst]
+        Aktivitet: [Tekst]
+        Årsak: [Tekst]
+        Konsekvens: [Tekst]
         Tiltak: [Tekst]
-        Fase: [Tekst]
         Ansvarlig: [Tekst]
-        Indikator: [Tekst]
-        Kontroll: [Tekst]
-        Avvikshåndtering: [Tekst]
+        Status: [Tekst]
+        
+        MANDAT:
+        Lag et førsteutkast til SHA-plan som er konkret, prosjektspesifikk og egnet for videre kvalitetssikring.
+        - Bruk prosjektets faktiske data, valgte risikoforhold, og trekk inn funn fra de vedlagte tegningene.
+        - Hvis tegningene viser trang tomt ({pd_state.get('tomteareal')} m2 vs {bta} m2 BTA), påpek logistikkutfordringer.
         
         STRUKTUR PÅ RAPPORTEN:
         # 1. DOKUMENTINFORMASJON (Bruk en enkel liste med bindestrek)
-        # 2. PROSJEKTBESKRIVELSE OG MILJØKONTEKST
-        # 3. MILJØMÅL
-        # 4. MILJØASPEKTREGISTER (Hvilke temaer er mest relevante? Bruk ### for hvert tema og nøkkelordene beskrevet over)
-        # 5. TILTAKSPLAN / MOP-KJERNE (Bruk ### for hvert tiltaksområde og nøkkelordene over for å bygge en stram profil)
-        # 6. OPPFØLGING OG RAPPORTERING
-        # 7. ÅPNE AVKLARINGER
-        # 8. HANDLINGSLISTE FOR NESTE FASE
+        # 2. FORMÅL OG OMFANG
+        # 3. PROSJEKTBESKRIVELSE
+        # 4. ROLLER OG ANSVAR (Hvem gjør hva ihht. Byggherreforskriften for entrepriseformen {entrepriseform}?)
+        # 5. ORGANISASJONSKART (Lag et tekstlig hierarki, bruk bindestrek)
+        # 6. FREMDRIFT OG FASEKRITISKE AKTIVITETER
+        # 7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK (Bruk ### for hver risiko, og bruk nøkkelordene over for corporate formatering!)
+        # 8. RUTINER FOR OPPFØLGING OG OPPDATERING
+        # 9. FORUTSETNINGER OG AVKLARINGER
+        # 10. HANDLINGSLISTE / MANGLER
         """
         
         prompt_parts = [prompt_text] + images_for_ai
@@ -412,7 +411,7 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer MOP-PDF med corporate design..."):
+            with st.spinner("Kompilerer SHA-PDF med corporate design..."):
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
@@ -421,34 +420,34 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
                 if "review_counter" not in st.session_state:
                     st.session_state.review_counter = 1
                     
-                doc_id = f"PRJ-{datetime.now().strftime('%y')}-MOP{st.session_state.review_counter:03d}"
+                doc_id = f"PRJ-{datetime.now().strftime('%y')}-SHA{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
                 
                 st.session_state.pending_reviews[doc_id] = {
                     "title": pd_state.get('p_name', 'Nytt Prosjekt'),
-                    "module": "MOP (Miljøoppfølging)",
+                    "module": "SHA-Plan (Ledelse)",
                     "drafter": "Builtly AI",
-                    "reviewer": "Senior Miljørådgiver",
-                    "status": "Pending Environmental Review",
-                    "class": "badge-roadmap",
+                    "reviewer": "Senior SHA-rådgiver / KP",
+                    "status": "Pending Coordinator Review",
+                    "class": "badge-priority",
                     "pdf_bytes": pdf_data
                 }
 
-            st.session_state.generated_mop_pdf = pdf_data
-            st.session_state.generated_mop_filename = f"Builtly_MOP_{p_name}.pdf"
+            st.session_state.generated_sha_pdf = pdf_data
+            st.session_state.generated_sha_filename = f"Builtly_SHA_{p_name}.pdf"
             st.rerun() 
                 
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
 
 # --- NEDLASTING OG NAVIGASJON ---
-if "generated_mop_pdf" in st.session_state:
-    st.success("✅ Miljøoppfølgingsplan (MOP) er ferdigstilt og sendt til QA-køen for godkjenning!")
+if "generated_sha_pdf" in st.session_state:
+    st.success("✅ SHA-Plan er ferdigstilt og lagt i QA-køen for godkjenning av koordinator (KP/KU)!")
     
     col_dl, col_qa = st.columns(2)
     with col_dl:
-        st.download_button("📄 Last ned MOP-utkast", st.session_state.generated_mop_pdf, st.session_state.generated_mop_filename, type="primary", use_container_width=True)
+        st.download_button("📄 Last ned SHA-Plan utkast", st.session_state.generated_sha_pdf, st.session_state.generated_sha_filename, type="primary", use_container_width=True)
     with col_qa:
         if find_page("Review"):
-            if st.button("🔍 Gå til QA for å vurdere", type="secondary", use_container_width=True):
+            if st.button("🔍 Gå til QA for å verifisere", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
