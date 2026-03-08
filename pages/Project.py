@@ -241,4 +241,288 @@ render_html(f"""
         <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
         
         <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{pd_state.get("last_sync", "Ikke synket enda")}</span></div>
-        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"
+        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if pd_state.get("adresse") or pd_state.get("gnr") else "Nei"}</span></div>
+    </div>
+</div>
+
+<div class="stat-grid">
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state.get("b_type", "-")}</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Bygningsareal</div><div class="stat-value">{pd_state.get("bta", "0")} m²</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Tomteareal</div><div class="stat-value">{pd_state.get("tomteareal", "0")} m²</div>
+    </div>
+</div>
+""")
+
+# --- 7. INPUT SEKSJON ---
+st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
+st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
+
+input_col, snap_col = st.columns([2, 1], gap="large")
+
+with input_col:
+    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📌 01 Generelt</h4></div>""", unsafe_allow_html=True)
+    
+    land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
+    try: l_idx = land_options.index(pd_state.get("land", "Norge (TEK17 / Kartverket)"))
+    except: l_idx = 0
+    new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
+    
+    c1, c2 = st.columns(2)
+    new_p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name", ""))
+    new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd_state.get("c_name", ""))
+    
+    new_p_desc = st.text_area("Prosjektbeskrivelse / Narrativ", value=pd_state.get("p_desc", ""), height=140)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🌍 02 Lokasjon & API</h4></div>""", unsafe_allow_html=True)
+    
+    if "Norge" in new_land: st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
+        
+    c3, c4 = st.columns(2)
+    new_adresse = c3.text_input("Gateadresse", value=pd_state.get("adresse", ""))
+    new_kommune = c4.text_input("Kommune", value=pd_state.get("kommune", ""))
+    
+    c5, c6 = st.columns(2)
+    new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd_state.get("gnr", ""))
+    new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state.get("bnr", ""))
+    
+    if "Norge" in new_land:
+        if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
+            st.session_state.project_data.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
+            with st.spinner("Søker i Nasjonalt Adresseregister..."):
+                res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
+                if res:
+                    st.session_state.project_data.update(res)
+                    st.success("✅ Fant eiendom! Husk å trykke Lagre i bunnen for å bekrefte.")
+                    time.sleep(1)
+                    st.rerun()
+                else: 
+                    st.warning("Fant ingen treff i Matrikkelen. Prøv en annen skrivemåte eller fyll inn manuelt.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🏢 03 Bygg- og Tomtedata</h4></div>""", unsafe_allow_html=True)
+    
+    c7, c8, c9, c10 = st.columns(4)
+    type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
+    try: default_idx = type_options.index(pd_state.get("b_type", "Næring / Kontor"))
+    except: default_idx = 1
+    
+    new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
+    new_etasjer = c8.number_input("Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
+    new_bta = c9.number_input("Bygningsareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
+    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=100)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
+    st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
+    
+    uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
+    
+    if uploaded_drawings:
+        if st.button("🤖 Analyser & Kvalitetssikre Tegninger med AI", type="secondary"):
+            if not google_key:
+                st.error("Google API-nøkkel mangler!")
+            else:
+                with st.spinner("AI studerer tegningene. Større filer komprimeres automatisk for å forhindre minnekrasj..."):
+                    images_for_qa = []
+                    try:
+                        for f in uploaded_drawings: 
+                            f.seek(0)
+                            if f.name.lower().endswith('pdf'):
+                                if fitz is None: 
+                                    st.error("Mangler PDF-modul (PyMuPDF).")
+                                    break
+                                doc = fitz.open(stream=f.read(), filetype="pdf")
+                                for page_num in range(min(4, len(doc))): 
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
+                                    img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                    img.thumbnail((1200, 1200))
+                                    images_for_qa.append(img)
+                                doc.close() 
+                            else:
+                                img = Image.open(f).convert("RGB")
+                                img.thumbnail((1200, 1200))
+                                images_for_qa.append(img)
+                                
+                        if images_for_qa:
+                            valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                            valgt_modell = valid_models[0]
+                            for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+                                if fav in valid_models: valgt_modell = fav; break
+                            
+                            model = genai.GenerativeModel(valgt_modell)
+                            
+                            qa_prompt = f"""
+                            Du er en Senior Rådgivende Ingeniør og Arkitekt for prosjektet '{new_p_name}'.
+                            Din oppgave er å utføre en streng kvalitetskontroll (QA) av de vedlagte tegningene før de sendes videre til andre fagfelt (brann, akustikk, konstruksjon).
+                            Prosjektinfo: {new_b_type}, {new_etasjer} etasjer, Bygg BTA {new_bta} m2, Tomteareal {new_tomteareal} m2.
+                            Vurder følgende:
+                            1. ER GRUNNLAGET KOMPLETT? Ser du både plantegninger, snitt, fasader og situasjonsplan? Hvis noe mangler, si ifra tydelig!
+                            2. KVALITET & LESBARHET: Er tegningene tydelige? Er det satt på mål og akser der det er nødvendig?
+                            3. POTENSIELLE UTFORDRINGER: Ut fra det du ser, er det noe arkitektonisk som kan by på problemer for Brannkonsept, Konstruksjon eller Akustikk?
+                            4. KONKRETE FORSLAG: Gi 2-3 konkrete forslag til endringer i tegningsgrunnlaget før videre prosjektering.
+                            Svar formatert pent med Markdown, bruk emojis, og vær direkte og profesjonell.
+                            """
+                            
+                            res = model.generate_content([qa_prompt] + images_for_qa)
+                            
+                            try:
+                                analysis_result = res.text
+                            except ValueError:
+                                analysis_result = "⚠️ **Merk:** AI-en klarte ikke å skrive en vurdering av disse spesifikke filene (returnerte et tomt svar). Dette kan skje med svært komplekse arkitekttegninger. **Du kan likevel trykke 'Lagre' for å gå videre til fagmodulene!**"
+                            
+                            st.session_state.ai_drawing_analysis = analysis_result
+                            st.session_state.analyzed_file_names = current_file_names
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Feil under bildebehandling: {e}")
+
+    if st.session_state.ai_drawing_analysis:
+        st.markdown("<div class='card' style='margin-top: 1rem; border-color: #38c2c9;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='margin-top: 0; color: #38c2c9;'>📊 AI-Vurdering av Tegningsgrunnlag</h4>", unsafe_allow_html=True)
+        st.markdown(st.session_state.ai_drawing_analysis)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    
+    mangler_qa = uploaded_drawings and set(current_file_names) != set(st.session_state.analyzed_file_names)
+    
+    if mangler_qa:
+        st.warning("⚠️ **Handling kreves:** Du har lastet opp nye tegninger. Du må kjøre AI-kvalitetssikringen (knappen over) før du kan lagre prosjektet.")
+        st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", disabled=True, use_container_width=True)
+    else:
+        if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
+            
+            for p in IMG_DIR.glob("*.jpg"):
+                p.unlink()
+
+            if uploaded_drawings:
+                try:
+                    img_count = 0
+                    for f in uploaded_drawings: 
+                        f.seek(0)
+                        if f.name.lower().endswith('pdf'):
+                            if fitz is not None: 
+                                doc = fitz.open(stream=f.read(), filetype="pdf")
+                                for page_num in range(min(4, len(doc))):
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
+                                    img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                    img.thumbnail((1200, 1200))
+                                    img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                                    img_count += 1
+                                doc.close() 
+                        else:
+                            img = Image.open(f).convert("RGB")
+                            img.thumbnail((1200, 1200))
+                            img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                            img_count += 1
+                except Exception as e:
+                    st.warning(f"Kunne ikke lagre alle filer: {e}")
+                
+            st.session_state.project_data.update({
+                "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
+                "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
+                "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta, "tomteareal": new_tomteareal,
+                "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
+            })
+            
+            with open(SSOT_FILE, "w", encoding="utf-8") as f:
+                json.dump(st.session_state.project_data, f, ensure_ascii=False, indent=4)
+                
+            st.success(f"✅ Data er lagret trygt på serveren! Prosjektet '{new_p_name}' er nå tilgjengelig for alle moduler.")
+            time.sleep(1)
+            st.rerun()
+
+with snap_col:
+    render_html(f"""
+    <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
+        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
+        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
+        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state.get("land", "-").split(' ')[0]}</div></div>
+        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state.get("p_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state.get("c_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd_state.get("adresse") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd_state.get("kommune") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state.get("gnr"), pd_state.get("bnr")])) or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{pd_state.get("bta", "0")} m² / {pd_state.get("tomteareal", "0")} m²</div></div>
+        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
+    </div>
+    """)
+
+# --- 8. LAUNCHPAD ---
+def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
+    with col:
+        st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
+        st.markdown(f"""
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+                <div class="module-icon">{icon}</div>
+                <div class="module-badge {badge_class}">{badge}</div>
+            </div>
+            <div style="font-size:1.08rem; font-weight:720; color:#f5f7fb; margin-bottom:0.5rem; line-height: 1.35;">{title}</div>
+            <div style="font-size:0.95rem; color:#9fb0c3; line-height:1.6; margin-bottom:1rem; min-height: 75px;">{desc}</div>
+            <div style="font-size:0.86rem; color:#c8d3df; padding-top:0.95rem; border-top:1px solid rgba(120,145,170,0.14); min-height: 65px;">
+                <strong>Input:</strong> {input_txt}<br>
+                <strong>Output:</strong> {output_txt}
+            </div>
+        """, unsafe_allow_html=True)
+
+        if page_target and find_page(page_target):
+            if st.button(btn_label, key=f"btn_{page_target}", type="secondary", use_container_width=True):
+                st.switch_page(find_page(page_target))
+        else:
+            st.button("In development", key=f"btn_{page_target}_dev", type="secondary", disabled=True, use_container_width=True)
+
+if completeness > 30:
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    
+    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>🛠️ Prosjektering & Fagmoduler</h3>", unsafe_allow_html=True)
+    
+    r1c1, r1c2, r1c3 = st.columns(3)
+    render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
+                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
+                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Åpne Geo & Miljø", "Geo")
+    render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound", 
+                       "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", 
+                       "Noise map + floor plan", "Acoustics report, facade eval.", "Åpne Akustikk", "Akustikk")
+    render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy", 
+                       "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", 
+                       "Architectural drawings + class", "Fire strategy concept, deviations", "Åpne Brannkonsept", "Brannkonsept")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    r2c1, r2c2, r2c3 = st.columns(3)
+    render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
+                       "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
+                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Åpne Mulighetsstudie", "Mulighetsstudie")
+    render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept", 
+                       "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", 
+                       "Models, load parameters", "Concept memo, grid layouts", "Åpne Konstruksjon", "Konstruksjon")
+    render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility", 
+                       "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", 
+                       "Site plans, local norms", "Traffic memo, mobility plan", "Åpne Trafikk & Mobilitet", "Trafikk")
+
+    # --- NY SEKSJON: LEDELSE & BÆREKRAFT ---
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>Bærekraft & Prosjektstyring (Tilleggsmoduler)</h3>", unsafe_allow_html=True)
+    
+    r3c1, r3c2, r3c3 = st.columns(3)
+    render_module_card(r3c1, "🦺", "Management", "badge-priority", "SHA-Plan", 
+                       "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner basert på tomten.", 
+                       "Prosjektdata + risikomoment", "Komplett SHA-plan", "Åpne SHA-modul", "SHA")
+    render_module_card(r3c2, "🌿", "Sustainability", "badge-phase2", "BREEAM Assistant", 
+                       "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi for prosjektet.", 
+                       "Byggdata + Ambisjonsnivå", "BREEAM Pre-assessment", "Åpne BREEAM", "BREEAM")
+    render_module_card(r3c3, "♻️", "Environment", "badge-roadmap", "Miljøoppfølging (MOP)", 
+                       "Miljøoppfølgingsplan for byggeplass. Vurderer avfallshåndtering, ombruk, utslipp og bevaring av natur.", 
+                       "Prosjektdata + miljømål", "MOP Dokument", "Åpne MOP", "MOP")
