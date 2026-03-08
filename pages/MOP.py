@@ -137,7 +137,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR FOR MOP ---
+# --- 5. DYNAMISK PDF MOTOR FOR MOP (CORPORATE EDITION) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -186,24 +186,75 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: pdf.ln(4); continue
+        if not line: 
+            pdf.ln(3)
+            continue
         
-        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
-            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        elif line.startswith('##'):
-            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
+        # Fjerner markdown-stjerner som AI-en prøver å bruke
+        safe_text = line.replace('**', '').replace('_', '')
+        safe_text = clean_pdf_text(safe_text)
+        
+        # Hovedoverskrifter (H1)
+        if safe_text.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', safe_text):
+            pdf.check_space(30)
+            pdf.ln(8)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 14)
+            pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
+            pdf.ln(2)
+            
+        # Underoverskrifter (H2/H3 - F.eks. "### Avfallshåndtering")
+        elif safe_text.startswith('## ') or safe_text.startswith('### '):
+            pdf.check_space(20)
+            pdf.ln(5)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.set_text_color(50, 65, 85)
+            pdf.multi_cell(0, 6, safe_text.replace('#', '').strip().upper())
+            pdf.ln(1)
+            
         else:
-            pdf.set_font('Helvetica', '', 10)
-            safe_text = ironclad_text_formatter(line)
-            if safe_text.strip() == "": continue
-            try:
-                if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
-                else:
-                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
-            except Exception: pdf.ln(2)
+            # MAGISK CORPORATE PARSER FOR MOP NØKKELORD
+            # Leter etter nøkkelord etterfulgt av kolon
+            kv_match = re.match(r'^(Miljøtema|Mål|Tiltak|Fase|Ansvarlig|Ansvar|Indikator|KPI|Kontroll|Kontrollmetode|Avvikshåndtering|Avvik|Status|Prioritet|Dokumentasjon):\s*(.*)', safe_text, re.IGNORECASE)
+            
+            if kv_match:
+                key = kv_match.group(1).upper()
+                val = kv_match.group(2)
+                
+                pdf.check_space(15)
+                # Tegner en lekker, fet, gråblå "Label"
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(120, 140, 160)
+                pdf.cell(0, 5, key, 0, 1)
+                
+                # Tegner selve innholdet rent og ryddig under
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, val)
+                pdf.ln(2)
+                
+            # Gjør om stygge bindestreker til pene kulepunkter
+            elif safe_text.startswith('- ') or safe_text.startswith('* '):
+                pdf.check_space(10)
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                bullet_text = "• " + safe_text[2:]
+                pdf.multi_cell(0, 5, bullet_text)
+                pdf.ln(1)
+                
+            # Vanlig brødtekst
+            else:
+                pdf.check_space(10)
+                pdf.set_x(25)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, safe_text)
+                pdf.ln(1)
 
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VISUELT GRUNNLAG", 0, 1)
@@ -310,12 +361,12 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
 
         fokus_str = ", ".join(fokusomrader) if fokusomrader else "Standard TEK-krav."
 
-        # --- DEN NYE, STRAMME MOP-PROMPTEN (UTEN TABELL-KRØLL) ---
+        # --- DEN NYE, STRAMME MOP-PROMPTEN FOR CORPORATE DESIGN ---
         prompt_text = f"""
         Du er en senior miljørådgiver for bygge-, anleggs- og eiendomsprosjekter i Norge. 
         Din oppgave er utelukkende å skrive selve innholdet til en Miljøoppfølgingsplan (MOP) for ytre miljø.
 
-        PROSJEKT: {p_name} ({pd_state.get('b_type')}, {pd_state.get('bta')} m2).
+        PROSJEKT: {p_name} ({pd_state.get('b_type')}, Bygg {pd_state.get('bta')} m2, Tomt {pd_state.get('tomteareal')} m2).
         LOKASJON: {adresse}.
         
         MILJØMÅL SATT AV BRUKER:
@@ -333,15 +384,25 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
         EKSTREMT VIKTIGE REGLER FOR FORMATERING:
         1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". 
         2. IKKE skriv noen form for introduksjon, hilsen, eller "Her er planen". Ikke forklar hvem du er.
-        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. Bruk vanlige, strukturerte lister med punktum eller kolon i stedet.
+        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. 
+        4. For underoverskrifter (f.eks. spesifikke miljøtemaer), bruk alltid ### foran (f.eks. "### Avfallshåndtering").
+        5. For utdyping av tiltak og mål under hvert tema, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
         
-        STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
-        # 1. DOKUMENTINFORMASJON (Bruk en enkel liste, f.eks: "Prosjektnavn: {p_name}")
-        # 2. PROSJEKTBESKRIVELSE OG MILJØKONTEKST (Hva bygger vi og hvor ligger det miljømessige risikobildet?)
-        # 3. MILJØMÅL (Overordnede og spesifikke mål)
-        # 4. MILJØASPEKTREGISTER (Hvilke temaer er mest relevante for akkurat denne tomten/dette bygget?)
-        # 5. TILTAKSPLAN / MOP-KJERNE (Dette er hoveddelen. Opprett konkrete tiltak for de valgte målene. Angi indikator, ansvar og kontroll som en strukturert liste, IKKE tabell)
-        # 6. OPPFØLGING OG RAPPORTERING (Møtestruktur og inspeksjoner)
+        Mål: [Tekst]
+        Tiltak: [Tekst]
+        Fase: [Tekst]
+        Ansvarlig: [Tekst]
+        Indikator: [Tekst]
+        Kontroll: [Tekst]
+        Avvikshåndtering: [Tekst]
+        
+        STRUKTUR PÅ RAPPORTEN:
+        # 1. DOKUMENTINFORMASJON (Bruk en enkel liste med bindestrek)
+        # 2. PROSJEKTBESKRIVELSE OG MILJØKONTEKST
+        # 3. MILJØMÅL
+        # 4. MILJØASPEKTREGISTER (Hvilke temaer er mest relevante? Bruk ### for hvert tema og nøkkelordene beskrevet over)
+        # 5. TILTAKSPLAN / MOP-KJERNE (Bruk ### for hvert tiltaksområde og nøkkelordene over for å bygge en stram profil)
+        # 6. OPPFØLGING OG RAPPORTERING
         # 7. ÅPNE AVKLARINGER
         # 8. HANDLINGSLISTE FOR NESTE FASE
         """
@@ -351,7 +412,7 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer MOP-PDF og fletter inn miljødokumentasjon..."):
+            with st.spinner("Kompilerer MOP-PDF med corporate design..."):
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
