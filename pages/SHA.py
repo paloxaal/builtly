@@ -199,7 +199,8 @@ def create_full_report_pdf(name, client, content, maps):
             safe_text = ironclad_text_formatter(line)
             if safe_text.strip() == "": continue
             try:
-                if safe_text.startswith('- ') or safe_text.startswith('* '):
+                # PDF-motoren rykker KUN inn linjer som starter med bindestrek
+                if safe_text.startswith('- '):
                     pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
                 else:
                     pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
@@ -254,7 +255,6 @@ with st.expander("2. Gjennomføringsmodell & Risikoforhold", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Riggplan / Fremdrift)", expanded=True):
     st.info("Last opp riggplan, situasjonskart eller fremdriftsplan. Agenten vil vurdere logistikk, kranplassering og konfliktområder.")
     
-    # Henter tegninger fra harddisken hvis de finnes
     saved_images = []
     if IMG_DIR.exists():
         for p in sorted(IMG_DIR.glob("*.jpg")):
@@ -311,13 +311,9 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
 
         risiko_str = ", ".join(risiko_liste) if risiko_liste else "Ingen spesifikke krysset av."
 
-        # --- DEN STRENGE SENIOR SHA-PROMPTEN ---
-        # FIKSET HER: pd_state.get('b_type') i stedet for bare {b_type}
+        # --- DEN OPPDATERTE OG EKSTREMT STRENGE SHA-PROMPTEN ---
         prompt_text = f"""
-        Du ER BUILTLY SHA AGENT.
-        
-        Rolle:
-        Du er en senior SHA-rådgiver for norske bygge- og anleggsprosjekter. Du utarbeider prosjektspesifikke SHA-utkast basert på prosjektdata, risikoforhold, fremdrift og organisering i henhold til Byggherreforskriften.
+        Du er en senior SHA-rådgiver for norske bygge- og anleggsprosjekter. Din oppgave er utelukkende å skrive innholdet i en formell SHA-plan.
 
         PROSJEKT: {p_name} ({pd_state.get('b_type', 'Ukjent type')}, {bta} m2, {pd_state.get('etasjer', 1)} etasjer).
         LOKASJON: {adresse}.
@@ -330,28 +326,24 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
         IDENTIFISERTE RISIKOFORHOLD AV BRUKER:
         {risiko_str}
         
+        EKSTREMT VIKTIGE REGLER FOR FORMATERING:
+        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". IKKE skriv noen form for introduksjon, hilsen, forbehold eller bekreftelse på rollen din!
+        2. FOR PUNKTLISTER: Bruk KUN bindestrek (-) som kulepunkt. IKKE bruk bokstaver (a, b, c) eller tall (1, 2, 3) for oppramsing av tiltak. PDF-systemet vårt gjenkjenner KUN bindestrek for å lage pene innrykk i teksten.
+        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
+        
         MANDAT:
-        Lag et førsteutkast til SHA-plan som er konkret, prosjektspesifikk og egnet for videre kvalitetssikring av ansvarlige roller (Byggherre, KU/KP).
-        
-        Du skal:
-        - Bruke prosjektets faktiske data, bruk valgte risikoforhold, og trekk inn funn fra de vedlagte tegningene.
-        - Identifisere prosjektspesifikke risikoforhold (hvis tegningene viser trang tomt, påpek dette!).
-        - Knytte spesifikke tiltak til de konkrete risikoforholdene.
-        - Synliggjøre roller og ansvar.
-        
-        Du skal IKKE:
-        - Skrive generiske standardformuleringer uten kobling til prosjektet.
-        - Påstå at SHA-planen er endelig godkjent.
-        - Forveksle virksomhetenes interne HMS-system med dette prosjektets felles SHA-plan.
+        Lag et førsteutkast til SHA-plan som er konkret, prosjektspesifikk og egnet for videre kvalitetssikring.
+        - Bruk prosjektets faktiske data, valgte risikoforhold, og trekk inn funn fra de vedlagte tegningene.
+        - Knytt spesifikke tiltak til de konkrete risikoforholdene. Bruk bindestrek for å liste opp disse tiltakene!
         
         STRUKTUR (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
         # 1. DOKUMENTINFORMASJON
         # 2. FORMÅL OG OMFANG
         # 3. PROSJEKTBESKRIVELSE
         # 4. ROLLER OG ANSVAR (Hvem gjør hva ihht. Byggherreforskriften for entrepriseformen {entrepriseform}?)
-        # 5. ORGANISASJONSKART (Lag et tekstlig hierarki)
+        # 5. ORGANISASJONSKART (Lag et tekstlig hierarki, bruk bindestrek)
         # 6. FREMDRIFT OG FASEKRITISKE AKTIVITETER (Beskriv spesielt fasen: {fremdrift})
-        # 7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK (Dette er viktigst! For hver risiko: angi aktivitet, årsak, konsekvens, tiltak og ansvarlig)
+        # 7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK (Bruk underoverskrifter for hver risiko, og list opp tiltakene med bindestrek)
         # 8. RUTINER FOR OPPFØLGING OG OPPDATERING
         # 9. FORUTSETNINGER OG AVKLARINGER
         # 10. HANDLINGSLISTE / MANGLER FØR ENDELIG PLAN
