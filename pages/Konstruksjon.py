@@ -350,7 +350,8 @@ if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_contai
             res = model.generate_content(prompt_parts)
             
             with st.spinner("Kompilerer RIB-PDF og fletter inn tegninger som vedlegg..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
+                # HER LÅ FEILEN! Vi må sende pd_state['c_name'] til PDF-motoren, ikke c_name
+                pdf_data = create_full_report_pdf(p_name, pd_state['c_name'], res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
