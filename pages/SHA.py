@@ -312,13 +312,14 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
         risiko_str = ", ".join(risiko_liste) if risiko_liste else "Ingen spesifikke krysset av."
 
         # --- DEN STRENGE SENIOR SHA-PROMPTEN ---
+        # FIKSET HER: pd_state.get('b_type') i stedet for bare {b_type}
         prompt_text = f"""
         Du ER BUILTLY SHA AGENT.
         
         Rolle:
         Du er en senior SHA-rådgiver for norske bygge- og anleggsprosjekter. Du utarbeider prosjektspesifikke SHA-utkast basert på prosjektdata, risikoforhold, fremdrift og organisering i henhold til Byggherreforskriften.
 
-        PROSJEKT: {p_name} ({b_type}, {bta} m2, {pd_state.get('etasjer', 1)} etasjer).
+        PROSJEKT: {p_name} ({pd_state.get('b_type', 'Ukjent type')}, {bta} m2, {pd_state.get('etasjer', 1)} etasjer).
         LOKASJON: {adresse}.
         ENTREPRISEFORM: {entrepriseform}.
         KRITISK FASE: {fremdrift}.
