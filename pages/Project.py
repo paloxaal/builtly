@@ -153,7 +153,6 @@ if "project_data" not in st.session_state:
     else:
         st.session_state.project_data = default_data.copy()
 
-# SIKKERHETSNETT: Lapper sammen databasen hvis en annen modul har krasjet og fjernet nøkler
 for k, v in default_data.items():
     if k not in st.session_state.project_data:
         st.session_state.project_data[k] = v
@@ -319,7 +318,6 @@ with input_col:
     new_etasjer = c8.number_input("Antall Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
     new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
 
-    # --- NY SEKSJON: TEGNINGSGRUNNLAG OG AI-KVALITETSSIKRING ---
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
     st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
@@ -460,7 +458,7 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD ---
+# --- 8. LAUNCHPAD (NÅ MED BÆREKRAFT-SEKSJON!) ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     with col:
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
@@ -485,28 +483,44 @@ def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, ou
 
 if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align:center; margin-bottom: 2.5rem; font-weight:750;'>🚀 Prosjektet er synkronisert! Velg fagmodul under:</h3>", unsafe_allow_html=True)
+    
+    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>🛠️ Prosjektering & Fagmoduler</h3>", unsafe_allow_html=True)
     
     r1c1, r1c2, r1c3 = st.columns(3)
     render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
                        "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
-                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Open Geo & Env", "Geo")
+                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Åpne Geo & Miljø", "Geo")
     render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound", 
                        "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", 
-                       "Noise map + floor plan", "Acoustics report, facade eval.", "Open Acoustics", "Akustikk")
+                       "Noise map + floor plan", "Acoustics report, facade eval.", "Åpne Akustikk", "Akustikk")
     render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy", 
                        "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", 
-                       "Architectural drawings + class", "Fire strategy concept, deviations", "Open Fire Strategy", "Brannkonsept")
+                       "Architectural drawings + class", "Fire strategy concept, deviations", "Åpne Brannkonsept", "Brannkonsept")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     r2c1, r2c2, r2c3 = st.columns(3)
     render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
                        "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
-                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Open Feasibility", "Mulighetsstudie")
+                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Åpne Mulighetsstudie", "Mulighetsstudie")
     render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept", 
                        "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", 
-                       "Models, load parameters", "Concept memo, grid layouts", "Open Structural", "Konstruksjon")
+                       "Models, load parameters", "Concept memo, grid layouts", "Åpne Konstruksjon", "Konstruksjon")
     render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility", 
                        "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", 
-                       "Site plans, local norms", "Traffic memo, mobility plan", "Open Traffic & Mobility", "Trafikk")
+                       "Site plans, local norms", "Traffic memo, mobility plan", "Åpne Trafikk & Mobilitet", "Trafikk")
+
+    # --- NY SEKSJON: LEDELSE & BÆREKRAFT ---
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750; color: #7ee081;'>🌱 Bærekraft & Prosjektstyring (Tilleggsmoduler)</h3>", unsafe_allow_html=True)
+    
+    r3c1, r3c2, r3c3 = st.columns(3)
+    render_module_card(r3c1, "🦺", "Compliance", "badge-priority", "SHA-Plan", 
+                       "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner basert på tomten.", 
+                       "Prosjektdata + risikomoment", "Komplett SHA-plan", "Åpne SHA-modul", "SHA")
+    render_module_card(r3c2, "🌿", "Certification", "badge-phase2", "BREEAM Assistant", 
+                       "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi for prosjektet.", 
+                       "Byggdata + Ambisjonsnivå", "BREEAM Pre-assessment", "Åpne BREEAM", "BREEAM")
+    render_module_card(r3c3, "♻️", "Compliance", "badge-roadmap", "Miljøoppfølging (MOP)", 
+                       "Miljøoppfølgingsplan for byggeplass. Vurderer avfallshåndtering, ombruk, utslipp og bevaring av natur.", 
+                       "Prosjektdata + miljømål", "MOP Dokument", "Åpne MOP", "MOP")
