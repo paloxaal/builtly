@@ -189,7 +189,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- DYNAMISK PDF MOTOR (RITra) ---
+# --- DYNAMISK PDF MOTOR (RITra) - OPPDATERT FORSIDE ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -212,10 +212,12 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
-    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("TRAFIKKNOTAT OG MOBILITETSPLAN (RITra)"), 0, 1, 'L')
+    # Fikset forside slik at lange titler brytes pent
+    pdf.set_y(95); pdf.set_font('Helvetica', 'B', 22); pdf.set_text_color(26, 43, 72)
+    pdf.multi_cell(0, 12, clean_pdf_text("TRAFIKKNOTAT OG MOBILITETSPLAN (RITra)"), 0, 'L')
+    pdf.ln(2)
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
+    pdf.multi_cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 'L'); pdf.ln(25)
     
     for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RITra AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
@@ -301,7 +303,6 @@ with st.expander("2. Trafikk & Mobilitetsparametere", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True):
     st.info("RITra trenger et kart eller en situasjonsplan for å vurdere adkomst, sykkelparkering og renovasjon/varelevering.")
     
-    # Henter tegninger fra harddisken hvis de finnes!
     saved_images = []
     if IMG_DIR.exists():
         for p in sorted(IMG_DIR.glob("*.jpg")):
@@ -423,10 +424,8 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
             res = model.generate_content(prompt_parts)
             
             with st.spinner("Kompilerer RITra-PDF og fletter inn tegninger som vedlegg..."):
-                # HER VAR FEILEN - Måtte bruke pd_state.get('c_name') istedenfor c_name
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
-                # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
                     st.session_state.pending_reviews = {}
                 if "review_counter" not in st.session_state:
@@ -435,7 +434,6 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
                 doc_id = f"PRJ-{datetime.now().strftime('%y')}-TRA{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
                 
-                # Fargekoder status basert på AI-ens vurdering (Spor 1, 2 eller 3)
                 ai_text_lower = res.text.lower()
                 if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
                     status = "Rejected - Needs Site Plan"
