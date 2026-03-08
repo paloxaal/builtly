@@ -4,6 +4,7 @@ import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
+import json
 from datetime import datetime
 import tempfile
 import re
@@ -61,7 +62,6 @@ def ironclad_text_formatter(text):
 
 # --- 2. KARTVERKET + GOOGLE MAPS FALLBACK MOTOR ---
 def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
-    """Henter kart automatisk for tomteanalysen."""
     nord, ost = None, None
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
@@ -105,14 +105,10 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
         
     return None, "Kunne ikke hente kart fra verken Kartverket eller Google."
 
-# --- 3. PREMIUM CSS (SKUDDSIKKER) ---
+# --- 3. PREMIUM CSS ---
 st.markdown("""
 <style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
-    }
+    :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px; }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
@@ -153,7 +149,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. SESSION STATE / SIKKERHET ---
+# --- 4. SESSION STATE & HARDDISK GJENOPPRETTING ---
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
+
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "project_images" not in st.session_state:
@@ -161,10 +161,16 @@ if "project_images" not in st.session_state:
 if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
+if st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
     st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    st.info("Arkitekt-agenten trenger kontekst om bygget for å kunne gjøre en mulighetsstudie og tomteanalyse.")
     if find_page("Project"):
         if st.button("⚙️ Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
@@ -206,10 +212,12 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
-    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("MULIGHETSSTUDIE OG TOMTEANALYSE (ARK)"), 0, 1, 'L')
+    # Fikset forside med multi_cell for å unngå tekst som faller utenfor arket
+    pdf.set_y(95); pdf.set_font('Helvetica', 'B', 22); pdf.set_text_color(26, 43, 72)
+    pdf.multi_cell(0, 12, clean_pdf_text("MULIGHETSSTUDIE OG TOMTEANALYSE (ARK)"), 0, 'L')
+    pdf.ln(2)
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"KONSEPTVURDERING: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
+    pdf.multi_cell(0, 10, clean_pdf_text(f"KONSEPTVURDERING: {pdf.p_name}"), 0, 'L'); pdf.ln(25)
     
     for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly ARK AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
@@ -234,7 +242,6 @@ def create_full_report_pdf(name, client, content, maps):
         line = raw_line.strip()
         if not line: pdf.ln(4); continue
         
-        # Regex for the new 10-point header structure
         if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
             pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
@@ -252,13 +259,12 @@ def create_full_report_pdf(name, client, content, maps):
                     pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
             except Exception: pdf.ln(2)
 
-    # Tvinger JPEG konvertering for å unngå PNG-krasj
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT KART- OG TEGNINGSGRUNNLAG", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                m.convert("RGB").save(tmp.name, format="JPEG")
+                m.convert("RGB").save(tmp.name, format="JPEG", quality=85)
                 img_h = 160 * (m.height / m.width)
                 if img_h > 240: 
                     img_h = 240
@@ -277,14 +283,14 @@ def create_full_report_pdf(name, client, content, maps):
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>📐 ARK — Mulighetsstudie</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for tidligfase tomteanalyse, volumberegning og reguleringsvurdering.</p>", unsafe_allow_html=True)
 
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert (SSOT).")
+st.success(f"✅ Prosjektdata for **{pd_state.get('p_name')}** er automatisk synkronisert (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
-    b_type = c2.text_input("Formål / Bygningstype", value=pd_state["b_type"], disabled=True)
-    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
-    bta = st.number_input("Ønsket Bruttoareal (BTA m2)", value=int(pd_state["bta"]), disabled=True)
+    p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
+    b_type = c2.text_input("Formål / Bygningstype", value=pd_state.get("b_type"), disabled=True)
+    adresse = st.text_input("Adresse", value=f"{pd_state.get('adresse')}, {pd_state.get('kommune')}", disabled=True)
+    bta = st.number_input("Ønsket Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
 
 with st.expander("2. Reguleringsbestemmelser (Utnyttelse & Høyder)", expanded=True):
     st.info("Legg inn begrensninger fra gjeldende reguleringsplan for å sjekke om ønsket volum er realistisk.")
@@ -297,8 +303,14 @@ with st.expander("2. Reguleringsbestemmelser (Utnyttelse & Høyder)", expanded=T
 with st.expander("3. Visuelt Grunnlag (Reguleringskart / Skisser)", expanded=True):
     st.info("For at arkitekten skal kunne gjøre en troverdig tomteanalyse, kreves det et kart og eventuelle volumberegninger.")
     
-    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} tegninger i prosjektets fellesminne (fra Project Setup). Disse inkluderes automatisk!")
+    # Henter tegninger fra harddisken hvis de finnes!
+    saved_images = []
+    if IMG_DIR.exists():
+        for p in sorted(IMG_DIR.glob("*.jpg")):
+            saved_images.append(Image.open(p).convert("RGB"))
+            
+    if len(saved_images) > 0:
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk!")
     else:
         st.warning("Ingen tegninger funnet i fellesminnet. Du bør enten hente kart under, eller laste opp reguleringskart/skisser.")
         
@@ -306,7 +318,7 @@ with st.expander("3. Visuelt Grunnlag (Reguleringskart / Skisser)", expanded=Tru
     with col_map1:
         if st.button("🌐 Hent kart automatisk for tomten", type="secondary"):
             with st.spinner("Søker i Kartverket og Google Maps..."):
-                img, source = fetch_map_image(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"], google_key)
+                img, source = fetch_map_image(pd_state.get("adresse"), pd_state.get("kommune"), pd_state.get("gnr"), pd_state.get("bnr"), google_key)
                 if img:
                     st.session_state.ark_kart = img
                     st.success(f"✅ Kart hentet fra: {source}")
@@ -324,16 +336,11 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_width=True):
     
-    images_for_ai = [] 
+    images_for_ai = saved_images.copy()
     
-    # Legger til auto-hentet kart
     if st.session_state.ark_kart:
         images_for_ai.append(st.session_state.ark_kart)
         
-    # Legger til fellesbilder fra minnet
-    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-        images_for_ai.extend(st.session_state.project_images)
-    
     if files:
         with st.spinner("📐 Henter ut supplerende filer for visuell analyse..."):
             try:
@@ -342,13 +349,15 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
                     if f.name.lower().endswith('pdf'):
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
-                            for page_num in range(min(3, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                            for page_num in range(min(4, len(doc))): 
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                img.thumbnail((1200, 1200))
                                 images_for_ai.append(img)
                             doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
+                        img.thumbnail((1200, 1200))
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
@@ -375,8 +384,8 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
 
         PROSJEKT: {p_name}
         ØNSKET FORMÅL: {b_type}
-        ØNSKET VOLUM: {bta} m2 fordelt på {pd_state['etasjer']} etasjer.
-        LOKASJON: {adresse} (Kommune: {pd_state['kommune']}).
+        ØNSKET VOLUM: {bta} m2 fordelt på {pd_state.get('etasjer', 1)} etasjer.
+        LOKASJON: {adresse} (Kommune: {pd_state.get('kommune', '')}).
         
         REGULERINGSMESSIGE BEGRENSNINGER OPPGITT AV KUNDE:
         - Status: {planstatus}
@@ -384,7 +393,7 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
         - Maks byggehøyde: {max_hoyde}
         
         KUNDENS PROSJEKTBESKRIVELSE / VISJON: 
-        "{pd_state['p_desc']}"
+        "{pd_state.get('p_desc', '')}"
         
         VIKTIG - VURDERING AV DATAGRUNNLAG:
         Jeg har lagt ved kart/bilder/tegninger. Du MÅ aktivt beskrive hva du ser på dem (tomtens form, naboer, veier).
@@ -400,7 +409,7 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
         -> Ikke beregn falske arealer. Lever KUN en overordnet risiko-vurdering av å bygge {b_type} i det angitte området, og krev mer dokumentasjon (kart/reguleringsplan).
         
         STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene):
-        1. OPPSUMMERING (Skriv tydelig om dette er full, indikativ eller avvist vurdering)
+        1. OPPSUMMERING
         2. GRUNNLAG (Vær streng på hva som mangler av dokumentasjon)
         3. VIKTIGSTE FORUTSETNINGER
         4. TOMT OG KONTEKST (Avles kart og ortofoto - nevn nabobygg, sol, adkomst)
@@ -418,7 +427,8 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
             res = model.generate_content(prompt_parts)
             
             with st.spinner("Kompilerer ARK-PDF med vedlagte kart og skisser..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
+                # FIKSET FEILEN HER: Bruker pd_state.get('c_name') istedenfor c_name variabelen!
+                pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', 'Ukjent'), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
@@ -429,7 +439,6 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
                 doc_id = f"PRJ-{datetime.now().strftime('%y')}-ARK{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
                 
-                # Fargekoder status basert på AI-ens vurdering (Spor 1, 2 eller 3)
                 ai_text_lower = res.text.lower()
                 if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
                     status = "Rejected - Needs Site Data"
@@ -442,7 +451,7 @@ if st.button("🚀 Kjør Mulighetsstudie (ARK)", type="primary", use_container_w
                     badge = "badge-pending"
                 
                 st.session_state.pending_reviews[doc_id] = {
-                    "title": pd_state['p_name'],
+                    "title": pd_state.get('p_name', 'Nytt Prosjekt'),
                     "module": "ARK (Mulighetsstudie)",
                     "drafter": "Builtly AI",
                     "reviewer": "Senior Arkitekt",
