@@ -137,7 +137,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR FOR SHA ---
+# --- 5. DYNAMISK PDF MOTOR FOR SHA (CORPORATE EDITION) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -177,7 +177,7 @@ def create_full_report_pdf(name, client, content, maps):
         "1. DOKUMENTINFORMASJON", "2. FORMÅL OG OMFANG", "3. PROSJEKTBESKRIVELSE",
         "4. ROLLER OG ANSVAR", "5. ORGANISASJONSKART", "6. FREMDRIFT OG KONSEKVENS",
         "7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK", "8. RUTINER FOR OPPFØLGING",
-        "9. FORUTSETNINGER OG AVKLARINGER", "10. HANDLINGSLISTE / MANGLER", "VEDLEGG: VISUELT GRUNNLAG"
+        "9. FORUTSETNINGER OG AVKLARINGER", "10. HANDLINGSLISTE / MANGLER"
     ]
     for t in toc:
         pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
@@ -186,25 +186,74 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: pdf.ln(4); continue
+        if not line: 
+            pdf.ln(3)
+            continue
         
-        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
-            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        elif line.startswith('##'):
-            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
+        # Fjerner markdown-stjerner
+        safe_text = line.replace('**', '').replace('_', '')
+        safe_text = clean_pdf_text(safe_text)
+        
+        # Hovedoverskrifter (H1)
+        if safe_text.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', safe_text):
+            pdf.check_space(30)
+            pdf.ln(8)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 14)
+            pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
+            pdf.ln(2)
+            
+        # Underoverskrifter (H2/H3 - F.eks. "### Arbeid i høyden")
+        elif safe_text.startswith('## ') or safe_text.startswith('### '):
+            pdf.check_space(20)
+            pdf.ln(5)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.set_text_color(50, 65, 85)
+            pdf.multi_cell(0, 6, safe_text.replace('#', '').strip().upper())
+            pdf.ln(1)
+            
         else:
-            pdf.set_font('Helvetica', '', 10)
-            safe_text = ironclad_text_formatter(line)
-            if safe_text.strip() == "": continue
-            try:
-                # PDF-motoren rykker KUN inn linjer som starter med bindestrek
-                if safe_text.startswith('- '):
-                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
-                else:
-                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
-            except Exception: pdf.ln(2)
+            # MAGISK CORPORATE PARSER FOR SHA NØKKELORD
+            kv_match = re.match(r'^(Aktivitet|Årsak|Konsekvens|Fase|Tiltak|Forebyggende tiltak|Ansvarlig|Rolle|Status|Koordinering|Frist):\s*(.*)', safe_text, re.IGNORECASE)
+            
+            if kv_match:
+                key = kv_match.group(1).upper()
+                val = kv_match.group(2)
+                
+                pdf.check_space(15)
+                # Tegner en lekker, fet, gråblå "Label"
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(120, 140, 160)
+                pdf.cell(0, 5, key, 0, 1)
+                
+                # Tegner selve innholdet rent og ryddig under
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, val)
+                pdf.ln(2)
+                
+            # Gjør om stygge bindestreker til pene kulepunkter
+            elif safe_text.startswith('- ') or safe_text.startswith('* '):
+                pdf.check_space(10)
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                bullet_text = "• " + safe_text[2:]
+                pdf.multi_cell(0, 5, bullet_text)
+                pdf.ln(1)
+                
+            # Vanlig brødtekst
+            else:
+                pdf.check_space(10)
+                pdf.set_x(25)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, safe_text)
+                pdf.ln(1)
 
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VISUELT GRUNNLAG", 0, 1)
@@ -311,11 +360,11 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
 
         risiko_str = ", ".join(risiko_liste) if risiko_liste else "Ingen spesifikke krysset av."
 
-        # --- DEN OPPDATERTE OG EKSTREMT STRENGE SHA-PROMPTEN ---
+        # --- DEN OPPDATERTE OG EKSTREMT STRENGE SHA-PROMPTEN FOR CORPORATE DESIGN ---
         prompt_text = f"""
         Du er en senior SHA-rådgiver for norske bygge- og anleggsprosjekter. Din oppgave er utelukkende å skrive innholdet i en formell SHA-plan.
 
-        PROSJEKT: {p_name} ({pd_state.get('b_type', 'Ukjent type')}, {bta} m2, {pd_state.get('etasjer', 1)} etasjer).
+        PROSJEKT: {p_name} ({pd_state.get('b_type', 'Ukjent type')}, Bygg {bta} m2, Tomt {pd_state.get('tomteareal')} m2, {pd_state.get('etasjer', 1)} etasjer).
         LOKASJON: {adresse}.
         ENTREPRISEFORM: {entrepriseform}.
         KRITISK FASE: {fremdrift}.
@@ -327,26 +376,34 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
         {risiko_str}
         
         EKSTREMT VIKTIGE REGLER FOR FORMATERING:
-        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". IKKE skriv noen form for introduksjon, hilsen, forbehold eller bekreftelse på rollen din!
-        2. FOR PUNKTLISTER: Bruk KUN bindestrek (-) som kulepunkt. IKKE bruk bokstaver (a, b, c) eller tall (1, 2, 3) for oppramsing av tiltak. PDF-systemet vårt gjenkjenner KUN bindestrek for å lage pene innrykk i teksten.
-        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
+        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". IKKE skriv noen form for introduksjon, hilsen, forbehold eller bekreftelse.
+        2. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
+        3. For underoverskrifter (f.eks. spesifikke risikoforhold), bruk alltid ### foran (f.eks. "### Arbeid i høyden").
+        4. For utdyping av risikoer og tiltak, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
+        
+        Aktivitet: [Tekst]
+        Årsak: [Tekst]
+        Konsekvens: [Tekst]
+        Tiltak: [Tekst]
+        Ansvarlig: [Tekst]
+        Status: [Tekst]
         
         MANDAT:
         Lag et førsteutkast til SHA-plan som er konkret, prosjektspesifikk og egnet for videre kvalitetssikring.
         - Bruk prosjektets faktiske data, valgte risikoforhold, og trekk inn funn fra de vedlagte tegningene.
-        - Knytt spesifikke tiltak til de konkrete risikoforholdene. Bruk bindestrek for å liste opp disse tiltakene!
+        - Hvis tegningene viser trang tomt ({pd_state.get('tomteareal')} m2 vs {bta} m2 BTA), påpek logistikkutfordringer.
         
-        STRUKTUR (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
-        # 1. DOKUMENTINFORMASJON
+        STRUKTUR PÅ RAPPORTEN:
+        # 1. DOKUMENTINFORMASJON (Bruk en enkel liste med bindestrek)
         # 2. FORMÅL OG OMFANG
         # 3. PROSJEKTBESKRIVELSE
         # 4. ROLLER OG ANSVAR (Hvem gjør hva ihht. Byggherreforskriften for entrepriseformen {entrepriseform}?)
         # 5. ORGANISASJONSKART (Lag et tekstlig hierarki, bruk bindestrek)
-        # 6. FREMDRIFT OG FASEKRITISKE AKTIVITETER (Beskriv spesielt fasen: {fremdrift})
-        # 7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK (Bruk underoverskrifter for hver risiko, og list opp tiltakene med bindestrek)
+        # 6. FREMDRIFT OG FASEKRITISKE AKTIVITETER
+        # 7. PROSJEKTSPESIFIKKE RISIKOFORHOLD OG TILTAK (Bruk ### for hver risiko, og bruk nøkkelordene over for corporate formatering!)
         # 8. RUTINER FOR OPPFØLGING OG OPPDATERING
         # 9. FORUTSETNINGER OG AVKLARINGER
-        # 10. HANDLINGSLISTE / MANGLER FØR ENDELIG PLAN
+        # 10. HANDLINGSLISTE / MANGLER
         """
         
         prompt_parts = [prompt_text] + images_for_ai
@@ -354,7 +411,7 @@ if st.button("🚀 Kjør SHA-analyse og generer plan", type="primary", use_conta
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer SHA-PDF og fletter inn tegninger som vedlegg..."):
+            with st.spinner("Kompilerer SHA-PDF med corporate design..."):
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
