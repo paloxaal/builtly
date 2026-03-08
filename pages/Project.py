@@ -7,14 +7,27 @@ import urllib.parse
 import re
 from datetime import datetime
 import time
+import io
+from PIL import Image
 
-# --- 1. GRUNNINNSTILLINGER ---
+# For AI-bildeanalyse
+import google.generativeai as genai
+try:
+    import fitz  # PyMuPDF for å lese PDF-er som bilder
+except ImportError:
+    fitz = None
+
+# --- 1. GRUNNINNSTILLINGER & API ---
 st.set_page_config(
     page_title="Project Setup | Builtly", 
     page_icon="⚙️", 
     layout="wide", 
     initial_sidebar_state="collapsed"
 )
+
+google_key = os.environ.get("GOOGLE_API_KEY")
+if google_key:
+    genai.configure(api_key=google_key)
 
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
@@ -34,7 +47,6 @@ def find_page(base_name: str) -> str:
         if p.exists(): return str(p)
     return ""
 
-# Løsning for sikker hjem-navigasjon (forhindrer minnetap)
 def go_home():
     main_file = None
     for f in Path(".").glob("*.py"):
@@ -44,7 +56,7 @@ def go_home():
     if main_file:
         st.switch_page(main_file)
 
-# --- 2. PREMIUM CSS (Nå med integrert kort-design for Launchpad!) ---
+# --- 2. PREMIUM CSS ---
 st.markdown(
     """
 <style>
@@ -89,9 +101,15 @@ st.markdown(
     }
     div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     div[data-baseweb="select"] span { color: #ffffff !important; }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label {
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
         color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
     }
+
+    /* FILOPPLASTER */
+    [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
+    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
 
     /* DASHBOARD BOKSER */
     .dash-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
@@ -141,6 +159,7 @@ st.markdown(
 </style>
 """, unsafe_allow_html=True)
 
+
 # --- 3. SESSION STATE LOGIKK (Hjernen i SSOT) ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {
@@ -148,6 +167,9 @@ if "project_data" not in st.session_state:
         "adresse": "", "kommune": "", "gnr": "", "bnr": "",
         "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
     }
+
+if "ai_drawing_analysis" not in st.session_state:
+    st.session_state.ai_drawing_analysis = None
 
 pd_state = st.session_state.project_data
 
@@ -157,7 +179,6 @@ completeness = int((filled_fields / len(fields_to_check)) * 100)
 sync_status = "Draft" if completeness < 100 else "Ready"
 progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
 
-# --- 4. ROBUST KARTVERKET-SØK (Fuzzy Search) ---
 def fetch_from_kartverket(adresse, kommune, gnr, bnr):
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
@@ -179,7 +200,6 @@ def fetch_from_kartverket(adresse, kommune, gnr, bnr):
         except Exception: pass
         return None
 
-    # Prøver flere kombinasjoner for å garantere treff!
     queries = []
     if adr_clean and kom_clean: queries.append(f"{adr_clean} {kom_clean}")
     if adr_clean: queries.append(adr_clean)
@@ -193,7 +213,7 @@ def fetch_from_kartverket(adresse, kommune, gnr, bnr):
         if res: return res
     return None
 
-# --- 5. HEADER (Nå med NATIVE knapper for å forhindre memory-wipe!) ---
+# --- 4. HEADER ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -208,7 +228,7 @@ with c3:
         if st.button("QA & Sign-off", type="primary", use_container_width=True):
             st.switch_page(find_page("Review"))
 
-# --- 6. DASHBOARD UI ---
+# --- 5. DASHBOARD UI ---
 render_html(f"""
 <div class="dash-grid">
     <div class="card card-hero">
@@ -248,7 +268,7 @@ render_html(f"""
 </div>
 """)
 
-# --- 7. INPUT SEKSJON ---
+# --- 6. INPUT SEKSJON ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
 st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
 
@@ -283,9 +303,7 @@ with input_col:
     
     if "Norge" in new_land:
         if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
-            # Vi lagrer de manuelle inputene midlertidig før vi søker
             st.session_state.project_data.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
-            
             with st.spinner("Søker i Nasjonalt Adresseregister..."):
                 res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
                 if res:
@@ -308,7 +326,73 @@ with input_col:
     new_etasjer = c8.number_input("Antall Etasjer", value=int(pd_state["etasjer"]), min_value=1)
     new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd_state["bta"]), step=100)
 
+    # --- NY SEKSJON: TEGNINGSGRUNNLAG OG AI-KVALITETSSIKRING ---
     st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
+    st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett og peke på eventuelle mangler.")
+    
+    uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    
+    if uploaded_drawings:
+        if st.button("🤖 Analyser & Kvalitetssikre Tegninger med AI", type="secondary"):
+            if not google_key:
+                st.error("Google API-nøkkel mangler!")
+            else:
+                with st.spinner("AI studerer tegningene for å vurdere byggekvalitet og mangler..."):
+                    images_for_qa = []
+                    try:
+                        for f in uploaded_drawings: 
+                            if f.name.lower().endswith('pdf'):
+                                if fitz is None: 
+                                    st.error("Mangler PDF-modul (PyMuPDF).")
+                                    break
+                                doc = fitz.open(stream=f.read(), filetype="pdf")
+                                for page_num in range(min(4, len(doc))): # Max 4 sider for rask sjekk
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                                    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                    images_for_qa.append(img)
+                                doc.close() 
+                            else:
+                                img = Image.open(f).convert("RGB")
+                                images_for_qa.append(img)
+                                
+                        if images_for_qa:
+                            # Hent riktig Gemini-modell
+                            valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                            valgt_modell = valid_models[0]
+                            for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+                                if fav in valid_models: valgt_modell = fav; break
+                            
+                            model = genai.GenerativeModel(valgt_modell)
+                            
+                            qa_prompt = f"""
+                            Du er en Senior Rådgivende Ingeniør og Arkitekt for prosjektet '{new_p_name}'.
+                            Din oppgave er å utføre en streng kvalitetskontroll (QA) av de vedlagte tegningene før de sendes videre til andre fagfelt (brann, akustikk, konstruksjon).
+                            
+                            Prosjektinfo: {new_b_type}, {new_etasjer} etasjer, {new_bta} m2.
+                            
+                            Vurder følgende:
+                            1. ER GRUNNLAGET KOMPLETT? Ser du både plantegninger, snitt, fasader og situasjonsplan? Hvis noe mangler, si ifra tydelig!
+                            2. KVALITET & LESBARHET: Er tegningene tydelige? Er det satt på mål og akser der det er nødvendig?
+                            3. POTENSIELLE UTFORDRINGER: Ut fra det du ser, er det noe arkitektonisk som kan by på problemer for Brannkonsept (f.eks lange rømningsveier), Konstruksjon (store spenn) eller Akustikk (store glassfasader)?
+                            4. KONKRETE FORSLAG: Gi 2-3 konkrete forslag til endringer eller utbedringer i tegningsgrunnlaget før videre prosjektering.
+                            
+                            Svar formatert pent med Markdown, bruk emojis, og vær direkte og profesjonell.
+                            """
+                            
+                            res = model.generate_content([qa_prompt] + images_for_qa)
+                            st.session_state.ai_drawing_analysis = res.text
+                    except Exception as e:
+                        st.error(f"Feil under bildebehandling: {e}")
+
+    # Vis AI-vurderingen hvis den finnes i minnet
+    if st.session_state.ai_drawing_analysis:
+        st.markdown("<div class='card' style='margin-top: 1rem; border-color: #38c2c9;'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='margin-top: 0; color: #38c2c9;'>📊 AI-Vurdering av Tegningsgrunnlag</h4>", unsafe_allow_html=True)
+        st.markdown(st.session_state.ai_drawing_analysis)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
     
     # HOVEDKNAPPEN FOR Å LAGRE!
     if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
@@ -339,7 +423,8 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD ---
+
+# --- 7. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     """En smart funksjon som tegner et vakkert HTML-kort, og legger en usynlig/kamuflert native-knapp over"""
     with col:
@@ -367,26 +452,28 @@ if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 2.5rem; font-weight:750;'>🚀 Prosjektet er synkronisert! Velg fagmodul under:</h3>", unsafe_allow_html=True)
     
+    # RAD 1
     r1c1, r1c2, r1c3 = st.columns(3)
     render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
-                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic.", 
-                       "XLSX / CSV / PDF", "Environmental action plan", "Open Geo & Env", "Geo")
+                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
+                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Open Geo & Env", "Geo")
     render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound", 
-                       "Ingest noise maps and floor plans. Generates facade requirements.", 
-                       "Noise map + floor plan", "Acoustics report", "Open Acoustics", "Akustikk")
+                       "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", 
+                       "Noise map + floor plan", "Acoustics report, facade eval.", "Open Acoustics", "Akustikk")
     render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy", 
-                       "Evaluate architectural drawings against building codes.", 
-                       "Architectural drawings", "Fire strategy concept", "Open Fire Strategy", "Brannkonsept")
+                       "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", 
+                       "Architectural drawings + class", "Fire strategy concept, deviations", "Open Fire Strategy", "Brannkonsept")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # RAD 2
     r2c1, r2c2, r2c3 = st.columns(3)
     render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
-                       "Site screening, volume analysis, and early-phase decision support.", 
-                       "Site data, zoning plans", "Feasibility report", "Open Feasibility", "Mulighetsstudie")
+                       "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
+                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Open Feasibility", "Mulighetsstudie")
     render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept", 
-                       "Conceptual structural checks, principle dimensioning.", 
-                       "Models, load parameters", "Concept memo", "Open Structural", "Konstruksjon")
+                       "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", 
+                       "Models, load parameters", "Concept memo, grid layouts", "Open Structural", "Konstruksjon")
     render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility", 
-                       "Traffic generation, parking requirements, access logic.", 
-                       "Site plans", "Traffic memo", "Open Traffic & Mobility", "Trafikk")
+                       "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", 
+                       "Site plans, local norms", "Traffic memo, mobility plan", "Open Traffic & Mobility", "Trafikk")
