@@ -117,8 +117,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Sikkerhetsnett for å hindre krasj hvis minnet tømmes brått
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
+
 # --- 3. GUARDRAIL LÅS MED NATIVE STREAMLIT NAVIGATION ---
-if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
     
@@ -346,17 +350,23 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
                     "class": "badge-pending",
                     "pdf_bytes": pdf_data
                 }
-                # -------------------------------------------------------------
                 
-            st.success("✅ RIBr Rapport er ferdigstilt og sendt til QA-køen!")
-            
-            col_dl, col_qa = st.columns(2)
-            with col_dl:
-                st.download_button("📄 Last ned Brannkonsept direkte", pdf_data, f"Builtly_RIBr_{p_name}.pdf", type="primary", use_container_width=True)
-            with col_qa:
-                if find_page("Review"):
-                    if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
-                        st.switch_page(find_page("Review"))
-                        
+                # Lagrer PDF-en lokalt i session state for nedlastingsknappen
+                st.session_state.generated_brann_pdf = pdf_data
+                st.session_state.generated_brann_filename = f"Builtly_RIBr_{p_name}.pdf"
+                st.rerun() # Tvinger oppdatering så knappene vises
+                
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
+
+# --- NEDLASTING OG NAVIGASJON (LIGGER TRYGT UTENFOR GENERERINGSLØKKEN) ---
+if "generated_brann_pdf" in st.session_state:
+    st.success("✅ RIBr Rapport er ferdigstilt og sendt til QA-køen!")
+    
+    col_dl, col_qa = st.columns(2)
+    with col_dl:
+        st.download_button("📄 Last ned Brannkonsept direkte", st.session_state.generated_brann_pdf, st.session_state.generated_brann_filename, type="primary", use_container_width=True)
+    with col_qa:
+        if find_page("Review"):
+            if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
+                st.switch_page(find_page("Review"))
