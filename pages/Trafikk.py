@@ -4,19 +4,17 @@ import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
+import json
 from datetime import datetime
 import tempfile
 import re
-import requests
-import urllib.parse
-import json
 import io
 from PIL import Image
 import numpy as np
 from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Trafikk & Mobilitet (RITra) | Builtly", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Trafikk & Mobilitet | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -50,7 +48,8 @@ def find_page(base_name: str) -> str:
 
 def clean_pdf_text(text):
     if not text: return ""
-    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "*"}
+    # Sikkerhetsnett: Bytter ut spesialtegn for å unngå font-krasj i PDF
+    rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "-"}
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
@@ -60,52 +59,7 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. KARTVERKET + GOOGLE MAPS FALLBACK MOTOR ---
-def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
-    nord, ost = None, None
-    adr_clean = adresse.replace(',', '').strip() if adresse else ""
-    kom_clean = kommune.replace(',', '').strip() if kommune else ""
-    
-    queries = []
-    if adr_clean and kom_clean: queries.append(f"{adr_clean} {kom_clean}")
-    if adr_clean: queries.append(adr_clean)
-    if gnr and bnr and kom_clean: queries.append(f"{kom_clean} {gnr}/{bnr}")
-    
-    for q in queries:
-        safe_query = urllib.parse.quote(q)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
-        try:
-            resp = requests.get(url, timeout=4)
-            if resp.status_code == 200 and resp.json().get('adresser'):
-                hit = resp.json()['adresser'][0]
-                nord = hit.get('representasjonspunkt', {}).get('nord')
-                ost = hit.get('representasjonspunkt', {}).get('øst')
-                break
-        except: pass
-        
-    if nord and ost:
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
-        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        try:
-            r1 = requests.get(url_orto, timeout=5)
-            if r1.status_code == 200 and len(r1.content) > 5000:
-                return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Kartverket (Norge i Bilder)"
-        except: pass
-        
-    if api_key and (adr_clean or kom_clean):
-        query = f"{adr_clean}, {kom_clean}, Norway"
-        safe_query = urllib.parse.quote(query)
-        url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
-        try:
-            r2 = requests.get(url_gmaps, timeout=5)
-            if r2.status_code == 200:
-                return Image.open(io.BytesIO(r2.content)).convert('RGB'), "Google Maps Satellite"
-        except: pass
-        
-    return None, "Kunne ikke hente kart fra verken Kartverket eller Google."
-
-# --- 3. PREMIUM CSS (SKUDDSIKKER) ---
+# --- 2. PREMIUM CSS ---
 st.markdown("""
 <style>
     :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px; }
@@ -115,7 +69,6 @@ st.markdown("""
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     
     button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
@@ -131,7 +84,7 @@ st.markdown("""
     ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
     ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
     div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label, .stMultiSelect label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
     
     div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
     div[data-testid="stExpander"] details summary:hover { background-color: rgba(255,255,255,0.03) !important; }
@@ -149,15 +102,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. SESSION STATE & HARDDISK GJENOPPRETTING ---
+# --- 3. SESSION STATE & HARDDISK GJENOPPRETTING ---
 DB_DIR = Path("qa_database")
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
-if "trafikk_kart" not in st.session_state:
-    st.session_state.trafikk_kart = None
 
 if st.session_state.project_data.get("p_name") == "":
     if SSOT_FILE.exists():
@@ -167,16 +118,14 @@ if st.session_state.project_data.get("p_name") == "":
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    
     st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    st.info("AI-agenten trenger kontekst om bygget (areal, formål, adresse) for å kunne vurdere trafikkgenerering og parkeringsbehov.")
-    
+    st.info("RITra-agenten trenger kontekst om prosjektet for å generere et relevant trafikknotat.")
     if find_page("Project"):
         if st.button("⚙️ Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
     st.stop()
 
-# --- 5. HEADER ---
+# --- 4. HEADER ---
 top_l, top_r = st.columns([4, 1])
 with top_l:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -189,7 +138,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- DYNAMISK PDF MOTOR (RITra) - OPPDATERT FORSIDE ---
+# --- 5. DYNAMISK PDF MOTOR (CORPORATE EDITION) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -212,14 +161,13 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
     
-    # Fikset forside slik at lange titler brytes pent
-    pdf.set_y(95); pdf.set_font('Helvetica', 'B', 22); pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(0, 12, clean_pdf_text("TRAFIKKNOTAT OG MOBILITETSPLAN (RITra)"), 0, 'L')
+    pdf.set_y(95); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
+    pdf.multi_cell(0, 12, clean_pdf_text("TRAFIKKNOTAT OG MOBILITET (RITra)"), 0, 'L')
     pdf.ln(2)
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 'L'); pdf.ln(25)
+    pdf.multi_cell(0, 10, clean_pdf_text(f"PROSJEKT: {pdf.p_name}"), 0, 'L'); pdf.ln(25)
     
-    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RITra AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
+    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RITra AI Engine"), ("REGELVERK:", "Norsk Standard / TEK17")]:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
@@ -227,15 +175,10 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
     toc = [
-        "1. OPPSUMMERING OG KONKLUSJON", 
-        "2. VURDERING AV GRUNNLAG", 
-        "3. VIKTIGSTE FORUTSETNINGER", 
-        "4. TRAFIKALT HOVEDGREP", 
-        "5. KRITISKE PUNKTER (Sikkerhet, kapasitet, logistikk)", 
-        "6. RISIKO OG USIKKERHET", 
-        "7. ANBEFALT LØSNING / ALTERNATIVER",
-        "8. BEHOV FOR VIDERE AVKLARINGER",
-        "VEDLEGG: VURDERT TEGNINGSGRUNNLAG"
+        "1. OPPSUMMERING OG KONKLUSJON", "2. VURDERING AV GRUNNLAG", 
+        "3. VIKTIGSTE FORUTSETNINGER", "4. TRAFIKALT HOVEDGREP", 
+        "5. KRITISKE PUNKTER (Sikkerhet, kapasitet, logistikk)", "6. RISIKO OG USIKKERHET",
+        "7. ANBEFALT LØSNING / ALTERNATIVER", "8. BEHOV FOR VIDERE AVKLARINGER"
     ]
     for t in toc:
         pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
@@ -244,30 +187,81 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: pdf.ln(4); continue
-        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
-            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        elif line.startswith('##'):
-            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
+        if not line: 
+            pdf.ln(3)
+            continue
+        
+        # Fjerner markdown-stjerner
+        safe_text = line.replace('**', '').replace('_', '')
+        safe_text = clean_pdf_text(safe_text)
+        
+        # Hovedoverskrifter (H1)
+        if safe_text.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', safe_text):
+            pdf.check_space(30)
+            pdf.ln(8)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 14)
+            pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
+            pdf.ln(2)
+            
+        # Underoverskrifter (H2/H3)
+        elif safe_text.startswith('## ') or safe_text.startswith('### '):
+            pdf.check_space(20)
+            pdf.ln(5)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.set_text_color(50, 65, 85)
+            pdf.multi_cell(0, 6, safe_text.replace('#', '').strip().upper())
+            pdf.ln(1)
+            
         else:
-            pdf.set_font('Helvetica', '', 10)
-            safe_text = ironclad_text_formatter(line)
-            if safe_text.strip() == "": continue
-            try:
-                if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
-                else:
-                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
-            except Exception: pdf.ln(2)
+            # MAGISK CORPORATE PARSER FOR NØKKELORD
+            kv_match = re.match(r'^(Tema|Vurdering|Risiko|Tiltak|Konsekvens|Anbefaling|Krav|Kapasitet|Status):\s*(.*)', safe_text, re.IGNORECASE)
+            
+            if kv_match:
+                key = kv_match.group(1).upper()
+                val = kv_match.group(2)
+                
+                pdf.check_space(15)
+                # Tegner en lekker, fet, gråblå "Label"
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(120, 140, 160)
+                pdf.cell(0, 5, key, 0, 1)
+                
+                # Tegner selve innholdet rent og ryddig under
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, val)
+                pdf.ln(2)
+                
+            # Gjør om stygge bindestreker til trygge ASCII-streker med innrykk
+            elif safe_text.startswith('- ') or safe_text.startswith('* '):
+                pdf.check_space(10)
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                bullet_text = "- " + safe_text[2:] 
+                pdf.multi_cell(0, 5, bullet_text)
+                pdf.ln(1)
+                
+            # Vanlig brødtekst
+            else:
+                pdf.check_space(10)
+                pdf.set_x(25)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, safe_text)
+                pdf.ln(1)
 
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT BILDEDOKUMENTASJON", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                m.convert("RGB").save(tmp.name, format="JPEG")
+                m.convert("RGB").save(tmp.name, format="JPEG", quality=85)
                 img_h = 160 * (m.height / m.width)
                 if img_h > 240: 
                     img_h = 240
@@ -282,26 +276,29 @@ def create_full_report_pdf(name, client, content, maps):
 
     return bytes(pdf.output(dest='S'))
 
-# --- STREAMLIT UI ---
-st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🚦 RITra — Trafikk & Mobilitet</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for trafikkgenerering, parkeringsbehov og vurdering av adkomstveier.</p>", unsafe_allow_html=True)
+# --- 6. STREAMLIT UI ---
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🚦 Trafikknotat & Mobilitet (RITra)</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for generering av tidligfase trafikkanalyser, adkomstvurdering og mobilitetsplaner.</p>", unsafe_allow_html=True)
 
 st.success(f"✅ Prosjektdata for **{pd_state.get('p_name')}** er automatisk synkronisert (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
     p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
-    b_type = c2.text_input("Formål / Bygningstype", value=pd_state.get("b_type"), disabled=True)
-    adresse = st.text_input("Adresse", value=f"{pd_state.get('adresse')}, {pd_state.get('kommune')}", disabled=True)
-    bta = st.number_input("Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
-
-with st.expander("2. Trafikk & Mobilitetsparametere", expanded=True):
+    b_type = c2.text_input("Bygningstype", value=pd_state.get("b_type"), disabled=True)
     c3, c4 = st.columns(2)
-    kollektivdekning = c3.selectbox("Nærhet til kollektivtransport", ["Svært god (Sentrum / Knute)", "Middels (Gåavstand til buss/bane)", "Dårlig (Krever i praksis bil)"], index=1)
-    p_norm = c4.selectbox("Føring for parkeringsnorm", ["Maksnorm (Restriktiv byutvikling)", "Minimumsnorm (Krav til antall plasser)", "Ingen spesifikke krav"], index=0)
+    bta = st.number_input("Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
+    tomteareal = st.number_input("Tomteareal (m2)", value=int(pd_state.get("tomteareal", 0)), disabled=True)
 
-with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True):
-    st.info("RITra trenger et kart eller en situasjonsplan for å vurdere adkomst, sykkelparkering og renovasjon/varelevering.")
+with st.expander("2. Trafikale Rammebetingelser", expanded=True):
+    st.info("Angi krav fra reguleringsplan/kommune. Agenten vil vurdere tegningene opp mot disse målene.")
+    c5, c6 = st.columns(2)
+    bil_norm = c5.selectbox("Parkeringsnorm Bil", ["Minimumsnorm (Krever mange plasser)", "Maksimumsnorm (Restriktiv, sentrumsnært)", "Ingen spesifikke krav / Uavklart"], index=1)
+    sykkel_norm = c6.selectbox("Parkeringsnorm Sykkel", ["Høy (Krav til trygg innendørs parkering og vask)", "Standard", "Ingen krav"], index=0)
+    kollektiv = st.selectbox("Kollektivdekning i området", ["Veldig god (Nær knutepunkt)", "Middels (Gangavstand til buss/bane)", "Dårlig (Avhengig av bil)"], index=1)
+
+with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Kjellerplan)", expanded=True):
+    st.info("Last opp situasjonsplan, utomhusplan eller kjellerplan. Agenten vil vurdere innkjøring, svingradier for renovasjon/varelevering og konflikter med myke trafikanter.")
     
     saved_images = []
     if IMG_DIR.exists():
@@ -309,45 +306,27 @@ with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True
             saved_images.append(Image.open(p).convert("RGB"))
             
     if len(saved_images) > 0:
-        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i analysen!")
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse vurderes automatisk for trafikale løsninger!")
     else:
-        st.warning("Ingen felles tegninger funnet. Du bør hente kart under eller laste opp situasjonsplan.")
+        st.warning("Ingen felles tegninger funnet. Du bør laste opp situasjonsplan under.")
         
-    col_map1, col_map2 = st.columns(2)
-    with col_map1:
-        if st.button("🌐 Hent utomhus-kart automatisk", type="secondary"):
-            with st.spinner("Søker i Kartverket og Google Maps..."):
-                img, source = fetch_map_image(pd_state.get("adresse"), pd_state.get("kommune"), pd_state.get("gnr"), pd_state.get("bnr"), google_key)
-                if img:
-                    st.session_state.trafikk_kart = img
-                    st.success(f"✅ Kart hentet fra: {source}")
-                else:
-                    st.error(source)
-        
-        if st.session_state.trafikk_kart:
-            st.image(st.session_state.trafikk_kart, caption="Hentet situasjonskart", use_container_width=True)
-
-    with col_map2:
-        st.markdown("##### Supplerende filer")
-        files = st.file_uploader("Last opp spesifikke trafikk-skisser / situasjonsplan", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    files = st.file_uploader("Last opp tegninger/kart (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_width=True):
+
+if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=True):
     
     images_for_ai = saved_images.copy()
-    
-    if st.session_state.trafikk_kart:
-        images_for_ai.append(st.session_state.trafikk_kart)
         
     if files:
-        with st.spinner("📐 Leser ut supplerende lokale filer..."):
+        with st.spinner("📐 Leser ut supplerende filer..."):
             try:
                 for f in files: 
                     f.seek(0)
                     if f.name.lower().endswith('pdf'):
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
-                            for page_num in range(min(3, len(doc))): 
+                            for page_num in range(min(4, len(doc))): 
                                 pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
                                 img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
                                 img.thumbnail((1200, 1200))
@@ -362,7 +341,7 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
                 
     st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til RITra-agenten for vurdering.")
                 
-    with st.spinner(f"🤖 Analyserer mobilitet og genererer trafikknotat for {pd_state.get('land', 'Norge')}..."):
+    with st.spinner(f"🤖 Vurderer adkomst, logistikk og mobilitet..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -376,46 +355,46 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
         model = genai.GenerativeModel(valgt_modell)
 
         prompt_text = f"""
-        Du er Builtly RITra AI, en svært erfaren trafikkonsulent med bred kompetanse innen trafikkplanlegging, mobilitet og adkomstløsninger.
-        Du skal analysere tilgjengelig prosjektgrunnlag og gi faglige, realistiske og tydelige trafikkfaglige vurderinger.
-        
-        PROSJEKT: {p_name} ({b_type}, {bta} m2). 
-        LOKASJON: {adresse}.
-        KOLLEKTIVDEKNING: {kollektivdekning}.
-        PARKERINGSNORM FØRING: {p_norm}.
+        Du er en senior trafikkrådgiver (RITra) for norske bygge- og eiendomsprosjekter. Din oppgave er UTELUKKENDE å skrive innholdet i et formelt Trafikknotat.
+
+        PROSJEKT: {p_name} ({pd_state.get('b_type')}, Bygg {pd_state.get('bta')} m2, Tomt {pd_state.get('tomteareal')} m2).
+        LOKASJON: {pd_state.get('adresse')}.
         
         KUNDENS PROSJEKTBESKRIVELSE: 
-        "{pd_state.get('p_desc')}"
+        "{pd_state.get('p_desc', '')}"
         
-        REGLER FOR DIN VURDERING (ALDRI BRYT DISSE):
-        - Du skal aldri late som du har trafikktall, ulykkesdata eller vegstatus som ikke er gitt deg.
-        - Du skal skille mellom dokumentert, sannsynlig, usikkert og ikke vurderbart.
-        - Vær faglig kritisk. Ikke anta at manøvrering fungerer bare fordi noe ser mulig ut.
+        PARKERING OG MOBILITETSKRAV:
+        - Bilparkering: {bil_norm}
+        - Sykkelparkering: {sykkel_norm}
+        - Kollektivdekning: {kollektiv}
         
-        VIKTIG - VURDERING AV TEGNINGSGRUNNLAG:
-        Du har nå mottatt et sett med bilder (kart, situasjonsplan). 
-        Din første oppgave er å vurdere om dette datagrunnlaget er godt nok for å sette et konsept for adkomst og parkering.
+        EKSTREMT VIKTIGE REGLER FOR FORMATERING:
+        1. START RESPONSEN DIREKTE med overskriften "# 1. OPPSUMMERING OG KONKLUSJON". IKKE skriv noen form for introduksjon, hilsen, eller metatekst som f.eks "Som RITra AI har jeg analysert...".
+        2. Aldri nevn at du ser på bilder eller at du har mottatt filer. Skriv som en fagperson som har studert prosjektet.
+        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
+        4. For underoverskrifter, bruk alltid ### foran.
+        5. For utdyping av punkter (spesielt under kapittel 5 og 6), MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
         
-        Bestem deg for ett av tre spor for rapporten:
+        Tema: [Tekst]
+        Vurdering: [Tekst]
+        Risiko: [Tekst]
+        Tiltak: [Tekst]
+        Anbefaling: [Tekst]
+        Kapasitet: [Tekst]
         
-        SPOR 1: FULLSTENDIG GRUNNLAG (Du ser en tydelig situasjonsplan som viser innkjøring og uteområder)
-        -> Gjør en full vurdering av trafikksikkerhet, adkomst, varemottak, og beregn teoretisk trafikkgenerering basert på areal/formål.
+        MANDAT:
+        - Vurder adkomst, intern logistikk (varemottak, renovasjon), parkering, og myke trafikanter basert på de vedlagte tegningene.
+        - Ta spesielt hensyn til konflikter mellom biltrafikk og myke trafikanter hvis tomten er trang (sammenlign tomt {pd_state.get('tomteareal')} m2 mot BTA {pd_state.get('bta')} m2).
         
-        SPOR 2: DELVIS GRUNNLAG (Du har kun et overordnet kart, og ingen arkitekttegning for uteområdet)
-        -> Gjør en foreløpig trafikkfaglig vurdering. Skriv "INDIKATIV VURDERING" i konklusjonen. Beregn trafikkgenerering, men vær tydelig på at adkomstløsninger må detaljeres.
-        
-        SPOR 3: FOR SVAKT GRUNNLAG (Ingen relevante kart eller tegninger er lastet opp)
-        -> Ikke lat som du kan vurdere sikkerhet eller kapasitet. Lever KUN en liste over hva kunden må levere av underlag, og en teoretisk betraktning over parkeringsbehovet for et {b_type}-bygg på {bta} m2. Skriv "AVVIST / FOR SVAKT GRUNNLAG" i konklusjonen.
-        
-        STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, uansett spor):
-        1. OPPSUMMERING OG KONKLUSJON (Angi tydelig om dette er endelig, indikativ eller avvist)
-        2. VURDERING AV GRUNNLAG (Beskriv nøyaktig hva du ser på de opplastede bildene)
-        3. VIKTIGSTE FORUTSETNINGER
-        4. TRAFIKALT HOVEDGREP (Adkomst og internveier)
-        5. KRITISKE PUNKTER (Sikkerhet, kapasitet, logistikk, myke trafikanter)
-        6. RISIKO OG USIKKERHET
-        7. ANBEFALT LØSNING / ALTERNATIVER (Parkering og mobilitet)
-        8. BEHOV FOR VIDERE AVKLARINGER
+        STRUKTUR PÅ RAPPORTEN:
+        # 1. OPPSUMMERING OG KONKLUSJON
+        # 2. VURDERING AV GRUNNLAG (Hva observerer vi rent objektivt om adkomst/parkering i prosjektet?)
+        # 3. VIKTIGSTE FORUTSETNINGER
+        # 4. TRAFIKALT HOVEDGREP (Beskriv adkomst og internveier)
+        # 5. KRITISKE PUNKTER (Bruk underoverskrifter ### og nøkkelordene over for å bygge opp corporate design!)
+        # 6. RISIKO OG USIKKERHET
+        # 7. ANBEFALT LØSNING / MOBILITETSPLAN
+        # 8. BEHOV FOR VIDERE AVKLARINGER
         """
         
         prompt_parts = [prompt_text] + images_for_ai
@@ -423,35 +402,25 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer RITra-PDF og fletter inn tegninger som vedlegg..."):
+            with st.spinner("Kompilerer Trafikk-PDF med corporate design..."):
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
+                # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
                     st.session_state.pending_reviews = {}
                 if "review_counter" not in st.session_state:
                     st.session_state.review_counter = 1
                     
-                doc_id = f"PRJ-{datetime.now().strftime('%y')}-TRA{st.session_state.review_counter:03d}"
+                doc_id = f"PRJ-{datetime.now().strftime('%y')}-RITRA{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
-                
-                ai_text_lower = res.text.lower()
-                if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
-                    status = "Rejected - Needs Site Plan"
-                    badge = "badge-early"
-                elif "indikativ" in ai_text_lower or "delvis" in ai_text_lower:
-                    status = "Indicative Mobility Plan"
-                    badge = "badge-roadmap"
-                else:
-                    status = "Pending Senior RITra Review"
-                    badge = "badge-pending"
                 
                 st.session_state.pending_reviews[doc_id] = {
                     "title": pd_state.get('p_name', 'Nytt Prosjekt'),
-                    "module": "RITra (Trafikk)",
+                    "module": "Trafikk & Mobilitet",
                     "drafter": "Builtly AI",
-                    "reviewer": "Senior Trafikkplanlegger",
-                    "status": status,
-                    "class": badge,
+                    "reviewer": "Senior RITra",
+                    "status": "Pending Engineering Review",
+                    "class": "badge-roadmap",
                     "pdf_bytes": pdf_data
                 }
 
@@ -464,12 +433,12 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
 
 # --- NEDLASTING OG NAVIGASJON ---
 if "generated_ritra_pdf" in st.session_state:
-    st.success("✅ Trafikknotat er ferdigstilt og lagt i QA-køen!")
+    st.success("✅ Trafikknotat er ferdigstilt og sendt til QA-køen for godkjenning!")
     
     col_dl, col_qa = st.columns(2)
     with col_dl:
         st.download_button("📄 Last ned Trafikknotat", st.session_state.generated_ritra_pdf, st.session_state.generated_ritra_filename, type="primary", use_container_width=True)
     with col_qa:
         if find_page("Review"):
-            if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
+            if st.button("🔍 Gå til QA for å vurdere", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
