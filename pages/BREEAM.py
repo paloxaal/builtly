@@ -52,12 +52,6 @@ def clean_pdf_text(text):
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
-def ironclad_text_formatter(text):
-    text = text.replace('$', '').replace('*', '').replace('_', '')
-    text = re.sub(r'[-|=]{3,}', ' ', text)
-    text = re.sub(r'([^\s]{40})', r'\1 ', text)
-    return clean_pdf_text(text)
-
 # --- 2. PREMIUM CSS ---
 st.markdown("""
 <style>
@@ -137,7 +131,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR FOR BREEAM ---
+# --- 5. DYNAMISK PDF MOTOR (CORPORATE EDITION) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -186,24 +180,75 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
-        if not line: pdf.ln(4); continue
+        if not line: 
+            pdf.ln(3)
+            continue
         
-        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
-            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        elif line.startswith('##'):
-            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
+        # Fjerner markdown-stjerner som AI-en prøver å bruke
+        safe_text = line.replace('**', '').replace('_', '')
+        safe_text = clean_pdf_text(safe_text)
+        
+        # Hovedoverskrifter (H1)
+        if safe_text.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', safe_text):
+            pdf.check_space(30)
+            pdf.ln(8)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 14)
+            pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
+            pdf.ln(2)
+            
+        # Underoverskrifter (H2/H3 - F.eks. "TRA 01 Transportstrategi")
+        elif safe_text.startswith('## ') or safe_text.startswith('### '):
+            pdf.check_space(20)
+            pdf.ln(5)
+            pdf.set_x(25)
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.set_text_color(50, 65, 85)
+            pdf.multi_cell(0, 6, safe_text.replace('#', '').strip().upper())
+            pdf.ln(1)
+            
         else:
-            pdf.set_font('Helvetica', '', 10)
-            safe_text = ironclad_text_formatter(line)
-            if safe_text.strip() == "": continue
-            try:
-                if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
-                else:
-                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
-            except Exception: pdf.ln(2)
+            # MAGISK CORPORATE PARSER FOR STATUS/VURDERING
+            # Leter etter nøkkelord etterfulgt av kolon
+            kv_match = re.match(r'^(Status|Vurdering|Manglende evidens|Anbefaling|Ansvarlig|Problemstilling|Tiltak|Frist|Gjelder):\s*(.*)', safe_text, re.IGNORECASE)
+            
+            if kv_match:
+                key = kv_match.group(1).upper()
+                val = kv_match.group(2)
+                
+                pdf.check_space(15)
+                # Tegner en lekker, fet, gråblå "Label"
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', 'B', 8)
+                pdf.set_text_color(120, 140, 160)
+                pdf.cell(0, 5, key, 0, 1)
+                
+                # Tegner selve innholdet rent og ryddig under
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, val)
+                pdf.ln(2)
+                
+            # Gjør om stygge bindestreker til pene kulepunkter
+            elif safe_text.startswith('- ') or safe_text.startswith('* '):
+                pdf.check_space(10)
+                pdf.set_x(30)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                bullet_text = "• " + safe_text[2:]
+                pdf.multi_cell(0, 5, bullet_text)
+                pdf.ln(1)
+                
+            # Vanlig brødtekst
+            else:
+                pdf.check_space(10)
+                pdf.set_x(25)
+                pdf.set_font('Helvetica', '', 10)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 5, safe_text)
+                pdf.ln(1)
 
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VISUELT GRUNNLAG", 0, 1)
@@ -301,11 +346,11 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN NYE, STRENGE BREEAM-PROMPTEN (UTEN TABELL ELLER INTRO) ---
+        # --- DEN NYE, EKSTREMT STRENGE BREEAM-PROMPTEN ---
         prompt_text = f"""
         Du er en senior BREEAM-NOR fagassistent. Din oppgave er utelukkende å skrive innholdet i et BREEAM-NOR Pre-assessment notat.
 
-        PROSJEKT: {p_name} ({pd_state.get('b_type')}, {pd_state.get('bta')} m2).
+        PROSJEKT: {p_name} ({pd_state.get('b_type')}, Bygg {pd_state.get('bta')} m2, Tomt {pd_state.get('tomteareal')} m2).
         LOKASJON: {adresse}.
         
         SERTIFISERINGSFORUTSETNINGER SATT AV BRUKER:
@@ -317,22 +362,26 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         "{pd_state.get('p_desc', '')}"
         
         EKSTREMT VIKTIGE REGLER FOR FORMATERING:
-        1. START RESPONSEN DIREKTE med overskriften "# 1. ANALYSEMETADATA". IKKE skriv noen form for introduksjon, hilsen eller bekreftelse på rollen din.
-        2. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. Bruk vanlige, strukturerte lister med strek (-) for Evidensoversikten.
-        3. For lister og oppramsing, bruk alltid bindestrek (-) slik at det blir pene kulepunkter.
+        1. START RESPONSEN DIREKTE med overskriften "# 1. ANALYSEMETADATA". IKKE skriv noen form for introduksjon, hilsen eller bekreftelse.
+        2. IKKE bruk tabeller (forbudt tegn: "|").
+        3. For BREEAM-emner, bruk alltid ### foran overskriften (f.eks. "### TRA 01 Transportstrategi").
+        4. For selve vurderingen under hvert emne, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
+        
+        Status: [Din vurdering, f.eks Sannsynlig]
+        Vurdering: [Din tekst her]
+        Manglende evidens: [Din tekst her]
         
         MANDAT & FAGLIG FOKUS:
         - Identifiser sannsynlig relevante emner (Energi, Materialer, Transport, Avfall osv).
-        - Ikke lov poeng du ikke har bevis for! Vurder status som sannsynlig, usikkert eller ikke dokumentert.
-        - Studer de vedlagte bildene/tegningene. Finner du tegn til at tomtens økologi, tilkomst eller dagslysforhold vil være problematisk for å oppnå {ambisjonsniva}? Påpek det!
+        - Studer de vedlagte bildene/tegningene for å se om tomten/bygget faktisk støtter opp under kravene for å nå {ambisjonsniva}.
         
-        STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
-        # 1. ANALYSEMETADATA (List opp prosjektnavn, byggtype, lokasjon, areal med bindestrek)
+        STRUKTUR PÅ RAPPORTEN:
+        # 1. ANALYSEMETADATA
         # 2. SERTIFISERINGSFORUTSETNINGER
         # 3. AMBISJONSBILDE (Er {ambisjonsniva} realistisk?)
-        # 4. KREDITT- / EMNEVURDERING (Bruk underoverskrifter for emnene, f.eks ## HEA 04)
-        # 5. EVIDENSOVERSIKT (IKKE bruk tabell. Lag en liste: "- [Kreditt]: [Hva må leveres] - [Ansvarlig]")
-        # 6. GAP-ANALYSE (Kritiske mangler og showstoppere)
+        # 4. KREDITT- / EMNEVURDERING (Husk å bruke ### for emnene og nøkkelordene Status:, Vurdering: og Manglende evidens: under hver av dem)
+        # 5. EVIDENSOVERSIKT (Bruk vanlige punktlister med bindestrek)
+        # 6. GAP-ANALYSE
         # 7. HANDLINGSLAN NESTE 30/60/90 DAGER
         # 8. SPØRSMÅL SOM MÅ LØFTES TIL AP ELLER REVISOR
         """
@@ -342,7 +391,7 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer BREEAM-PDF og fletter inn dokumentasjon..."):
+            with st.spinner("Kompilerer BREEAM-PDF med corporate design..."):
                 pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
