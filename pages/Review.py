@@ -4,7 +4,6 @@ import base64
 from pathlib import Path
 import time
 from datetime import datetime
-from fpdf import FPDF
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="QA & Sign-off | Builtly", page_icon="✅", layout="wide", initial_sidebar_state="collapsed")
@@ -34,58 +33,19 @@ if "active_review" not in st.session_state:
 if "signed_docs" not in st.session_state:
     st.session_state.signed_docs = []
 
-# Vår "database" over dokumenter (nå oppdatert med ditt test-prosjekt!)
-DOCS = {
-    "PRJ-2026-A1": {"title": "Prosjekt TEST", "module": "RIBr (Brannkonsept)", "drafter": "Builtly AI", "reviewer": "Senior Branningeniør", "status": "Pending Senior Review", "class": "badge-pending"},
-    "PRJ-2026-B4": {"title": "Fjordveien Boligsameie", "module": "RIG-M (Miljø)", "drafter": "Builtly AI", "reviewer": "Kari Nilsen (Junior)", "status": "Pending Senior Review", "class": "badge-pending"},
-    "PRJ-2026-C2": {"title": "Sentrumsterminalen", "module": "RIB (Konstruksjon)", "drafter": "Builtly AI", "reviewer": "Ola Nordmann (Junior)", "status": "Pending Senior Review", "class": "badge-pending"}
-}
+# VIKTIG: Hent den faktiske køen fra AI-modulene!
+if "pending_reviews" not in st.session_state:
+    st.session_state.pending_reviews = {}
 
-# --- 3. DUMMY PDF GENERATOR ---
-# Dette bygger en EKTE flersiders PDF slik at vi kan demonstrere en scrollbar viewer!
-def generate_mock_pdf(doc_info):
-    pdf = FPDF()
-    pdf.add_page()
-    
-    # Forside
-    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
-    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, doc_info['title'].upper(), 0, 1, 'L')
-    pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, f"Disiplin: {doc_info['module']}", 0, 1, 'L'); pdf.ln(20)
-    
-    pdf.set_font('Helvetica', 'B', 10)
-    pdf.cell(50, 8, "OPPDRAGSGIVER:", 0, 0); pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, "Heimdal", 0, 1)
-    pdf.set_font('Helvetica', 'B', 10)
-    pdf.cell(50, 8, "DATO:", 0, 0); pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, datetime.now().strftime("%d. %m. %Y"), 0, 1)
-    pdf.set_font('Helvetica', 'B', 10)
-    pdf.cell(50, 8, "UTARBEIDET AV:", 0, 0); pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, doc_info['drafter'], 0, 1)
-    
-    # Innhold (Side 2 og utover for å vise scrolling)
-    pdf.add_page()
-    pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, "1. Sammendrag og Konklusjon", 0, 1)
-    pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
-    tekst_1 = f"Dette dokumentet representerer en vurdering for {doc_info['title']}, lokalisert på Øvre Ferstadveg 13A i Trondheim. Formålet med dokumentet er å etablere en overordnet strategi som sikrer at prosjektet oppfyller kravene i gjeldende byggeforskrift."
-    pdf.multi_cell(0, 7, tekst_1.encode('latin-1', 'replace').decode('latin-1'))
-    pdf.ln(10)
-    
-    pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, "2. Prosjektbeskrivelse og Regelverk", 0, 1)
-    pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
-    tekst_2 = "Prosjektet omfatter oppføring av et bygg. Basert på klassifiseringen er det avgjørende å ta hensyn til lokale forhold, som tilgjengelighet for redningsbrannvesen og tilgang til infrastruktur i det branntekniske designet.\n\n" * 15
-    pdf.multi_cell(0, 7, tekst_2.encode('latin-1', 'replace').decode('latin-1'))
-    
-    return pdf.output(dest='S').encode('latin-1')
+DOCS = st.session_state.pending_reviews
 
-# For å vise PDF i Streamlit
 def display_pdf(pdf_bytes):
+    """Viser den EKTE PDF-filen som ble generert i modulen!"""
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
     pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="850" type="application/pdf" style="border: 1px solid rgba(120,145,170,0.3); border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);"></iframe>'
     st.markdown(pdf_display, unsafe_allow_html=True)
 
-
-# --- 4. PREMIUM CSS ---
+# --- 3. PREMIUM CSS ---
 st.markdown("""
 <style>
     :root {
@@ -114,18 +74,10 @@ st.markdown("""
     [data-testid="column"]:has(.review-card-hook) { background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important; border: 1px solid rgba(120, 145, 170, 0.18) !important; border-radius: 16px !important; padding: 1.8rem 2rem !important; margin-bottom: 1.2rem !important; box-shadow: 0 8px 24px rgba(0,0,0,0.15) !important; transition: all 0.2s ease !important; }
     [data-testid="column"]:has(.review-card-hook):hover { border-color: rgba(56,194,201,0.3) !important; box-shadow: 0 12px 32px rgba(0,0,0,0.25) !important; transform: translateY(-2px); }
     
-    /* --- FIKS FOR QA PANELET PÅ HØYRE SIDE --- */
-    [data-testid="column"]:has(.qa-panel-hook) {
-        background: linear-gradient(180deg, rgba(16,30,46,0.9), rgba(10,18,28,0.9)) !important;
-        border: 1px solid rgba(120,145,170,0.2) !important;
-        border-radius: 16px !important;
-        padding: 2.5rem 2rem !important;
-        box-shadow: 0 12px 30px rgba(0,0,0,0.2) !important;
-    }
+    [data-testid="column"]:has(.qa-panel-hook) { background: linear-gradient(180deg, rgba(16,30,46,0.9), rgba(10,18,28,0.9)) !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 16px !important; padding: 2.5rem 2rem !important; box-shadow: 0 12px 30px rgba(0,0,0,0.2) !important; }
     
     button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 8px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 20px rgba(56,194,201,0.25) !important; }
-    
     button[kind="secondary"] { background-color: #0d1824 !important; border: 1px solid rgba(120,145,170,0.4) !important; border-radius: 8px !important; padding: 8px 24px !important; transition: all 0.2s ease !important; }
     button[kind="secondary"] * { color: #f5f7fb !important; font-weight: 650 !important; font-size: 0.95rem !important; }
     button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: rgba(56,194,201,0.8) !important; }
@@ -133,14 +85,14 @@ st.markdown("""
 
     .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-size: 0.75rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; }
     .badge-pending { background: rgba(244, 191, 79, 0.1); border: 1px solid rgba(244, 191, 79, 0.3); color: #f4bf4f; }
-    
-    /* INPUTS FOR REVIEW-SIDEN */
+    .badge-approved { background: rgba(126, 224, 129, 0.1); border: 1px solid rgba(126, 224, 129, 0.3); color: #7ee081; }
+
     .stTextArea textarea { background-color: #0d1824 !important; color: #ffffff !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     .stTextArea textarea:focus { border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 5. HEADER UI ---
+# --- 4. HEADER UI ---
 logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
 
 render_html(f"""
@@ -182,7 +134,7 @@ if st.session_state.active_review is None:
     st.markdown("<h2 style='font-size: 1.6rem; margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem;'>Dokumenter til behandling</h2>", unsafe_allow_html=True)
 
     if pending_count == 0:
-        st.success("🎉 Fantastisk! Det er ingen dokumenter i køen. Alle rapporter er ferdig signert.")
+        st.info("Ingen dokumenter i køen akkurat nå. Gå til en av fagmodulene (f.eks. Brann eller Geo) og generer en rapport for å se den her!")
     else:
         def review_card(doc_id, info):
             col, _ = st.columns([1, 0.001])
@@ -225,12 +177,13 @@ else:
     
     with col_doc:
         st.markdown("<h3 style='font-size: 1.1rem; margin-bottom: 1rem;'>📄 Dokument forhåndsvisning</h3>", unsafe_allow_html=True)
-        # Her genereres og vises en ekte, scrollbar PDF "on the fly"!
-        pdf_bytes = generate_mock_pdf(doc_info)
-        display_pdf(pdf_bytes)
+        # HER VISES DEN EKTE PDF-EN FRA MINNET!
+        if "pdf_bytes" in doc_info:
+            display_pdf(doc_info["pdf_bytes"])
+        else:
+            st.error("Kunne ikke laste PDF-filen. Data mangler.")
         
     with col_qa:
-        # Hook for å tvinge kolonnen til å bli et mørkt, vakkert QA-panel!
         st.markdown('<div class="qa-panel-hook"></div>', unsafe_allow_html=True)
         st.markdown("<h3 style='font-size: 1.3rem; margin-bottom: 1.5rem; margin-top: 0; color: #fff;'>Formell Godkjenning (QA)</h3>", unsafe_allow_html=True)
         
