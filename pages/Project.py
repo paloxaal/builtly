@@ -56,7 +56,7 @@ def go_home():
     if main_file:
         st.switch_page(main_file)
 
-# --- 2. PREMIUM CSS ---
+# --- 2. PREMIUM CSS (MED FIKSEDE INPUTS) ---
 st.markdown(
     """
 <style>
@@ -72,7 +72,7 @@ st.markdown(
 
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); margin-bottom: 1rem; }
     
-    /* Native Streamlit Knapper */
+    /* NATIVE STREAMLIT KNAPPER */
     button[kind="primary"] {
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
@@ -91,19 +91,67 @@ st.markdown(
         color: var(--accent) !important; transform: translateY(-2px) !important;
     }
 
-    /* INPUT-FELT DESIGN */
+    /* ----------------------------------------------------
+       INPUT-FELT DESIGN (FIKSET FOR HVITE BOKSER OG MØRK TEKST)
+       ---------------------------------------------------- */
+    /* Mørklegger selve rammen rundt alle inputs */
+    div[data-baseweb="base-input"],
+    div[data-baseweb="select"] > div,
+    .stTextArea > div > div > div {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 8px !important;
+    }
+    
+    /* Gjør skrivefeltet gjennomsiktig så rammen bak vises, og tvinger hvit tekst */
     .stTextInput input, .stNumberInput input, .stTextArea textarea {
-        background-color: #0d1824 !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
+        background-color: transparent !important; 
+        color: #ffffff !important; 
+        -webkit-text-fill-color: #ffffff !important;
+        border: none !important;
+        box-shadow: none !important;
     }
+    
+    /* Fjerner Streamlits standard blå fokus-ramme fra innmaten... */
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-        border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
+        border: none !important;
     }
-    div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    div[data-baseweb="select"] span { color: #ffffff !important; }
+    
+    /* ...og flytter den til den ytre rammen for et rent design */
+    div[data-baseweb="base-input"]:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    .stTextArea > div > div > div:focus-within {
+        border-color: var(--accent) !important; 
+        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
+    }
+
+    /* Tvinger all tekst i dropdown-menyen til å bli hvit! */
+    div[data-baseweb="select"] * { 
+        color: #ffffff !important; 
+    }
+    
+    /* Hviser dropdown-menyen som popper opp i mørke farger */
+    ul[data-baseweb="menu"] {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+    }
+    ul[data-baseweb="menu"] li {
+        color: #ffffff !important;
+    }
+    ul[data-baseweb="menu"] li:hover {
+        background-color: rgba(56, 194, 201, 0.1) !important;
+    }
+    
+    /* Farger "Press Enter to apply"-teksten lys grå */
+    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span {
+        color: #9fb0c3 !important;
+    }
+
+    /* Overskrifter over input-feltene */
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
         color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
     }
+    /* ---------------------------------------------------- */
 
     /* FILOPPLASTER */
     [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
@@ -357,7 +405,6 @@ with input_col:
                                 images_for_qa.append(img)
                                 
                         if images_for_qa:
-                            # Hent riktig Gemini-modell
                             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                             valgt_modell = valid_models[0]
                             for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
