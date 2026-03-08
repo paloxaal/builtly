@@ -325,9 +325,38 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer Brann-PDF med vedlagte tegninger..."):
+            with st.spinner("Kompilerer Brann-PDF og sender til QA-kø..."):
                 pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
-            st.success("✅ RIBr Rapport er ferdigstilt!")
-            st.download_button("📄 Last ned Brannkonsept", pdf_data, f"Builtly_RIBr_{p_name}.pdf", type="primary")
+                
+                # --- HER ER MAGIEN! VI LAGRER PDF-EN TIL QA-KØEN I MINNET! ---
+                if "pending_reviews" not in st.session_state:
+                    st.session_state.pending_reviews = {}
+                if "review_counter" not in st.session_state:
+                    st.session_state.review_counter = 1
+                    
+                doc_id = f"PRJ-{datetime.now().strftime('%y')}-BR{st.session_state.review_counter:03d}"
+                st.session_state.review_counter += 1
+                
+                st.session_state.pending_reviews[doc_id] = {
+                    "title": pd_state['p_name'],
+                    "module": "RIBr (Brannkonsept)",
+                    "drafter": "Builtly AI",
+                    "reviewer": "Senior Branningeniør",
+                    "status": "Pending Senior Review",
+                    "class": "badge-pending",
+                    "pdf_bytes": pdf_data
+                }
+                # -------------------------------------------------------------
+                
+            st.success("✅ RIBr Rapport er ferdigstilt og sendt til QA-køen!")
+            
+            col_dl, col_qa = st.columns(2)
+            with col_dl:
+                st.download_button("📄 Last ned Brannkonsept direkte", pdf_data, f"Builtly_RIBr_{p_name}.pdf", type="primary", use_container_width=True)
+            with col_qa:
+                if find_page("Review"):
+                    if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
+                        st.switch_page(find_page("Review"))
+                        
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
