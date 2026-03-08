@@ -77,6 +77,7 @@ st.markdown("""
     button[kind="primary"][disabled] { background: rgba(120,145,170,0.2) !important; color: rgba(255,255,255,0.3) !important; box-shadow: none !important; transform: none !important; cursor: not-allowed !important; }
     button[kind="secondary"] { background: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 20px !important; transition: all 0.2s ease !important; }
     button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important; }
+    button[kind="secondary"][disabled] { opacity: 0.5; cursor: not-allowed !important; transform: none !important; border-color: rgba(120,145,170,0.2) !important; }
 
     div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
@@ -100,7 +101,7 @@ st.markdown("""
     
     .hero-kicker { display: inline-flex; align-items: center; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 1rem; border: 1px solid var(--stroke); padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,0.02); }
     .hero-title { font-size: 2.8rem; font-weight: 800; margin: 0 0 0.5rem 0; letter-spacing: -0.03em; color: #fff; }
-    .hero-sub { color: var(--soft); font-size: 1.05rem; line-height: 1.6; max-width: 50ch; margin-bottom: 1.5rem; }
+    .hero-sub { color: var(--soft); font-size: 1.05rem; line-height: 1.6; max-width: 60ch; margin-bottom: 1.5rem; }
     
     .status-kicker { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.2rem; }
     .status-title { font-size: 2rem; font-weight: 750; color: #fff; margin-bottom: 1rem; }
@@ -226,7 +227,7 @@ render_html(f"""
     <div class="card card-hero">
         <div class="hero-kicker">✦ Builtly AI • Project SSOT</div>
         <h1 class="hero-title">Project Configuration</h1>
-        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Oppdater disse feltene én gang, og la Builtly synke kontekst til analyse, kalkyle og dokumentasjon.</div>
+        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Synkroniser prosjektets kontekst sømløst til teknisk prosjektering, bærekraftsanalyser og prosjektledelse.</div>
     </div>
     
     <div class="card">
@@ -458,7 +459,7 @@ with snap_col:
     </div>
     """)
 
-# --- 8. LAUNCHPAD (NÅ MED BÆREKRAFT-SEKSJON!) ---
+# --- 8. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     with col:
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
@@ -468,8 +469,8 @@ def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, ou
                 <div class="module-badge {badge_class}">{badge}</div>
             </div>
             <div style="font-size:1.08rem; font-weight:720; color:#f5f7fb; margin-bottom:0.5rem; line-height: 1.35;">{title}</div>
-            <div style="font-size:0.95rem; color:#9fb0c3; line-height:1.6; margin-bottom:1rem;">{desc}</div>
-            <div style="font-size:0.86rem; color:#c8d3df; padding-top:0.95rem; border-top:1px solid rgba(120,145,170,0.14);">
+            <div style="font-size:0.95rem; color:#9fb0c3; line-height:1.6; margin-bottom:1rem; min-height: 75px;">{desc}</div>
+            <div style="font-size:0.86rem; color:#c8d3df; padding-top:0.95rem; border-top:1px solid rgba(120,145,170,0.14); min-height: 65px;">
                 <strong>Input:</strong> {input_txt}<br>
                 <strong>Output:</strong> {output_txt}
             </div>
@@ -512,15 +513,15 @@ if completeness > 30:
 
     # --- NY SEKSJON: LEDELSE & BÆREKRAFT ---
     st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750; color: #7ee081;'>🌱 Bærekraft & Prosjektstyring (Tilleggsmoduler)</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>Bærekraft & Prosjektstyring (Tilleggsmoduler)</h3>", unsafe_allow_html=True)
     
     r3c1, r3c2, r3c3 = st.columns(3)
-    render_module_card(r3c1, "🦺", "Compliance", "badge-priority", "SHA-Plan", 
+    render_module_card(r3c1, "🦺", "Management", "badge-priority", "SHA-Plan", 
                        "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner basert på tomten.", 
                        "Prosjektdata + risikomoment", "Komplett SHA-plan", "Åpne SHA-modul", "SHA")
-    render_module_card(r3c2, "🌿", "Certification", "badge-phase2", "BREEAM Assistant", 
+    render_module_card(r3c2, "🌿", "Sustainability", "badge-phase2", "BREEAM Assistant", 
                        "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi for prosjektet.", 
                        "Byggdata + Ambisjonsnivå", "BREEAM Pre-assessment", "Åpne BREEAM", "BREEAM")
-    render_module_card(r3c3, "♻️", "Compliance", "badge-roadmap", "Miljøoppfølging (MOP)", 
+    render_module_card(r3c3, "♻️", "Environment", "badge-roadmap", "Miljøoppfølging (MOP)", 
                        "Miljøoppfølgingsplan for byggeplass. Vurderer avfallshåndtering, ombruk, utslipp og bevaring av natur.", 
                        "Prosjektdata + miljømål", "MOP Dokument", "Åpne MOP", "MOP")
