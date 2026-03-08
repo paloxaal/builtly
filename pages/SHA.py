@@ -48,7 +48,6 @@ def find_page(base_name: str) -> str:
 
 def clean_pdf_text(text):
     if not text: return ""
-    # Sikkerhetsnett: Bytter ut spesialtegn inkludert det problematiske kulepunktet
     rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "...", "•": "-"}
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
@@ -138,7 +137,7 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR FOR SHA (CORPORATE EDITION) ---
+# --- 5. DYNAMISK PDF MOTOR FOR SHA (CORPORATE EDITION - STRAMME MARGER) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -216,7 +215,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(1)
             
         else:
-            # MAGISK CORPORATE PARSER FOR SHA NØKKELORD
+            # MAGISK CORPORATE PARSER FOR SHA NØKKELORD (Stram venstremarg)
             kv_match = re.match(r'^(Aktivitet|Årsak|Konsekvens|Fase|Tiltak|Forebyggende tiltak|Ansvarlig|Rolle|Status|Koordinering|Frist):\s*(.*)', safe_text, re.IGNORECASE)
             
             if kv_match:
@@ -224,26 +223,26 @@ def create_full_report_pdf(name, client, content, maps):
                 val = kv_match.group(2)
                 
                 pdf.check_space(15)
-                # Tegner en lekker, fet, gråblå "Label"
-                pdf.set_x(30)
+                # Tegner en lekker, fet, gråblå "Label" på linje med venstremargen (x=25)
+                pdf.set_x(25)
                 pdf.set_font('Helvetica', 'B', 8)
                 pdf.set_text_color(120, 140, 160)
                 pdf.cell(0, 5, key, 0, 1)
                 
-                # Tegner selve innholdet rent og ryddig under
-                pdf.set_x(30)
+                # Tegner selve innholdet rent og ryddig under (x=25)
+                pdf.set_x(25)
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
                 pdf.multi_cell(0, 5, val)
                 pdf.ln(2)
                 
-            # Gjør om lister til pene ASCII-streker med innrykk (Sikker metode)
+            # Gjør om lister til pene ASCII-streker med litt innrykk (Sikker metode)
             elif safe_text.startswith('- ') or safe_text.startswith('* '):
                 pdf.check_space(10)
-                pdf.set_x(30)
+                pdf.set_x(28) # Lite, elegant innrykk
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
-                bullet_text = "- " + safe_text[2:] # Trygg bindestrek
+                bullet_text = "- " + safe_text[2:] 
                 pdf.multi_cell(0, 5, bullet_text)
                 pdf.ln(1)
                 
