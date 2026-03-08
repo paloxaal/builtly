@@ -187,7 +187,7 @@ st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; 
 
 pd_state = st.session_state.project_data
 
-# --- DYNAMISK PDF MOTOR (OPPGRADERT FOR BILDER) ---
+# --- DYNAMISK PDF MOTOR ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -247,13 +247,11 @@ def create_full_report_pdf(name, client, content, maps):
                     pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
             except Exception: pdf.ln(2)
 
-    # --- FORBEDRET VEDLEGGS-MOTOR (Tvinger JPEG for å unngå gjennomsiktighets-krasj i FPDF) ---
     if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT TEGNINGSGRUNNLAG", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                # Lagrer som JPEG i stedet for PNG (løser 99% av bildefeil i FPDF)
                 m.convert("RGB").save(tmp.name, format="JPEG")
                 img_w = 160
                 img_h = 160 * (m.height / m.width)
@@ -261,7 +259,6 @@ def create_full_report_pdf(name, client, content, maps):
                     img_h = 240
                     img_w = 240 * (m.width / m.height)
                 
-                # Sentrerer bildet
                 x_pos = 105 - (img_w / 2)
                 pdf.image(tmp.name, x=x_pos, y=pdf.get_y(), w=img_w)
                 
@@ -270,6 +267,25 @@ def create_full_report_pdf(name, client, content, maps):
                 pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt analysert av AI-agenten."), 0, 1, 'C')
 
     return bytes(pdf.output(dest='S'))
+
+# --- 6. SMART AUTO-KLASSIFISERING (Ny logikk) ---
+# Finner standardverdi for Risikoklasse basert på Project Setup
+default_rkl_idx = 1  # Standard: RKL 2 (Kontor)
+b_type_lower = pd_state.get("b_type", "").lower()
+if "bolig" in b_type_lower: 
+    default_rkl_idx = 2  # RKL 4 (Bolig)
+elif "sykehus" in b_type_lower or "hotell" in b_type_lower: 
+    default_rkl_idx = 3  # RKL 6
+elif "industri" in b_type_lower or "lager" in b_type_lower: 
+    default_rkl_idx = 0  # RKL 1
+
+# Finner standardverdi for Brannklasse basert på antall etasjer fra Project Setup
+etasjer = int(pd_state.get("etasjer", 1))
+default_bkl_idx = 0  # Standard: BKL 1 (1-2 etasjer)
+if etasjer in [3, 4]: 
+    default_bkl_idx = 1  # BKL 2
+elif etasjer >= 5: 
+    default_bkl_idx = 2  # BKL 3
 
 # --- STREAMLIT UI ---
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🔥 RIBr — Brannkonsept</h1>", unsafe_allow_html=True)
@@ -291,8 +307,9 @@ with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
     
     st.markdown("##### Brannteknisk Klassifisering")
     c6, c7 = st.columns(2)
-    risikoklasse = c6.selectbox("Risikoklasse / Verksamhetsklass", ["RKL 1 (Garasjer/Lager)", "RKL 2 (Kontor)", "RKL 4 (Bolig)", "RKL 6 (Sykehus/Hotell)"], index=1)
-    brannklasse = c7.selectbox("Brannklasse / Byggnadsklass", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=1)
+    # Bruker de smarte standardverdiene vi regnet ut over!
+    risikoklasse = c6.selectbox("Risikoklasse / Verksamhetsklass", ["RKL 1 (Garasjer/Lager)", "RKL 2 (Kontor)", "RKL 4 (Bolig)", "RKL 6 (Sykehus/Hotell)"], index=default_rkl_idx)
+    brannklasse = c7.selectbox("Brannklasse / Byggnadsklass", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=default_bkl_idx)
 
 with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True):
     st.info("Viktig: For å vurdere brannsmitte og tilkomst for brannbil, trenger AI-en et kart. Du kan hente det automatisk eller laste opp situasjonsplan manuelt.")
@@ -366,7 +383,6 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN NYE "SENIOR-PISKEN" (STRENG PROMPT) ---
         prompt_text = f"""
         Du er Builtly RIBr AI, en ledende, autoritær og svært grundig senior branningeniør.
         Din oppgave er å skrive et detaljert "Brannteknisk konsept" for prosjektet:
