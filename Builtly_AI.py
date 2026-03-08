@@ -20,15 +20,15 @@ st.set_page_config(
 # -------------------------------------------------
 if "project_data" not in st.session_state:
     st.session_state.project_data = {
-        "land": "UK (Building Regs)", "p_name": "", "c_name": "", "p_desc": "",
+        "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
         "adresse": "", "kommune": "", "gnr": "", "bnr": "",
         "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500,
         "last_sync": "Ikke synket enda"
     }
 
-# SETTER ENGELSK SOM STANDARD SPRÅK
+# SETTER NORSK SOM STANDARD SPRÅK NÅ
 if "app_lang" not in st.session_state:
-    st.session_state.app_lang = "🇬🇧 English"
+    st.session_state.app_lang = "🇳🇴 Norsk"
 
 
 # -------------------------------------------------
@@ -80,8 +80,8 @@ TEXTS = {
         
         "btn_dev": "In development",
 
-        "cta_title": "Start with one project. Upload raw data. Get a reviewable package.",
-        "cta_desc": "Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.",
+        "cta_title": "Start with one project. Upload raw data.",
+        "cta_desc": "Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. Get your submission-ready package faster.",
         "cta_btn1": "Start in project setup", "cta_btn2": "Go to review queue",
 
         "footer_copy": "AI-assisted engineering. Human-verified. Compliance-grade.",
@@ -116,7 +116,7 @@ TEXTS = {
 
         "mod_sec_kicker": "Moduler og veikart", "mod_sec_title": "Spesialiserte agenter i én plattform", "mod_sec_sub": "Hver modul har egen logikk og fagspesifikke regler, men deler samme portal og kvalitetskontroll.",
         "mod_sec1": "Tilgjengelig nå (Klar for pilot)", "mod_sec2": "Veikart og tidligfase",
-        "mod_sec3": "Bærekraft & Sikkerhet", "mod_sec3_sub": "Integrerte tjenester for miljøoppfølging, sikkerhet og sertifisering, skreddersydd for å skape effektive og verdiskapende prosjekter.",
+        "mod_sec3": "Bærekraft & Sikkerhet", "mod_sec3_sub": "Integrerte tjenester for miljøoppfølging, sikkerhet og sertifisering, skreddersydd for å skape ansvarlige og verdiskapende prosjekter.",
 
         "m_geo_t": "GEO / MILJØ - Grunnforhold", "m_geo_d": "Analyserer lab-filer og graveceller. Klassifiserer masser og utarbeider tiltaksplaner.", "m_geo_in": "XLSX / CSV / PDF + Kart", "m_geo_out": "Tiltaksplan, logg", "m_geo_btn": "Åpne Geo & Miljø",
         "m_aku_t": "AKUSTIKK - Støy & Lyd", "m_aku_d": "Leser støykart og plantegninger. Genererer krav til fasade, vinduer og skjerming.", "m_aku_in": "Støykart + Plan", "m_aku_out": "Akustikkrapport", "m_aku_btn": "Åpne Akustikk",
@@ -126,13 +126,13 @@ TEXTS = {
         "m_rib_t": "RIB - Konstruksjon", "m_rib_d": "Konseptuelle struktursjekker, spennvidder og integrasjon med klimagass.", "m_rib_in": "Modeller, Laster", "m_rib_out": "Konseptnotat RIB", "m_rib_btn": "Åpne Konstruksjon",
         "m_tra_t": "TRAFIKK - Mobilitet", "m_tra_d": "Trafikkgenerering, parkering, adkomstlogikk og myke trafikanter for tidligfase.", "m_tra_in": "Situasjonsplan", "m_tra_out": "Trafikknotat", "m_tra_btn": "Åpne Trafikk & Mobilitet",
         
-        "m_sha_t": "SHA-Plan (Sikkerhet)", "m_sha_d": "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner.", "m_sha_in": "Prosjektdata + Risiko", "m_sha_out": "Komplett SHA-plan", "m_sha_btn": "Åpne SHA-modul",
+        "m_sha_t": "SHA-Plan (Sikkerhet)", "m_sha_d": "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner.", "m_sha_in": "Prosjektdata + Risiko", "m_sha_out": "Komplett SHA-plan", "m_sha_btn": "Åpne SHA",
         "m_breeam_t": "BREEAM Assistent", "m_breeam_d": "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi.", "m_breeam_in": "Byggdata + Ambisjon", "m_breeam_out": "BREEAM Pre-assessment", "m_breeam_btn": "Åpne BREEAM",
         "m_mop_t": "MOP (Miljøoppfølging)", "m_mop_d": "Miljøoppfølgingsplan for byggeplass. Vurderer avfall, ombruk, utslipp og natur.", "m_mop_in": "Prosjektdata + Miljømål", "m_mop_out": "MOP Dokument", "m_mop_btn": "Åpne MOP",
         
         "btn_dev": "Under utvikling",
 
-        "cta_title": "Start med ett prosjekt. Last opp data. Få en ferdig pakke.",
+        "cta_title": "Start med ett prosjekt. Last opp data.",
         "cta_desc": "Builtly kombinerer selvbetjening for kunder, deterministiske sjekker, AI-utkast og formell signering i én portal.",
         "cta_btn1": "Start i Project Setup", "cta_btn2": "Gå til kontroll-kø",
 
@@ -246,7 +246,7 @@ TEXTS = {
 }
 
 # Hent tekster for valgt språk
-lang = TEXTS.get(st.session_state.app_lang, TEXTS["🇬🇧 English"])
+lang = TEXTS.get(st.session_state.app_lang, TEXTS["🇳🇴 Norsk"])
 
 # -------------------------------------------------
 # 4) PAGE MAP & SMART SØKER
@@ -349,7 +349,7 @@ def logo_data_uri() -> str:
     return ""
 
 # -------------------------------------------------
-# 6) CSS (Din eksakte styling + Symmetri Fiks)
+# 6) CSS (Oppdatert Footer og Horisontal CTA)
 # -------------------------------------------------
 st.markdown(
     """
@@ -399,7 +399,7 @@ st.markdown(
     .block-container {
         max-width: 1300px !important;
         padding-top: 1.35rem !important;
-        padding-bottom: 4rem !important;
+        padding-bottom: 2rem !important; /* Redusert padding nederst på siden */
     }
 
     .top-shell {
@@ -432,7 +432,6 @@ st.markdown(
         letter-spacing: -0.02em;
     }
 
-    /* NATIVE SELECTBOX STYLING */
     [data-testid="stSelectbox"] { margin-bottom: 0 !important; width: 150px; float: right; }
     [data-testid="stSelectbox"] label { display: none !important; }
     [data-testid="stSelectbox"] > div > div {
@@ -792,12 +791,11 @@ st.markdown(
         margin-bottom: 0.5rem;
     }
 
-    /* CSS FIKS FOR PERFEKT SYMMETRI */
     .module-desc {
         font-size: 0.95rem;
         line-height: 1.72;
         color: var(--muted);
-        min-height: 80px; /* Tvinger alle beskrivelser til å ta like mye plass */
+        min-height: 80px; 
     }
 
     .module-meta {
@@ -806,7 +804,7 @@ st.markdown(
         color: var(--soft);
         padding-top: 0.95rem;
         border-top: 1px solid rgba(120,145,170,0.14);
-        min-height: 65px; /* Tvinger Input/Output tekstene til å flukte perfekt */
+        min-height: 65px; 
     }
 
     .module-spacer {
@@ -835,33 +833,49 @@ st.markdown(
         transition: all 0.2s ease;
     }
 
+    /* HORISONTAL CTA BOKS (LØSER DET STORE TOMROMMET) */
     .cta-band {
-        margin-top: 3rem;
-        margin-bottom: 1.5rem;
-        background: linear-gradient(135deg, rgba(56,194,201,0.12), rgba(18,49,76,0.28));
-        border: 1px solid rgba(56,194,201,0.18);
-        border-radius: 24px;
-        padding: 1.8rem;
+        margin-top: 4rem;
+        background: linear-gradient(135deg, rgba(56,194,201,0.08), rgba(18,49,76,0.3));
+        border: 1px solid rgba(56,194,201,0.2);
+        border-radius: 20px;
+        padding: 2.5rem 3rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 2rem;
+    }
+
+    .cta-text-wrapper {
+        max-width: 65ch;
     }
 
     .cta-title {
-        font-size: 1.35rem;
+        font-size: 1.45rem;
         font-weight: 750;
         color: var(--text);
-        margin-bottom: 0.35rem;
+        margin-bottom: 0.5rem;
     }
 
     .cta-desc {
         color: var(--muted);
-        line-height: 1.78;
-        max-width: 72ch;
+        line-height: 1.6;
+        font-size: 1rem;
     }
 
+    .cta-actions {
+        display: flex;
+        gap: 1rem;
+        flex-shrink: 0;
+    }
+
+    /* STRAM OG ELEGANT FOOTER */
     .footer-block {
         text-align: center;
-        margin-top: 3.6rem;
-        padding-top: 2rem;
-        border-top: 1px solid rgba(120,145,170,0.18);
+        margin-top: 2.5rem; /* Redusert kraftig */
+        padding-top: 1.5rem; /* Redusert */
+        padding-bottom: 1rem;
+        border-top: 1px solid rgba(120,145,170,0.15);
     }
 
     .footer-name {
@@ -889,6 +903,18 @@ st.markdown(
         }
         .trust-grid, .loop-grid, .module-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+    }
+
+    @media (max-width: 900px) {
+        .cta-band {
+            flex-direction: column;
+            align-items: flex-start;
+            padding: 2rem;
+        }
+        .cta-actions {
+            margin-top: 1rem;
+            flex-wrap: wrap;
         }
     }
 
@@ -1057,14 +1083,16 @@ render_html(
 )
 
 # -------------------------------------------------
-# 11) CTA BAND
+# 11) CTA BAND (NÅ HORISONTAL PÅ DESKTOP!)
 # -------------------------------------------------
 render_html(
     f"""
     <div class="cta-band">
-        <div class="cta-title">{lang['cta_title']}</div>
-        <div class="cta-desc">{lang['cta_desc']}</div>
-        <div class="hero-actions" style="margin-top:1rem;">
+        <div class="cta-text-wrapper">
+            <div class="cta-title">{lang['cta_title']}</div>
+            <div class="cta-desc">{lang['cta_desc']}</div>
+        </div>
+        <div class="cta-actions">
             {hero_action('project', lang['cta_btn1'], 'primary')}
             {hero_action('review', lang['cta_btn2'], 'secondary')}
         </div>
@@ -1073,7 +1101,7 @@ render_html(
 )
 
 # -------------------------------------------------
-# 12) FOOTER
+# 12) FOOTER (STRAM OG TETT)
 # -------------------------------------------------
 render_html(
     f"""
