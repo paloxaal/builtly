@@ -4,6 +4,7 @@ import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
+import json
 from datetime import datetime
 import tempfile
 import re
@@ -154,7 +155,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. SESSION STATE / SIKKERHET ---
+# --- 4. SESSION STATE & HARDDISK GJENOPPRETTING ---
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
+
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "brann_kart" not in st.session_state:
@@ -163,6 +168,11 @@ if "brann_kart_kilde" not in st.session_state:
     st.session_state.brann_kart_kilde = None
 if "project_images" not in st.session_state:
     st.session_state.project_images = []
+
+if st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -268,54 +278,52 @@ def create_full_report_pdf(name, client, content, maps):
 
     return bytes(pdf.output(dest='S'))
 
-# --- 6. SMART AUTO-KLASSIFISERING (Ny logikk) ---
-# Finner standardverdi for Risikoklasse basert på Project Setup
-default_rkl_idx = 1  # Standard: RKL 2 (Kontor)
+# --- 6. SMART AUTO-KLASSIFISERING ---
+default_rkl_idx = 1  
 b_type_lower = pd_state.get("b_type", "").lower()
-if "bolig" in b_type_lower: 
-    default_rkl_idx = 2  # RKL 4 (Bolig)
-elif "sykehus" in b_type_lower or "hotell" in b_type_lower: 
-    default_rkl_idx = 3  # RKL 6
-elif "industri" in b_type_lower or "lager" in b_type_lower: 
-    default_rkl_idx = 0  # RKL 1
+if "bolig" in b_type_lower: default_rkl_idx = 2  
+elif "sykehus" in b_type_lower or "hotell" in b_type_lower: default_rkl_idx = 3  
+elif "industri" in b_type_lower or "lager" in b_type_lower: default_rkl_idx = 0  
 
-# Finner standardverdi for Brannklasse basert på antall etasjer fra Project Setup
 etasjer = int(pd_state.get("etasjer", 1))
-default_bkl_idx = 0  # Standard: BKL 1 (1-2 etasjer)
-if etasjer in [3, 4]: 
-    default_bkl_idx = 1  # BKL 2
-elif etasjer >= 5: 
-    default_bkl_idx = 2  # BKL 3
+default_bkl_idx = 0  
+if etasjer in [3, 4]: default_bkl_idx = 1  
+elif etasjer >= 5: default_bkl_idx = 2  
 
 # --- STREAMLIT UI ---
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🔥 RIBr — Brannkonsept</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for generering av teknisk brannkonsept basert på arkitektur og situasjonsplan.</p>", unsafe_allow_html=True)
 
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert.")
+st.success(f"✅ Prosjektdata for **{pd_state.get('p_name')}** er automatisk synkronisert.")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
-    c_name = c2.text_input("Oppdragsgiver", value=pd_state["c_name"], disabled=True)
-    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
+    p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
+    c_name = c2.text_input("Oppdragsgiver", value=pd_state.get("c_name"), disabled=True)
+    adresse = st.text_input("Adresse", value=f"{pd_state.get('adresse')}, {pd_state.get('kommune')}", disabled=True)
 
 with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
     c3, c4, c5 = st.columns(3)
-    b_type = c3.text_input("Formål", value=pd_state["b_type"], disabled=True)
-    etasjer = c4.number_input("Antall etasjer", value=int(pd_state["etasjer"]), disabled=True)
-    bta = c5.number_input("Bruttoareal (BTA m2)", value=int(pd_state["bta"]), disabled=True)
+    b_type = c3.text_input("Formål", value=pd_state.get("b_type"), disabled=True)
+    etasjer = c4.number_input("Antall etasjer", value=int(pd_state.get("etasjer", 1)), disabled=True)
+    bta = c5.number_input("Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
     
     st.markdown("##### Brannteknisk Klassifisering")
     c6, c7 = st.columns(2)
-    # Bruker de smarte standardverdiene vi regnet ut over!
     risikoklasse = c6.selectbox("Risikoklasse / Verksamhetsklass", ["RKL 1 (Garasjer/Lager)", "RKL 2 (Kontor)", "RKL 4 (Bolig)", "RKL 6 (Sykehus/Hotell)"], index=default_rkl_idx)
     brannklasse = c7.selectbox("Brannklasse / Byggnadsklass", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=default_bkl_idx)
 
 with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True):
     st.info("Viktig: For å vurdere brannsmitte og tilkomst for brannbil, trenger AI-en et kart. Du kan hente det automatisk eller laste opp situasjonsplan manuelt.")
     
-    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} tegninger i prosjektets fellesminne (fra Project Setup). Disse inkluderes automatisk i vurderingen!")
+    # Henter tegninger fra harddisken hvis de finnes
+    saved_images = []
+    if IMG_DIR.exists():
+        for p in sorted(IMG_DIR.glob("*.jpg")):
+            saved_images.append(Image.open(p).convert("RGB"))
+            
+    if len(saved_images) > 0:
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i analysen!")
     else:
         st.warning("Ingen tegninger funnet i fellesminnet. Du må enten laste opp under, eller gå tilbake til Project Setup og trykke 'Lagre' etter at filene er lastet inn.")
         
@@ -323,7 +331,7 @@ with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True
     with col_map1:
         if st.button("🌐 Hent kart automatisk for prosjektet", type="secondary"):
             with st.spinner("Søker i Kartverket og Google Maps..."):
-                img, source = fetch_map_image(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"], google_key)
+                img, source = fetch_map_image(pd_state.get("adresse"), pd_state.get("kommune"), pd_state.get("gnr"), pd_state.get("bnr"), google_key)
                 if img:
                     st.session_state.brann_kart = img
                     st.session_state.brann_kart_kilde = source
@@ -342,12 +350,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_container_width=True):
     
-    images_for_ai = [] 
+    images_for_ai = saved_images.copy()
     if st.session_state.brann_kart:
         images_for_ai.append(st.session_state.brann_kart)
-    
-    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-        images_for_ai.extend(st.session_state.project_images)
         
     if files:
         with st.spinner("📐 Leser ut supplerende lokale filer..."):
@@ -358,12 +363,14 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
                             for page_num in range(min(4, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                img.thumbnail((1200, 1200))
                                 images_for_ai.append(img)
                             doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
+                        img.thumbnail((1200, 1200))
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
@@ -393,7 +400,7 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
         REGELVERK: {pd_state.get('land', 'Norge (TEK17)')}
         
         KUNDENS PROSJEKTBESKRIVELSE: 
-        "{pd_state['p_desc']}"
+        "{pd_state.get('p_desc')}"
         
         EKSTREMT VIKTIG INSTRUKKS FOR VISUELL ANALYSE:
         Jeg har lagt ved opptil flere tegninger (plantegninger, snitt, fasade, kart). 
@@ -427,7 +434,7 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
                 st.session_state.review_counter += 1
                 
                 st.session_state.pending_reviews[doc_id] = {
-                    "title": pd_state['p_name'],
+                    "title": pd_state.get('p_name'),
                     "module": "RIBr (Brannkonsept)",
                     "drafter": "Builtly AI",
                     "reviewer": "Senior Branningeniør",
