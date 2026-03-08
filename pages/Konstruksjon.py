@@ -4,6 +4,7 @@ import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
+import json
 from datetime import datetime
 import tempfile
 import re
@@ -57,14 +58,10 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS (SKUDDSIKKER) ---
+# --- 2. PREMIUM CSS ---
 st.markdown("""
 <style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
-    }
+    :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px; }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
@@ -79,7 +76,6 @@ st.markdown("""
     button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
     button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
-    /* INPUT-FELT DESIGN (KRYSTALLKLAR TEKST) */
     div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
@@ -106,11 +102,17 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. SESSION STATE / SIKKERHET ---
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
-if "project_images" not in st.session_state:
-    st.session_state.project_images = []
+# --- 3. HARDDISK GJENOPPRETTING (Sikrer data mot krasj) ---
+DB_DIR = Path("qa_database")
+IMG_DIR = DB_DIR / "project_images"
+SSOT_FILE = DB_DIR / "ssot.json"
+
+if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+    else:
+        st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -172,7 +174,6 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
-    # Oppdatert TOC basert på ny senior-prompt
     toc = [
         "1. SAMMENDRAG OG KONKLUSJON", 
         "2. VURDERING AV DATAGRUNNLAG", 
@@ -212,7 +213,6 @@ def create_full_report_pdf(name, client, content, maps):
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                # Tvinger JPEG for å sikre stabilitet for gjennomsiktige PNG-er
                 m.convert("RGB").save(tmp.name, format="JPEG")
                 img_h = 160 * (m.height / m.width)
                 if img_h > 240: 
@@ -249,8 +249,14 @@ with st.expander("2. Valg av Bæresystem & Grunnforhold", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Arkitektur / Snitt)", expanded=True):
     st.info("Viktig: RIB trenger plantegninger og snitt for å analysere bygningsvolumet, foreslå grid-system (spennvidder for dekker), søyleplassering og stabiliserende kjerner.")
     
-    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i RIB-analysen!")
+    # Henter tegninger fra harddisken hvis de finnes!
+    saved_images = []
+    if IMG_DIR.exists():
+        for p in sorted(IMG_DIR.glob("*.jpg")):
+            saved_images.append(Image.open(p).convert("RGB"))
+            
+    if len(saved_images) > 0:
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i RIB-analysen!")
     else:
         st.warning("Ingen felles tegninger funnet. Du bør laste opp plan og snitt under.")
         
@@ -259,11 +265,7 @@ with st.expander("3. Visuelt Grunnlag (Arkitektur / Snitt)", expanded=True):
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_container_width=True):
     
-    images_for_ai = [] 
-    
-    # Hent globale tegninger fra minnet
-    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-        images_for_ai.extend(st.session_state.project_images)
+    images_for_ai = saved_images.copy()
         
     if files:
         with st.spinner("📐 Leser ut supplerende lokale filer..."):
@@ -274,12 +276,14 @@ if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_contai
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
                             for page_num in range(min(4, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                img.thumbnail((1200, 1200))
                                 images_for_ai.append(img)
                             doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
+                        img.thumbnail((1200, 1200))
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
@@ -299,7 +303,6 @@ if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_contai
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN STRENGE SENIOR RIB-PROMPTEN MED 3-TRINNS LOGIKK ---
         prompt_text = f"""
         Du er Builtly RIB AI, en senior rådgivende ingeniør bygg (RIB) med tung erfaring fra bolig, næring, rehabilitering, transformasjon og nybygg.
         Du vurderer bæresystem, lastnedføring, stabilitet, spenn, materialvalg, fundamentering og byggbarhet.
@@ -350,7 +353,6 @@ if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_contai
             res = model.generate_content(prompt_parts)
             
             with st.spinner("Kompilerer RIB-PDF og fletter inn tegninger som vedlegg..."):
-                # HER LÅ FEILEN! Vi må sende pd_state['c_name'] til PDF-motoren, ikke c_name
                 pdf_data = create_full_report_pdf(p_name, pd_state['c_name'], res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
@@ -362,7 +364,7 @@ if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_contai
                 doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
                 
-                # Fargekoder status basert på AI-ens vurdering (Spor 1, 2 eller 3)
+                # Fargekoder status basert på AI-ens vurdering
                 ai_text_lower = res.text.lower()
                 if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
                     status = "Rejected - Needs Architecture Data"
