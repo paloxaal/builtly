@@ -64,13 +64,20 @@ TEXTS = {
 
         "mod_sec_kicker": "Modules and roadmap", "mod_sec_title": "Specialized agents in one platform", "mod_sec_sub": "Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.",
         "mod_sec1": "Available now and pilot-ready", "mod_sec2": "Roadmap and early-phase tools",
+        "mod_sec3": "Sustainability & Compliance", "mod_sec3_sub": "Integrated services for environmental follow-up, safety, and certification, tailored to create responsible and value-driven developments.",
 
         "m_geo_t": "GEO / ENV - Ground Conditions", "m_geo_d": "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", "m_geo_in": "XLSX / CSV / PDF + plans", "m_geo_out": "Environmental action plan, logs", "m_geo_btn": "Open Geo & Env",
         "m_aku_t": "ACOUSTICS - Noise & Sound", "m_aku_d": "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", "m_aku_in": "Noise map + floor plan", "m_aku_out": "Acoustics report, facade evaluation", "m_aku_btn": "Open Acoustics",
         "m_brann_t": "FIRE - Safety Strategy", "m_brann_d": "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", "m_brann_in": "Architectural drawings + class", "m_brann_out": "Fire strategy concept, deviations", "m_brann_btn": "Open Fire Strategy",
+        
         "m_ark_t": "ARK - Feasibility Study", "m_ark_d": "Site screening, volume analysis, and early-phase decision support before full engineering design.", "m_ark_in": "Site data, zoning plans", "m_ark_out": "Feasibility report, utilization metrics", "m_ark_btn": "Open Feasibility",
         "m_rib_t": "STRUC - Structural Concept", "m_rib_d": "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", "m_rib_in": "Models, load parameters", "m_rib_out": "Concept memo, grid layouts", "m_rib_btn": "Open Structural",
         "m_tra_t": "TRAFFIC - Mobility", "m_tra_d": "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", "m_tra_in": "Site plans, local norms", "m_tra_out": "Traffic memo, mobility plan", "m_tra_btn": "Open Traffic & Mobility",
+        
+        "m_sha_t": "SHA - Safety & Health Plan", "m_sha_d": "Safety, health, and working environment. Generates routines for site logistics and high-risk operations.", "m_sha_in": "Project data + Risk factors", "m_sha_out": "Complete SHA plan", "m_sha_btn": "Open SHA Module",
+        "m_breeam_t": "BREEAM Assistant", "m_breeam_d": "Early-phase assessment of BREEAM potential, credit requirements, and material strategies.", "m_breeam_in": "Building data + Ambitions", "m_breeam_out": "BREEAM Pre-assessment", "m_breeam_btn": "Open BREEAM Assistant",
+        "m_mop_t": "MOP - Environment Plan", "m_mop_d": "Environmental follow-up plan. Assesses waste management, reuse, emissions, and nature preservation.", "m_mop_in": "Project data + Eco goals", "m_mop_out": "MOP Document", "m_mop_btn": "Open MOP Module",
+        
         "btn_dev": "In development",
 
         "cta_title": "Start with one project. Upload raw data. Get a reviewable package.",
@@ -109,13 +116,20 @@ TEXTS = {
 
         "mod_sec_kicker": "Moduler og veikart", "mod_sec_title": "Spesialiserte agenter i én plattform", "mod_sec_sub": "Hver modul har egen logikk og fagspesifikke regler, men deler samme portal og kvalitetskontroll.",
         "mod_sec1": "Tilgjengelig nå (Klar for pilot)", "mod_sec2": "Veikart og tidligfase",
+        "mod_sec3": "Bærekraft & Sikkerhet", "mod_sec3_sub": "Integrerte tjenester for miljøoppfølging, sikkerhet og sertifisering, skreddersydd for å skape effektive og verdiskapende prosjekter.",
 
         "m_geo_t": "GEO / MILJØ - Grunnforhold", "m_geo_d": "Analyserer lab-filer og graveceller. Klassifiserer masser og utarbeider tiltaksplaner.", "m_geo_in": "XLSX / CSV / PDF + Kart", "m_geo_out": "Tiltaksplan, logg", "m_geo_btn": "Åpne Geo & Miljø",
         "m_aku_t": "AKUSTIKK - Støy & Lyd", "m_aku_d": "Leser støykart og plantegninger. Genererer krav til fasade, vinduer og skjerming.", "m_aku_in": "Støykart + Plan", "m_aku_out": "Akustikkrapport", "m_aku_btn": "Åpne Akustikk",
         "m_brann_t": "BRANN - Sikkerhetskonsept", "m_brann_d": "Vurderer arkitektur mot forskrifter. Definerer rømning og brannceller.", "m_brann_in": "Tegninger + Klasse", "m_brann_out": "Brannkonsept (RIBr)", "m_brann_btn": "Åpne Brannkonsept",
+        
         "m_ark_t": "ARK - Mulighetsstudie", "m_ark_d": "Tomteanalyse, volumvurdering og beslutningsgrunnlag for tidligfase.", "m_ark_in": "Regulering + Tomt", "m_ark_out": "Mulighetsstudie", "m_ark_btn": "Åpne Feasibility",
         "m_rib_t": "RIB - Konstruksjon", "m_rib_d": "Konseptuelle struktursjekker, spennvidder og integrasjon med klimagass.", "m_rib_in": "Modeller, Laster", "m_rib_out": "Konseptnotat RIB", "m_rib_btn": "Åpne Konstruksjon",
         "m_tra_t": "TRAFIKK - Mobilitet", "m_tra_d": "Trafikkgenerering, parkering, adkomstlogikk og myke trafikanter for tidligfase.", "m_tra_in": "Situasjonsplan", "m_tra_out": "Trafikknotat", "m_tra_btn": "Åpne Trafikk & Mobilitet",
+        
+        "m_sha_t": "SHA-Plan (Sikkerhet)", "m_sha_d": "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner.", "m_sha_in": "Prosjektdata + Risiko", "m_sha_out": "Komplett SHA-plan", "m_sha_btn": "Åpne SHA-modul",
+        "m_breeam_t": "BREEAM Assistent", "m_breeam_d": "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi.", "m_breeam_in": "Byggdata + Ambisjon", "m_breeam_out": "BREEAM Pre-assessment", "m_breeam_btn": "Åpne BREEAM",
+        "m_mop_t": "MOP (Miljøoppfølging)", "m_mop_d": "Miljøoppfølgingsplan for byggeplass. Vurderer avfall, ombruk, utslipp og natur.", "m_mop_in": "Prosjektdata + Miljømål", "m_mop_out": "MOP Dokument", "m_mop_btn": "Åpne MOP",
+        
         "btn_dev": "Under utvikling",
 
         "cta_title": "Start med ett prosjekt. Last opp data. Få en ferdig pakke.",
@@ -143,7 +157,7 @@ TEXTS = {
         "sec_val_kicker": "Kärnprodukt", "sec_val_title": "Portal först. Moduler under.", "sec_val_sub": "Builtly är ett gemensamt system för projektuppsättning, AI-bearbetning och kvalitetssäkring.",
         "val_1_t": "Kundportal", "val_1_d": "Upprättande, input och dokumentgenerering i ett flöde.",
         "val_2_t": "Regelstyrd AI", "val_2_d": "AI arbetar inom strikta lagkrav och mallar.",
-        "val_3_t": "QA och Signering", "val_3_d": "Junior validerar. Senior ger slutgiltigt godkännande.",
+        "val_3_t": "QA och Signering", "val_3_d": "Junior validerer. Senior ger slutgiltigt godkännande.",
         "val_4_t": "Skalbarhet", "val_4_d": "Nya discipliner ansluts till samma ramverk.",
 
         "sec_loop_kicker": "Arbetsflöde", "sec_loop_title": "Så fungerar Builtly", "sec_loop_sub": "En deterministisk fyra-stegs process.",
@@ -154,13 +168,20 @@ TEXTS = {
 
         "mod_sec_kicker": "Moduler", "mod_sec_title": "Specialiserade agenter", "mod_sec_sub": "Varje modul delar samma portal och kvalitetskontroll.",
         "mod_sec1": "Tillgängligt nu", "mod_sec2": "Roadmap och tidiga skeden",
+        "mod_sec3": "Hållbarhet & Säkerhet", "mod_sec3_sub": "Integrerade tjänster för miljöuppföljning, säkerhet och certifiering, anpassade för att skapa ansvarsfulla projekt.",
 
         "m_geo_t": "GEO / MILJÖ", "m_geo_d": "Analyserar labbfiler. Klassificerar massor och åtgärdsplaner.", "m_geo_in": "XLSX / CSV + Karta", "m_geo_out": "Åtgärdsplan", "m_geo_btn": "Öppna Geo",
         "m_aku_t": "AKUSTIK", "m_aku_d": "Läser bullerkartor och planritningar. Genererar fasadkrav.", "m_aku_in": "Bullerkarta + Plan", "m_aku_out": "Akustikrapport", "m_aku_btn": "Öppna Akustik",
         "m_brann_t": "BRAND - Koncept", "m_brann_d": "Utvärderar arkitektur mot BBR. Definierar brandceller.", "m_brann_in": "Ritningar + Klass", "m_brann_out": "Brandkoncept", "m_brann_btn": "Öppna Brand",
+        
         "m_ark_t": "ARK - Förstudie", "m_ark_d": "Tomtanalys och volymbedömning för tidiga skeden.", "m_ark_in": "Detaljplan + Tomt", "m_ark_out": "Förstudie", "m_ark_btn": "Öppna ARK",
         "m_rib_t": "Konstruktion", "m_rib_d": "Konceptuella strukturkontroller och byggfysik.", "m_rib_in": "Sektion + Laster", "m_rib_out": "Koncept-PM", "m_rib_btn": "Öppna Konstruktion",
         "m_tra_t": "TRAFIK", "m_tra_d": "Trafikalstring, parkering och logistik.", "m_tra_in": "Situationsplan", "m_tra_out": "Trafik-PM", "m_tra_btn": "Öppna Trafik",
+        
+        "m_sha_t": "SHA-Plan (Säkerhet)", "m_sha_d": "Säkerhet, hälsa och arbetsmiljö. Genererar rutiner för byggarbetsplatsen.", "m_sha_in": "Projektdata + Risker", "m_sha_out": "Komplett SHA-plan", "m_sha_btn": "Öppna SHA",
+        "m_breeam_t": "BREEAM Assistent", "m_breeam_d": "Tidig bedömning av BREEAM-krav och materialstrategi.", "m_breeam_in": "Byggdata + Ambition", "m_breeam_out": "BREEAM Pre-assessment", "m_breeam_btn": "Öppna BREEAM",
+        "m_mop_t": "MOP (Miljöplan)", "m_mop_d": "Miljöuppföljningsplan för avfall, återbruk och utsläpp.", "m_mop_in": "Projektdata + Miljömål", "m_mop_out": "MOP Dokument", "m_mop_btn": "Öppna MOP",
+
         "btn_dev": "Under utveckling",
 
         "cta_title": "Starta ett projekt. Ladda upp data.",
@@ -189,7 +210,7 @@ TEXTS = {
         "val_1_t": "Kundeportal", "val_1_d": "Oprettelse, input og dokumentgenerering i ét flow.",
         "val_2_t": "Regelstyret AI", "val_2_d": "AI opererer inden for eksplicitte lovkrav og skabeloner.",
         "val_3_t": "QA og Signering", "val_3_d": "Junior validerer. Senior giver endelig godkendelse.",
-        "val_4_t": "Skalerbarhed", "val_4_d": "Nye fagområder tilsluttes samme rammeværk.",
+        "val_4_t": "Skalerbarhet", "val_4_d": "Nye fagområder tilsluttes samme rammeværk.",
 
         "sec_loop_kicker": "Arbejdsgang", "sec_loop_title": "Sådan fungerer Builtly", "sec_loop_sub": "En deterministisk fire-trins proces.",
         "loop_1_t": "Input", "loop_1_d": "Upload filer og data ét sted.",
@@ -199,13 +220,20 @@ TEXTS = {
 
         "mod_sec_kicker": "Moduler", "mod_sec_title": "Specialiserede agenter", "mod_sec_sub": "Hvert modul deler samme portal og kvalitetskontrol.",
         "mod_sec1": "Tilgængelig nu", "mod_sec2": "Roadmap",
+        "mod_sec3": "Bæredygtighed & Sikkerhed", "mod_sec3_sub": "Integrerede tjenester til miljøopfølgning, sikkerhed og certificering, skræddersyet til ansvarlige projekter.",
 
         "m_geo_t": "GEO / MILJØ", "m_geo_d": "Analyserer lab-filer og udarbejder miljøhandlingsplaner.", "m_geo_in": "XLSX / CSV + Kort", "m_geo_out": "Handlingsplan", "m_geo_btn": "Åbn Geo",
         "m_aku_t": "AKUSTIK", "m_aku_d": "Læser støjkort. Genererer krav til facade.", "m_aku_in": "Støjkort + Plan", "m_aku_out": "Akustikrapport", "m_aku_btn": "Åbn Akustik",
         "m_brann_t": "BRAND", "m_brann_d": "Vurderer arkitektur mod BR18. Definerer brandceller.", "m_brann_in": "Tegninger + Klasse", "m_brann_out": "Brandstrategi", "m_brann_btn": "Åbn Brand",
+        
         "m_ark_t": "ARK - Studie", "m_ark_d": "Grundanlyse og volumen for tidlige faser.", "m_ark_in": "Lokalplan + Grund", "m_ark_out": "Mulighedsstudie", "m_ark_btn": "Åbn ARK",
         "m_rib_t": "Konstruktion", "m_rib_d": "Konceptuelle strukturtjek og bygningsfysik.", "m_rib_in": "Snit + Laster", "m_rib_out": "Konceptnotat", "m_rib_btn": "Åbn Konstruktion",
         "m_tra_t": "TRAFIK", "m_tra_d": "Trafikgenerering og parkering.", "m_tra_in": "Situationsplan", "m_tra_out": "Trafiknotat", "m_tra_btn": "Åbn Trafik",
+        
+        "m_sha_t": "SHA-Plan (Sikkerhed)", "m_sha_d": "Sikkerhed, sundhed og arbejdsmiljø. Genererer rutiner for byggepladsen.", "m_sha_in": "Projektdata + Risici", "m_sha_out": "Komplet SHA-plan", "m_sha_btn": "Åbn SHA",
+        "m_breeam_t": "BREEAM Assistent", "m_breeam_d": "Tidlig vurdering af BREEAM potentiale og materialestrategi.", "m_breeam_in": "Byggedata + Ambition", "m_breeam_out": "BREEAM Pre-assessment", "m_breeam_btn": "Åbn BREEAM",
+        "m_mop_t": "MOP (Miljøplan)", "m_mop_d": "Miljøopfølgningsplan for affald, genbrug og udledning.", "m_mop_in": "Projektdata + Miljømål", "m_mop_out": "MOP Dokument", "m_mop_btn": "Åbn MOP",
+
         "btn_dev": "Under udvikling",
 
         "cta_title": "Start et projekt. Upload data.",
@@ -237,6 +265,9 @@ PAGES = {
     "brann": find_page("Brannkonsept"),
     "akustikk": find_page("Akustikk"),
     "trafikk": find_page("Trafikk"),
+    "sha": find_page("SHA"),
+    "breeam": find_page("BREEAM"),
+    "mop": find_page("MOP"),
     "project": find_page("Project"),
     "review": find_page("Review"),
 }
@@ -318,7 +349,7 @@ def logo_data_uri() -> str:
     return ""
 
 # -------------------------------------------------
-# 6) CSS (Din eksakte styling + Selectbox)
+# 6) CSS (Din eksakte styling + Symmetri Fiks)
 # -------------------------------------------------
 st.markdown(
     """
@@ -401,7 +432,7 @@ st.markdown(
         letter-spacing: -0.02em;
     }
 
-    /* NATIVE SELECTBOX STYLING - Byttet ut knappene */
+    /* NATIVE SELECTBOX STYLING */
     [data-testid="stSelectbox"] { margin-bottom: 0 !important; width: 150px; float: right; }
     [data-testid="stSelectbox"] label { display: none !important; }
     [data-testid="stSelectbox"] > div > div {
@@ -410,7 +441,6 @@ st.markdown(
         min-height: 42px !important; padding-left: 10px !important; cursor: pointer;
     }
     [data-testid="stSelectbox"] > div > div:hover { border-color: var(--accent) !important; background-color: rgba(255,255,255,0.08) !important; }
-
 
     .hero-action.disabled,
     .module-cta.disabled {
@@ -735,29 +765,10 @@ st.markdown(
         white-space: nowrap;
     }
 
-    .badge-priority {
-        color: #8ef0c0;
-        border-color: rgba(142,240,192,0.25);
-        background: rgba(126,224,129,0.08);
-    }
-
-    .badge-phase2 {
-        color: #9fe7ff;
-        border-color: rgba(120,220,225,0.22);
-        background: rgba(56,194,201,0.08);
-    }
-
-    .badge-early {
-        color: #d7def7;
-        border-color: rgba(215,222,247,0.18);
-        background: rgba(255,255,255,0.03);
-    }
-
-    .badge-roadmap {
-        color: #f4bf4f;
-        border-color: rgba(244,191,79,0.22);
-        background: rgba(244,191,79,0.08);
-    }
+    .badge-priority { color: #8ef0c0; border-color: rgba(142,240,192,0.25); background: rgba(126,224,129,0.08); }
+    .badge-phase2 { color: #9fe7ff; border-color: rgba(120,220,225,0.22); background: rgba(56,194,201,0.08); }
+    .badge-early { color: #d7def7; border-color: rgba(215,222,247,0.18); background: rgba(255,255,255,0.03); }
+    .badge-roadmap { color: #f4bf4f; border-color: rgba(244,191,79,0.22); background: rgba(244,191,79,0.08); }
 
     .module-icon {
         width: 46px;
@@ -781,15 +792,12 @@ st.markdown(
         margin-bottom: 0.5rem;
     }
 
+    /* CSS FIKS FOR PERFEKT SYMMETRI */
     .module-desc {
         font-size: 0.95rem;
         line-height: 1.72;
         color: var(--muted);
-    }
-
-    .module-spacer {
-        flex: 1;
-        min-height: 1rem;
+        min-height: 80px; /* Tvinger alle beskrivelser til å ta like mye plass */
     }
 
     .module-meta {
@@ -798,6 +806,12 @@ st.markdown(
         color: var(--soft);
         padding-top: 0.95rem;
         border-top: 1px solid rgba(120,145,170,0.14);
+        min-height: 65px; /* Tvinger Input/Output tekstene til å flukte perfekt */
+    }
+
+    .module-spacer {
+        flex: 1;
+        min-height: 1rem;
     }
 
     .module-cta-wrap {
@@ -909,14 +923,12 @@ with top_l:
     render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left">{logo_html}</div></div>')
 
 with top_r:
-    # Skyver dropdown-menyen ned slik at den flukter med logoen
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
     valgt_språk = st.selectbox(
         "Språk", 
         list(TEXTS.keys()), 
         index=list(TEXTS.keys()).index(st.session_state.app_lang)
     )
-    # Oppdaterer minnet automatisk hvis språket endres!
     if valgt_språk != st.session_state.app_lang:
         st.session_state.app_lang = valgt_språk
         st.session_state.project_data["land"] = TEXTS[valgt_språk]["rule_set"]
@@ -1018,6 +1030,12 @@ roadmap_cards = [
     module_card("trafikk", "🚦", "Roadmap", "badge-roadmap", lang["m_tra_t"], lang["m_tra_d"], lang["m_tra_in"], lang["m_tra_out"], lang["m_tra_btn"])
 ]
 
+sustainability_cards = [
+    module_card("sha", "🦺", "Compliance", "badge-priority", lang["m_sha_t"], lang["m_sha_d"], lang["m_sha_in"], lang["m_sha_out"], lang["m_sha_btn"]),
+    module_card("breeam", "🌿", "Certification", "badge-phase2", lang["m_breeam_t"], lang["m_breeam_d"], lang["m_breeam_in"], lang["m_breeam_out"], lang["m_breeam_btn"]),
+    module_card("mop", "♻️", "Environment", "badge-roadmap", lang["m_mop_t"], lang["m_mop_d"], lang["m_mop_in"], lang["m_mop_out"], lang["m_mop_btn"])
+]
+
 render_html(
     f"""
     <div class="section-head">
@@ -1031,6 +1049,10 @@ render_html(
 
     <div class="subsection-title">{lang['mod_sec2']}</div>
     <div class="module-grid">{''.join(roadmap_cards)}</div>
+
+    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec3']}</div>
+    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec3_sub']}</div>
+    <div class="module-grid">{''.join(sustainability_cards)}</div>
     """
 )
 
