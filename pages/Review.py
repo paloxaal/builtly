@@ -3,6 +3,7 @@ import os
 import base64
 from pathlib import Path
 import time
+from datetime import datetime  # <--- HER ER FIKSEN SOM MANGLET!
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="QA & Sign-off | Builtly", page_icon="✅", layout="wide", initial_sidebar_state="collapsed")
@@ -127,7 +128,7 @@ if st.session_state.active_review is None:
     st.markdown("<h1 style='font-size: 2.8rem; margin-bottom: 0.2rem; letter-spacing: -0.02em;'>QA & Sign-off Dashboard</h1>", unsafe_allow_html=True)
     st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem;'>Kvalitetssikring av AI-genererte dokumenter før endelig leveranse.</p>", unsafe_allow_html=True)
 
-    # Beregner levende statistikk!
+    # Beregner levende statistikk
     pending_count = len(DOCS) - len(st.session_state.signed_docs)
     signed_count = len(st.session_state.signed_docs)
     
@@ -177,7 +178,6 @@ if st.session_state.active_review is None:
             if doc_id not in st.session_state.signed_docs:
                 review_card(doc_id, info)
 
-
 # =====================================================================
 # RUTE 2: AKTIV KONTROLL (DETALJVISNING)
 # =====================================================================
@@ -186,7 +186,7 @@ else:
     doc_info = DOCS[doc_id]
     
     # Tilbakeknapp (Avbryt kontroll)
-    if st.button("← Avbryt og gå tilbake", type="secondary"):
+    if st.button("← Avbryt og gå tilbake til listen", type="secondary"):
         st.session_state.active_review = None
         st.rerun()
         
@@ -198,7 +198,8 @@ else:
     
     with col_doc:
         st.markdown("<h3 style='font-size: 1.1rem; margin-bottom: 1rem;'>📄 Dokumentforhåndsvisning (Utkast)</h3>", unsafe_allow_html=True)
-        # Simulert PDF-visning ved hjelp av CSS
+        # Simulert PDF-visning ved hjelp av CSS. 
+        # Nå fungerer datofunksjonen!
         render_html(f"""
         <div class="doc-mockup">
             <div class="doc-header">
@@ -208,13 +209,13 @@ else:
             <div class="doc-body">
                 <div class="doc-h2">1. Sammendrag og Konklusjon</div>
                 Dette dokumentet representerer det AI-genererte utkastet for <strong>{doc_info['title']}</strong>. 
-                Rapporten er validert opp mot gjeldende regelverk (TEK17) og prosjektets Master Data (SSOT).
+                Rapporten er validert opp mot gjeldende regelverk og prosjektets Master Data (SSOT).
                 <br><br>
                 Konklusjonen er at prosjektet lar seg gjennomføre innenfor de gitte tekniske rammene, forutsatt at 
                 avbøtende tiltak nevnt i kapittel 4 implementeres.
                 
                 <div class="doc-h2">2. Prosjektbeskrivelse</div>
-                Bygningsmassen består av et næringsbygg/boligbygg der beregningsforutsetningene er lagt til grunn basert 
+                Bygningsmassen består av et bygg der beregningsforutsetningene er lagt til grunn basert 
                 på innsendte plantegninger og underlag.
                 <br><br>
                 <em>[Resten av den genererte rapporten vil normalt fylle flere sider her nedover...]</em>
@@ -244,7 +245,7 @@ else:
             if not (chk1 and chk2 and chk3):
                 st.error("Du må huke av for alle punktene i sjekklisten før du kan signere!")
             else:
-                # Legger til i listen over signerte dokumenter!
+                # Legger til i listen over signerte dokumenter
                 st.session_state.signed_docs.append(doc_id)
                 st.session_state.active_review = None # Lukker visningen
                 st.success(f"Dokument '{doc_info['title']}' er nå signert og ferdigstilt!")
