@@ -166,12 +166,6 @@ if "analyzed_file_names" not in st.session_state:
 pd_state = st.session_state.project_data
 saved_image_count = len(list(IMG_DIR.glob("*.jpg")))
 
-fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta", "tomteareal"]
-filled_fields = sum(1 for field in fields_to_check if bool(pd_state.get(field)))
-completeness = int((filled_fields / len(fields_to_check)) * 100)
-sync_status = "Draft" if completeness < 100 else "Ready"
-progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
-
 def fetch_from_kartverket(adresse, kommune, gnr, bnr):
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
@@ -221,45 +215,10 @@ with c3:
         if st.button("QA & Sign-off", type="primary", use_container_width=True):
             st.switch_page(find_page("Review"))
 
-# --- 6. DASHBOARD UI ---
-render_html(f"""
-<div class="dash-grid">
-    <div class="card card-hero">
-        <div class="hero-kicker">✦ Builtly AI • Project SSOT</div>
-        <h1 class="hero-title">Project Configuration</h1>
-        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Synkroniser prosjektets kontekst sømløst til teknisk prosjektering, bærekraftsanalyser og prosjektledelse.</div>
-    </div>
-    
-    <div class="card">
-        <div class="status-kicker">Sync Status</div>
-        <div class="status-title">{sync_status}</div>
-        <div class="status-desc">{filled_fields} av {len(fields_to_check)} nøkkelfelt er fylt ut og tilgjengelige for AI-modulene.</div>
-        
-        <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:0.5rem; color: #c8d3df;">
-            <span>Kompletthet</span><span style="font-weight:700;">{completeness}%</span>
-        </div>
-        <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
-        
-        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{pd_state.get("last_sync", "Ikke synket enda")}</span></div>
-        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if pd_state.get("adresse") or pd_state.get("gnr") else "Nei"}</span></div>
-    </div>
-</div>
-
-<div class="stat-grid">
-    <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
-    </div>
-    <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state.get("b_type", "-")}</div>
-    </div>
-    <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Bygningsareal</div><div class="stat-value">{pd_state.get("bta", "0")} m²</div>
-    </div>
-    <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Tomteareal</div><div class="stat-value">{pd_state.get("tomteareal", "0")} m²</div>
-    </div>
-</div>
-""")
+# --- 6. MAGISKE PLACEHOLDERE FOR LIVE-DASHBOARD ---
+# Ved å legge disse her, kan vi dytte inn HTML etter at du har skrevet i feltene!
+dash_placeholder = st.empty()
+stat_placeholder = st.empty()
 
 # --- 7. INPUT SEKSJON ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
@@ -318,8 +277,86 @@ with input_col:
     new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
     new_etasjer = c8.number_input("Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
     new_bta = c9.number_input("Bygningsareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
-    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=100)
+    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=10)
 
+# --- 8. BEREGNING AV LIVE-STATUS ---
+# Nå leser vi av de ferske variablene mens du skriver!
+current_state = {
+    "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
+    "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
+    "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta, "tomteareal": new_tomteareal,
+    "last_sync": pd_state.get("last_sync", "Ikke synket enda")
+}
+
+fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta", "tomteareal"]
+filled_fields = sum(1 for field in fields_to_check if bool(current_state.get(field)))
+completeness = int((filled_fields / len(fields_to_check)) * 100)
+sync_status = "Draft" if completeness < 100 else "Ready"
+progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
+
+# --- 9. RENDERER LIVE DASHBOARD PÅ TOPPEN ---
+dash_placeholder.markdown(f"""
+<div class="dash-grid">
+    <div class="card card-hero">
+        <div class="hero-kicker">✦ Builtly AI • Project SSOT</div>
+        <h1 class="hero-title">Project Configuration</h1>
+        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Synkroniser prosjektets kontekst sømløst til teknisk prosjektering, bærekraftsanalyser og prosjektledelse.</div>
+    </div>
+    
+    <div class="card">
+        <div class="status-kicker">Sync Status</div>
+        <div class="status-title">{sync_status}</div>
+        <div class="status-desc">{filled_fields} av {len(fields_to_check)} nøkkelfelt er fylt ut og tilgjengelige for AI-modulene.</div>
+        
+        <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:0.5rem; color: #c8d3df;">
+            <span>Kompletthet</span><span style="font-weight:700;">{completeness}%</span>
+        </div>
+        <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
+        
+        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{current_state["last_sync"]}</span></div>
+        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if current_state["adresse"] or current_state["gnr"] else "Nei"}</span></div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+stat_placeholder.markdown(f"""
+<div class="stat-grid">
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{current_state["b_type"]}</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Bygningsareal</div><div class="stat-value">{current_state["bta"]} m²</div>
+    </div>
+    <div class="card" style="padding: 1.5rem;">
+        <div class="stat-title">Tomteareal</div><div class="stat-value">{current_state["tomteareal"]} m²</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# --- 10. RENDERER LIVE SNAPSHOT (HØYRE SIDE) ---
+with snap_col:
+    render_html(f"""
+    <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
+        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
+        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
+        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{current_state["land"].split(' ')[0]}</div></div>
+        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{current_state["p_name"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{current_state["c_name"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{current_state["adresse"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{current_state["kommune"] or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [current_state["gnr"], current_state["bnr"]])) or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{current_state["b_type"]}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{current_state["bta"]} / {current_state["tomteareal"]} m²</div></div>
+        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
+    </div>
+    """)
+
+# --- 11. OPPLASTING OG LAGRE-KNAPP (FORTSETTER I INPUT_COL) ---
+with input_col:
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
     st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
@@ -428,12 +465,8 @@ with input_col:
                 except Exception as e:
                     st.warning(f"Kunne ikke lagre alle filer: {e}")
                 
-            st.session_state.project_data.update({
-                "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
-                "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
-                "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta, "tomteareal": new_tomteareal,
-                "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
-            })
+            current_state["last_sync"] = datetime.now().strftime("%d. %b %Y kl %H:%M")
+            st.session_state.project_data.update(current_state)
             
             with open(SSOT_FILE, "w", encoding="utf-8") as f:
                 json.dump(st.session_state.project_data, f, ensure_ascii=False, indent=4)
@@ -442,25 +475,7 @@ with input_col:
             time.sleep(1)
             st.rerun()
 
-with snap_col:
-    render_html(f"""
-    <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
-        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
-        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
-        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
-        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state.get("land", "-").split(' ')[0]}</div></div>
-        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state.get("p_name") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state.get("c_name") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd_state.get("adresse") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd_state.get("kommune") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state.get("gnr"), pd_state.get("bnr")])) or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
-        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{pd_state.get("bta", "0")} m² / {pd_state.get("tomteareal", "0")} m²</div></div>
-        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
-    </div>
-    """)
-
-# --- 8. LAUNCHPAD ---
+# --- 12. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     with col:
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
