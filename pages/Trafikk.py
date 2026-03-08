@@ -9,6 +9,7 @@ import tempfile
 import re
 import requests
 import urllib.parse
+import json
 import io
 from PIL import Image
 import numpy as np
@@ -107,11 +108,7 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
 # --- 3. PREMIUM CSS (SKUDDSIKKER) ---
 st.markdown("""
 <style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
-    }
+    :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px; }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
@@ -152,13 +149,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. SESSION STATE / SIKKERHET ---
+# --- 4. SESSION STATE & HARDDISK GJENOPPRETTING ---
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
+
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
-if "project_images" not in st.session_state:
-    st.session_state.project_images = []
 if "trafikk_kart" not in st.session_state:
     st.session_state.trafikk_kart = None
+
+if st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -220,7 +224,6 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
-    # Oppdatert TOC basert på ny senior-prompt
     toc = [
         "1. OPPSUMMERING OG KONKLUSJON", 
         "2. VURDERING AV GRUNNLAG", 
@@ -281,14 +284,14 @@ def create_full_report_pdf(name, client, content, maps):
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🚦 RITra — Trafikk & Mobilitet</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for trafikkgenerering, parkeringsbehov og vurdering av adkomstveier.</p>", unsafe_allow_html=True)
 
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert (SSOT).")
+st.success(f"✅ Prosjektdata for **{pd_state.get('p_name')}** er automatisk synkronisert (SSOT).")
 
 with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
-    b_type = c2.text_input("Formål / Bygningstype", value=pd_state["b_type"], disabled=True)
-    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
-    bta = st.number_input("Bruttoareal (BTA m2)", value=int(pd_state["bta"]), disabled=True)
+    p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
+    b_type = c2.text_input("Formål / Bygningstype", value=pd_state.get("b_type"), disabled=True)
+    adresse = st.text_input("Adresse", value=f"{pd_state.get('adresse')}, {pd_state.get('kommune')}", disabled=True)
+    bta = st.number_input("Bruttoareal (BTA m2)", value=int(pd_state.get("bta", 0)), disabled=True)
 
 with st.expander("2. Trafikk & Mobilitetsparametere", expanded=True):
     c3, c4 = st.columns(2)
@@ -298,8 +301,14 @@ with st.expander("2. Trafikk & Mobilitetsparametere", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True):
     st.info("RITra trenger et kart eller en situasjonsplan for å vurdere adkomst, sykkelparkering og renovasjon/varelevering.")
     
-    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i analysen!")
+    # Henter tegninger fra harddisken hvis de finnes!
+    saved_images = []
+    if IMG_DIR.exists():
+        for p in sorted(IMG_DIR.glob("*.jpg")):
+            saved_images.append(Image.open(p).convert("RGB"))
+            
+    if len(saved_images) > 0:
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i analysen!")
     else:
         st.warning("Ingen felles tegninger funnet. Du bør hente kart under eller laste opp situasjonsplan.")
         
@@ -307,7 +316,7 @@ with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True
     with col_map1:
         if st.button("🌐 Hent utomhus-kart automatisk", type="secondary"):
             with st.spinner("Søker i Kartverket og Google Maps..."):
-                img, source = fetch_map_image(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"], google_key)
+                img, source = fetch_map_image(pd_state.get("adresse"), pd_state.get("kommune"), pd_state.get("gnr"), pd_state.get("bnr"), google_key)
                 if img:
                     st.session_state.trafikk_kart = img
                     st.success(f"✅ Kart hentet fra: {source}")
@@ -324,13 +333,10 @@ with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Adkomst)", expanded=True
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_width=True):
     
-    images_for_ai = [] 
+    images_for_ai = saved_images.copy()
     
-    # Hent kart og globale tegninger
     if st.session_state.trafikk_kart:
         images_for_ai.append(st.session_state.trafikk_kart)
-    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-        images_for_ai.extend(st.session_state.project_images)
         
     if files:
         with st.spinner("📐 Leser ut supplerende lokale filer..."):
@@ -341,12 +347,14 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
                             for page_num in range(min(3, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                img.thumbnail((1200, 1200))
                                 images_for_ai.append(img)
                             doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
+                        img.thumbnail((1200, 1200))
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
@@ -366,7 +374,6 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN STRENGE SENIOR TRAFIKK-PROMPTEN MED 3-TRINNS LOGIKK ---
         prompt_text = f"""
         Du er Builtly RITra AI, en svært erfaren trafikkonsulent med bred kompetanse innen trafikkplanlegging, mobilitet og adkomstløsninger.
         Du skal analysere tilgjengelig prosjektgrunnlag og gi faglige, realistiske og tydelige trafikkfaglige vurderinger.
@@ -377,7 +384,7 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
         PARKERINGSNORM FØRING: {p_norm}.
         
         KUNDENS PROSJEKTBESKRIVELSE: 
-        "{pd_state['p_desc']}"
+        "{pd_state.get('p_desc')}"
         
         REGLER FOR DIN VURDERING (ALDRI BRYT DISSE):
         - Du skal aldri late som du har trafikktall, ulykkesdata eller vegstatus som ikke er gitt deg.
@@ -416,7 +423,8 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
             res = model.generate_content(prompt_parts)
             
             with st.spinner("Kompilerer RITra-PDF og fletter inn tegninger som vedlegg..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
+                # HER VAR FEILEN - Måtte bruke pd_state.get('c_name') istedenfor c_name
+                pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
@@ -440,7 +448,7 @@ if st.button("🚀 Kjør Trafikkanalyse (RITra)", type="primary", use_container_
                     badge = "badge-pending"
                 
                 st.session_state.pending_reviews[doc_id] = {
-                    "title": pd_state['p_name'],
+                    "title": pd_state.get('p_name', 'Nytt Prosjekt'),
                     "module": "RITra (Trafikk)",
                     "drafter": "Builtly AI",
                     "reviewer": "Senior Trafikkplanlegger",
