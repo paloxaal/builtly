@@ -48,7 +48,6 @@ def find_page(base_name: str) -> str:
 
 def clean_pdf_text(text):
     if not text: return ""
-    # Removed the problematic bullet point replacement here
     rep = {"–": "-", "—": "-", "“": "\"", "”": "\"", "‘": "'", "’": "'", "…": "..."}
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode('latin-1', 'replace').decode('latin-1')
@@ -74,7 +73,7 @@ st.markdown("""
     button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
     button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
-    button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
     div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
     .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
@@ -205,7 +204,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.multi_cell(0, 7, safe_text.replace('#', '').strip())
             pdf.ln(2)
             
-        # Underoverskrifter (H2/H3 - F.eks. "TRA 01 Transportstrategi")
+        # Underoverskrifter (H2/H3 - F.eks. "### Ledelse og styring (MAN 01)")
         elif safe_text.startswith('## ') or safe_text.startswith('### '):
             pdf.check_space(20)
             pdf.ln(5)
@@ -216,7 +215,7 @@ def create_full_report_pdf(name, client, content, maps):
             pdf.ln(1)
             
         else:
-            # MAGISK CORPORATE PARSER FOR STATUS/VURDERING
+            # MAGISK CORPORATE PARSER FOR STATUS/VURDERING (Fjernet innrykk!)
             kv_match = re.match(r'^(Status|Vurdering|Manglende evidens|Anbefaling|Ansvarlig|Problemstilling|Tiltak|Frist|Gjelder):\s*(.*)', safe_text, re.IGNORECASE)
             
             if kv_match:
@@ -224,26 +223,25 @@ def create_full_report_pdf(name, client, content, maps):
                 val = kv_match.group(2)
                 
                 pdf.check_space(15)
-                # Tegner en lekker, fet, gråblå "Label"
-                pdf.set_x(30)
+                # Tegner en lekker, fet, gråblå "Label" FLUKT MED VENSTREMARG (x=25)
+                pdf.set_x(25)
                 pdf.set_font('Helvetica', 'B', 8)
                 pdf.set_text_color(120, 140, 160)
                 pdf.cell(0, 5, key, 0, 1)
                 
-                # Tegner selve innholdet rent og ryddig under
-                pdf.set_x(30)
+                # Tegner selve innholdet rent og ryddig under (x=25)
+                pdf.set_x(25)
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
                 pdf.multi_cell(0, 5, val)
                 pdf.ln(2)
                 
-            # Gjør om stygge bindestreker til rene ASCII-streker med innrykk
+            # Gjør om stygge bindestreker til trygge ASCII-streker med et lite innrykk
             elif safe_text.startswith('- ') or safe_text.startswith('* '):
                 pdf.check_space(10)
-                pdf.set_x(30)
+                pdf.set_x(28) # Lite innrykk for lister
                 pdf.set_font('Helvetica', '', 10)
                 pdf.set_text_color(40, 40, 40)
-                # Using a safe, standard hyphen for bulleting to avoid Unicode errors
                 bullet_text = "- " + safe_text[2:]
                 pdf.multi_cell(0, 5, bullet_text)
                 pdf.ln(1)
@@ -370,7 +368,7 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         EKSTREMT VIKTIGE REGLER FOR FORMATERING:
         1. START RESPONSEN DIREKTE med overskriften "# 1. ANALYSEMETADATA". IKKE skriv noen form for introduksjon, hilsen eller bekreftelse.
         2. IKKE bruk tabeller (forbudt tegn: "|").
-        3. For BREEAM-emner, bruk alltid ### foran overskriften (f.eks. "### TRA 01 Transportstrategi").
+        3. BREEAM-koder som MAN (Management) og WST (Waste) er uforståelige for vanlige folk. Du MÅ skrive fulle norske navn i overskriftene. Eksempel: Bruk "### Ledelse og styring (MAN 01)" i stedet for bare "### MAN 01".
         4. For selve vurderingen under hvert emne, MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
         
         Status: [Din vurdering, f.eks Sannsynlig]
@@ -385,7 +383,7 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         # 1. ANALYSEMETADATA
         # 2. SERTIFISERINGSFORUTSETNINGER
         # 3. AMBISJONSBILDE (Er {ambisjonsniva} realistisk?)
-        # 4. KREDITT- / EMNEVURDERING (Husk å bruke ### for emnene og nøkkelordene Status:, Vurdering: og Manglende evidens: under hver av dem)
+        # 4. KREDITT- / EMNEVURDERING (Bruk ### for emnene med FULLE NORSKE NAVN, og nøkkelordene Status:, Vurdering: og Manglende evidens: under hver av dem)
         # 5. EVIDENSOVERSIKT (Bruk vanlige punktlister med bindestrek)
         # 6. GAP-ANALYSE
         # 7. HANDLINGSLAN NESTE 30/60/90 DAGER
