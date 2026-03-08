@@ -139,17 +139,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 4. SESSION STATE LOGIKK (Gjenoppretter fra harddisk hvis krasj) ---
+# --- 4. SESSION STATE LOGIKK (MED SELVHELBRENDENDE SIKKERHETSNETT) ---
+default_data = {
+    "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
+    "adresse": "", "kommune": "", "gnr": "", "bnr": "",
+    "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
+}
+
 if "project_data" not in st.session_state:
     if SSOT_FILE.exists():
         with open(SSOT_FILE, "r", encoding="utf-8") as f:
             st.session_state.project_data = json.load(f)
     else:
-        st.session_state.project_data = {
-            "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
-            "adresse": "", "kommune": "", "gnr": "", "bnr": "",
-            "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
-        }
+        st.session_state.project_data = default_data.copy()
+
+# SIKKERHETSNETT: Lapper sammen databasen hvis en annen modul har krasjet og fjernet nøkler
+for k, v in default_data.items():
+    if k not in st.session_state.project_data:
+        st.session_state.project_data[k] = v
 
 if "ai_drawing_analysis" not in st.session_state:
     st.session_state.ai_drawing_analysis = None
@@ -160,7 +167,7 @@ pd_state = st.session_state.project_data
 saved_image_count = len(list(IMG_DIR.glob("*.jpg")))
 
 fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta"]
-filled_fields = sum(1 for field in fields_to_check if bool(pd_state[field]))
+filled_fields = sum(1 for field in fields_to_check if bool(pd_state.get(field)))
 completeness = int((filled_fields / len(fields_to_check)) * 100)
 sync_status = "Draft" if completeness < 100 else "Ready"
 progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
@@ -233,8 +240,8 @@ render_html(f"""
         </div>
         <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
         
-        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{pd_state["last_sync"]}</span></div>
-        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if pd_state["adresse"] or pd_state["gnr"] else "Nei"}</span></div>
+        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{pd_state.get("last_sync", "Ikke synket enda")}</span></div>
+        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if pd_state.get("adresse") or pd_state.get("gnr") else "Nei"}</span></div>
     </div>
 </div>
 
@@ -243,13 +250,13 @@ render_html(f"""
         <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state["b_type"]}</div>
+        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state.get("b_type", "-")}</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Bruttoareal</div><div class="stat-value">{pd_state["bta"]} m²</div>
+        <div class="stat-title">Bruttoareal</div><div class="stat-value">{pd_state.get("bta", "0")} m²</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Etasjer</div><div class="stat-value">{pd_state["etasjer"]}</div>
+        <div class="stat-title">Etasjer</div><div class="stat-value">{pd_state.get("etasjer", "0")}</div>
     </div>
 </div>
 """)
@@ -264,15 +271,15 @@ with input_col:
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📌 01 Generelt</h4></div>""", unsafe_allow_html=True)
     
     land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
-    try: l_idx = land_options.index(pd_state["land"])
+    try: l_idx = land_options.index(pd_state.get("land", "Norge (TEK17 / Kartverket)"))
     except: l_idx = 0
     new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
     
     c1, c2 = st.columns(2)
-    new_p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"])
-    new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd_state["c_name"])
+    new_p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name", ""))
+    new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd_state.get("c_name", ""))
     
-    new_p_desc = st.text_area("Prosjektbeskrivelse / Narrativ", value=pd_state["p_desc"], height=140)
+    new_p_desc = st.text_area("Prosjektbeskrivelse / Narrativ", value=pd_state.get("p_desc", ""), height=140)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🌍 02 Lokasjon & API</h4></div>""", unsafe_allow_html=True)
@@ -280,12 +287,12 @@ with input_col:
     if "Norge" in new_land: st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
         
     c3, c4 = st.columns(2)
-    new_adresse = c3.text_input("Gateadresse", value=pd_state["adresse"])
-    new_kommune = c4.text_input("Kommune", value=pd_state["kommune"])
+    new_adresse = c3.text_input("Gateadresse", value=pd_state.get("adresse", ""))
+    new_kommune = c4.text_input("Kommune", value=pd_state.get("kommune", ""))
     
     c5, c6 = st.columns(2)
-    new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd_state["gnr"])
-    new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state["bnr"])
+    new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd_state.get("gnr", ""))
+    new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state.get("bnr", ""))
     
     if "Norge" in new_land:
         if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
@@ -305,12 +312,12 @@ with input_col:
     
     c7, c8, c9 = st.columns(3)
     type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
-    try: default_idx = type_options.index(pd_state["b_type"])
+    try: default_idx = type_options.index(pd_state.get("b_type", "Næring / Kontor"))
     except: default_idx = 1
     
     new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
-    new_etasjer = c8.number_input("Antall Etasjer", value=int(pd_state["etasjer"]), min_value=1)
-    new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd_state["bta"]), step=100)
+    new_etasjer = c8.number_input("Antall Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
+    new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
 
     # --- NY SEKSJON: TEGNINGSGRUNNLAG OG AI-KVALITETSSIKRING ---
     st.markdown("<br>", unsafe_allow_html=True)
@@ -368,7 +375,6 @@ with input_col:
                             
                             res = model.generate_content([qa_prompt] + images_for_qa)
                             
-                            # SIKKERHETSNETT: Håndterer tomme svar (finish_reason 1) uten å krasje
                             try:
                                 analysis_result = res.text
                             except ValueError:
@@ -388,7 +394,6 @@ with input_col:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     
-    # --- NY, SIKKER LAGRINGS-LOGIKK (Med bypass hvis AI-en hikker) ---
     mangler_qa = uploaded_drawings and set(current_file_names) != set(st.session_state.analyzed_file_names)
     
     if mangler_qa:
@@ -397,11 +402,9 @@ with input_col:
     else:
         if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
             
-            # Slett gamle bilder fra harddisken
             for p in IMG_DIR.glob("*.jpg"):
                 p.unlink()
 
-            # Lagre nye bilder fysisk på harddisken
             if uploaded_drawings:
                 try:
                     img_count = 0
@@ -445,14 +448,14 @@ with snap_col:
         <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
         <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
         <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
-        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state["land"].split(' ')[0]}</div></div>
-        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state["p_name"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state["c_name"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd_state["adresse"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd_state["kommune"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state["gnr"], pd_state["bnr"]])) or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state["b_type"]}</div></div>
-        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum</div><div class="snap-val">{pd_state["etasjer"]} etg / {pd_state["bta"]} m²</div></div>
+        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state.get("land", "-").split(' ')[0]}</div></div>
+        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state.get("p_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state.get("c_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd_state.get("adresse") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd_state.get("kommune") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state.get("gnr"), pd_state.get("bnr")])) or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum</div><div class="snap-val">{pd_state.get("etasjer", "-")} etg / {pd_state.get("bta", "-")} m²</div></div>
         <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
     </div>
     """)
