@@ -56,7 +56,7 @@ def go_home():
     if main_file:
         st.switch_page(main_file)
 
-# --- 2. PREMIUM CSS (MED FIKSEDE INPUTS) ---
+# --- 2. PREMIUM CSS ---
 st.markdown(
     """
 <style>
@@ -91,70 +91,22 @@ st.markdown(
         color: var(--accent) !important; transform: translateY(-2px) !important;
     }
 
-    /* ----------------------------------------------------
-       INPUT-FELT DESIGN (FIKSET FOR HVITE BOKSER OG MØRK TEKST)
-       ---------------------------------------------------- */
-    /* Mørklegger selve rammen rundt alle inputs */
-    div[data-baseweb="base-input"],
-    div[data-baseweb="select"] > div,
-    .stTextArea > div > div > div {
-        background-color: #0d1824 !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important;
-        border-radius: 8px !important;
+    /* INPUT-FELT DESIGN */
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div {
+        background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
     }
-    
-    /* Gjør skrivefeltet gjennomsiktig så rammen bak vises, og tvinger hvit tekst */
-    .stTextInput input, .stNumberInput input, .stTextArea textarea {
-        background-color: transparent !important; 
-        color: #ffffff !important; 
-        -webkit-text-fill-color: #ffffff !important;
-        border: none !important;
-        box-shadow: none !important;
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * {
+        background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important;
     }
-    
-    /* Fjerner Streamlits standard blå fokus-ramme fra innmaten... */
-    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-        border: none !important;
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
+    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within {
+        border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
     }
-    
-    /* ...og flytter den til den ytre rammen for et rent design */
-    div[data-baseweb="base-input"]:focus-within,
-    div[data-baseweb="select"] > div:focus-within,
-    .stTextArea > div > div > div:focus-within {
-        border-color: var(--accent) !important; 
-        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
-    }
-
-    /* Tvinger all tekst i dropdown-menyen til å bli hvit! */
-    div[data-baseweb="select"] * { 
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-    }
-    
-    /* Hviser dropdown-menyen som popper opp i mørke farger */
-    ul[data-baseweb="menu"] {
-        background-color: #0d1824 !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important;
-    }
-    ul[data-baseweb="menu"] li {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-    }
-    ul[data-baseweb="menu"] li:hover {
-        background-color: rgba(56, 194, 201, 0.1) !important;
-    }
-    
-    /* Farger "Press Enter to apply"-teksten lys grå */
-    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span {
-        color: #9fb0c3 !important;
-        -webkit-text-fill-color: #9fb0c3 !important;
-    }
-
-    /* Overskrifter over input-feltene */
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
-        color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important;
-    }
-    /* ---------------------------------------------------- */
+    ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
+    ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
+    ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
+    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
 
     /* FILOPPLASTER */
     [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
@@ -219,7 +171,6 @@ if "project_data" not in st.session_state:
         "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
     }
 
-# Minnet for tegninger og AI-QA
 if "ai_drawing_analysis" not in st.session_state:
     st.session_state.ai_drawing_analysis = None
 if "project_images" not in st.session_state:
@@ -396,6 +347,7 @@ with input_col:
                     images_for_qa = []
                     try:
                         for f in uploaded_drawings: 
+                            f.seek(0)
                             if f.name.lower().endswith('pdf'):
                                 if fitz is None: 
                                     st.error("Mangler PDF-modul (PyMuPDF).")
@@ -411,7 +363,7 @@ with input_col:
                                 images_for_qa.append(img)
                                 
                         if images_for_qa:
-                            # LAGRE BILDENE I MINNET FOR FAGMODULENE!
+                            # LAGRE BILDENE I MINNET FOR FAGMODULENE NÅR MAN KLIKKER QA!
                             st.session_state.project_images = images_for_qa
                             
                             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -452,13 +404,37 @@ with input_col:
     
     # HOVEDKNAPPEN FOR Å LAGRE!
     if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
+        
+        # VIKTIG OPPDATERING: Sørger for at tegninger blir lagret i minnet selv om man ikke trykket på QA-knappen!
+        if uploaded_drawings:
+            images_to_save = []
+            try:
+                for f in uploaded_drawings: 
+                    f.seek(0) # Spoler tilbake filen i tilfelle den ble lest tidligere
+                    if f.name.lower().endswith('pdf'):
+                        if fitz is not None: 
+                            doc = fitz.open(stream=f.read(), filetype="pdf")
+                            for page_num in range(min(4, len(doc))):
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                images_to_save.append(img)
+                            doc.close() 
+                    else:
+                        img = Image.open(f).convert("RGB")
+                        images_to_save.append(img)
+                st.session_state.project_images = images_to_save
+            except Exception as e:
+                st.warning(f"Kunne ikke konvertere alle filer: {e}")
+        else:
+            st.session_state.project_images = []
+            
         st.session_state.project_data.update({
             "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
             "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
             "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta,
             "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
         })
-        st.success(f"✅ Data lagret! Prosjektet '{new_p_name}' er nå synkronisert med alle AI-moduler.")
+        st.success(f"✅ Data og tegninger er lagret! Prosjektet '{new_p_name}' er nå synkronisert med alle AI-moduler.")
         time.sleep(1)
         st.rerun()
 
@@ -476,6 +452,7 @@ with snap_col:
         <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state["gnr"], pd_state["bnr"]])) or '-'}</div></div>
         <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state["b_type"]}</div></div>
         <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum</div><div class="snap-val">{pd_state["etasjer"]} etg / {pd_state["bta"]} m²</div></div>
+        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger i minnet</div><div class="snap-val" style="color:#7ee081;">{len(st.session_state.project_images)} sider klare</div></div>
     </div>
     """)
 
