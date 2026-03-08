@@ -310,12 +310,10 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
 
         fokus_str = ", ".join(fokusomrader) if fokusomrader else "Standard TEK-krav."
 
-        # --- DEN STRENGE SENIOR MOP-PROMPTEN ---
+        # --- DEN NYE, STRAMME MOP-PROMPTEN (UTEN TABELL-KRØLL) ---
         prompt_text = f"""
-        DU ER BUILTLY MOP AGENT.
-        
-        Rolle:
-        Du er en senior miljørådgiver for bygge-, anleggs- og eiendomsprosjekter i Norge. Du utarbeider miljøprogram og miljøoppfølgingsplan (MOP) for ytre miljø.
+        Du er en senior miljørådgiver for bygge-, anleggs- og eiendomsprosjekter i Norge. 
+        Din oppgave er utelukkende å skrive selve innholdet til en Miljøoppfølgingsplan (MOP) for ytre miljø.
 
         PROSJEKT: {p_name} ({pd_state.get('b_type')}, {pd_state.get('bta')} m2).
         LOKASJON: {adresse}.
@@ -329,20 +327,20 @@ if st.button("🚀 Generer Miljøoppfølgingsplan (MOP)", type="primary", use_co
         "{pd_state.get('p_desc', '')}"
         
         MANDAT:
-        Lag en prosjektspesifikk miljøoppfølgingsplan som oversetter prosjektets miljømål til konkrete tiltak, ansvar, kontrollpunkter og oppfølgingsrutiner.
+        Lag en prosjektspesifikk miljøoppfølgingsplan som oversetter prosjektets miljømål til konkrete tiltak, ansvar, kontrollpunkter og oppfølgingsrutiner. 
+        Identifiser faktiske miljøpåvirkninger basert på de vedlagte tegningene (f.eks. sårbar natur i nærheten, trang tomt som gir mye trafikk).
         
-        REGLER:
-        - Skill mellom overordnede mål og operative tiltak.
-        - Strukturer innholdet slik at det kan brukes aktivt i prosjektstyring.
-        - Identifiser faktiske miljøpåvirkninger basert på de vedlagte tegningene (f.eks. sårbar natur i nærheten, trang tomt som gir mye trafikk).
-        - Ikke bruk generisk ESG-prat. Vær konkret (KPI-er, kontrollmetode, ansvarlig rolle).
+        EKSTREMT VIKTIGE REGLER FOR FORMATERING:
+        1. START RESPONSEN DIREKTE med overskriften "# 1. DOKUMENTINFORMASJON". 
+        2. IKKE skriv noen form for introduksjon, hilsen, eller "Her er planen". Ikke forklar hvem du er.
+        3. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. Bruk vanlige, strukturerte lister med punktum eller kolon i stedet.
         
         STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
-        # 1. DOKUMENTINFORMASJON
+        # 1. DOKUMENTINFORMASJON (Bruk en enkel liste, f.eks: "Prosjektnavn: {p_name}")
         # 2. PROSJEKTBESKRIVELSE OG MILJØKONTEKST (Hva bygger vi og hvor ligger det miljømessige risikobildet?)
         # 3. MILJØMÅL (Overordnede og spesifikke mål)
         # 4. MILJØASPEKTREGISTER (Hvilke temaer er mest relevante for akkurat denne tomten/dette bygget?)
-        # 5. TILTAKSPLAN / MOP-KJERNE (Dette er hoveddelen. Opprett konkrete tiltak for de valgte målene. Angi indikator, ansvar, kontroll og avvikshåndtering)
+        # 5. TILTAKSPLAN / MOP-KJERNE (Dette er hoveddelen. Opprett konkrete tiltak for de valgte målene. Angi indikator, ansvar og kontroll som en strukturert liste, IKKE tabell)
         # 6. OPPFØLGING OG RAPPORTERING (Møtestruktur og inspeksjoner)
         # 7. ÅPNE AVKLARINGER
         # 8. HANDLINGSLISTE FOR NESTE FASE
