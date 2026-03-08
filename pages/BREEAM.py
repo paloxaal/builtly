@@ -176,7 +176,7 @@ def create_full_report_pdf(name, client, content, maps):
     toc = [
         "1. ANALYSEMETADATA", "2. SERTIFISERINGSFORUTSETNINGER", 
         "3. AMBISJONSBILDE", "4. KREDITT- / EMNEVURDERING", 
-        "5. EVIDENSMATRISE", "6. GAP-ANALYSE",
+        "5. EVIDENSOVERSIKT", "6. GAP-ANALYSE",
         "7. HANDLINGSLAN NESTE 30/60/90 DAGER", "8. SPØRSMÅL TIL AP ELLER REVISOR"
     ]
     for t in toc:
@@ -301,12 +301,9 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN STRENGE SENIOR BREEAM-PROMPTEN ---
+        # --- DEN NYE, STRENGE BREEAM-PROMPTEN (UTEN TABELL ELLER INTRO) ---
         prompt_text = f"""
-        DU ER BUILTLY BREEAM AGENT.
-        
-        Rolle:
-        Du er en senior BREEAM-NOR fagassistent som støtter prosjektteam, BREEAM-AP og revisor med pre-analyse, kredittvurdering, evidensoversikt, gap-analyse og handlingsplan.
+        Du er en senior BREEAM-NOR fagassistent. Din oppgave er utelukkende å skrive innholdet i et BREEAM-NOR Pre-assessment notat.
 
         PROSJEKT: {p_name} ({pd_state.get('b_type')}, {pd_state.get('bta')} m2).
         LOKASJON: {adresse}.
@@ -319,19 +316,22 @@ if st.button("🚀 Kjør BREEAM Pre-assessment", type="primary", use_container_w
         KUNDENS PROSJEKTBESKRIVELSE: 
         "{pd_state.get('p_desc', '')}"
         
-        MANDAT & REGLER:
-        - Lag en prosjektspesifikk BREEAM-analyse.
+        EKSTREMT VIKTIGE REGLER FOR FORMATERING:
+        1. START RESPONSEN DIREKTE med overskriften "# 1. ANALYSEMETADATA". IKKE skriv noen form for introduksjon, hilsen eller bekreftelse på rollen din.
+        2. IKKE bruk Markdown-tabeller (forbudt tegn: "|"). PDF-generatoren vår støtter ikke tabeller. Bruk vanlige, strukturerte lister med strek (-) for Evidensoversikten.
+        3. For lister og oppramsing, bruk alltid bindestrek (-) slik at det blir pene kulepunkter.
+        
+        MANDAT & FAGLIG FOKUS:
         - Identifiser sannsynlig relevante emner (Energi, Materialer, Transport, Avfall osv).
         - Ikke lov poeng du ikke har bevis for! Vurder status som sannsynlig, usikkert eller ikke dokumentert.
-        - Ikke overstyr revisor eller AP. Du er en assistent.
         - Studer de vedlagte bildene/tegningene. Finner du tegn til at tomtens økologi, tilkomst eller dagslysforhold vil være problematisk for å oppnå {ambisjonsniva}? Påpek det!
         
         STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, formater med # eller ##):
-        # 1. ANALYSEMETADATA
+        # 1. ANALYSEMETADATA (List opp prosjektnavn, byggtype, lokasjon, areal med bindestrek)
         # 2. SERTIFISERINGSFORUTSETNINGER
         # 3. AMBISJONSBILDE (Er {ambisjonsniva} realistisk?)
-        # 4. KREDITT- / EMNEVURDERING (Gå gjennom de viktigste BREEAM-emnene)
-        # 5. EVIDENSMATRISE (Hvem må levere hva, og når?)
+        # 4. KREDITT- / EMNEVURDERING (Bruk underoverskrifter for emnene, f.eks ## HEA 04)
+        # 5. EVIDENSOVERSIKT (IKKE bruk tabell. Lag en liste: "- [Kreditt]: [Hva må leveres] - [Ansvarlig]")
         # 6. GAP-ANALYSE (Kritiske mangler og showstoppere)
         # 7. HANDLINGSLAN NESTE 30/60/90 DAGER
         # 8. SPØRSMÅL SOM MÅ LØFTES TIL AP ELLER REVISOR
