@@ -99,7 +99,7 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
     if api_key and (adr_clean or kom_clean):
         query = f"{adr_clean}, {kom_clean}, Norway"
         safe_query = urllib.parse.quote(query)
-        # Henter et 600x600 satellittbilde med zoom nivå 19 (nært)
+        # Henter et 600x600 satellittbilde
         url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
         try:
             r2 = requests.get(url_gmaps, timeout=5)
@@ -109,7 +109,7 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
         
     return None, "Kunne ikke hente kart fra verken Kartverket eller Google."
 
-# --- 3. PREMIUM CSS ---
+# --- 3. PREMIUM CSS (MED FIKS FOR HVITE EXPANDERS) ---
 st.markdown("""
 <style>
     :root {
@@ -142,9 +142,20 @@ st.markdown("""
     div[data-baseweb="select"] span { color: #ffffff !important; }
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
     
-    div[data-testid="stExpander"] { background: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; margin-bottom: 1rem !important; }
+    /* --- DEN NYE AGGRESSIVE FIKSEN FOR HVITE EXPANDER-BOKSER --- */
+    div[data-testid="stExpander"] details, 
+    div[data-testid="stExpander"] details summary, 
+    div[data-testid="stExpander"] { 
+        background-color: #0c1520 !important; 
+        color: #f5f7fb !important; 
+        border-radius: 12px !important; 
+    }
+    div[data-testid="stExpander"] details summary:hover { background-color: rgba(255,255,255,0.03) !important; }
+    div[data-testid="stExpander"] details summary p { color: #f5f7fb !important; font-weight: 650 !important; }
+    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
     div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
     div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
+    /* ----------------------------------------------------------- */
     
     [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
     [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
@@ -153,8 +164,6 @@ st.markdown("""
     
     [data-testid="stAlert"] { background-color: rgba(56, 189, 248, 0.05) !important; border: 1px solid rgba(56, 189, 248, 0.2) !important; border-radius: 12px !important; }
     [data-testid="stAlert"] * { color: #f5f7fb !important; }
-    
-    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-xl); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,7 +175,7 @@ if "brann_kart" not in st.session_state:
 if "brann_kart_kilde" not in st.session_state:
     st.session_state.brann_kart_kilde = None
 
-# --- 4. GUARDRAIL LÅS MED NATIVE STREAMLIT NAVIGATION ---
+# --- 4. GUARDRAIL LÅS ---
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
@@ -179,7 +188,7 @@ if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
             st.switch_page(find_page("Project"))
     st.stop()
 
-# --- 5. HEADER (MED NATIVE TILBAKEKNAPP) ---
+# --- 5. HEADER ---
 top_l, top_r = st.columns([4, 1])
 with top_l:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
