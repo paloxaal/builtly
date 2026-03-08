@@ -109,7 +109,7 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
         
     return None, "Kunne ikke hente kart fra verken Kartverket eller Google."
 
-# --- 3. PREMIUM CSS (MED FIKS FOR HVITE EXPANDERS) ---
+# --- 3. PREMIUM CSS ---
 st.markdown("""
 <style>
     :root {
@@ -136,10 +136,38 @@ st.markdown("""
     button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
     button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
-    .stTextInput input, .stNumberInput input, .stTextArea textarea { background-color: #0d1824 !important; color: #ffffff !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important; }
-    div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    div[data-baseweb="select"] span { color: #ffffff !important; }
+    /* --- FIKSEDE INPUT-FELT FRA PROJECT SETUP --- */
+    div[data-baseweb="base-input"],
+    div[data-baseweb="select"] > div,
+    .stTextArea > div > div > div {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 8px !important;
+    }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea {
+        background-color: transparent !important; 
+        color: #ffffff !important; 
+        -webkit-text-fill-color: #ffffff !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    .stSelectbox div[data-baseweb="select"] * {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+        border: none !important;
+    }
+    div[data-baseweb="base-input"]:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    .stTextArea > div > div > div:focus-within {
+        border-color: var(--accent) !important; 
+        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
+    }
+    ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
+    ul[data-baseweb="menu"] li { color: #ffffff !important; }
+    ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
+    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
     
     /* --- DEN NYE AGGRESSIVE FIKSEN FOR HVITE EXPANDER-BOKSER --- */
@@ -174,6 +202,8 @@ if "brann_kart" not in st.session_state:
     st.session_state.brann_kart = None
 if "brann_kart_kilde" not in st.session_state:
     st.session_state.brann_kart_kilde = None
+if "project_images" not in st.session_state:
+    st.session_state.project_images = []
 
 # --- 4. GUARDRAIL LÅS ---
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
@@ -309,6 +339,9 @@ with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True):
     st.info("Viktig: For å vurdere brannsmitte og tilkomst for brannbil, trenger AI-en et kart. Du kan hente det automatisk eller laste opp situasjonsplan manuelt.")
     
+    if len(st.session_state.project_images) > 0:
+        st.success(f"📎 Fant {len(st.session_state.project_images)} tegninger i prosjektets fellesminne (Project Setup). Disse inkluderes automatisk i vurderingen!")
+    
     col_map1, col_map2 = st.columns(2)
     with col_map1:
         if st.button("🌐 Hent kart automatisk for prosjektet", type="secondary"):
@@ -325,8 +358,8 @@ with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True
             st.image(st.session_state.brann_kart, caption=f"Kilde: {st.session_state.brann_kart_kilde}", use_container_width=True)
 
     with col_map2:
-        st.markdown("##### Plantegninger og Snitt")
-        files = st.file_uploader("Last opp plantegninger/snitt (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+        st.markdown("##### Supplerende Plantegninger / Branntegninger")
+        files = st.file_uploader("Last opp ekstra tegninger (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -335,6 +368,10 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
     images_for_ai = [] 
     if st.session_state.brann_kart:
         images_for_ai.append(st.session_state.brann_kart)
+    
+    # Inkluderer fellesbilder fra Project Setup (hvis de eksisterer og vi legger til den koden senere)
+    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
+        images_for_ai.extend(st.session_state.project_images)
         
     if files:
         with st.spinner("📐 Henter ut bilder fra dokumentene for visuell AI-analyse..."):
