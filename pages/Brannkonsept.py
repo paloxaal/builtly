@@ -61,12 +61,10 @@ def ironclad_text_formatter(text):
 
 # --- 2. KARTVERKET + GOOGLE MAPS FALLBACK MOTOR ---
 def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
-    """Prøver Kartverket først. Hvis det feiler, bruker vi Google Maps Static API."""
     nord, ost = None, None
     adr_clean = adresse.replace(',', '').strip() if adresse else ""
     kom_clean = kommune.replace(',', '').strip() if kommune else ""
     
-    # 1. Prøv Kartverket (Finn koordinater)
     queries = []
     if adr_clean and kom_clean: queries.append(f"{adr_clean} {kom_clean}")
     if adr_clean: queries.append(adr_clean)
@@ -84,7 +82,6 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
                 break
         except: pass
         
-    # 1B. Hent bilde fra Kartverket WMS
     if nord and ost:
         min_x, max_x = float(ost) - 150, float(ost) + 150
         min_y, max_y = float(nord) - 150, float(nord) + 150
@@ -95,11 +92,9 @@ def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
                 return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Kartverket (Norge i Bilder)"
         except: pass
         
-    # 2. FALLBACK TIL GOOGLE MAPS SATELLITE
     if api_key and (adr_clean or kom_clean):
         query = f"{adr_clean}, {kom_clean}, Norway"
         safe_query = urllib.parse.quote(query)
-        # Henter et 600x600 satellittbilde
         url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
         try:
             r2 = requests.get(url_gmaps, timeout=5)
@@ -127,75 +122,39 @@ st.markdown("""
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-left { display: flex; align-items: center; gap: 0.9rem; min-width: 0; }
     .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem; padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025); border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important; }
-    .top-link { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important; font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent; white-space: nowrap; }
-    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
-    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
     
     button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
     button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
     button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
 
-    /* --- FIKSEDE INPUT-FELT FRA PROJECT SETUP --- */
-    div[data-baseweb="base-input"],
-    div[data-baseweb="select"] > div,
-    .stTextArea > div > div > div {
-        background-color: #0d1824 !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important;
-        border-radius: 8px !important;
-    }
-    .stTextInput input, .stNumberInput input, .stTextArea textarea {
-        background-color: transparent !important; 
-        color: #ffffff !important; 
-        -webkit-text-fill-color: #ffffff !important;
-        border: none !important;
-        box-shadow: none !important;
-    }
-    .stSelectbox div[data-baseweb="select"] * {
-        color: #ffffff !important;
-        -webkit-text-fill-color: #ffffff !important;
-    }
-    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
-        border: none !important;
-    }
-    div[data-baseweb="base-input"]:focus-within,
-    div[data-baseweb="select"] > div:focus-within,
-    .stTextArea > div > div > div:focus-within {
-        border-color: var(--accent) !important; 
-        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
-    }
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
+    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important; }
     ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
-    ul[data-baseweb="menu"] li { color: #ffffff !important; }
+    ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
     ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
     div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
     
-    /* --- DEN NYE AGGRESSIVE FIKSEN FOR HVITE EXPANDER-BOKSER --- */
-    div[data-testid="stExpander"] details, 
-    div[data-testid="stExpander"] details summary, 
-    div[data-testid="stExpander"] { 
-        background-color: #0c1520 !important; 
-        color: #f5f7fb !important; 
-        border-radius: 12px !important; 
-    }
+    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
     div[data-testid="stExpander"] details summary:hover { background-color: rgba(255,255,255,0.03) !important; }
     div[data-testid="stExpander"] details summary p { color: #f5f7fb !important; font-weight: 650 !important; }
     div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
     div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
     div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
-    /* ----------------------------------------------------------- */
     
     [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
     [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
     [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
     [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
-    
-    [data-testid="stAlert"] { background-color: rgba(56, 189, 248, 0.05) !important; border: 1px solid rgba(56, 189, 248, 0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.05) !important; border: 1px solid rgba(56, 194, 201, 0.2) !important; border-radius: 12px !important; }
     [data-testid="stAlert"] * { color: #f5f7fb !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Sikkerhetsnett for minnet
+# --- 4. SESSION STATE / SIKKERHET ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "brann_kart" not in st.session_state:
@@ -205,14 +164,10 @@ if "brann_kart_kilde" not in st.session_state:
 if "project_images" not in st.session_state:
     st.session_state.project_images = []
 
-# --- 4. GUARDRAIL LÅS ---
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    
     st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    st.info("AI-agenten trenger kontekst om bygget for å kunne generere en faglig og juridisk korrekt rapport.")
-    
     if find_page("Project"):
         if st.button("⚙️ Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
@@ -232,7 +187,7 @@ st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; 
 
 pd_state = st.session_state.project_data
 
-# --- DYNAMISK PDF MOTOR ---
+# --- DYNAMISK PDF MOTOR (OPPGRADERT FOR BILDER) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
@@ -292,19 +247,23 @@ def create_full_report_pdf(name, client, content, maps):
                     pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
             except Exception: pdf.ln(2)
 
-    if maps:
+    # --- FORBEDRET VEDLEGGS-MOTOR (Tvinger JPEG for å unngå gjennomsiktighets-krasj i FPDF) ---
+    if maps and len(maps) > 0:
         pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT TEGNINGSGRUNNLAG", 0, 1)
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                m.save(tmp.name, format="PNG")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                # Lagrer som JPEG i stedet for PNG (løser 99% av bildefeil i FPDF)
+                m.convert("RGB").save(tmp.name, format="JPEG")
+                img_w = 160
                 img_h = 160 * (m.height / m.width)
                 if img_h > 240: 
                     img_h = 240
                     img_w = 240 * (m.width / m.height)
-                    pdf.image(tmp.name, x=105-(img_w/2), y=pdf.get_y(), w=img_w)
-                else:
-                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                
+                # Sentrerer bildet
+                x_pos = 105 - (img_w / 2)
+                pdf.image(tmp.name, x=x_pos, y=pdf.get_y(), w=img_w)
                 
                 pdf.set_y(pdf.get_y() + img_h + 5)
                 pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
@@ -323,7 +282,6 @@ with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
     p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
     c_name = c2.text_input("Oppdragsgiver", value=pd_state["c_name"], disabled=True)
     adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
-    st.info(f"📍 **Regelverk:** Agenten vil bruke **{pd_state.get('land', 'Norge')}** som juridisk utgangspunkt.")
 
 with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
     c3, c4, c5 = st.columns(3)
@@ -339,9 +297,11 @@ with st.expander("2. Bygningsdata & Klassifisering", expanded=True):
 with st.expander("3. Visuelt Grunnlag (Kart, Arkitektur & Snitt)", expanded=True):
     st.info("Viktig: For å vurdere brannsmitte og tilkomst for brannbil, trenger AI-en et kart. Du kan hente det automatisk eller laste opp situasjonsplan manuelt.")
     
-    if len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} tegninger i prosjektets fellesminne (Project Setup). Disse inkluderes automatisk i vurderingen!")
-    
+    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
+        st.success(f"📎 Fant {len(st.session_state.project_images)} tegninger i prosjektets fellesminne (fra Project Setup). Disse inkluderes automatisk i vurderingen!")
+    else:
+        st.warning("Ingen tegninger funnet i fellesminnet. Du må enten laste opp under, eller gå tilbake til Project Setup og trykke 'Lagre' etter at filene er lastet inn.")
+        
     col_map1, col_map2 = st.columns(2)
     with col_map1:
         if st.button("🌐 Hent kart automatisk for prosjektet", type="secondary"):
@@ -369,29 +329,31 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
     if st.session_state.brann_kart:
         images_for_ai.append(st.session_state.brann_kart)
     
-    # Inkluderer fellesbilder fra Project Setup (hvis de eksisterer og vi legger til den koden senere)
     if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
         images_for_ai.extend(st.session_state.project_images)
         
     if files:
-        with st.spinner("📐 Henter ut bilder fra dokumentene for visuell AI-analyse..."):
+        with st.spinner("📐 Leser ut supplerende lokale filer..."):
             try:
                 for f in files: 
+                    f.seek(0)
                     if f.name.lower().endswith('pdf'):
-                        if fitz is None: st.stop()
-                        doc = fitz.open(stream=f.read(), filetype="pdf")
-                        for page_num in range(min(3, len(doc))): 
-                            pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                            img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-                            images_for_ai.append(img)
-                        doc.close() 
+                        if fitz is not None: 
+                            doc = fitz.open(stream=f.read(), filetype="pdf")
+                            for page_num in range(min(4, len(doc))): 
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                images_for_ai.append(img)
+                            doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
                 
-    with st.spinner(f"🤖 Analyserer tegninger og genererer brannstrategi etter {pd_state.get('land', 'Norge')}..."):
+    st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til AI-en og vedleggs-generatoren for analyse.")
+                
+    with st.spinner(f"🤖 Analyserer {len(images_for_ai)} tegninger og genererer brannstrategi etter {pd_state.get('land', 'Norge')}..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -404,36 +366,32 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
         
         model = genai.GenerativeModel(valgt_modell)
 
+        # --- DEN NYE "SENIOR-PISKEN" (STRENG PROMPT) ---
         prompt_text = f"""
-        Du er Builtly RIBr AI, en senior branningeniør.
-        Skriv et formelt "Brannteknisk konsept" for prosjektet:
+        Du er Builtly RIBr AI, en ledende, autoritær og svært grundig senior branningeniør.
+        Din oppgave er å skrive et detaljert "Brannteknisk konsept" for prosjektet:
         
         PROSJEKT: {p_name} ({bta} m2, {etasjer} etasjer). 
         KLASSIFISERING: {risikoklasse}, {brannklasse}.
         LOKASJON: {adresse}.
-        
         REGELVERK: {pd_state.get('land', 'Norge (TEK17)')}
-        Skriv på språket og referer til det nasjonale regelverket som er angitt over.
         
         KUNDENS PROSJEKTBESKRIVELSE: 
         "{pd_state['p_desc']}"
         
-        VISUELL ANALYSE AV VEDLAGTE TEGNINGER OG KART:
-        Jeg har lagt ved bilder av bygget og et kart over lokasjonen. Din oppgave er å NØYE analysere disse:
-        1. Innvendig (Plantegninger): Identifiser trapperom, rømningsveier og rominndeling. Hvor bør branncellene gå?
-        2. Utvendig (Kart/Utomhus): Vurder hvor brannbiler kan kjøre inn og plasseres (oppstillingsplass / tilkomst for innsatsmannskaper). Vurder rømning ut på terreng til sikkert sted. Vurder også avstand til nabobygg med tanke på smittefare.
+        EKSTREMT VIKTIG INSTRUKKS FOR VISUELL ANALYSE:
+        Jeg har lagt ved opptil flere tegninger (plantegninger, snitt, fasade, kart). 
+        Du MÅ aktivt bevise for meg at du har lest disse tegningene. 
+        Du skal eksplisitt skrive setninger som: "Av plantegningen fremgår det at...", eller "Situasjonsplanen viser en avstand til nabobygg på ca...".
+        Hvis noe er uklart eller mangler på tegningene (f.eks. rømning ut i terreng), skal du kritisere det!
         
-        INSTRUKSER (Skriv formelt, teknisk tungt og presist, min 1200 ord):
-        - Flett inn dine spesifikke observasjoner fra bildene i teksten.
-        - Ta spesifikt stilling til adkomst for brannvesen og brannsmitte i rapporten basert på kartet.
-        
-        STRUKTUR (Bruk KUN disse nøyaktige overskriftene):
+        STRUKTUR (Bruk KUN disse nøyaktige overskriftene, og skriv mye innhold under hver):
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. PROSJEKTBESKRIVELSE OG REGELVERK
         # 3. KLASSIFISERING
-        # 4. RØMNINGSFORHOLD OG LEDESYSTEM (Beskriv innvendig rømning og rømning på terreng basert på tegning)
-        # 5. BRANNCELLER OG BRANNMOTSTAND (Inkluder avstand til nabobygg/smittefare)
-        # 6. SLOKKEUTSTYR OG REDNINGSBRANNVESEN (Beskriv tilkomstvei og oppstillingsplass for brannbil basert på situasjonsplan)
+        # 4. RØMNINGSFORHOLD OG LEDESYSTEM (Her MÅ du ha et eget avsnitt kalt 'Visuelle observasjoner fra plantegning' hvor du beskriver rømningen du ser på bildene)
+        # 5. BRANNCELLER OG BRANNMOTSTAND (Gjør konkrete vurderinger basert på layout og snitt)
+        # 6. SLOKKEUTSTYR OG REDNINGSBRANNVESEN (Gjør konkrete vurderinger basert på situasjonsplan og kart, nevn smittefare!)
         """
         
         prompt_parts = [prompt_text] + images_for_ai
@@ -441,10 +399,9 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
         try:
             res = model.generate_content(prompt_parts)
             
-            with st.spinner("Kompilerer Brann-PDF og sender til QA-kø..."):
+            with st.spinner("Kompilerer Brann-PDF og fletter inn tegninger som vedlegg..."):
                 pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
                 
-                # --- HER ER MAGIEN! VI LAGRER PDF-EN TIL QA-KØEN I MINNET! ---
                 if "pending_reviews" not in st.session_state:
                     st.session_state.pending_reviews = {}
                 if "review_counter" not in st.session_state:
@@ -463,10 +420,9 @@ if st.button("🚀 Kjør Brannteknisk Analyse (RIBr)", type="primary", use_conta
                     "pdf_bytes": pdf_data
                 }
                 
-                # Lagrer PDF-en lokalt i session state for nedlastingsknappen
                 st.session_state.generated_brann_pdf = pdf_data
                 st.session_state.generated_brann_filename = f"Builtly_RIBr_{p_name}.pdf"
-                st.rerun() # Tvinger oppdatering så knappene vises
+                st.rerun() 
                 
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
