@@ -16,10 +16,214 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# 2) PAGE MAP & SMART SØKER
+# 2) SESSION STATE (Hjernen)
+# -------------------------------------------------
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {
+        "land": "UK (Building Regs)", "p_name": "", "c_name": "", "p_desc": "",
+        "adresse": "", "kommune": "", "gnr": "", "bnr": "",
+        "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500,
+        "last_sync": "Ikke synket enda"
+    }
+
+# SETTER ENGELSK SOM STANDARD SPRÅK
+if "app_lang" not in st.session_state:
+    st.session_state.app_lang = "🇬🇧 English"
+
+
+# -------------------------------------------------
+# 3) OVERSETTELSESMOTOR (i18n)
+# -------------------------------------------------
+TEXTS = {
+    "🇬🇧 English": {
+        "rule_set": "UK (Building Regs)",
+        "eyebrow": "The Builtly Loop",
+        "title": "From <span class='accent'>raw data</span> to signed deliverables.",
+        "subtitle": "Builtly is the customer portal for compliance-grade engineering delivery. Upload project inputs, let the platform validate, calculate, check rules, and draft the report - before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.",
+        "btn_setup": "Open project setup",
+        "btn_qa": "Open QA and sign-off",
+        "proofs": ["Rules-first", "Audit trail", "PDF + DOCX output", "Digital sign-off", "Structured QA workflow"],
+        
+        "why_kicker": "Why Builtly?",
+        "stat1_v": "80-90%", "stat1_t": "Reduction in manual drafting", "stat1_d": "and repetitive report production",
+        "stat2_v": "Junior + Senior", "stat2_t": "Human-in-the-loop QA", "stat2_d": "technical control, and digital sign-off",
+        "stat3_v": "PDF + DOCX", "stat3_t": "Complete report packages", "stat3_d": "with appendices and traceability",
+        "stat4_v": "Full Traceability", "stat4_t": "End-to-end logging", "stat4_d": "Inputs, versions, compliance checks logged",
+
+        "sec_val_kicker": "Core value proposition", "sec_val_title": "Portal first. Modules under.", "sec_val_sub": "Builtly is not a collection of disconnected tools. It is one secure portal for project setup, data ingestion, validation, AI processing, review, sign-off, and final delivery.",
+        "val_1_t": "Client portal", "val_1_d": "Project creation, input uploads, missing-data follow-up, document generation, and audit trails in one workflow.",
+        "val_2_t": "Rules-first AI", "val_2_d": "AI operates inside explicit regulatory guardrails, checklists, and standard templates - not as free-form guesswork.",
+        "val_3_t": "QA and sign-off", "val_3_d": "Junior engineers validate plausibility and structure. Senior engineers provide final review and certification.",
+        "val_4_t": "Scalable delivery", "val_4_d": "Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.",
+
+        "sec_loop_kicker": "Workflow", "sec_loop_title": "The Builtly Loop", "sec_loop_sub": "A deterministic four-step workflow that takes you from fragmented project data to a reviewable, compliant engineering package.",
+        "loop_1_t": "Input", "loop_1_d": "Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.",
+        "loop_2_t": "Validate and analyze", "loop_2_d": "The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable.",
+        "loop_3_t": "QA and sign-off", "loop_3_d": "Junior review, senior technical assessment, and digital sign-off - with version control throughout.",
+        "loop_4_t": "Output", "loop_4_d": "Finalized documentation package in standard formats, ready for municipal submission or execution.",
+
+        "mod_sec_kicker": "Modules and roadmap", "mod_sec_title": "Specialized agents in one platform", "mod_sec_sub": "Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.",
+        "mod_sec1": "Available now and pilot-ready", "mod_sec2": "Roadmap and early-phase tools",
+
+        "m_geo_t": "GEO / ENV - Ground Conditions", "m_geo_d": "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", "m_geo_in": "XLSX / CSV / PDF + plans", "m_geo_out": "Environmental action plan, logs", "m_geo_btn": "Open Geo & Env",
+        "m_aku_t": "ACOUSTICS - Noise & Sound", "m_aku_d": "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", "m_aku_in": "Noise map + floor plan", "m_aku_out": "Acoustics report, facade evaluation", "m_aku_btn": "Open Acoustics",
+        "m_brann_t": "FIRE - Safety Strategy", "m_brann_d": "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", "m_brann_in": "Architectural drawings + class", "m_brann_out": "Fire strategy concept, deviations", "m_brann_btn": "Open Fire Strategy",
+        "m_ark_t": "ARK - Feasibility Study", "m_ark_d": "Site screening, volume analysis, and early-phase decision support before full engineering design.", "m_ark_in": "Site data, zoning plans", "m_ark_out": "Feasibility report, utilization metrics", "m_ark_btn": "Open Feasibility",
+        "m_rib_t": "STRUC - Structural Concept", "m_rib_d": "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", "m_rib_in": "Models, load parameters", "m_rib_out": "Concept memo, grid layouts", "m_rib_btn": "Open Structural",
+        "m_tra_t": "TRAFFIC - Mobility", "m_tra_d": "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", "m_tra_in": "Site plans, local norms", "m_tra_out": "Traffic memo, mobility plan", "m_tra_btn": "Open Traffic & Mobility",
+        "btn_dev": "In development",
+
+        "cta_title": "Start with one project. Upload raw data. Get a reviewable package.",
+        "cta_desc": "Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.",
+        "cta_btn1": "Start in project setup", "cta_btn2": "Go to review queue",
+
+        "footer_copy": "AI-assisted engineering. Human-verified. Compliance-grade.",
+        "footer_meta": "© 2026 Builtly Engineering AS. All rights reserved."
+    },
+    "🇳🇴 Norsk": {
+        "rule_set": "Norge (TEK17 / Kartverket)",
+        "eyebrow": "Builtly Arbeidsflyt",
+        "title": "Fra <span class='accent'>rådata</span> til signerte leveranser.",
+        "subtitle": "Builtly er kundeportalen for teknisk rådgivning. Last opp prosjektdata, la plattformen validere, beregne og utarbeide rapporten – før junior-QA og senior-signering gjør pakken klar til innsending.",
+        "btn_setup": "Åpne Project Setup",
+        "btn_qa": "Åpne QA & Sign-off",
+        "proofs": ["Regelstyrt AI", "Revisjonsspor", "PDF + DOCX format", "Digital signering", "Strukturert QA-flyt"],
+        
+        "why_kicker": "Hvorfor Builtly?",
+        "stat1_v": "80-90%", "stat1_t": "Tidsbesparelse", "stat1_d": "på manuell rapportskriving og repetitivt arbeid",
+        "stat2_v": "Junior + Senior", "stat2_t": "Kvalitetssikring", "stat2_d": "teknisk kontroll og digital signering",
+        "stat3_v": "PDF + DOCX", "stat3_t": "Komplette leveranser", "stat3_d": "med vedlegg og full sporbarhet",
+        "stat4_v": "Full Sporbarhet", "stat4_t": "Loggføring fra start til slutt", "stat4_d": "Input, regel-sjekk og signaturer lagres",
+
+        "sec_val_kicker": "Kjerneprodukt", "sec_val_title": "Portal først. Moduler under.", "sec_val_sub": "Builtly er ikke en samling løsrevne verktøy. Det er én felles plattform for prosjektoppsett, data-innsamling, AI-prosessering, QA og endelig leveranse.",
+        "val_1_t": "Kundeportal", "val_1_d": "Opprett prosjekt, last opp data og generer dokumenter i én sømløs flyt.",
+        "val_2_t": "Regelstyrt AI", "val_2_d": "AI-en opererer innenfor eksplisitte lovkrav, sjekklister og standardmaler.",
+        "val_3_t": "QA og signering", "val_3_d": "Junior validerer struktur og logikk. Senior gir endelig teknisk godkjenning.",
+        "val_4_t": "Skalerbarhet", "val_4_d": "Nye fagfelt plugges direkte inn i samme dokumentasjons- og rammeverk.",
+
+        "sec_loop_kicker": "Arbeidsflyt", "sec_loop_title": "Slik fungerer Builtly", "sec_loop_sub": "En deterministisk fire-stegs prosess som tar deg fra fragmentert prosjektdata til en ferdig teknisk pakke.",
+        "loop_1_t": "Input", "loop_1_d": "Last opp PDF, IFC-modeller, Excel-filer og prosjektdata på ett sted.",
+        "loop_2_t": "Valider og analyser", "loop_2_d": "Plattformen validerer data, sjekker regelverk, gjør beregninger og skriver utkastet.",
+        "loop_3_t": "QA og signering", "loop_3_d": "Junior-sjekk, teknisk vurdering fra senior og digital signering – med versjonskontroll.",
+        "loop_4_t": "Output", "loop_4_d": "Ferdig dokumentpakke i standardformater, klar for innsending eller utførelse.",
+
+        "mod_sec_kicker": "Moduler og veikart", "mod_sec_title": "Spesialiserte agenter i én plattform", "mod_sec_sub": "Hver modul har egen logikk og fagspesifikke regler, men deler samme portal og kvalitetskontroll.",
+        "mod_sec1": "Tilgjengelig nå (Klar for pilot)", "mod_sec2": "Veikart og tidligfase",
+
+        "m_geo_t": "GEO / MILJØ - Grunnforhold", "m_geo_d": "Analyserer lab-filer og graveceller. Klassifiserer masser og utarbeider tiltaksplaner.", "m_geo_in": "XLSX / CSV / PDF + Kart", "m_geo_out": "Tiltaksplan, logg", "m_geo_btn": "Åpne Geo & Miljø",
+        "m_aku_t": "AKUSTIKK - Støy & Lyd", "m_aku_d": "Leser støykart og plantegninger. Genererer krav til fasade, vinduer og skjerming.", "m_aku_in": "Støykart + Plan", "m_aku_out": "Akustikkrapport", "m_aku_btn": "Åpne Akustikk",
+        "m_brann_t": "BRANN - Sikkerhetskonsept", "m_brann_d": "Vurderer arkitektur mot forskrifter. Definerer rømning og brannceller.", "m_brann_in": "Tegninger + Klasse", "m_brann_out": "Brannkonsept (RIBr)", "m_brann_btn": "Åpne Brannkonsept",
+        "m_ark_t": "ARK - Mulighetsstudie", "m_ark_d": "Tomteanalyse, volumvurdering og beslutningsgrunnlag for tidligfase.", "m_ark_in": "Regulering + Tomt", "m_ark_out": "Mulighetsstudie", "m_ark_btn": "Åpne Feasibility",
+        "m_rib_t": "RIB - Konstruksjon", "m_rib_d": "Konseptuelle struktursjekker, spennvidder og integrasjon med klimagass.", "m_rib_in": "Modeller, Laster", "m_rib_out": "Konseptnotat RIB", "m_rib_btn": "Åpne Konstruksjon",
+        "m_tra_t": "TRAFIKK - Mobilitet", "m_tra_d": "Trafikkgenerering, parkering, adkomstlogikk og myke trafikanter for tidligfase.", "m_tra_in": "Situasjonsplan", "m_tra_out": "Trafikknotat", "m_tra_btn": "Åpne Trafikk & Mobilitet",
+        "btn_dev": "Under utvikling",
+
+        "cta_title": "Start med ett prosjekt. Last opp data. Få en ferdig pakke.",
+        "cta_desc": "Builtly kombinerer selvbetjening for kunder, deterministiske sjekker, AI-utkast og formell signering i én portal.",
+        "cta_btn1": "Start i Project Setup", "cta_btn2": "Gå til kontroll-kø",
+
+        "footer_copy": "AI-assisted engineering. Human-verified. Compliance-grade.",
+        "footer_meta": "© 2026 Builtly Engineering AS. All rights reserved."
+    },
+    "🇸🇪 Svensk": {
+        "rule_set": "Sverige (BBR)",
+        "eyebrow": "Builtly Arbetsflöde",
+        "title": "Från <span class='accent'>rådata</span> till signerade leveranser.",
+        "subtitle": "Builtly är kundportalen för teknisk rådgivning. Ladda upp projektdata, låt AI validera och utarbeta rapporten – innan junior-QA och senior-signering gör det klart för inlämning.",
+        "btn_setup": "Starta i Project Setup",
+        "btn_qa": "Öppna QA & Sign-off",
+        "proofs": ["Regelstyrd AI", "Revisionsspår", "PDF + DOCX", "Digital Signering", "Strukturerad QA"],
+        
+        "why_kicker": "Varför Builtly?",
+        "stat1_v": "80-90%", "stat1_t": "Tidsbesparing", "stat1_d": "Minskning av manuellt rapportarbete",
+        "stat2_v": "Junior + Senior", "stat2_t": "Kvalitetssäkring", "stat2_d": "Digital QA och signering av ansvarig",
+        "stat3_v": "PDF + DOCX", "stat3_t": "Kompletta rapporter", "stat3_d": "Med bilagor och spårbarhet",
+        "stat4_v": "Spårbarhet", "stat4_t": "Dokumentation", "stat4_d": "Versionshantering från input till PDF",
+
+        "sec_val_kicker": "Kärnprodukt", "sec_val_title": "Portal först. Moduler under.", "sec_val_sub": "Builtly är ett gemensamt system för projektuppsättning, AI-bearbetning och kvalitetssäkring.",
+        "val_1_t": "Kundportal", "val_1_d": "Upprättande, input och dokumentgenerering i ett flöde.",
+        "val_2_t": "Regelstyrd AI", "val_2_d": "AI arbetar inom strikta lagkrav och mallar.",
+        "val_3_t": "QA och Signering", "val_3_d": "Junior validerar. Senior ger slutgiltigt godkännande.",
+        "val_4_t": "Skalbarhet", "val_4_d": "Nya discipliner ansluts till samma ramverk.",
+
+        "sec_loop_kicker": "Arbetsflöde", "sec_loop_title": "Så fungerar Builtly", "sec_loop_sub": "En deterministisk fyra-stegs process.",
+        "loop_1_t": "Input", "loop_1_d": "Ladda upp filer och data på ett ställe.",
+        "loop_2_t": "AI Analys", "loop_2_d": "Plattformen kontrollerar regelverk och skriver utkast.",
+        "loop_3_t": "QA & Signering", "loop_3_d": "Granskning och digital signering.",
+        "loop_4_t": "Output", "loop_4_d": "Färdigt dokument för bygglov.",
+
+        "mod_sec_kicker": "Moduler", "mod_sec_title": "Specialiserade agenter", "mod_sec_sub": "Varje modul delar samma portal och kvalitetskontroll.",
+        "mod_sec1": "Tillgängligt nu", "mod_sec2": "Roadmap och tidiga skeden",
+
+        "m_geo_t": "GEO / MILJÖ", "m_geo_d": "Analyserar labbfiler. Klassificerar massor och åtgärdsplaner.", "m_geo_in": "XLSX / CSV + Karta", "m_geo_out": "Åtgärdsplan", "m_geo_btn": "Öppna Geo",
+        "m_aku_t": "AKUSTIK", "m_aku_d": "Läser bullerkartor och planritningar. Genererar fasadkrav.", "m_aku_in": "Bullerkarta + Plan", "m_aku_out": "Akustikrapport", "m_aku_btn": "Öppna Akustik",
+        "m_brann_t": "BRAND - Koncept", "m_brann_d": "Utvärderar arkitektur mot BBR. Definierar brandceller.", "m_brann_in": "Ritningar + Klass", "m_brann_out": "Brandkoncept", "m_brann_btn": "Öppna Brand",
+        "m_ark_t": "ARK - Förstudie", "m_ark_d": "Tomtanalys och volymbedömning för tidiga skeden.", "m_ark_in": "Detaljplan + Tomt", "m_ark_out": "Förstudie", "m_ark_btn": "Öppna ARK",
+        "m_rib_t": "Konstruktion", "m_rib_d": "Konceptuella strukturkontroller och byggfysik.", "m_rib_in": "Sektion + Laster", "m_rib_out": "Koncept-PM", "m_rib_btn": "Öppna Konstruktion",
+        "m_tra_t": "TRAFIK", "m_tra_d": "Trafikalstring, parkering och logistik.", "m_tra_in": "Situationsplan", "m_tra_out": "Trafik-PM", "m_tra_btn": "Öppna Trafik",
+        "btn_dev": "Under utveckling",
+
+        "cta_title": "Starta ett projekt. Ladda upp data.",
+        "cta_desc": "Builtly kombinerar insamling, AI och professionell signering i en portal.",
+        "cta_btn1": "Starta i Project Setup", "cta_btn2": "Gå till QA-kö",
+
+        "footer_copy": "AI-assisted engineering. Human-verified. Compliance-grade.",
+        "footer_meta": "© 2026 Builtly Engineering AS. Alla rättigheter förbehållna."
+    },
+    "🇩🇰 Dansk": {
+        "rule_set": "Danmark (BR18)",
+        "eyebrow": "Builtly Workflow",
+        "title": "Fra <span class='accent'>rådata</span> til underskrevne leverancer.",
+        "subtitle": "Builtly er kundeportalen for teknisk rådgivning. Upload projektdata, lad AI validere og udarbejde rapporten – før junior-QA og senior-signering gør det klar.",
+        "btn_setup": "Start i Project Setup",
+        "btn_qa": "Åbn QA & Sign-off",
+        "proofs": ["Regelstyret AI", "Revisionsspor", "PDF + DOCX", "Digital Signatur", "Struktureret QA"],
+        
+        "why_kicker": "Hvorfor Builtly?",
+        "stat1_v": "80-90%", "stat1_t": "Tidsbesparelse", "stat1_d": "Reduktion af manuelt rapportarbejde",
+        "stat2_v": "Junior + Senior", "stat2_t": "Kvalitetssikring", "stat2_d": "Digital QA og signering af fagansvarlig",
+        "stat3_v": "PDF + DOCX", "stat3_t": "Komplette rapporter", "stat3_d": "Med bilag og sporbarhed",
+        "stat4_v": "Sporbarhed", "stat4_t": "Dokumentation", "stat4_d": "Versionskontrol fra input til PDF",
+
+        "sec_val_kicker": "Kerneprodukt", "sec_val_title": "Portal først. Moduler under.", "sec_val_sub": "Builtly er et fælles system for projektoprettelse, AI-behandling og kvalitetssikring.",
+        "val_1_t": "Kundeportal", "val_1_d": "Oprettelse, input og dokumentgenerering i ét flow.",
+        "val_2_t": "Regelstyret AI", "val_2_d": "AI opererer inden for eksplicitte lovkrav og skabeloner.",
+        "val_3_t": "QA og Signering", "val_3_d": "Junior validerer. Senior giver endelig godkendelse.",
+        "val_4_t": "Skalerbarhed", "val_4_d": "Nye fagområder tilsluttes samme rammeværk.",
+
+        "sec_loop_kicker": "Arbejdsgang", "sec_loop_title": "Sådan fungerer Builtly", "sec_loop_sub": "En deterministisk fire-trins proces.",
+        "loop_1_t": "Input", "loop_1_d": "Upload filer og data ét sted.",
+        "loop_2_t": "AI Analyse", "loop_2_d": "Platformen tjekker bygningsreglement og skriver udkast.",
+        "loop_3_t": "QA & Signering", "loop_3_d": "Gennemgang og digital signatur.",
+        "loop_4_t": "Output", "loop_4_d": "Færdigt dokument til byggetilladelse.",
+
+        "mod_sec_kicker": "Moduler", "mod_sec_title": "Specialiserede agenter", "mod_sec_sub": "Hvert modul deler samme portal og kvalitetskontrol.",
+        "mod_sec1": "Tilgængelig nu", "mod_sec2": "Roadmap",
+
+        "m_geo_t": "GEO / MILJØ", "m_geo_d": "Analyserer lab-filer og udarbejder miljøhandlingsplaner.", "m_geo_in": "XLSX / CSV + Kort", "m_geo_out": "Handlingsplan", "m_geo_btn": "Åbn Geo",
+        "m_aku_t": "AKUSTIK", "m_aku_d": "Læser støjkort. Genererer krav til facade.", "m_aku_in": "Støjkort + Plan", "m_aku_out": "Akustikrapport", "m_aku_btn": "Åbn Akustik",
+        "m_brann_t": "BRAND", "m_brann_d": "Vurderer arkitektur mod BR18. Definerer brandceller.", "m_brann_in": "Tegninger + Klasse", "m_brann_out": "Brandstrategi", "m_brann_btn": "Åbn Brand",
+        "m_ark_t": "ARK - Studie", "m_ark_d": "Grundanlyse og volumen for tidlige faser.", "m_ark_in": "Lokalplan + Grund", "m_ark_out": "Mulighedsstudie", "m_ark_btn": "Åbn ARK",
+        "m_rib_t": "Konstruktion", "m_rib_d": "Konceptuelle strukturtjek og bygningsfysik.", "m_rib_in": "Snit + Laster", "m_rib_out": "Konceptnotat", "m_rib_btn": "Åbn Konstruktion",
+        "m_tra_t": "TRAFIK", "m_tra_d": "Trafikgenerering og parkering.", "m_tra_in": "Situationsplan", "m_tra_out": "Trafiknotat", "m_tra_btn": "Åbn Trafik",
+        "btn_dev": "Under udvikling",
+
+        "cta_title": "Start et projekt. Upload data.",
+        "cta_desc": "Builtly kombinerer dataindsamling, AI og faglig signering i én portal.",
+        "cta_btn1": "Start i Project Setup", "cta_btn2": "Gå til QA",
+
+        "footer_copy": "AI-assisted engineering. Human-verified. Compliance-grade.",
+        "footer_meta": "© 2026 Builtly Engineering AS. Alle rettigheder forbeholdes."
+    }
+}
+
+# Hent tekster for valgt språk
+lang = TEXTS.get(st.session_state.app_lang, TEXTS["🇬🇧 English"])
+
+# -------------------------------------------------
+# 4) PAGE MAP & SMART SØKER
 # -------------------------------------------------
 def find_page(base_name: str) -> str:
-    # Løser Linux-problemet med store/små bokstaver
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
         if p.exists():
@@ -32,13 +236,13 @@ PAGES = {
     "konstruksjon": find_page("Konstruksjon"),
     "brann": find_page("Brannkonsept"),
     "akustikk": find_page("Akustikk"),
-    "trafikk": find_page("Trafikk"), # Løser Trafikk-linken!
+    "trafikk": find_page("Trafikk"),
     "project": find_page("Project"),
     "review": find_page("Review"),
 }
 
 # -------------------------------------------------
-# 3) HELPERS & ANTI-BUG RENDERER
+# 5) HELPERS & ANTI-BUG RENDERER
 # -------------------------------------------------
 def page_exists(page_path: str) -> bool:
     return Path(page_path).exists()
@@ -64,7 +268,6 @@ def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
         return f'<a href="{href}" target="_self" class="hero-action {kind}">{label}</a>'
     return f'<span class="hero-action {kind} disabled">{label}</span>'
 
-# DETTE ER MAGIEN: Fjerner linjeskift så Streamlit aldri lager "hvite kodebokser" av HTML-en vår.
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
@@ -83,7 +286,7 @@ def module_card(
     action_html = (
         f'<a href="{href}" target="_self" class="module-cta">{cta_label}</a>'
         if href
-        else '<span class="module-cta disabled">In development</span>'
+        else f'<span class="module-cta disabled">{lang["btn_dev"]}</span>'
     )
 
     return f"""
@@ -115,7 +318,7 @@ def logo_data_uri() -> str:
     return ""
 
 # -------------------------------------------------
-# 4) CSS (Uendret - Denne satt perfekt!)
+# 6) CSS (Din eksakte styling + Selectbox)
 # -------------------------------------------------
 st.markdown(
     """
@@ -173,7 +376,6 @@ st.markdown(
         align-items: center;
         justify-content: space-between;
         gap: 1.25rem;
-        margin-bottom: 2rem;
     }
 
     .brand-left {
@@ -199,57 +401,17 @@ st.markdown(
         letter-spacing: -0.02em;
     }
 
-    .topbar-right {
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 0.65rem;
-        padding: 0.35rem;
-        border-radius: 18px;
-        background: rgba(255,255,255,0.025);
-        border: 1px solid rgba(120,145,170,0.12);
-        flex-wrap: nowrap !important;
+    /* NATIVE SELECTBOX STYLING - Byttet ut knappene */
+    [data-testid="stSelectbox"] { margin-bottom: 0 !important; width: 150px; float: right; }
+    [data-testid="stSelectbox"] label { display: none !important; }
+    [data-testid="stSelectbox"] > div > div {
+        background-color: rgba(255,255,255,0.05) !important; color: #f5f7fb !important;
+        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important;
+        min-height: 42px !important; padding-left: 10px !important; cursor: pointer;
     }
+    [data-testid="stSelectbox"] > div > div:hover { border-color: var(--accent) !important; background-color: rgba(255,255,255,0.08) !important; }
 
-    .top-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 42px;
-        padding: 0.72rem 1.2rem;
-        border-radius: 12px;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.93rem;
-        transition: all 0.2s ease;
-        border: 1px solid transparent;
-        white-space: nowrap;
-    }
 
-    .top-link.ghost {
-        color: var(--soft) !important;
-        background: rgba(255,255,255,0.04);
-        border-color: rgba(120,145,170,0.18);
-    }
-
-    .top-link.ghost:hover {
-        color: #ffffff !important;
-        border-color: rgba(56,194,201,0.38);
-        background: rgba(255,255,255,0.06);
-    }
-
-    .top-link.primary {
-        color: #041018 !important;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border-color: rgba(120,220,225,0.45);
-    }
-
-    .top-link.primary:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 10px 24px rgba(56,194,201,0.18);
-    }
-
-    .top-link.disabled,
     .hero-action.disabled,
     .module-cta.disabled {
         opacity: 0.45;
@@ -711,10 +873,6 @@ st.markdown(
             flex-direction: column;
             align-items: flex-start;
         }
-        .topbar-right {
-            width: 100%;
-            justify-content: flex-start;
-        }
         .trust-grid, .loop-grid, .module-grid {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
@@ -731,16 +889,6 @@ st.markdown(
         .hero-title {
             max-width: none;
         }
-        .topbar-right {
-            flex-direction: row;
-            width: 100%;
-            gap: 0.5rem;
-        }
-        .top-link {
-            flex: 1;
-            padding: 0.7rem 0.4rem;
-            font-size: 0.85rem;
-        }
         .brand-logo {
             height: 60px;
         }
@@ -751,31 +899,33 @@ st.markdown(
 )
 
 # -------------------------------------------------
-# 5) TOP BAR
+# 7) TOP BAR (Kun Logo og Språk)
 # -------------------------------------------------
-logo_html = ""
-logo_uri = logo_data_uri()
-if logo_uri:
-    logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />'
-else:
-    logo_html = '<div class="brand-name">Builtly</div>'
+top_l, top_r = st.columns([5, 1])
 
-render_html(
-    f"""
-    <div class="top-shell">
-        <div class="brand-left">
-            {logo_html}
-        </div>
-        <div class="topbar-right">
-            {top_link('project', 'Project Setup', 'ghost')}
-            {top_link('review', 'QA & Sign-off', 'primary')}
-        </div>
-    </div>
-    """
-)
+with top_l:
+    logo_uri = logo_data_uri()
+    logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
+    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left">{logo_html}</div></div>')
+
+with top_r:
+    # Skyver dropdown-menyen ned slik at den flukter med logoen
+    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
+    valgt_språk = st.selectbox(
+        "Språk", 
+        list(TEXTS.keys()), 
+        index=list(TEXTS.keys()).index(st.session_state.app_lang)
+    )
+    # Oppdaterer minnet automatisk hvis språket endres!
+    if valgt_språk != st.session_state.app_lang:
+        st.session_state.app_lang = valgt_språk
+        st.session_state.project_data["land"] = TEXTS[valgt_språk]["rule_set"]
+        st.rerun()
+
+st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 6) HERO (50/50 Symmetri)
+# 8) HERO (50/50 Symmetri)
 # -------------------------------------------------
 left, right = st.columns([1.2, 0.8], gap="large")
 
@@ -783,23 +933,15 @@ with left:
     render_html(
         f"""
         <div class="hero">
-            <div class="eyebrow">The Builtly Loop</div>
-            <h1 class="hero-title">From <span class="accent">raw data</span> to signed deliverables.</h1>
-            <div class="hero-subtitle">
-                Builtly is the customer portal for compliance-grade engineering delivery.
-                Upload project inputs, let the platform validate, calculate, check rules, and draft the report -
-                before junior QA and senior sign-off turn it into a consistent, traceable, submission-ready package.
-            </div>
+            <div class="eyebrow">{lang['eyebrow']}</div>
+            <h1 class="hero-title">{lang['title']}</h1>
+            <div class="hero-subtitle">{lang['subtitle']}</div>
             <div class="hero-actions">
-                {hero_action('project', 'Open project setup', 'primary')}
-                {hero_action('review', 'Open QA and sign-off', 'secondary')}
+                {hero_action('project', lang['btn_setup'], 'primary')}
+                {hero_action('review', lang['btn_qa'], 'secondary')}
             </div>
             <div class="proof-strip">
-                <div class="proof-chip">Rules-first</div>
-                <div class="proof-chip">Audit trail</div>
-                <div class="proof-chip">PDF + DOCX output</div>
-                <div class="proof-chip">Digital sign-off</div>
-                <div class="proof-chip">Structured QA workflow</div>
+                {"".join([f'<div class="proof-chip">{p}</div>' for p in lang['proofs']])}
             </div>
         </div>
         """
@@ -807,220 +949,115 @@ with left:
 
 with right:
     render_html(
-        """
+        f"""
         <div class="hero-panel">
-            <div class="panel-title">Why Builtly?</div>
+            <div class="panel-title">{lang['why_kicker']}</div>
             <div class="mini-stat">
-                <div class="mini-stat-value">80-90%</div>
-                <div class="mini-stat-label">Reduction in manual drafting and repetitive report production</div>
+                <div class="mini-stat-value">{lang['stat1_v']}</div>
+                <div class="mini-stat-label"><b>{lang['stat1_t']}</b><br>{lang['stat1_d']}</div>
             </div>
             <div class="mini-stat">
-                <div class="mini-stat-value">Junior + Senior</div>
-                <div class="mini-stat-label">Human-in-the-loop QA, technical control, and digital sign-off</div>
+                <div class="mini-stat-value">{lang['stat2_v']}</div>
+                <div class="mini-stat-label"><b>{lang['stat2_t']}</b><br>{lang['stat2_d']}</div>
             </div>
             <div class="mini-stat">
-                <div class="mini-stat-value">PDF + DOCX</div>
-                <div class="mini-stat-label">Complete report packages with appendices and traceability</div>
+                <div class="mini-stat-value">{lang['stat3_v']}</div>
+                <div class="mini-stat-label"><b>{lang['stat3_t']}</b><br>{lang['stat3_d']}</div>
             </div>
             <div class="mini-stat" style="margin-bottom:0;">
-                <div class="mini-stat-value">Full Traceability</div>
-                <div class="mini-stat-label">Inputs, versions, compliance checks, and signatures logged end-to-end</div>
+                <div class="mini-stat-value">{lang['stat4_v']}</div>
+                <div class="mini-stat-label"><b>{lang['stat4_t']}</b><br>{lang['stat4_d']}</div>
             </div>
         </div>
         """
     )
 
 # -------------------------------------------------
-# 7) VALUE PROPOSITION
+# 9) KJERNEPRODUKT & ARBEIDSFLYT
 # -------------------------------------------------
 render_html(
-    """
+    f"""
     <div class="section-head">
-        <div class="section-kicker">Core value proposition</div>
-        <h2 class="section-title">Portal first. Modules under.</h2>
-        <div class="section-subtitle">
-            Builtly is not a collection of disconnected tools. It is one secure portal for project setup,
-            data ingestion, validation, AI processing, review, sign-off, and final delivery.
-        </div>
+        <div class="section-kicker">{lang['sec_val_kicker']}</div>
+        <h2 class="section-title">{lang['sec_val_title']}</h2>
+        <div class="section-subtitle">{lang['sec_val_sub']}</div>
     </div>
     <div class="trust-grid">
-        <div class="trust-card">
-            <div class="trust-title">Client portal</div>
-            <div class="trust-desc">Project creation, input uploads, missing-data follow-up, document generation, and audit trails in one workflow.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">Rules-first AI</div>
-            <div class="trust-desc">AI operates inside explicit regulatory guardrails, checklists, and standard templates - not as free-form guesswork.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">QA and sign-off</div>
-            <div class="trust-desc">Junior engineers validate plausibility and structure. Senior engineers provide final review and certification.</div>
-        </div>
-        <div class="trust-card">
-            <div class="trust-title">Scalable delivery</div>
-            <div class="trust-desc">Each new engineering discipline plugs into the same validation, documentation, and sign-off backbone.</div>
-        </div>
+        <div class="trust-card"><div class="trust-title">{lang['val_1_t']}</div><div class="trust-desc">{lang['val_1_d']}</div></div>
+        <div class="trust-card"><div class="trust-title">{lang['val_2_t']}</div><div class="trust-desc">{lang['val_2_d']}</div></div>
+        <div class="trust-card"><div class="trust-title">{lang['val_3_t']}</div><div class="trust-desc">{lang['val_3_d']}</div></div>
+        <div class="trust-card"><div class="trust-title">{lang['val_4_t']}</div><div class="trust-desc">{lang['val_4_d']}</div></div>
     </div>
-    """
-)
 
-# -------------------------------------------------
-# 8) WORKFLOW
-# -------------------------------------------------
-render_html(
-    """
     <div class="section-head">
-        <div class="section-kicker">Workflow</div>
-        <h2 class="section-title">The Builtly Loop</h2>
-        <div class="section-subtitle">
-            A deterministic four-step workflow that takes you from fragmented project data to a reviewable,
-            compliant engineering package.
-        </div>
+        <div class="section-kicker">{lang['sec_loop_kicker']}</div>
+        <h2 class="section-title">{lang['sec_loop_title']}</h2>
+        <div class="section-subtitle">{lang['sec_loop_sub']}</div>
     </div>
     <div class="loop-grid">
-        <div class="loop-card">
-            <div class="loop-number">1</div>
-            <div class="loop-title">Input</div>
-            <div class="loop-desc">Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">2</div>
-            <div class="loop-title">Validate and analyze</div>
-            <div class="loop-desc">The platform parses, validates, applies local rule checks, performs calculations, and drafts the deliverable.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">3</div>
-            <div class="loop-title">QA and sign-off</div>
-            <div class="loop-desc">Junior review, senior technical assessment, and digital sign-off - with version control throughout.</div>
-        </div>
-        <div class="loop-card">
-            <div class="loop-number">4</div>
-            <div class="loop-title">Output</div>
-            <div class="loop-desc">Finalized documentation package in standard formats, ready for municipal submission or execution.</div>
-        </div>
+        <div class="loop-card"><div class="loop-number">1</div><div class="loop-title">{lang['loop_1_t']}</div><div class="loop-desc">{lang['loop_1_d']}</div></div>
+        <div class="loop-card"><div class="loop-number">2</div><div class="loop-title">{lang['loop_2_t']}</div><div class="loop-desc">{lang['loop_2_d']}</div></div>
+        <div class="loop-card"><div class="loop-number">3</div><div class="loop-title">{lang['loop_3_t']}</div><div class="loop-desc">{lang['loop_3_d']}</div></div>
+        <div class="loop-card"><div class="loop-number">4</div><div class="loop-title">{lang['loop_4_t']}</div><div class="loop-desc">{lang['loop_4_d']}</div></div>
     </div>
     """
 )
 
 # -------------------------------------------------
-# 9) MODULES
+# 10) MODULER
 # -------------------------------------------------
 available_cards = [
-    module_card(
-        "geo",
-        "🌍",
-        "Phase 1 - Priority",
-        "badge-priority",
-        "GEO / ENV - Ground Conditions",
-        "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.",
-        "XLSX / CSV / PDF + plans",
-        "Environmental action plan, logs",
-        "Open Geo & Env",
-    ),
-    module_card(
-        "akustikk",
-        "🔊",
-        "Phase 2",
-        "badge-phase2",
-        "ACOUSTICS - Noise & Sound",
-        "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.",
-        "Noise map + floor plan",
-        "Acoustics report, facade evaluation",
-        "Open Acoustics",
-    ),
-    module_card(
-        "brann",
-        "🔥",
-        "Phase 2",
-        "badge-phase2",
-        "FIRE - Safety Strategy",
-        "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.",
-        "Architectural drawings + class",
-        "Fire strategy concept, deviations",
-        "Open Fire Strategy",
-    ),
+    module_card("geo", "🌍", "Phase 1 - Priority", "badge-priority", lang["m_geo_t"], lang["m_geo_d"], lang["m_geo_in"], lang["m_geo_out"], lang["m_geo_btn"]),
+    module_card("akustikk", "🔊", "Phase 2", "badge-phase2", lang["m_aku_t"], lang["m_aku_d"], lang["m_aku_in"], lang["m_aku_out"], lang["m_aku_btn"]),
+    module_card("brann", "🔥", "Phase 2", "badge-phase2", lang["m_brann_t"], lang["m_brann_d"], lang["m_brann_in"], lang["m_brann_out"], lang["m_brann_btn"])
 ]
 
 roadmap_cards = [
-    module_card(
-        "mulighetsstudie",
-        "📐",
-        "Early phase",
-        "badge-early",
-        "ARK - Feasibility Study",
-        "Site screening, volume analysis, and early-phase decision support before full engineering design.",
-        "Site data, zoning plans",
-        "Feasibility report, utilization metrics",
-        "Open Feasibility",
-    ),
-    module_card(
-        "konstruksjon",
-        "🏢",
-        "Roadmap",
-        "badge-roadmap",
-        "STRUC - Structural Concept",
-        "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.",
-        "Models, load parameters",
-        "Concept memo, grid layouts",
-        "Open Structural",
-    ),
-    module_card(
-        "trafikk",
-        "🚦",
-        "Roadmap",
-        "badge-roadmap",
-        "TRAFFIC - Mobility",
-        "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.",
-        "Site plans, local norms",
-        "Traffic memo, mobility plan",
-        "Open Traffic & Mobility",
-    ),
+    module_card("mulighetsstudie", "📐", "Early phase", "badge-early", lang["m_ark_t"], lang["m_ark_d"], lang["m_ark_in"], lang["m_ark_out"], lang["m_ark_btn"]),
+    module_card("konstruksjon", "🏢", "Roadmap", "badge-roadmap", lang["m_rib_t"], lang["m_rib_d"], lang["m_rib_in"], lang["m_rib_out"], lang["m_rib_btn"]),
+    module_card("trafikk", "🚦", "Roadmap", "badge-roadmap", lang["m_tra_t"], lang["m_tra_d"], lang["m_tra_in"], lang["m_tra_out"], lang["m_tra_btn"])
 ]
 
 render_html(
     f"""
     <div class="section-head">
-        <div class="section-kicker">Modules and roadmap</div>
-        <h2 class="section-title">Specialized agents in one platform</h2>
-        <div class="section-subtitle">
-            Each module has dedicated ingestion logic, discipline-specific rules, and output templates while sharing the same portal, validation, QA, and sign-off backbone.
-        </div>
+        <div class="section-kicker">{lang['mod_sec_kicker']}</div>
+        <h2 class="section-title">{lang['mod_sec_title']}</h2>
+        <div class="section-subtitle">{lang['mod_sec_sub']}</div>
     </div>
 
-    <div class="subsection-title">Available now and pilot-ready</div>
+    <div class="subsection-title">{lang['mod_sec1']}</div>
     <div class="module-grid">{''.join(available_cards)}</div>
 
-    <div class="subsection-title">Roadmap and early-phase tools</div>
+    <div class="subsection-title">{lang['mod_sec2']}</div>
     <div class="module-grid">{''.join(roadmap_cards)}</div>
     """
 )
 
 # -------------------------------------------------
-# 10) CTA BAND
+# 11) CTA BAND
 # -------------------------------------------------
 render_html(
     f"""
     <div class="cta-band">
-        <div class="cta-title">Start with one project. Upload raw data. Get a reviewable package.</div>
-        <div class="cta-desc">
-            Builtly combines customer self-service, deterministic checks, AI-generated drafts, and professional sign-off in one portal. The result is faster delivery, better consistency, and full traceability across every version.
-        </div>
+        <div class="cta-title">{lang['cta_title']}</div>
+        <div class="cta-desc">{lang['cta_desc']}</div>
         <div class="hero-actions" style="margin-top:1rem;">
-            {hero_action('project', 'Start in project setup', 'primary')}
-            {hero_action('review', 'Go to review queue', 'secondary')}
+            {hero_action('project', lang['cta_btn1'], 'primary')}
+            {hero_action('review', lang['cta_btn2'], 'secondary')}
         </div>
     </div>
     """
 )
 
 # -------------------------------------------------
-# 11) FOOTER
+# 12) FOOTER
 # -------------------------------------------------
 render_html(
-    """
+    f"""
     <div class="footer-block">
-        <div class="footer-copy">AI-assisted engineering. Human-verified. Compliance-grade.</div>
-        <div class="footer-meta">© 2026 Builtly Engineering AS. All rights reserved.</div>
+        <div class="footer-copy">{lang['footer_copy']}</div>
+        <div class="footer-meta">{lang['footer_meta']}</div>
     </div>
     """
 )
