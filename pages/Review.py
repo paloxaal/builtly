@@ -1,21 +1,15 @@
 import streamlit as st
+import json
 import os
 import base64
 from pathlib import Path
-import time
 from datetime import datetime
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="QA & Sign-off | Builtly", page_icon="✅", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="QA & Sign-off | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
-
-def find_page(base_name: str) -> str:
-    for name in [base_name, base_name.lower(), base_name.capitalize()]:
-        p = Path(f"pages/{name}.py")
-        if p.exists(): return str(p)
-    return ""
 
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
@@ -26,26 +20,65 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
-# --- 2. SESSION STATE (Hukommelse for QA) ---
-if "active_review" not in st.session_state:
-    st.session_state.active_review = None
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists(): return str(p)
+    return ""
 
-if "signed_docs" not in st.session_state:
-    st.session_state.signed_docs = []
+# --- 2. LOKAL FIL-DATABASE LOGIKK ---
+DB_DIR = Path("qa_database")
+PDF_DIR = DB_DIR / "pdfs"
+DB_FILE = DB_DIR / "reviews.json"
 
-# VIKTIG: Hent den faktiske køen fra AI-modulene!
-if "pending_reviews" not in st.session_state:
-    st.session_state.pending_reviews = {}
+def init_db():
+    """Oppretter mapper og databasefil hvis de ikke eksisterer."""
+    DB_DIR.mkdir(exist_ok=True)
+    PDF_DIR.mkdir(exist_ok=True)
+    if not DB_FILE.exists():
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
 
-DOCS = st.session_state.pending_reviews
+def load_db():
+    init_db()
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def display_pdf(pdf_bytes):
-    """Viser den EKTE PDF-filen som ble generert i modulen!"""
-    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="850" type="application/pdf" style="border: 1px solid rgba(120,145,170,0.3); border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
+def save_db(data):
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
-# --- 3. PREMIUM CSS ---
+init_db()
+
+# --- 3. INGESTION ENGINE (Magi som flytter data fra RAM til Harddisk) ---
+if "pending_reviews" in st.session_state and st.session_state.pending_reviews:
+    db_data = load_db()
+    for doc_id, review in st.session_state.pending_reviews.items():
+        if doc_id not in db_data:
+            # 1. Lagre selve PDF-filen fysisk
+            pdf_path = PDF_DIR / f"{doc_id}.pdf"
+            pdf_bytes = review["pdf_bytes"]
+            
+            # Sikkerhetsnett for ulike FPDF-versjoner (bytes vs string)
+            if isinstance(pdf_bytes, str):
+                pdf_bytes = pdf_bytes.encode('latin1')
+                
+            with open(pdf_path, "wb") as f:
+                f.write(pdf_bytes)
+            
+            # 2. Lagre metadata til JSON-databasen (Uten de tunge bytene)
+            meta = review.copy()
+            if "pdf_bytes" in meta:
+                del meta["pdf_bytes"]
+            meta["date_added"] = datetime.now().strftime("%d. %b %Y kl %H:%M")
+            
+            db_data[doc_id] = meta
+            
+    # Lagrer databasen og tømmer RAM-en!
+    save_db(db_data)
+    st.session_state.pending_reviews = {} 
+
+# --- 4. PREMIUM CSS ---
 st.markdown("""
 <style>
     :root {
@@ -58,161 +91,94 @@ st.markdown("""
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
-    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
+
+    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 8px 24px !important; transition: all 0.2s ease !important; }
+    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
+    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 8px 24px !important; transition: all 0.2s; }
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
+
+    /* Styling for Tabs (Til Behandling, Godkjent, Avvist) */
+    .stTabs [data-baseweb="tab-list"] { background-color: transparent !important; gap: 2rem; }
+    .stTabs [data-baseweb="tab"] { color: #9fb0c3 !important; font-weight: 650 !important; font-size: 1.1rem !important; padding-bottom: 1rem !important; }
+    .stTabs [aria-selected="true"] { color: #38bdf8 !important; border-bottom-color: #38bdf8 !important; }
     
-    .topbar-right { display: flex; align-items: center; justify-content: flex-end; gap: 0.65rem; padding: 0.35rem; border-radius: 18px; background: rgba(255,255,255,0.025); border: 1px solid rgba(120,145,170,0.12); flex-wrap: nowrap !important; }
-    .top-link { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0.72rem 1.2rem; border-radius: 12px; text-decoration: none !important; font-weight: 650; font-size: 0.93rem; transition: all 0.2s ease; border: 1px solid transparent; white-space: nowrap; }
-    .top-link.ghost { color: var(--soft) !important; background: rgba(255,255,255,0.04); border-color: rgba(120,145,170,0.18); }
-    .top-link.ghost:hover { color: #ffffff !important; border-color: rgba(56,194,201,0.38); background: rgba(255,255,255,0.06); }
-
-    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; margin-bottom: 3rem; }
-    .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 1.5rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
-    .stat-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.8rem; }
-    .stat-value { font-size: 2.2rem; font-weight: 750; color: #fff; margin-bottom: 0.3rem; line-height: 1; }
-
-    [data-testid="column"]:has(.review-card-hook) { background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important; border: 1px solid rgba(120, 145, 170, 0.18) !important; border-radius: 16px !important; padding: 1.8rem 2rem !important; margin-bottom: 1.2rem !important; box-shadow: 0 8px 24px rgba(0,0,0,0.15) !important; transition: all 0.2s ease !important; }
-    [data-testid="column"]:has(.review-card-hook):hover { border-color: rgba(56,194,201,0.3) !important; box-shadow: 0 12px 32px rgba(0,0,0,0.25) !important; transform: translateY(-2px); }
-    
-    [data-testid="column"]:has(.qa-panel-hook) { background: linear-gradient(180deg, rgba(16,30,46,0.9), rgba(10,18,28,0.9)) !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 16px !important; padding: 2.5rem 2rem !important; box-shadow: 0 12px 30px rgba(0,0,0,0.2) !important; }
-    
-    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 8px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
-    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 20px rgba(56,194,201,0.25) !important; }
-    button[kind="secondary"] { background-color: #0d1824 !important; border: 1px solid rgba(120,145,170,0.4) !important; border-radius: 8px !important; padding: 8px 24px !important; transition: all 0.2s ease !important; }
-    button[kind="secondary"] * { color: #f5f7fb !important; font-weight: 650 !important; font-size: 0.95rem !important; }
-    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: rgba(56,194,201,0.8) !important; }
-    button[kind="secondary"]:hover * { color: var(--accent) !important; }
-
-    .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-size: 0.75rem; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; }
-    .badge-pending { background: rgba(244, 191, 79, 0.1); border: 1px solid rgba(244, 191, 79, 0.3); color: #f4bf4f; }
-    .badge-approved { background: rgba(126, 224, 129, 0.1); border: 1px solid rgba(126, 224, 129, 0.3); color: #7ee081; }
-
-    .stTextArea textarea { background-color: #0d1824 !important; color: #ffffff !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    .stTextArea textarea:focus { border-color: #38bdf8 !important; box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.5) !important; }
+    .qa-card { background: rgba(12, 21, 32, 0.9); border: 1px solid rgba(120,145,170,0.2); border-radius: 16px; padding: 1.5rem; margin-bottom: 1rem; transition: all 0.2s ease; }
+    .qa-card:hover { border-color: rgba(56, 189, 248, 0.4); box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. HEADER UI ---
-logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+# --- 5. HEADER ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
 
-render_html(f"""
-<div class="top-shell">
-    <div>{logo_html}</div>
-    <div class="topbar-right">
-        <a href="/" target="_self" class="top-link ghost">← Tilbake til Portal</a>
-    </div>
-</div>
-""")
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🛡️ Kvalitetssikring (QA) & Sign-off</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>Senter for seniorgjennomgang av AI-genererte konseptnotater.</p>", unsafe_allow_html=True)
 
-# =====================================================================
-# RUTE 1: HOVED-DASHBOARD (LISTE)
-# =====================================================================
-if st.session_state.active_review is None:
-    st.markdown("<h1 style='font-size: 2.8rem; margin-bottom: 0.2rem; letter-spacing: -0.02em;'>QA & Sign-off Dashboard</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem;'>Kvalitetssikring av AI-genererte dokumenter før endelig leveranse.</p>", unsafe_allow_html=True)
+# --- 6. HENT DATA FRA HARDDISK ---
+db_data = load_db()
 
-    pending_count = len(DOCS) - len(st.session_state.signed_docs)
-    signed_count = len(st.session_state.signed_docs)
+# Sorter rapportene i riktig bøtte
+pending = {k: v for k, v in db_data.items() if v.get("status") not in ["Godkjent", "Avvist"]}
+approved = {k: v for k, v in db_data.items() if v.get("status") == "Godkjent"}
+rejected = {k: v for k, v in db_data.items() if v.get("status") == "Avvist"}
+
+# --- 7. TABS & UI ---
+tab1, tab2, tab3 = st.tabs([f"📥 Til Behandling ({len(pending)})", f"✅ Godkjent ({len(approved)})", f"❌ Avvist ({len(rejected)})"])
+
+def render_qa_card(doc_id, meta, show_actions=False):
+    st.markdown('<div class="qa-card">', unsafe_allow_html=True)
     
-    render_html(f"""
-    <div class="stat-grid">
-        <div class="card">
-            <div class="stat-title">Pending Sign-offs</div>
-            <div class="stat-value">{pending_count}</div>
-        </div>
-        <div class="card">
-            <div class="stat-title">Signed Today</div>
-            <div class="stat-value">{signed_count}</div>
-        </div>
-        <div class="card">
-            <div class="stat-title">AI Confidence Avg.</div>
-            <div class="stat-value" style="color: var(--accent);">97.2%</div>
-        </div>
-    </div>
-    """)
-
-    st.markdown("<h2 style='font-size: 1.6rem; margin-bottom: 1.5rem; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 0.5rem;'>Dokumenter til behandling</h2>", unsafe_allow_html=True)
-
-    if pending_count == 0:
-        st.info("Ingen dokumenter i køen akkurat nå. Gå til en av fagmodulene (f.eks. Brann eller Geo) og generer en rapport for å se den her!")
-    else:
-        def review_card(doc_id, info):
-            col, _ = st.columns([1, 0.001])
-            with col:
-                st.markdown('<div class="review-card-hook"></div>', unsafe_allow_html=True)
-                st.markdown(f"""
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
-                    <div style="font-size: 1.35rem; font-weight: 750; color: #fff;">{info["title"]}</div>
-                    <div class="status-badge {info["class"]}">⏳ {info["status"]}</div>
-                </div>
-                <div style="color: #9fb0c3; font-size: 0.95rem; line-height: 1.6; margin-bottom: 0.5rem;">
-                    <strong>ID:</strong> {doc_id} &nbsp;&bull;&nbsp; <strong>Modul:</strong> {info["module"]} <br>
-                    <strong>Draftet:</strong> {info["drafter"]} &nbsp;&bull;&nbsp; <strong>Sjekket av:</strong> {info["reviewer"]}
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if st.button("🔍 Åpne for kontroll", key=f"btn_{doc_id}", type="secondary"):
-                    st.session_state.active_review = doc_id
-                    st.rerun()
-
-        for doc_id, info in DOCS.items():
-            if doc_id not in st.session_state.signed_docs:
-                review_card(doc_id, info)
-
-# =====================================================================
-# RUTE 2: AKTIV KONTROLL (DETALJVISNING MED EKTE PDF)
-# =====================================================================
-else:
-    doc_id = st.session_state.active_review
-    doc_info = DOCS[doc_id]
+    # Header rad
+    st.markdown(f"<h3 style='margin-top:0; margin-bottom:0.5rem; color:#f5f7fb;'>📄 {meta['title']} <span style='color:#9fb0c3; font-size:1.1rem;'>— {meta['module']}</span></h3>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#9fb0c3; font-size:0.9rem; margin-bottom:1.5rem;'><b>ID:</b> <code>{doc_id}</code> &nbsp;|&nbsp; <b>Opprettet:</b> {meta.get('date_added', 'Ukjent')} &nbsp;|&nbsp; <b>Status:</b> <span style='color:#f4bf4f;'>{meta['status']}</span></p>", unsafe_allow_html=True)
     
-    if st.button("← Avbryt og gå tilbake til listen", type="secondary"):
-        st.session_state.active_review = None
-        st.rerun()
-        
-    st.markdown(f"<h1 style='font-size: 2.2rem; margin-top: 1rem; margin-bottom: 0;'>Kontroll: {doc_info['title']}</h1>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color: var(--muted); margin-bottom: 2rem;'><strong>{doc_id}</strong> | {doc_info['module']} | Utkast fra: {doc_info['drafter']}</p>", unsafe_allow_html=True)
+    pdf_path = PDF_DIR / f"{doc_id}.pdf"
     
-    col_doc, col_qa = st.columns([1.6, 1], gap="large")
-    
-    with col_doc:
-        st.markdown("<h3 style='font-size: 1.1rem; margin-bottom: 1rem;'>📄 Dokument forhåndsvisning</h3>", unsafe_allow_html=True)
-        # HER VISES DEN EKTE PDF-EN FRA MINNET!
-        if "pdf_bytes" in doc_info:
-            display_pdf(doc_info["pdf_bytes"])
+    c1, c2, c3, _ = st.columns([2, 1.5, 1.5, 4])
+    with c1:
+        if pdf_path.exists():
+            with open(pdf_path, "rb") as f:
+                st.download_button("⬇️ Last ned PDF for gjennomlesning", f.read(), file_name=f"{doc_id}.pdf", key=f"dl_{doc_id}", type="secondary", use_container_width=True)
         else:
-            st.error("Kunne ikke laste PDF-filen. Data mangler.")
-        
-    with col_qa:
-        st.markdown('<div class="qa-panel-hook"></div>', unsafe_allow_html=True)
-        st.markdown("<h3 style='font-size: 1.3rem; margin-bottom: 1.5rem; margin-top: 0; color: #fff;'>Formell Godkjenning (QA)</h3>", unsafe_allow_html=True)
-        
-        st.markdown("**Sjekkliste for Senior:**")
-        chk1 = st.checkbox("Kontrollert at premisser fra SSOT er riktig anvendt.")
-        chk2 = st.checkbox("Faglig vurdering av konklusjon er validert.")
-        chk3 = st.checkbox("Eventuelle tegninger/kart er tolket riktig av AI.")
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        kommentar = st.text_area("Kommentarer til revisjon (Valgfritt):", placeholder="Skriv inn eventuelle avvik eller rettelser her...", height=120)
-        st.markdown("<br>", unsafe_allow_html=True)
-        
-        if st.button("✅ Godkjenn & Signer digitalt", type="primary", use_container_width=True):
-            if not (chk1 and chk2 and chk3):
-                st.error("Du må huke av for alle punktene i sjekklisten før du kan signere!")
-            else:
-                st.session_state.signed_docs.append(doc_id)
-                st.session_state.active_review = None 
-                st.success(f"Dokument '{doc_info['title']}' er nå signert og ferdigstilt!")
-                time.sleep(1) 
+            st.error("PDF-fil mangler på server!")
+            
+    if show_actions:
+        with c2:
+            if st.button("✅ Godkjenn (Sign-off)", key=f"app_{doc_id}", type="primary", use_container_width=True):
+                db_data[doc_id]["status"] = "Godkjent"
+                save_db(db_data)
+                st.rerun()
+        with c3:
+            if st.button("❌ Avvis / Retur", key=f"rej_{doc_id}", use_container_width=True):
+                db_data[doc_id]["status"] = "Avvist"
+                save_db(db_data)
                 st.rerun()
                 
-        st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
-        
-        if st.button("❌ Send tilbake for revisjon", type="secondary", use_container_width=True):
-            if not kommentar:
-                st.warning("Du må skrive en kommentar for å kunne sende dokumentet tilbake.")
-            else:
-                st.session_state.active_review = None
-                st.info(f"Dokumentet er sendt tilbake til {doc_info['reviewer']} med dine kommentarer.")
-                time.sleep(1)
-                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+with tab1:
+    if not pending:
+        st.info("Køen er tom! Ingen nye rapporter til vurdering.")
+    for doc_id, meta in reversed(pending.items()): # Viser nyeste først
+        render_qa_card(doc_id, meta, show_actions=True)
+
+with tab2:
+    if not approved:
+        st.info("Ingen godkjente rapporter enda.")
+    for doc_id, meta in reversed(approved.items()):
+        render_qa_card(doc_id, meta, show_actions=False)
+
+with tab3:
+    if not rejected:
+        st.info("Ingen avviste rapporter.")
+    for doc_id, meta in reversed(rejected.items()):
+        render_qa_card(doc_id, meta, show_actions=False)
