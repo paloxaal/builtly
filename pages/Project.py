@@ -56,7 +56,7 @@ def go_home():
     if main_file:
         st.switch_page(main_file)
 
-# --- 2. PREMIUM CSS (URØRT OG SKUDDSIKKER) ---
+# --- 2. PREMIUM CSS ---
 st.markdown(
     """
 <style>
@@ -81,13 +81,9 @@ st.markdown(
     }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
     
-    /* Gråer ut deaktiverte knapper */
     button[kind="primary"][disabled] {
-        background: rgba(120,145,170,0.2) !important;
-        color: rgba(255,255,255,0.3) !important;
-        box-shadow: none !important;
-        transform: none !important;
-        cursor: not-allowed !important;
+        background: rgba(120,145,170,0.2) !important; color: rgba(255,255,255,0.3) !important;
+        box-shadow: none !important; transform: none !important; cursor: not-allowed !important;
     }
     
     button[kind="secondary"] {
@@ -100,23 +96,13 @@ st.markdown(
         color: var(--accent) !important; transform: translateY(-2px) !important;
     }
 
-    /* INPUT-FELT DESIGN (KRYSTALLKLAR TEKST) */
-    div[data-baseweb="base-input"],
-    div[data-baseweb="select"] > div,
-    .stTextArea > div > div > div {
-        background-color: #0d1824 !important;
-        border: 1px solid rgba(120, 145, 170, 0.4) !important;
-        border-radius: 8px !important;
+    /* INPUT-FELT DESIGN */
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div {
+        background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
     }
-    .stTextInput input, 
-    .stNumberInput input, 
-    .stTextArea textarea, 
-    div[data-baseweb="select"] * {
-        background-color: transparent !important; 
-        color: #ffffff !important; 
-        -webkit-text-fill-color: #ffffff !important;
-        border: none !important;
-        box-shadow: none !important;
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * {
+        background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
+        border: none !important; box-shadow: none !important;
     }
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
     div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within {
@@ -195,7 +181,6 @@ if "ai_drawing_analysis" not in st.session_state:
     st.session_state.ai_drawing_analysis = None
 if "project_images" not in st.session_state:
     st.session_state.project_images = []
-# NY: Teller for å holde styr på om vi har analysert akkurat de filene som er opplastet
 if "analyzed_file_names" not in st.session_state:
     st.session_state.analyzed_file_names = []
 
@@ -360,8 +345,6 @@ with input_col:
     st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett og peke på eventuelle mangler.")
     
     uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
-    
-    # Henter ut listen med filnavn for det som ligger i opplasteren akkurat nå
     current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
     
     if uploaded_drawings:
@@ -369,7 +352,7 @@ with input_col:
             if not google_key:
                 st.error("Google API-nøkkel mangler!")
             else:
-                with st.spinner("AI studerer tegningene for å vurdere byggekvalitet og mangler..."):
+                with st.spinner("AI studerer tegningene. Større filer komprimeres automatisk for å forhindre minnekrasj..."):
                     images_for_qa = []
                     try:
                         for f in uploaded_drawings: 
@@ -379,17 +362,23 @@ with input_col:
                                     st.error("Mangler PDF-modul (PyMuPDF).")
                                     break
                                 doc = fitz.open(stream=f.read(), filetype="pdf")
-                                for page_num in range(min(4, len(doc))): # Max 4 sider for rask sjekk
-                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                # Begrenser antall sider per fil for å spare minne
+                                for page_num in range(min(4, len(doc))): 
+                                    # Reduserer matrisen fra 2.0 til 1.5 for å spare RAM
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                    # Leser inn som JPEG direkte fra minnet for ekstrem minnebesparelse
+                                    img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                    # Thumbnail sikrer at bildet aldri er større enn 2000px, Streamlit/API krasjer ikke
+                                    img.thumbnail((2000, 2000))
                                     images_for_qa.append(img)
                                 doc.close() 
                             else:
                                 img = Image.open(f).convert("RGB")
+                                img.thumbnail((2000, 2000))
                                 images_for_qa.append(img)
                                 
                         if images_for_qa:
-                            st.session_state.project_images = images_for_qa # Lagrer til fellesminnet
+                            st.session_state.project_images = images_for_qa 
                             
                             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                             valgt_modell = valid_models[0]
@@ -415,13 +404,11 @@ with input_col:
                             
                             res = model.generate_content([qa_prompt] + images_for_qa)
                             st.session_state.ai_drawing_analysis = res.text
-                            # Marker akkurat disse filene som "kvalitetssikret"
                             st.session_state.analyzed_file_names = current_file_names
                             st.rerun()
                     except Exception as e:
                         st.error(f"Feil under bildebehandling: {e}")
 
-    # Vis AI-vurderingen hvis den finnes i minnet
     if st.session_state.ai_drawing_analysis:
         st.markdown("<div class='card' style='margin-top: 1rem; border-color: #38c2c9;'>", unsafe_allow_html=True)
         st.markdown("<h4 style='margin-top: 0; color: #38c2c9;'>📊 AI-Vurdering av Tegningsgrunnlag</h4>", unsafe_allow_html=True)
@@ -430,7 +417,6 @@ with input_col:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     
-    # --- NY, SIKKER LAGRINGS-LOGIKK (Tvinger AI-Sjekk) ---
     mangler_qa = uploaded_drawings and set(current_file_names) != set(st.session_state.analyzed_file_names)
     
     if mangler_qa:
@@ -441,6 +427,28 @@ with input_col:
             if not uploaded_drawings:
                 st.session_state.project_images = []
                 st.session_state.analyzed_file_names = []
+            else:
+                # Samme kompresjonslogikk her for å sikre at minnet ikke sprenges når brukeren trykker lagre
+                images_to_save = []
+                try:
+                    for f in uploaded_drawings: 
+                        f.seek(0)
+                        if f.name.lower().endswith('pdf'):
+                            if fitz is not None: 
+                                doc = fitz.open(stream=f.read(), filetype="pdf")
+                                for page_num in range(min(4, len(doc))):
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                    img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                    img.thumbnail((2000, 2000))
+                                    images_to_save.append(img)
+                                doc.close() 
+                        else:
+                            img = Image.open(f).convert("RGB")
+                            img.thumbnail((2000, 2000))
+                            images_to_save.append(img)
+                    st.session_state.project_images = images_to_save
+                except Exception as e:
+                    st.warning(f"Kunne ikke konvertere alle filer: {e}")
                 
             st.session_state.project_data.update({
                 "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
@@ -470,10 +478,8 @@ with snap_col:
     </div>
     """)
 
-
 # --- 7. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
-    """En smart funksjon som tegner et vakkert HTML-kort, og legger en usynlig/kamuflert native-knapp over"""
     with col:
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
         st.markdown(f"""
@@ -499,7 +505,6 @@ if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 2.5rem; font-weight:750;'>🚀 Prosjektet er synkronisert! Velg fagmodul under:</h3>", unsafe_allow_html=True)
     
-    # RAD 1
     r1c1, r1c2, r1c3 = st.columns(3)
     render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
                        "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
@@ -513,7 +518,6 @@ if completeness > 30:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # RAD 2
     r2c1, r2c2, r2c3 = st.columns(3)
     render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
                        "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
