@@ -127,7 +127,8 @@ st.markdown(
 
     /* Tvinger all tekst i dropdown-menyen til å bli hvit! */
     div[data-baseweb="select"] * { 
-        color: #ffffff !important; 
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     
     /* Hviser dropdown-menyen som popper opp i mørke farger */
@@ -137,6 +138,7 @@ st.markdown(
     }
     ul[data-baseweb="menu"] li {
         color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
     }
     ul[data-baseweb="menu"] li:hover {
         background-color: rgba(56, 194, 201, 0.1) !important;
@@ -145,6 +147,7 @@ st.markdown(
     /* Farger "Press Enter to apply"-teksten lys grå */
     div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span {
         color: #9fb0c3 !important;
+        -webkit-text-fill-color: #9fb0c3 !important;
     }
 
     /* Overskrifter over input-feltene */
@@ -216,8 +219,11 @@ if "project_data" not in st.session_state:
         "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
     }
 
+# Minnet for tegninger og AI-QA
 if "ai_drawing_analysis" not in st.session_state:
     st.session_state.ai_drawing_analysis = None
+if "project_images" not in st.session_state:
+    st.session_state.project_images = []
 
 pd_state = st.session_state.project_data
 
@@ -405,6 +411,9 @@ with input_col:
                                 images_for_qa.append(img)
                                 
                         if images_for_qa:
+                            # LAGRE BILDENE I MINNET FOR FAGMODULENE!
+                            st.session_state.project_images = images_for_qa
+                            
                             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                             valgt_modell = valid_models[0]
                             for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
