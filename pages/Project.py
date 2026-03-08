@@ -3,7 +3,10 @@ import os
 import base64
 from pathlib import Path
 import requests
+import urllib.parse
+import re
 from datetime import datetime
+import time
 
 # --- 1. GRUNNINNSTILLINGER ---
 st.set_page_config(
@@ -30,6 +33,16 @@ def find_page(base_name: str) -> str:
         p = Path(f"pages/{name}.py")
         if p.exists(): return str(p)
     return ""
+
+# Løsning for sikker hjem-navigasjon (forhindrer minnetap)
+def go_home():
+    main_file = None
+    for f in Path(".").glob("*.py"):
+        if f.name.lower() not in ["setup.py", "test.py"]:
+            main_file = str(f)
+            break
+    if main_file:
+        st.switch_page(main_file)
 
 # --- 2. PREMIUM CSS (Nå med integrert kort-design for Launchpad!) ---
 st.markdown(
@@ -112,67 +125,21 @@ st.markdown(
     [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.1) !important; border: 1px solid rgba(56, 194, 201, 0.3) !important; border-radius: 8px !important; }
     [data-testid="stAlert"] * { color: #f5f7fb !important; }
 
-    /* --- MAGISK CSS FOR LAUNCHPAD KORTENE --- */
-    .module-badge {
-        display: inline-flex; align-items: center; justify-content: center;
-        padding: 0.32rem 0.62rem; border-radius: 999px;
-        border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03);
-        color: var(--muted); font-size: 0.75rem; font-weight: 650;
-    }
+    /* MODULE CARDS CSS HOOK */
+    .module-badge { display: inline-flex; align-items: center; justify-content: center; padding: 0.32rem 0.62rem; border-radius: 999px; border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03); color: var(--muted); font-size: 0.75rem; font-weight: 650; }
     .badge-priority { color: #8ef0c0; border-color: rgba(142,240,192,0.25); background: rgba(126,224,129,0.08); }
     .badge-phase2 { color: #9fe7ff; border-color: rgba(120,220,225,0.22); background: rgba(56,194,201,0.08); }
     .badge-early { color: #d7def7; border-color: rgba(215,222,247,0.18); background: rgba(255,255,255,0.03); }
     .badge-roadmap { color: #f4bf4f; border-color: rgba(244,191,79,0.22); background: rgba(244,191,79,0.08); }
-
-    .module-icon {
-        width: 46px; height: 46px; border-radius: 14px;
-        display: inline-flex; align-items: center; justify-content: center;
-        background: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.18);
-        font-size: 1.32rem; flex-shrink: 0;
-    }
-
-    /* Styler den native Streamlit kolonnen til å bli et perfekt kort */
-    [data-testid="column"]:has(.module-card-hook) {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
-        border: 1px solid rgba(120, 145, 170, 0.18) !important;
-        border-radius: 22px !important;
-        padding: 1.5rem !important;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18) !important;
-        transition: all 0.2s ease !important;
-        margin-bottom: 1rem !important;
-    }
-    [data-testid="column"]:has(.module-card-hook):hover {
-        border-color: rgba(56,194,201,0.24) !important;
-        box-shadow: 0 16px 42px rgba(0,0,0,0.24) !important;
-    }
-
-    /* Tvinger kortet til å fylle hele høyden og dytte knappen nederst */
-    [data-testid="column"]:has(.module-card-hook) > div {
-        height: 100% !important; display: flex !important; flex-direction: column !important;
-    }
-    [data-testid="column"]:has(.module-card-hook) [data-testid="stButton"] {
-        margin-top: auto !important; width: 100% !important; padding-top: 1rem;
-    }
-
-    /* Styler den native st.button i kortet slik at den ser ut som front-page lenken */
-    [data-testid="column"]:has(.module-card-hook) button[kind="secondary"] {
-        background: rgba(56,194,201,0.1) !important;
-        border: 1px solid rgba(56,194,201,0.28) !important;
-        color: #f5f7fb !important;
-        border-radius: 12px !important;
-        min-height: 46px !important;
-        font-weight: 650 !important;
-        font-size: 0.94rem !important;
-        width: 100% !important;
-    }
-    [data-testid="column"]:has(.module-card-hook) button[kind="secondary"]:hover {
-        border-color: rgba(56,194,201,0.8) !important;
-        background: rgba(56,194,201,0.2) !important;
-        transform: translateY(-2px) !important;
-    }
+    .module-icon { width: 46px; height: 46px; border-radius: 14px; display: inline-flex; align-items: center; justify-content: center; background: rgba(56,194,201,0.1); border: 1px solid rgba(56,194,201,0.18); font-size: 1.32rem; flex-shrink: 0; }
+    [data-testid="column"]:has(.module-card-hook) { background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important; border: 1px solid rgba(120, 145, 170, 0.18) !important; border-radius: 22px !important; padding: 1.5rem !important; box-shadow: 0 12px 38px rgba(0,0,0,0.18) !important; transition: all 0.2s ease !important; margin-bottom: 1rem !important; }
+    [data-testid="column"]:has(.module-card-hook):hover { border-color: rgba(56,194,201,0.24) !important; box-shadow: 0 16px 42px rgba(0,0,0,0.24) !important; }
+    [data-testid="column"]:has(.module-card-hook) > div { height: 100% !important; display: flex !important; flex-direction: column !important; }
+    [data-testid="column"]:has(.module-card-hook) [data-testid="stButton"] { margin-top: auto !important; width: 100% !important; padding-top: 1rem; }
+    [data-testid="column"]:has(.module-card-hook) button[kind="secondary"] { background: rgba(56,194,201,0.1) !important; border: 1px solid rgba(56,194,201,0.28) !important; color: #f5f7fb !important; border-radius: 12px !important; min-height: 46px !important; font-weight: 650 !important; font-size: 0.94rem !important; width: 100% !important; }
+    [data-testid="column"]:has(.module-card-hook) button[kind="secondary"]:hover { border-color: rgba(56,194,201,0.8) !important; background: rgba(56,194,201,0.2) !important; transform: translateY(-2px) !important; }
 </style>
 """, unsafe_allow_html=True)
-
 
 # --- 3. SESSION STATE LOGIKK (Hjernen i SSOT) ---
 if "project_data" not in st.session_state:
@@ -190,35 +157,58 @@ completeness = int((filled_fields / len(fields_to_check)) * 100)
 sync_status = "Draft" if completeness < 100 else "Ready"
 progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
 
-def fetch_from_kartverket(sok_adresse="", kommune="", gnr="", bnr=""):
-    params = {'treffPerSide': 1, 'utkoordsys': 25833}
-    if sok_adresse: params['sok'] = sok_adresse
-    if kommune: params['kommunenavn'] = kommune
-    if gnr: params['gardsnummer'] = gnr
-    if bnr: params['bruksnummer'] = bnr
-    try:
-        r = requests.get("https://ws.geonorge.no/adresser/v1/sok", params=params, timeout=5)
-        if r.status_code == 200 and r.json().get('adresser'):
-            hit = r.json()['adresser'][0]
-            return {"adresse": hit.get('adressetekst', ''), "kommune": hit.get('kommunenavn', ''), "gnr": str(hit.get('gardsnummer', '')), "bnr": str(hit.get('bruksnummer', ''))}
-    except Exception: return None
+# --- 4. ROBUST KARTVERKET-SØK (Fuzzy Search) ---
+def fetch_from_kartverket(adresse, kommune, gnr, bnr):
+    adr_clean = adresse.replace(',', '').strip() if adresse else ""
+    kom_clean = kommune.replace(',', '').strip() if kommune else ""
+
+    def api_call(query_string):
+        if not query_string.strip(): return None
+        safe_query = urllib.parse.quote(query_string)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200 and resp.json().get('adresser'):
+                hit = resp.json()['adresser'][0]
+                return {
+                    "adresse": hit.get('adressetekst', ''),
+                    "kommune": hit.get('kommunenavn', ''),
+                    "gnr": str(hit.get('gardsnummer', '')),
+                    "bnr": str(hit.get('bruksnummer', ''))
+                }
+        except Exception: pass
+        return None
+
+    # Prøver flere kombinasjoner for å garantere treff!
+    queries = []
+    if adr_clean and kom_clean: queries.append(f"{adr_clean} {kom_clean}")
+    if adr_clean: queries.append(adr_clean)
+    if adr_clean: 
+        base_num = re.sub(r'(\d+)[a-zA-Z]+', r'\1', adr_clean)
+        if base_num != adr_clean: queries.append(base_num)
+    if gnr and bnr and kom_clean: queries.append(f"{kom_clean} {gnr}/{bnr}")
+        
+    for q in queries:
+        res = api_call(q)
+        if res: return res
     return None
 
-# --- 4. HEADER ---
+# --- 5. HEADER (Nå med NATIVE knapper for å forhindre memory-wipe!) ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(logo_html)
 with c2:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
-    render_html('<a href="/" target="_self" style="display:block; text-align:center; padding:10px; color:#9fb0c3; text-decoration:none; font-weight:600; border:1px solid rgba(120,145,170,0.3); border-radius:12px; background:rgba(255,255,255,0.05);">← Til Portal</a>')
+    if st.button("← Tilbake til Portal", use_container_width=True, type="secondary"):
+        go_home()
 with c3:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
     if find_page("Review"):
         if st.button("QA & Sign-off", type="primary", use_container_width=True):
             st.switch_page(find_page("Review"))
 
-# --- 5. DASHBOARD UI ---
+# --- 6. DASHBOARD UI ---
 render_html(f"""
 <div class="dash-grid">
     <div class="card card-hero">
@@ -258,7 +248,7 @@ render_html(f"""
 </div>
 """)
 
-# --- 6. INPUT SEKSJON ---
+# --- 7. INPUT SEKSJON ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
 st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
 
@@ -293,14 +283,18 @@ with input_col:
     
     if "Norge" in new_land:
         if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
+            # Vi lagrer de manuelle inputene midlertidig før vi søker
             st.session_state.project_data.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
-            with st.spinner("Henter fra Nasjonalt Adresseregister..."):
+            
+            with st.spinner("Søker i Nasjonalt Adresseregister..."):
                 res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
                 if res:
-                    st.session_state.project_data.update({"adresse": res['adresse'], "kommune": res['kommune'], "gnr": res['gnr'], "bnr": res['bnr']})
-                    st.success("✅ Fant eiendom!")
+                    st.session_state.project_data.update(res)
+                    st.success("✅ Fant eiendom! Husk å trykke Lagre i bunnen for å bekrefte.")
+                    time.sleep(1)
                     st.rerun()
-                else: st.warning("Fant ingen treff i Matrikkelen. Sjekk skrivemåten.")
+                else: 
+                    st.warning("Fant ingen treff i Matrikkelen. Prøv en annen skrivemåte eller fyll inn manuelt.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🏢 03 Byggdata</h4></div>""", unsafe_allow_html=True)
@@ -315,6 +309,8 @@ with input_col:
     new_bta = c9.number_input("Bruttoareal (BTA m²)", value=int(pd_state["bta"]), step=100)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    
+    # HOVEDKNAPPEN FOR Å LAGRE!
     if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
         st.session_state.project_data.update({
             "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
@@ -323,6 +319,7 @@ with input_col:
             "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
         })
         st.success(f"✅ Data lagret! Prosjektet '{new_p_name}' er nå synkronisert med alle AI-moduler.")
+        time.sleep(1)
         st.rerun()
 
 with snap_col:
@@ -342,14 +339,11 @@ with snap_col:
     </div>
     """)
 
-
-# --- 7. LAUNCHPAD (NÅ MED FRONT PAGE KORT-DESIGN!) ---
+# --- 8. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     """En smart funksjon som tegner et vakkert HTML-kort, og legger en usynlig/kamuflert native-knapp over"""
     with col:
-        # Hook for CSS
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
-        # Visuelt innhold
         st.markdown(f"""
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
                 <div class="module-icon">{icon}</div>
@@ -363,7 +357,6 @@ def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, ou
             </div>
         """, unsafe_allow_html=True)
 
-        # Native knapp som bevarer minnet og er stylet som CTA via CSS
         if page_target and find_page(page_target):
             if st.button(btn_label, key=f"btn_{page_target}", type="secondary", use_container_width=True):
                 st.switch_page(find_page(page_target))
@@ -374,28 +367,26 @@ if completeness > 30:
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     st.markdown("<h3 style='text-align:center; margin-bottom: 2.5rem; font-weight:750;'>🚀 Prosjektet er synkronisert! Velg fagmodul under:</h3>", unsafe_allow_html=True)
     
-    # RAD 1
     r1c1, r1c2, r1c3 = st.columns(3)
     render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
-                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
-                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Open Geo & Env", "Geo")
+                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic.", 
+                       "XLSX / CSV / PDF", "Environmental action plan", "Open Geo & Env", "Geo")
     render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound", 
-                       "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", 
-                       "Noise map + floor plan", "Acoustics report, facade eval.", "Open Acoustics", "Akustikk")
+                       "Ingest noise maps and floor plans. Generates facade requirements.", 
+                       "Noise map + floor plan", "Acoustics report", "Open Acoustics", "Akustikk")
     render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy", 
-                       "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", 
-                       "Architectural drawings + class", "Fire strategy concept, deviations", "Open Fire Strategy", "Brannkonsept")
+                       "Evaluate architectural drawings against building codes.", 
+                       "Architectural drawings", "Fire strategy concept", "Open Fire Strategy", "Brannkonsept")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # RAD 2
     r2c1, r2c2, r2c3 = st.columns(3)
     render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
-                       "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
-                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Open Feasibility", "Mulighetsstudie")
+                       "Site screening, volume analysis, and early-phase decision support.", 
+                       "Site data, zoning plans", "Feasibility report", "Open Feasibility", "Mulighetsstudie")
     render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept", 
-                       "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", 
-                       "Models, load parameters", "Concept memo, grid layouts", "Open Structural", "Konstruksjon")
+                       "Conceptual structural checks, principle dimensioning.", 
+                       "Models, load parameters", "Concept memo", "Open Structural", "Konstruksjon")
     render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility", 
-                       "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", 
-                       "Site plans, local norms", "Traffic memo, mobility plan", "Open Traffic & Mobility", "Trafikk")
+                       "Traffic generation, parking requirements, access logic.", 
+                       "Site plans", "Traffic memo", "Open Traffic & Mobility", "Trafikk")
