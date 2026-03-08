@@ -7,8 +7,9 @@ import base64
 from datetime import datetime
 import tempfile
 import re
+import json
 import io
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from pathlib import Path
 
@@ -57,21 +58,16 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS (SKUDDSIKKER) ---
+# --- 2. PREMIUM CSS ---
 st.markdown("""
 <style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
-    }
+    :root { --bg: #06111a; --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-xl: 24px; --radius-lg: 16px; }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-
     .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
     
     button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
@@ -105,11 +101,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. SESSION STATE / SIKKERHET ---
+# --- 3. SESSION STATE & HARDDISK ---
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
+
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
-if "project_images" not in st.session_state:
-    st.session_state.project_images = []
+
+if st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -168,7 +171,16 @@ def create_full_report_pdf(name, client, content, maps):
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
     
-    for t in ["1. SAMMENDRAG OG KONKLUSJON", "2. VURDERING AV DATAGRUNNLAG", "3. LYDFORHOLD UTENDØRS", "4. LYDFORHOLD INNENDØRS", "5. FASADEISOLASJON", "6. TILTAK OG VIDERE PROSJEKTERING", "VEDLEGG: VURDERT DATAGRUNNLAG"]:
+    toc = [
+        "1. SAMMENDRAG OG KONKLUSJON", 
+        "2. VURDERING AV DATAGRUNNLAG", 
+        "3. KARTLEGGING OG PINPOINTING AV STØY", 
+        "4. LYDFORHOLD INNENDØRS OG PLANLØSNING", 
+        "5. KRAV TIL FASADEISOLASJON", 
+        "6. TILTAK OG VIDERE PROSJEKTERING", 
+        "VEDLEGG: VURDERT DATAGRUNNLAG"
+    ]
+    for t in toc:
         pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
         pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
@@ -176,7 +188,7 @@ def create_full_report_pdf(name, client, content, maps):
     for raw_line in content.split('\n'):
         line = raw_line.strip()
         if not line: pdf.ln(4); continue
-        if line.startswith('# '):
+        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
             pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         elif line.startswith('##'):
@@ -198,7 +210,7 @@ def create_full_report_pdf(name, client, content, maps):
         for i, m in enumerate(maps):
             if i > 0: pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                m.convert("RGB").save(tmp.name, format="JPEG")
+                m.convert("RGB").save(tmp.name, format="JPEG", quality=90)
                 img_w = 160
                 img_h = 160 * (m.height / m.width)
                 if img_h > 240: 
@@ -208,7 +220,7 @@ def create_full_report_pdf(name, client, content, maps):
                 pdf.image(tmp.name, x=x_pos, y=pdf.get_y(), w=img_w)
                 pdf.set_y(pdf.get_y() + img_h + 5)
                 pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument/Kart visuelt analysert av RIAku-agenten."), 0, 1, 'C')
+                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: AI-analysert kartutsnitt med estimerte støysoner."), 0, 1, 'C')
 
     return bytes(pdf.output(dest='S'))
 
@@ -233,17 +245,21 @@ with st.expander("2. Bygningsdata & Lydklasse", expanded=True):
     
     st.markdown("##### Akustisk Klassifisering (NS 8175)")
     c6, c7 = st.columns(2)
-    # Lydklasse C er standard minimumskrav i Norge for nye boliger
     lydklasse = c6.selectbox("Lydklasse (NS 8175)", ["Klasse A (Spesielt gode)", "Klasse B (Gode)", "Klasse C (Minimumskrav i TEK)", "Klasse D (Eldre bygg)"], index=2)
     stoykilde = c7.selectbox("Dominerende Støykilde", ["Veitrafikk", "Bane/Tog", "Flystøy", "Industri/Næring", "Lite støy (Stille område)"], index=0)
 
 with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
-    st.info("Viktig: For å beregne fasadeisolasjon trenger AI-en støykart (f.eks. fra kommunen) og plan/fasadetegninger.")
+    st.info("Viktig: For at AI-en skal kunne pinpointe fasadene, kreves støykart lagt over eller sammenholdt med situasjonsplanen.")
     
-    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
-        st.success(f"📎 Fant {len(st.session_state.project_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i analysen!")
+    saved_images = []
+    if IMG_DIR.exists():
+        for p in sorted(IMG_DIR.glob("*.jpg")):
+            saved_images.append(Image.open(p).convert("RGB"))
+            
+    if len(saved_images) > 0:
+        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger/kart fra Project Setup. Disse inkluderes automatisk i analysen!")
     else:
-        st.warning("Ingen felles tegninger funnet. Du bør laste opp plan og fasade under.")
+        st.warning("Ingen felles tegninger funnet. Du bør laste opp plan og støykart under.")
         
     st.markdown("##### Last opp spesifikke Akustikk-vedlegg")
     files = st.file_uploader("Last opp Støykart, Trafikkdata eller Planløsninger (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
@@ -252,9 +268,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_container_width=True):
     
-    images_for_ai = [] 
-    if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-        images_for_ai.extend(st.session_state.project_images)
+    images_for_ai = saved_images.copy()
         
     if files:
         with st.spinner("📐 Leser ut støykart og supplerende filer..."):
@@ -265,19 +279,21 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                         if fitz is not None: 
                             doc = fitz.open(stream=f.read(), filetype="pdf")
                             for page_num in range(min(4, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
+                                img.thumbnail((1200, 1200))
                                 images_for_ai.append(img)
                             doc.close() 
                     else:
                         img = Image.open(f).convert("RGB")
+                        img.thumbnail((1200, 1200))
                         images_for_ai.append(img)
             except Exception as e: 
                 st.error(f"Feil under bildebehandling: {e}")
                 
     st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til AI-en for vurdering.")
                 
-    with st.spinner(f"🤖 Vurderer datagrunnlaget og genererer Akustikkrapport..."):
+    with st.spinner(f"🤖 Pinpointer støysoner og tegner fysiske sirkler på bildene..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -290,50 +306,105 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
         
         model = genai.GenerativeModel(valgt_modell)
 
-        # --- DEN STRENGE "PORTVAKT"-PROMPTEN ---
+        # --- DEN MAGISKE "TEGNE"-PROMPTEN ---
         prompt_text = f"""
-        Du er Builtly RIAku AI, en streng, autoritær og svært grundig senior rådgivende ingeniør innen akustikk.
+        Du er Builtly RIAku AI, en streng og nøyaktig senior akustiker.
         
-        PROSJEKT: {p_name} ({bta} m2, {etasjer} etasjer, Formål: {b_type}). 
+        PROSJEKT: {p_name} ({bta} m2, {etasjer} etasjer). 
         LOKASJON: {adresse}.
         MÅL-LYDKLASSE: {lydklasse}.
         DOMINERENDE STØYKILDE: {stoykilde}.
         
-        KUNDENS PROSJEKTBESKRIVELSE: 
-        "{pd_state['p_desc']}"
+        EKSTREMT VIKTIG FOR TEGNING AV STØY-SIRKLER PÅ BILDENE:
+        For at kodesystemet mitt skal kunne stemple fysiske røde sirkler med dB-verdier oppå bildene i PDF-en, 
+        MÅ du returnere en maskinlesbar JSON-blokk HELT NEDERST i teksten din, uansett hva!
+        Du må anslå X- og Y-koordinater (i prosent av bildet) for hvor fasadene treffes av støyen.
         
-        VIKTIG - VURDERING AV DATAGRUNNLAG:
-        Du har nå mottatt et sett med bilder (plantegninger, snitt, og eventuelt støykart). 
-        Din aller første oppgave er å vurdere om dette datagrunnlaget er godt nok. 
-        Du MÅ aktivt beskrive hva du ser på bildene.
+        Bruk NØYAKTIG dette formatet (kopier strukturen):
+        ```json
+        [
+          {{"image_index": 0, "x_pct": 50, "y_pct": 20, "db": "72", "color": "red"}},
+          {{"image_index": 0, "x_pct": 80, "y_pct": 80, "db": "54", "color": "green"}}
+        ]
+        ```
+        Forklaring for JSON:
+        - `image_index`: Hvilket opplastet bilde (0, 1, 2). Bruk 0 hvis du ser situasjonsplanen/kartet der.
+        - `x_pct` og `y_pct`: Prosent (0-100) fra øverst til venstre. (0,0 er oppe til venstre, 50,50 er midten). Prøv å treffe bygningskroppene du ser.
+        - `color`: "red" (>65 dB), "yellow" (55-65 dB), eller "green" (<55 dB).
         
-        Bestem deg for ett av tre spor for rapporten:
-        
-        SPOR 1: FULLSTENDIG GRUNNLAG (Du ser både tydelige støykart/trafikktall OG plantegninger)
-        -> Utfør beregninger, oppgi krav til fasadeisolasjon, trinnlyd og gi en endelig faglig konklusjon.
-        
-        SPOR 2: DELVIS GRUNNLAG (Du har plantegninger, men mangler støykart, eller vice versa)
-        -> Forklar manglene tydelig. Skriv "INDIKATIV VURDERING" i konklusjonen. Gi generelle råd og anslag, men nekt å sette to streker under svaret før du får mer data.
-        
-        SPOR 3: FOR SVAKT GRUNNLAG (Du har ingen relevante tegninger eller kart)
-        -> Ikke gjør beregninger. Rapporten skal fungere som et "Avviksnotat". Lever KUN en liste over mangler (hva kunden må laste opp) og en overordnet, teoretisk risikovurdering av prosjektet basert på adressen og formålet.
-        
-        STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, uansett spor):
-        # 1. SAMMENDRAG OG KONKLUSJON (Skriv tydelig om dette er en endelig, indikativ eller avvist vurdering)
-        # 2. VURDERING AV DATAGRUNNLAG (Er det fullstendig, delvis eller for svakt? Vær streng og spesifikk på hva du ser og ikke ser i vedleggene!)
-        # 3. LYDFORHOLD UTENDØRS (Støy fra vei/industri basert på kart eller antakelser)
-        # 4. LYDFORHOLD INNENDØRS (Luftlyd, trinnlyd, romakustikk. Kritiser planløsningen hvis du ser uheldige rom-kombinasjoner, f.eks. soverom mot støyende gate)
-        # 5. FASADEISOLASJON (Krav til vinduer og yttervegg)
-        # 6. TILTAK OG VIDERE PROSJEKTERING (Hva er neste steg for kunden?)
+        Din tekstlige vurdering skal følge denne strukturen:
+        # 1. SAMMENDRAG OG KONKLUSJON (Skriv tydelig om vurderingen er endelig, indikativ eller avvist)
+        # 2. VURDERING AV DATAGRUNNLAG
+        # 3. KARTLEGGING OG PINPOINTING AV STØY (Henvis gjerne til de fargede sirklene på vedleggene bakerst)
+        # 4. LYDFORHOLD INNENDØRS OG PLANLØSNING
+        # 5. KRAV TIL FASADEISOLASJON
+        # 6. TILTAK OG VIDERE PROSJEKTERING
         """
         
         prompt_parts = [prompt_text] + images_for_ai
 
         try:
             res = model.generate_content(prompt_parts)
+            ai_raw_text = res.text
             
-            with st.spinner("Kompilerer Akustikk-PDF og fletter inn tegninger som vedlegg..."):
-                pdf_data = create_full_report_pdf(p_name, c_name, res.text, images_for_ai)
+            # --- PYTHON TEGNE-ROBOTEN ---
+            clean_text = ai_raw_text
+            json_match = re.search(r'```json\s*(.*?)\s*```', ai_raw_text, re.DOTALL)
+            
+            if json_match:
+                try:
+                    markers = json.loads(json_match.group(1))
+                    clean_text = re.sub(r'```json\s*.*?\s*```', '', ai_raw_text, flags=re.DOTALL) # Fjerner JSON fra rapporten
+                    
+                    for marker in markers:
+                        idx = int(marker.get("image_index", 0))
+                        if idx < len(images_for_ai):
+                            img = images_for_ai[idx]
+                            draw = ImageDraw.Draw(img)
+                            w, h = img.size
+                            
+                            # Regn ut piksel-posisjon ut fra prosent
+                            x = int((marker.get("x_pct", 50) / 100.0) * w)
+                            y = int((marker.get("y_pct", 50) / 100.0) * h)
+                            db_str = str(marker.get("db", "??")) + " dB"
+                            
+                            color_name = marker.get("color", "red").lower()
+                            if "green" in color_name:
+                                color_rgb = (46, 204, 113) # Pen grønnfarge
+                            elif "yellow" in color_name:
+                                color_rgb = (241, 196, 15) # Pen gulfarge
+                            else:
+                                color_rgb = (231, 76, 60) # Alvorlig rødfarge
+                            
+                            # Tegn en stor, tydelig sirkel
+                            radius = int(w * 0.05)
+                            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color_rgb, width=max(4, int(w*0.008)))
+                            
+                            # Prøv å bruke en font, eller fallback til standard tegning
+                            try:
+                                font = ImageFont.truetype("arial.ttf", int(w * 0.03))
+                            except:
+                                font = ImageFont.load_default()
+                            
+                            # Tegn bakgrunnsboks for teksten slik at den blir lesbar over kartet
+                            try:
+                                bbox = draw.textbbox((0,0), db_str, font=font)
+                                tw = bbox[2] - bbox[0]
+                                th = bbox[3] - bbox[1]
+                            except:
+                                tw, th = 60, 20
+                                
+                            draw.rectangle((x - tw/2 - 8, y - th/2 - 8, x + tw/2 + 8, y + th/2 + 8), fill=color_rgb)
+                            draw.text((x - tw/2, y - th/2), db_str, fill=(255, 255, 255), font=font)
+                            
+                            # Oppdaterer bildet i listen slik at FPDF får den overtegnede versjonen
+                            images_for_ai[idx] = img
+
+                except Exception as e:
+                    print(f"Feil under tegning: {e}")
+            
+            with st.spinner("Kompilerer Akustikk-PDF og fletter inn tegninger med tegnede sirkler..."):
+                pdf_data = create_full_report_pdf(p_name, pd_state['c_name'], clean_text, images_for_ai)
                 
                 if "pending_reviews" not in st.session_state:
                     st.session_state.pending_reviews = {}
@@ -343,8 +414,7 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                 doc_id = f"PRJ-{datetime.now().strftime('%y')}-AKU{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
                 
-                # Fargekoder status basert på om AI-en var fornøyd eller ikke
-                ai_text_lower = res.text.lower()
+                ai_text_lower = clean_text.lower()
                 if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
                     status = "Rejected - Needs Data"
                     badge = "badge-early"
