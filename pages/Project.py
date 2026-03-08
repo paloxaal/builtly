@@ -5,25 +5,20 @@ from pathlib import Path
 import requests
 import urllib.parse
 import re
+import json
 from datetime import datetime
 import time
 import io
 from PIL import Image
 
-# For AI-bildeanalyse
 import google.generativeai as genai
 try:
-    import fitz  # PyMuPDF for å lese PDF-er som bilder
+    import fitz  
 except ImportError:
     fitz = None
 
 # --- 1. GRUNNINNSTILLINGER & API ---
-st.set_page_config(
-    page_title="Project Setup | Builtly", 
-    page_icon="⚙️", 
-    layout="wide", 
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="Project Setup | Builtly", page_icon="⚙️", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -56,71 +51,48 @@ def go_home():
     if main_file:
         st.switch_page(main_file)
 
-# --- 2. PREMIUM CSS ---
-st.markdown(
-    """
+# --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
+DB_DIR = Path("qa_database")
+IMG_DIR = DB_DIR / "project_images"
+SSOT_FILE = DB_DIR / "ssot.json"
+
+def init_db():
+    DB_DIR.mkdir(exist_ok=True)
+    IMG_DIR.mkdir(exist_ok=True)
+
+init_db()
+
+# --- 3. PREMIUM CSS ---
+st.markdown("""
 <style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); 
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38c2c9; --radius-xl: 24px; --radius-lg: 16px;
-    }
+    :root { --bg: #06111a; --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38c2c9; --radius-xl: 24px; --radius-lg: 16px; }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
-
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); margin-bottom: 1rem; }
     
-    /* NATIVE STREAMLIT KNAPPER */
-    button[kind="primary"] {
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
-        color: #041018 !important; border: none !important; font-weight: 750 !important;
-        border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important;
-        transition: all 0.2s ease !important;
-    }
+    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
     button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
-    
-    button[kind="primary"][disabled] {
-        background: rgba(120,145,170,0.2) !important; color: rgba(255,255,255,0.3) !important;
-        box-shadow: none !important; transform: none !important; cursor: not-allowed !important;
-    }
-    
-    button[kind="secondary"] {
-        background: rgba(255,255,255,0.05) !important; color: #f8fafc !important;
-        border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; 
-        font-weight: 650 !important; padding: 10px 20px !important; transition: all 0.2s ease !important;
-    }
-    button[kind="secondary"]:hover { 
-        background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; 
-        color: var(--accent) !important; transform: translateY(-2px) !important;
-    }
+    button[kind="primary"][disabled] { background: rgba(120,145,170,0.2) !important; color: rgba(255,255,255,0.3) !important; box-shadow: none !important; transform: none !important; cursor: not-allowed !important; }
+    button[kind="secondary"] { background: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 20px !important; transition: all 0.2s ease !important; }
+    button[kind="secondary"]:hover { background: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important; }
 
-    /* INPUT-FELT DESIGN */
-    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div {
-        background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important;
-    }
-    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * {
-        background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important;
-        border: none !important; box-shadow: none !important;
-    }
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
-    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within {
-        border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
-    }
+    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important; }
     ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
     ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
     ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
     div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
     .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
 
-    /* FILOPPLASTER */
     [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
     [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
     [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
     [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
 
-    /* DASHBOARD BOKSER */
     .dash-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
     .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; margin-bottom: 2.5rem; }
     .card { background: linear-gradient(180deg, rgba(16,30,46,0.8), rgba(10,18,28,0.8)); border: 1px solid var(--stroke); border-radius: var(--radius-lg); padding: 1.8rem; box-shadow: 0 12px 30px rgba(0,0,0,0.2); }
@@ -148,11 +120,9 @@ st.markdown(
     .snap-label { color: var(--muted); width: 35%; flex-shrink: 0; }
     .snap-val { color: var(--text); font-weight: 500; text-align: right; width: 65%; word-wrap: break-word;}
     
-    /* ALERTS */
     [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.1) !important; border: 1px solid rgba(56, 194, 201, 0.3) !important; border-radius: 8px !important; }
     [data-testid="stAlert"] * { color: #f5f7fb !important; }
 
-    /* MODULE CARDS CSS HOOK */
     .module-badge { display: inline-flex; align-items: center; justify-content: center; padding: 0.32rem 0.62rem; border-radius: 999px; border: 1px solid rgba(120,145,170,0.18); background: rgba(255,255,255,0.03); color: var(--muted); font-size: 0.75rem; font-weight: 650; }
     .badge-priority { color: #8ef0c0; border-color: rgba(142,240,192,0.25); background: rgba(126,224,129,0.08); }
     .badge-phase2 { color: #9fe7ff; border-color: rgba(120,220,225,0.22); background: rgba(56,194,201,0.08); }
@@ -169,22 +139,25 @@ st.markdown(
 """, unsafe_allow_html=True)
 
 
-# --- 3. SESSION STATE LOGIKK (Hjernen i SSOT) ---
+# --- 4. SESSION STATE LOGIKK (Gjenoppretter fra harddisk hvis krasj) ---
 if "project_data" not in st.session_state:
-    st.session_state.project_data = {
-        "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
-        "adresse": "", "kommune": "", "gnr": "", "bnr": "",
-        "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
-    }
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+    else:
+        st.session_state.project_data = {
+            "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
+            "adresse": "", "kommune": "", "gnr": "", "bnr": "",
+            "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "last_sync": "Ikke synket enda"
+        }
 
 if "ai_drawing_analysis" not in st.session_state:
     st.session_state.ai_drawing_analysis = None
-if "project_images" not in st.session_state:
-    st.session_state.project_images = []
 if "analyzed_file_names" not in st.session_state:
     st.session_state.analyzed_file_names = []
 
 pd_state = st.session_state.project_data
+saved_image_count = len(list(IMG_DIR.glob("*.jpg")))
 
 fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta"]
 filled_fields = sum(1 for field in fields_to_check if bool(pd_state[field]))
@@ -226,7 +199,7 @@ def fetch_from_kartverket(adresse, kommune, gnr, bnr):
         if res: return res
     return None
 
-# --- 4. HEADER ---
+# --- 5. HEADER ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
@@ -241,7 +214,7 @@ with c3:
         if st.button("QA & Sign-off", type="primary", use_container_width=True):
             st.switch_page(find_page("Review"))
 
-# --- 5. DASHBOARD UI ---
+# --- 6. DASHBOARD UI ---
 render_html(f"""
 <div class="dash-grid">
     <div class="card card-hero">
@@ -281,7 +254,7 @@ render_html(f"""
 </div>
 """)
 
-# --- 6. INPUT SEKSJON ---
+# --- 7. INPUT SEKSJON ---
 st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
 st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
 
@@ -342,7 +315,7 @@ with input_col:
     # --- NY SEKSJON: TEGNINGSGRUNNLAG OG AI-KVALITETSSIKRING ---
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
-    st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett og peke på eventuelle mangler.")
+    st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
     
     uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
     current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
@@ -362,24 +335,18 @@ with input_col:
                                     st.error("Mangler PDF-modul (PyMuPDF).")
                                     break
                                 doc = fitz.open(stream=f.read(), filetype="pdf")
-                                # Begrenser antall sider per fil for å spare minne
                                 for page_num in range(min(4, len(doc))): 
-                                    # Reduserer matrisen fra 2.0 til 1.5 for å spare RAM
-                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                                    # Leser inn som JPEG direkte fra minnet for ekstrem minnebesparelse
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
                                     img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
-                                    # Thumbnail sikrer at bildet aldri er større enn 2000px, Streamlit/API krasjer ikke
-                                    img.thumbnail((2000, 2000))
+                                    img.thumbnail((1200, 1200))
                                     images_for_qa.append(img)
                                 doc.close() 
                             else:
                                 img = Image.open(f).convert("RGB")
-                                img.thumbnail((2000, 2000))
+                                img.thumbnail((1200, 1200))
                                 images_for_qa.append(img)
                                 
                         if images_for_qa:
-                            st.session_state.project_images = images_for_qa 
-                            
                             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
                             valgt_modell = valid_models[0]
                             for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
@@ -390,20 +357,24 @@ with input_col:
                             qa_prompt = f"""
                             Du er en Senior Rådgivende Ingeniør og Arkitekt for prosjektet '{new_p_name}'.
                             Din oppgave er å utføre en streng kvalitetskontroll (QA) av de vedlagte tegningene før de sendes videre til andre fagfelt (brann, akustikk, konstruksjon).
-                            
                             Prosjektinfo: {new_b_type}, {new_etasjer} etasjer, {new_bta} m2.
-                            
                             Vurder følgende:
                             1. ER GRUNNLAGET KOMPLETT? Ser du både plantegninger, snitt, fasader og situasjonsplan? Hvis noe mangler, si ifra tydelig!
                             2. KVALITET & LESBARHET: Er tegningene tydelige? Er det satt på mål og akser der det er nødvendig?
-                            3. POTENSIELLE UTFORDRINGER: Ut fra det du ser, er det noe arkitektonisk som kan by på problemer for Brannkonsept (f.eks lange rømningsveier), Konstruksjon (store spenn) eller Akustikk (store glassfasader)?
-                            4. KONKRETE FORSLAG: Gi 2-3 konkrete forslag til endringer eller utbedringer i tegningsgrunnlaget før videre prosjektering.
-                            
+                            3. POTENSIELLE UTFORDRINGER: Ut fra det du ser, er det noe arkitektonisk som kan by på problemer for Brannkonsept, Konstruksjon eller Akustikk?
+                            4. KONKRETE FORSLAG: Gi 2-3 konkrete forslag til endringer i tegningsgrunnlaget før videre prosjektering.
                             Svar formatert pent med Markdown, bruk emojis, og vær direkte og profesjonell.
                             """
                             
                             res = model.generate_content([qa_prompt] + images_for_qa)
-                            st.session_state.ai_drawing_analysis = res.text
+                            
+                            # SIKKERHETSNETT: Håndterer tomme svar (finish_reason 1) uten å krasje
+                            try:
+                                analysis_result = res.text
+                            except ValueError:
+                                analysis_result = "⚠️ **Merk:** AI-en klarte ikke å skrive en vurdering av disse spesifikke filene (returnerte et tomt svar). Dette kan skje med svært komplekse arkitekttegninger. **Du kan likevel trykke 'Lagre' for å gå videre til fagmodulene!**"
+                            
+                            st.session_state.ai_drawing_analysis = analysis_result
                             st.session_state.analyzed_file_names = current_file_names
                             st.rerun()
                     except Exception as e:
@@ -417,38 +388,42 @@ with input_col:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     
+    # --- NY, SIKKER LAGRINGS-LOGIKK (Med bypass hvis AI-en hikker) ---
     mangler_qa = uploaded_drawings and set(current_file_names) != set(st.session_state.analyzed_file_names)
     
     if mangler_qa:
-        st.warning("⚠️ **Handling kreves:** Du har lastet opp nye tegninger. Du må kjøre AI-kvalitetssikringen (knappen over) for å sjekke om grunnlaget er godt nok før du kan lagre/synkronisere prosjektet.")
+        st.warning("⚠️ **Handling kreves:** Du har lastet opp nye tegninger. Du må kjøre AI-kvalitetssikringen (knappen over) før du kan lagre prosjektet.")
         st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", disabled=True, use_container_width=True)
     else:
         if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
-            if not uploaded_drawings:
-                st.session_state.project_images = []
-                st.session_state.analyzed_file_names = []
-            else:
-                # Samme kompresjonslogikk her for å sikre at minnet ikke sprenges når brukeren trykker lagre
-                images_to_save = []
+            
+            # Slett gamle bilder fra harddisken
+            for p in IMG_DIR.glob("*.jpg"):
+                p.unlink()
+
+            # Lagre nye bilder fysisk på harddisken
+            if uploaded_drawings:
                 try:
+                    img_count = 0
                     for f in uploaded_drawings: 
                         f.seek(0)
                         if f.name.lower().endswith('pdf'):
                             if fitz is not None: 
                                 doc = fitz.open(stream=f.read(), filetype="pdf")
                                 for page_num in range(min(4, len(doc))):
-                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
                                     img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
-                                    img.thumbnail((2000, 2000))
-                                    images_to_save.append(img)
+                                    img.thumbnail((1200, 1200))
+                                    img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                                    img_count += 1
                                 doc.close() 
                         else:
                             img = Image.open(f).convert("RGB")
-                            img.thumbnail((2000, 2000))
-                            images_to_save.append(img)
-                    st.session_state.project_images = images_to_save
+                            img.thumbnail((1200, 1200))
+                            img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                            img_count += 1
                 except Exception as e:
-                    st.warning(f"Kunne ikke konvertere alle filer: {e}")
+                    st.warning(f"Kunne ikke lagre alle filer: {e}")
                 
             st.session_state.project_data.update({
                 "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
@@ -456,7 +431,11 @@ with input_col:
                 "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta,
                 "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
             })
-            st.success(f"✅ Data er lagret! Prosjektet '{new_p_name}' er nå synkronisert og kan brukes i modulene.")
+            
+            with open(SSOT_FILE, "w", encoding="utf-8") as f:
+                json.dump(st.session_state.project_data, f, ensure_ascii=False, indent=4)
+                
+            st.success(f"✅ Data er lagret trygt på serveren! Prosjektet '{new_p_name}' er nå tilgjengelig for alle moduler.")
             time.sleep(1)
             st.rerun()
 
@@ -465,7 +444,7 @@ with snap_col:
     <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
         <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
         <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
-        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i minnet akkurat nå.</p>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
         <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state["land"].split(' ')[0]}</div></div>
         <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state["p_name"] or '-'}</div></div>
         <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state["c_name"] or '-'}</div></div>
@@ -474,11 +453,11 @@ with snap_col:
         <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state["gnr"], pd_state["bnr"]])) or '-'}</div></div>
         <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state["b_type"]}</div></div>
         <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum</div><div class="snap-val">{pd_state["etasjer"]} etg / {pd_state["bta"]} m²</div></div>
-        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger i minnet</div><div class="snap-val" style="color:#7ee081;">{len(st.session_state.project_images)} sider klare</div></div>
+        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
     </div>
     """)
 
-# --- 7. LAUNCHPAD ---
+# --- 8. LAUNCHPAD ---
 def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, output_txt, btn_label, page_target):
     with col:
         st.markdown('<div class="module-card-hook"></div>', unsafe_allow_html=True)
