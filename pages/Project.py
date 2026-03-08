@@ -149,11 +149,15 @@ default_data = {
 
 if "project_data" not in st.session_state:
     if SSOT_FILE.exists():
-        with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            st.session_state.project_data = json.load(f)
+        try:
+            with open(SSOT_FILE, "r", encoding="utf-8") as f:
+                st.session_state.project_data = json.load(f)
+        except Exception:
+            st.session_state.project_data = default_data.copy()
     else:
         st.session_state.project_data = default_data.copy()
 
+# SKUDDSIKRET SIKKERHETSNETT: Lapper sammen manglende nøkler
 for k, v in default_data.items():
     if k not in st.session_state.project_data:
         st.session_state.project_data[k] = v
@@ -216,7 +220,7 @@ with c3:
             st.switch_page(find_page("Review"))
 
 # --- 6. MAGISKE PLACEHOLDERE FOR LIVE-DASHBOARD ---
-# Ved å legge disse her, kan vi dytte inn HTML etter at du har skrevet i feltene!
+# Ved å legge disse her, kan vi dytte inn HTML ETTER at du har skrevet i feltene
 dash_placeholder = st.empty()
 stat_placeholder = st.empty()
 
@@ -225,6 +229,10 @@ st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosj
 st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
 
 input_col, snap_col = st.columns([2, 1], gap="large")
+
+# Legger av plass til høyre-menyen (Snapshot) først
+with snap_col:
+    snap_placeholder = st.empty()
 
 with input_col:
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📌 01 Generelt</h4></div>""", unsafe_allow_html=True)
@@ -277,10 +285,10 @@ with input_col:
     new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
     new_etasjer = c8.number_input("Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
     new_bta = c9.number_input("Bygningsareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
-    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=10)
+    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=100)
 
 # --- 8. BEREGNING AV LIVE-STATUS ---
-# Nå leser vi av de ferske variablene mens du skriver!
+# Nå leser vi av de ferske variablene og tvinger dem inn i UI-et på toppen!
 current_state = {
     "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
     "adresse": new_adresse, "kommune": new_kommune, "gnr": new_gnr, "bnr": new_bnr,
@@ -295,6 +303,7 @@ sync_status = "Draft" if completeness < 100 else "Ready"
 progress_color = "#38c2c9" if completeness > 80 else "#f4bf4f" if completeness > 40 else "#ef4444"
 
 # --- 9. RENDERER LIVE DASHBOARD PÅ TOPPEN ---
+# SKUDDSIKKERT: Bruker utelukkende current_state.get() med fail-safes
 dash_placeholder.markdown(f"""
 <div class="dash-grid">
     <div class="card card-hero">
@@ -313,8 +322,8 @@ dash_placeholder.markdown(f"""
         </div>
         <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
         
-        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{current_state["last_sync"]}</span></div>
-        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if current_state["adresse"] or current_state["gnr"] else "Nei"}</span></div>
+        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{current_state.get("last_sync", "Ikke synket enda")}</span></div>
+        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if current_state.get("adresse") or current_state.get("gnr") else "Nei"}</span></div>
     </div>
 </div>
 """, unsafe_allow_html=True)
@@ -325,35 +334,34 @@ stat_placeholder.markdown(f"""
         <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{current_state["b_type"]}</div>
+        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{current_state.get("b_type", "-")}</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Bygningsareal</div><div class="stat-value">{current_state["bta"]} m²</div>
+        <div class="stat-title">Bygningsareal</div><div class="stat-value">{current_state.get("bta", "0")} m²</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Tomteareal</div><div class="stat-value">{current_state["tomteareal"]} m²</div>
+        <div class="stat-title">Tomteareal</div><div class="stat-value">{current_state.get("tomteareal", "0")} m²</div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 # --- 10. RENDERER LIVE SNAPSHOT (HØYRE SIDE) ---
-with snap_col:
-    render_html(f"""
-    <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
-        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
-        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
-        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
-        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{current_state["land"].split(' ')[0]}</div></div>
-        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{current_state["p_name"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{current_state["c_name"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{current_state["adresse"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{current_state["kommune"] or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [current_state["gnr"], current_state["bnr"]])) or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{current_state["b_type"]}</div></div>
-        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{current_state["bta"]} / {current_state["tomteareal"]} m²</div></div>
-        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
-    </div>
-    """)
+snap_placeholder.markdown(f"""
+<div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
+    <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
+    <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
+    <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
+    <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{current_state.get("land", "-").split(' ')[0]}</div></div>
+    <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{current_state.get("p_name") or '-'}</div></div>
+    <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{current_state.get("c_name") or '-'}</div></div>
+    <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{current_state.get("adresse") or '-'}</div></div>
+    <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{current_state.get("kommune") or '-'}</div></div>
+    <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [current_state.get("gnr"), current_state.get("bnr")])) or '-'}</div></div>
+    <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{current_state.get("b_type", "-")}</div></div>
+    <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{current_state.get("bta", "0")} / {current_state.get("tomteareal", "0")} m²</div></div>
+    <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
+</div>
+""", unsafe_allow_html=True)
 
 # --- 11. OPPLASTING OG LAGRE-KNAPP (FORTSETTER I INPUT_COL) ---
 with input_col:
