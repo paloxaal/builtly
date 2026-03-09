@@ -109,7 +109,7 @@ def clean_pdf_text(text: Any) -> str:
         "‘": "'",
         "’": "'",
         "…": "...",
-        "•": "-",
+        "•": "*",
         "²": "2",
         "³": "3",
         "ø": "o",
@@ -200,6 +200,23 @@ def geo_runtime_notes() -> List[str]:
 
 
 # --- 3. GEODATA / KART ---
+
+def get_kommunenummer(input_str: str) -> Optional[str]:
+    """Oversatt bynavn til riktig 4-sifret kommunenummer fra Kartverket API."""
+    s = str(input_str).strip()
+    if s.isdigit() and len(s) >= 3:
+        return s.zfill(4)
+    try:
+        resp = requests.get("https://ws.geonorge.no/kommuneinfo/v1/kommuner", timeout=5)
+        if resp.status_code == 200:
+            for k in resp.json():
+                if k.get("kommunenavn", "").lower() == s.lower():
+                    return k.get("kommunenummer")
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
 def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional[float], str]:
     query = ", ".join([x for x in [adresse, kommune, "Norway"] if x])
@@ -223,7 +240,25 @@ def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
-def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str) -> Tuple[Optional[Image.Image], str]:
+def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str, bounds: Optional[Tuple[float, float, float, float]] = None) -> Tuple[Optional[Image.Image], str]:
+    # 1. HØYESTE PRIORITET: Bruk eksakte koordinater hvis vi har hentet tomt (bounds i EPSG:25833)
+    if bounds is not None:
+        minx, miny, maxx, maxy = bounds
+        # Legg på 50 meter margin rundt tomten for kartvisning
+        url_orto = (
+            "https://wms.geonorge.no/skwms1/wms.nib"
+            "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
+            f"&styles=&srs=EPSG:25833&bbox={minx-60},{miny-60},{maxx+60},{maxy+60}"
+            "&width=1000&height=1000&format=image/png"
+        )
+        try:
+            r1 = requests.get(url_orto, timeout=10)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Ortofoto (via Eksakt Tomtegrense)"
+        except Exception:
+            pass
+
+    # 2. MELLOMPRIORITET: Vanlig adressesøk mot Kartverket
     nord, ost = None, None
     adr_clean = adresse.replace(",", "").strip() if adresse else ""
     kom_clean = kommune.replace(",", "").strip() if kommune else ""
@@ -253,8 +288,8 @@ def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str
             pass
 
     if nord and ost:
-        min_x, max_x = float(ost) - 180, float(ost) + 180
-        min_y, max_y = float(nord) - 180, float(nord) + 180
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
         url_orto = (
             "https://wms.geonorge.no/skwms1/wms.nib"
             "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
@@ -264,10 +299,11 @@ def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str
         try:
             r1 = requests.get(url_orto, timeout=8)
             if r1.status_code == 200 and len(r1.content) > 5000:
-                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket (Norge i Bilder)"
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Adressesøk (Norge i Bilder)"
         except Exception:
             pass
 
+    # 3. LAVESTE PRIORITET: Google Maps
     if api_key and (adr_clean or kom_clean):
         query = f"{adr_clean}, {kom_clean}, Norway"
         safe_query = urllib.parse.quote(query)
@@ -312,6 +348,7 @@ def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Ima
             continue
     return images
 
+
 # --- 4. GEOSPATIAL HJELPERE ---
 DEFAULT_FLOOR_HEIGHT_M = 3.2
 
@@ -327,11 +364,14 @@ def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
         return [{"type": "Feature", "geometry": obj, "properties": {}}]
     return []
 
-def hent_tomt_fra_geonorge(kommunenr: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
+def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
     """Henter nøyaktige eiendomsgrenser fra Kartverket WFS og slår dem sammen"""
+    knr = get_kommunenummer(kommune_input)
+    if not knr:
+        return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Prøv å skrive f.eks. 'Oslo' eller '0301'."
+        
     polygoner = []
     feil = []
-    knr = str(kommunenr).strip().zfill(4)
     
     for gnr, bnr in gnr_bnr_liste:
         url = "https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig"
@@ -370,7 +410,7 @@ def hent_tomt_fra_geonorge(kommunenr: str, gnr_bnr_liste: List[Tuple[str, str]])
         
     try:
         samlet = unary_union(polygoner)
-        msg = "Hentet tomt: " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
+        msg = f"Hentet tomt ({knr}): " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
         if feil:
             msg += f" | Mangler: {', '.join(feil)}"
         return samlet, msg
@@ -475,7 +515,7 @@ def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Option
 
 def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: Any, coordinate_text: str) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
     
-    # 1. Høyeste prioritet: Tomt hentet fra Kartverket
+    # 1. Høyeste prioritet: Tomt hentet fra Kartverket (Allerede i meter/UTM33)
     if auto_polygon is not None:
         poly_local, _, info = normalize_polygon_to_local(auto_polygon)
         crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
@@ -2211,10 +2251,10 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
 
 with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
     st.markdown("##### 🌍 1. Hent eiendom fra Kartverket automatisk (Anbefalt)")
-    st.info("Skriv inn kommunenummer og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4). Motoren slår dem automatisk sammen til ett byggeklart polygon.")
+    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4). Motoren slår dem automatisk sammen til ett byggeklart polygon.")
     
     c_k, c_g = st.columns(2)
-    kommune_nr_input = c_k.text_input("Kommunenummer (f.eks. 5001 for Trondheim)", value="")
+    kommune_nr_input = c_k.text_input("Kommune (Navn eller 4-sifret nummer)", value=pd_state.get('kommune', ''))
     
     default_gnr_bnr = ""
     if pd_state.get('gnr') and pd_state.get('bnr'):
@@ -2224,7 +2264,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
 
     if st.button("Søk opp og lagre tomt fra Kartverket", type="secondary"):
         if not kommune_nr_input or not gnr_bnr_input:
-            st.warning("Fyll inn både kommunenummer og Gnr/Bnr.")
+            st.warning("Fyll inn både kommune og Gnr/Bnr.")
         else:
             with st.spinner("Kobler til GeoNorge WFS og genererer polygon..."):
                 pairs = []
@@ -2240,7 +2280,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
                         st.session_state.auto_site_msg = msg
                         st.rerun()
                     else:
-                        st.error(f"❌ Feil: {msg}")
+                        st.error(f"❌ {msg}")
                 else:
                     st.warning("Ugyldig format på Gnr/Bnr. Bruk formatet 15/2.")
                     
@@ -2350,16 +2390,20 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
     with c_map:
         if st.button("Hent kart automatisk for tomten", type="secondary"):
             with st.spinner("Henter kart ..."):
+                auto_poly = st.session_state.get("auto_site_polygon")
+                bounds_for_map = auto_poly.bounds if auto_poly else None
+                
                 img, source = fetch_map_image(
                     pd_state.get("adresse", ""),
                     pd_state.get("kommune", ""),
                     pd_state.get("gnr", ""),
                     pd_state.get("bnr", ""),
                     google_key or "",
+                    bounds=bounds_for_map
                 )
                 if img is not None:
                     st.session_state.ark_kart = img
-                    st.success(f"Kart hentet fra {source}")
+                    st.success(f"Kart hentet! (Kilde: {source})")
                 else:
                     st.error(source)
         if st.session_state.ark_kart is not None:
@@ -2395,10 +2439,21 @@ if run_analysis:
         images_for_context.append(st.session_state.ark_kart)
     images_for_context.extend(load_uploaded_visuals(uploaded_files))
 
-    lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
-
     auto_poly = st.session_state.get("auto_site_polygon")
     site_polygon_input, site_crs, polygon_meta = load_site_polygon_input(auto_poly, site_polygon_upload, site_polygon_text)
+    
+    # Skuddsikker lat/lon henting
+    if auto_poly is not None and HAS_PYPROJ:
+        try:
+            centroid = auto_poly.centroid
+            transformer = Transformer.from_crs(CRS.from_epsg(25833), CRS.from_epsg(4326), always_xy=True)
+            lon_geocoded, lat_geocoded = transformer.transform(centroid.x, centroid.y)
+            geo_source = "Kartverket Polygon"
+        except:
+            lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
+    else:
+        lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
+
     latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
     longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
 
