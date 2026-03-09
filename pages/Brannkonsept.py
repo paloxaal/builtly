@@ -122,6 +122,7 @@ if "brann_kart" not in st.session_state:
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
     st.session_state.project_data = json.loads(SSOT_FILE.read_text(encoding="utf-8"))
 
+# DEFINERER pd_state GLOBALT HER FOR Å UNNGÅ NAMEERROR
 pd_state = st.session_state.project_data
 
 if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
@@ -134,11 +135,6 @@ if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
     st.stop()
 
 # --- 3. DATAKLASSER OG KART ---
-@dataclass
-class UploadedSource:
-    name: str
-    pages: List[Image.Image] = field(default_factory=list)
-
 @dataclass
 class FireMarkupSpec:
     page_title: str = ""
@@ -165,10 +161,10 @@ def pdf_to_images(pdf_bytes: bytes, limit: int = 5, scale: float = 2.0) -> List[
     return images
 
 def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
-    nord, ost = None, None
     adr_clean = adresse.replace(",", "").strip() if adresse else ""
     kom_clean = kommune.replace(",", "").strip() if kommune else ""
     queries = [f"{adr_clean} {kom_clean}", adr_clean, f"{kom_clean} {gnr}/{bnr}"]
+    nord, ost = None, None
     for q in queries:
         safe_query = urllib.parse.quote(q)
         url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
@@ -301,6 +297,53 @@ def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Imag
             draw_arrow(draw, tuple(el["points"][0]), tuple(el["points"][1]), stroke, width)
     return Image.alpha_composite(canvas, overlay).convert("RGB")
 
+def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+    match = re.search(r"(\{.*\})", text.strip().replace("\n", ""), re.S)
+    if match:
+        try: return json.loads(match.group(1))
+        except: return None
+    return None
+
+def build_cover_page(pdf, pd_state, brann_data, cover_img):
+    pdf.add_page()
+    if os.path.exists("logo.png"): pdf.image("logo.png", x=150, y=15, w=40)
+    pdf.set_xy(20, 45); pdf.set_font("Helvetica", "B", 11); pdf.set_text_color(100, 105, 110); pdf.cell(80, 6, "RAPPORT", 0, 1)
+    pdf.set_x(20); pdf.set_font("Helvetica", "B", 34); pdf.set_text_color(20, 28, 38); pdf.multi_cell(95, 12, clean_pdf_text(pd_state.get("p_name")), 0, 'L')
+    pdf.ln(4); pdf.set_x(20); pdf.set_font("Helvetica", "B", 14); pdf.set_text_color(229, 57, 53); pdf.multi_cell(95, 6.5, "Brannteknisk konsept (RIBr)\nTEK17 Dokumentasjon", 0, 'L')
+    pdf.set_xy(118, 45); pdf.kv_card([("Byggherre", pd_state.get("c_name")), ("RKL", brann_data['rkl']), ("BKL", brann_data['bkl']), ("Dato", datetime.now().strftime("%d.%m.%Y"))], x=118, width=72, title="Fakta")
+    if cover_img:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            cover_img.convert("RGB").save(tmp.name, format="JPEG")
+            w = 170; h = w * (cover_img.height/cover_img.width)
+            if h > 130: h = 130; w = h / (cover_img.height/cover_img.width)
+            pdf.image(tmp.name, x=20 + (170-w)/2, y=115, w=w)
+    pdf.set_xy(20, 255); pdf.set_font("Helvetica", "", 8.8); pdf.set_text_color(104, 109, 116); pdf.multi_cell(170, 4.5, "Rapporten er generert av Builtly RIBr AI. Dette er et forprosjektutkast og skal underlegges kontroll før innsending.")
+
+def create_full_report_pdf(pd_state, brann_data, content, sketches, raw_imgs):
+    pdf = BuiltlyCorporatePDF("P", "mm", "A4")
+    pdf.set_auto_page_break(True, margin=22); pdf.set_margins(18, 18, 18)
+    pdf.header_left = clean_pdf_text(pd_state['p_name'])
+    build_cover_page(pdf, pd_state, brann_data, raw_imgs[0] if raw_imgs else None)
+    
+    sections = split_ai_sections(content)
+    pdf.add_page()
+    for idx, sec in enumerate(sections):
+        if idx > 0: pdf.ensure_space(30); pdf.ln(8)
+        pdf.section_title(sec['title'])
+        if sec['title'].startswith("1."):
+            pdf.stats_row([("Risikoklasse", brann_data['rkl'], "TK1"), ("Brannklasse", brann_data['bkl'], "TK4"), ("Sprinkler", "Ja" if "Ja" in brann_data['sprinkler'] else "Nei", "TK2"), ("Etasjer", str(pd_state['etasjer']), "TK1")])
+        for line in sec['lines']:
+            if is_subheading_line(line): pdf.subheading(line)
+            elif is_bullet_line(line): pdf.bullets([strip_bullet(line)])
+            else: pdf.body_paragraph(line)
+
+    for title, img in sketches:
+        pdf.add_page(); pdf.section_title(title)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            img.convert("RGB").save(tmp.name, format="JPEG", quality=85)
+            pdf.image(tmp.name, x=18, y=pdf.get_y(), w=174)
+    return bytes(pdf.output(dest="S"))
+
 # --- 6. PREMIUM CSS & UI ---
 st.markdown("""
 <style>
@@ -346,12 +389,19 @@ with st.expander("3. AI-Assistert Branntegning (Tegn på plan)", expanded=True):
         sel_doc_name = st.selectbox("Velg tegning for AI-skisse", [d['name'] for d in st.session_state.source_documents])
         sel_doc = next(d for d in st.session_state.source_documents if d['name'] == sel_doc_name)
         pg_cnt = len(sel_doc['pages'])
-        sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1) if pg_cnt > 1 else 1
+        
+        # FIKSER SLIDER-BUG: Bare vis slider hvis det er flere sider
+        sel_pg_idx = 1
+        if pg_cnt > 1:
+            sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1)
+        
         sel_pg = sel_doc['pages'][sel_pg_idx-1]
         st.image(sel_pg, use_container_width=True)
+        
         if st.button("🎨 Foreslå brann-overlay med AI", type="primary"):
             with st.spinner("AI studerer planen og tegner inn brannkrav..."):
-                model = genai.GenerativeModel(pick_model_name())
+                model_name = pick_model_name()
+                model = genai.GenerativeModel(model_name)
                 prompt = f"Lag et førsteutkast til brannoverlay for '{sel_doc_name}'. RKL: {rkl}, BKL: {bkl}. Returner KUN JSON: " + '{"elements":[{"type":"line","points":[[100,100],[500,100]],"style":"dashed_red","label":"EI60"}]}'
                 res = model.generate_content([prompt, sel_pg])
                 rendered = render_fire_overlay(sel_pg, res.text)
@@ -365,13 +415,16 @@ st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_container_width=True):
     with st.spinner("Analyserer underlag og skriver rapport..."):
         try:
-            model = genai.GenerativeModel(pick_model_name())
+            model_name = pick_model_name()
+            model = genai.GenerativeModel(model_name)
             all_imgs = [p for d in st.session_state.get("source_documents", []) for p in d['pages']][:5]
+            
             prompt = f"""
             Du er en senior RIBr. Skriv et komplett Brannkonsept iht. TEK17 for {pd_state['p_name']}.
             Forutsetninger: {rkl}, {bkl}, Sprinkler: {spr_opt}, Alarm: {alarm_opt}.
-            START DIREKTE PÅ KAPITTEL 1.
+            START DIREKTE PÅ KAPITTEL 1. Ingen hilsen.
             I KAPITTEL 7: Skriv en KONKRET og operativ tiltaksplan (f.eks. hvilke skiller som skal være EI60).
+            Anta at alt datagrunnlag er 100% korrekt.
             Struktur:
             # 1. SAMMENDRAG
             # 2. PROSJEKTBESKRIVELSE
@@ -384,43 +437,19 @@ if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_c
             res = model.generate_content([prompt] + all_imgs)
             
             # --- BYGG PDF ---
-            pdf = BuiltlyCorporatePDF("P", "mm", "A4")
-            pdf.set_auto_page_break(True, margin=22); pdf.set_margins(18, 18, 18)
-            pdf.header_left = clean_pdf_text(pd_state['p_name'])
-            # Cover page fiks: Ingen strek gjennom logo
-            pdf.add_page()
-            if os.path.exists("logo.png"): pdf.image("logo.png", x=150, y=15, w=40)
-            pdf.set_xy(20, 45); pdf.set_font("Helvetica", "B", 11); pdf.set_text_color(100, 105, 110); pdf.cell(80, 6, "RAPPORT", 0, 1)
-            pdf.set_x(20); pdf.set_font("Helvetica", "B", 34); pdf.set_text_color(20, 28, 38); pdf.multi_cell(95, 12, clean_pdf_text(pd_state.get("p_name")), 0, 'L')
-            pdf.ln(4); pdf.set_x(20); pdf.set_font("Helvetica", "B", 14); pdf.set_text_color(229, 57, 53); pdf.multi_cell(95, 6.5, "Brannteknisk konsept (RIBr)\nTEK17 Dokumentasjon", 0, 'L')
-            pdf.set_xy(118, 45); pdf.kv_card([("Kunde", pd_state.get("c_name")), ("RKL", rkl), ("BKL", bkl)], x=118, width=72, title="Fakta")
-            if all_imgs:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                    all_imgs[0].convert("RGB").save(tmp.name, format="JPEG")
-                    pdf.image(tmp.name, x=20, y=115, w=170)
-            pdf.set_xy(20, 255); pdf.set_font("Helvetica", "", 8.8); pdf.set_text_color(104, 109, 116); pdf.multi_cell(170, 4.5, "Generert av Builtly AI.")
-
-            sections = split_ai_sections(res.text)
-            pdf.add_page()
-            for idx, sec in enumerate(sections):
-                if idx > 0: pdf.ensure_space(30); pdf.ln(8)
-                pdf.section_title(sec['title'])
-                if sec['title'].startswith("1."):
-                    pdf.stats_row([("Risikoklasse", rkl, "TK1"), ("Brannklasse", bkl, "TK4"), ("Sprinkler", "Ja" if "Ja" in spr_opt else "Nei", "TK2"), ("Etasjer", str(pd_state['etasjer']), "TK1")])
-                for line in sec['lines']:
-                    if is_subheading_line(line): pdf.subheading(line)
-                    else: pdf.body_paragraph(line)
-
-            for title, img in st.session_state.generated_fire_drawings:
-                pdf.add_page(); pdf.section_title(title)
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                    img.convert("RGB").save(tmp.name, format="JPEG", quality=85)
-                    pdf.image(tmp.name, x=18, y=pdf.get_y(), w=174)
-
-            st.session_state.generated_pdf = bytes(pdf.output(dest="S"))
+            pdf_data = create_full_report_pdf(
+                pd_state, 
+                {'rkl':rkl, 'bkl':bkl, 'sprinkler':spr_opt, 'alarm':alarm_opt},
+                res.text,
+                st.session_state.get("generated_fire_drawings", []),
+                all_imgs
+            )
+            
+            st.session_state.generated_pdf = pdf_data
             st.rerun()
-        except Exception as e: st.error(f"Feil: {e}")
+        except Exception as e:
+            st.error(f"Feil under generering: {e}")
 
 if st.session_state.get("generated_pdf"):
-    st.success("✅ Brannkonsept ferdigstilt!")
+    st.success("✅ Brannkonseptet er ferdigstilt!")
     st.download_button("📄 Last ned RIBr-rapport", st.session_state.generated_pdf, f"Builtly_RIBr_{pd_state['p_name']}.pdf", type="primary", use_container_width=True)
