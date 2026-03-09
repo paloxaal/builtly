@@ -4,17 +4,17 @@ import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
-import json
 from datetime import datetime
 import tempfile
 import re
+import requests
+import urllib.parse
 import io
 from PIL import Image
-import numpy as np
 from pathlib import Path
 
 # --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Konstruksjon (RIB) | Builtly", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -22,11 +22,6 @@ if google_key:
 else:
     st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
     st.stop()
-
-try:
-    import fitz  
-except ImportError:
-    fitz = None
 
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
@@ -58,10 +53,14 @@ def ironclad_text_formatter(text):
     text = re.sub(r'([^\s]{40})', r'\1 ', text)
     return clean_pdf_text(text)
 
-# --- 2. PREMIUM CSS ---
+# --- 2. PREMIUM CSS (SAMME SOM PROJECT & BRANN) ---
 st.markdown("""
 <style>
-    :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px; }
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
+    }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     header[data-testid="stHeader"] { visibility: hidden; height: 0; }
@@ -102,25 +101,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. HARDDISK GJENOPPRETTING (Sikrer data mot krasj) ---
-DB_DIR = Path("qa_database")
-IMG_DIR = DB_DIR / "project_images"
-SSOT_FILE = DB_DIR / "ssot.json"
-
-if "project_data" not in st.session_state or st.session_state.project_data.get("p_name") == "":
-    if SSOT_FILE.exists():
-        with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            st.session_state.project_data = json.load(f)
-    else:
-        st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
+# --- 3. SESSION STATE LOGIKK ---
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"}
+if "geo_maps" not in st.session_state:
+    st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
+if "project_images" not in st.session_state:
+    st.session_state.project_images = []
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    
     st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    st.info("RIB-agenten trenger kontekst om bygget (areal, etasjer, adresse og regelverk) for å kunne generere en faglig og juridisk korrekt rapport.")
-    
     if find_page("Project"):
         if st.button("⚙️ Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
@@ -139,12 +131,69 @@ with top_r:
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
 pd_state = st.session_state.project_data
 
-# --- 5. DYNAMISK PDF MOTOR (RIB) ---
+# --- 5. KARTVERKET + GOOGLE MAPS FALLBACK ---
+def fetch_kartverket_og_google(adresse, kommune, gnr, bnr, api_key):
+    nord, ost = None, None
+    adr_clean = adresse.replace(',', '').strip() if adresse else ""
+    kom_clean = kommune.replace(',', '').strip() if kommune else ""
+    
+    queries = []
+    if adr_clean and kom_clean: queries.append(f"{adr_clean} {kom_clean}")
+    if adr_clean: queries.append(adr_clean)
+    if gnr and bnr and kom_clean: queries.append(f"{kom_clean} {gnr}/{bnr}")
+    
+    for q in queries:
+        safe_query = urllib.parse.quote(q)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=4)
+            if resp.status_code == 200 and resp.json().get('adresser'):
+                hit = resp.json()['adresser'][0]
+                nord = hit.get('representasjonspunkt', {}).get('nord')
+                ost = hit.get('representasjonspunkt', {}).get('øst')
+                break
+        except: pass
+        
+    if nord and ost:
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
+        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+        try:
+            r1 = requests.get(url_orto, timeout=5)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Kartverket (Norge i Bilder)"
+        except: pass
+        
+    if api_key and (adr_clean or kom_clean):
+        query = f"{adr_clean}, {kom_clean}, Norway"
+        safe_query = urllib.parse.quote(query)
+        url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
+        try:
+            r2 = requests.get(url_gmaps, timeout=5)
+            if r2.status_code == 200:
+                return Image.open(io.BytesIO(r2.content)).convert('RGB'), "Google Maps Satellite"
+        except: pass
+        
+    return None, "Kunne ikke hente kart."
+
+# --- 6. EXCEL/CSV DATA EXTRACTOR ---
+def extract_drill_data(files):
+    extracted_text = ""
+    for f in files:
+        if f.name.lower().endswith(('.xlsx', '.xls', '.csv')):
+            try:
+                df = pd.read_csv(f) if f.name.lower().endswith('.csv') else pd.read_excel(f)
+                extracted_text += f"\n--- RÅDATA FRA LABORATORIUM: {f.name.upper()} ---\n{df.head(100).to_string()}\n\n"
+            except Exception as e:
+                extracted_text += f"\n[Feil ved lesing av {f.name}: {e}]\n"
+    return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
+
+# --- 7. DYNAMISK PDF MOTOR FOR GEO (Fikset for JPEG/RGB) ---
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
             self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
-            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIB-001"), 0, 1, 'R')
+            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIG-M-001"), 0, 1, 'R')
             self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
     def footer(self):
         self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
@@ -153,45 +202,60 @@ class BuiltlyProPDF(FPDF):
         if self.get_y() + height > 270: 
             self.add_page(); self.set_margins(25, 25, 25); self.set_x(25)
 
-def create_full_report_pdf(name, client, content, maps):
+def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text):
     pdf = BuiltlyProPDF()
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
     
     pdf.add_page()
-    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50) 
-    
+    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
     pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 15, clean_pdf_text("KONSEPTNOTAT: KONSTRUKSJON (RIB)"), 0, 1, 'L')
+    pdf.cell(0, 15, clean_pdf_text("GEOTEKNISK & MILJØTEKNISK RAPPORT"), 0, 1, 'L')
     pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"FORPROSJEKT: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
+    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
     
-    for l, v in [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RIB AI Engine"), ("REGELVERK:", pd_state.get('land', 'Norge'))]:
+    metadata = [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RIG-M AI Engine"), ("REGELVERK:", pd_state.get('land', 'Ukjent'))]
+    for l, v in metadata:
         pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
         pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
 
     pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
-    
-    toc = [
-        "1. SAMMENDRAG OG KONKLUSJON", 
-        "2. VURDERING AV DATAGRUNNLAG", 
-        "3. LASTER OG FORUTSETNINGER", 
-        "4. KONSEPT FOR BÆRESYSTEM OG STABILITET", 
-        "5. FUNDAMENTERING OG EKSISTERENDE KONSTRUKSJONER", 
-        "6. RISIKO, SÅRBARHET OG NESTE STEG", 
-        "VEDLEGG: VURDERT TEGNINGSGRUNNLAG"
-    ]
+    toc = ["1. SAMMENDRAG OG KONKLUSJON", "2. INNLEDNING OG PROSJEKTBESKRIVELSE", "3. KARTVERKET OG HISTORISK LOKASJON", "4. UTFØRTE GRUNNUNDERSØKELSER", "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING", "6. GEOTEKNISKE VURDERINGER", "7. TILTAKSPLAN OG MASSEHÅNDTERING"]
+    pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
     for t in toc:
-        pdf.set_x(25); pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
-        pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+        pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
 
     pdf.add_page()
     for raw_line in content.split('\n'):
         line = raw_line.strip()
         if not line: pdf.ln(4); continue
-        if line.startswith('# ') or re.match(r'^\d+\.\s[A-Z]', line):
+            
+        if line.startswith('# 3. KARTVERKET'):
+            pdf.check_space(180); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
+            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(4)
+            
+            # Kartbilder med JPEG konvertering for sikker utskrift
+            if recent_img and hist_img:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t1, tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t2:
+                    recent_img.convert("RGB").save(t1.name, format="JPEG"); hist_img.convert("RGB").save(t2.name, format="JPEG")
+                    y_pos = pdf.get_y()
+                    pdf.image(t1.name, x=25, y=y_pos, w=75); pdf.image(t2.name, x=110, y=y_pos, w=75)
+                    pdf.set_y(y_pos + 75 * (recent_img.height / recent_img.width) + 5)
+                    pdf.set_font('Helvetica', 'I', 8); pdf.set_text_color(100, 100, 100); pdf.set_x(25)
+                    pdf.cell(75, 5, clean_pdf_text(f"Fig 1: Nyere ({source_text})"), 0, 0, 'C'); pdf.set_x(110); pdf.cell(75, 5, clean_pdf_text("Fig 2: Historisk"), 0, 1, 'C'); pdf.ln(5)
+            elif recent_img:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t1:
+                    recent_img.convert("RGB").save(t1.name, format="JPEG")
+                    pdf.image(t1.name, x=45, y=pdf.get_y(), w=120)
+                    pdf.set_y(pdf.get_y() + 120 * (recent_img.height / recent_img.width) + 5)
+                    pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(100, 100, 100); pdf.set_x(25); pdf.cell(0, 5, clean_pdf_text(f"Figur 1: Kartgrunnlag. Kilde: {source_text}"), 0, 1, 'C'); pdf.ln(5)
+            else:
+                pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(150, 0, 0); pdf.set_x(25); pdf.cell(0, 5, f"Merknad: Intet kartgrunnlag er innhentet.", 0, 1, 'L'); pdf.ln(5)
+            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0); continue
+            
+        elif line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
             pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
         elif line.startswith('##'):
@@ -207,199 +271,154 @@ def create_full_report_pdf(name, client, content, maps):
                 else:
                     pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
             except Exception: pdf.ln(2)
-
-    if maps and len(maps) > 0:
-        pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72); pdf.cell(0, 20, "VEDLEGG: VURDERT BILDEDOKUMENTASJON", 0, 1)
-        for i, m in enumerate(maps):
-            if i > 0: pdf.add_page()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                m.convert("RGB").save(tmp.name, format="JPEG")
-                img_h = 160 * (m.height / m.width)
-                if img_h > 240: 
-                    img_h = 240
-                    img_w = 240 * (m.width / m.height)
-                    pdf.image(tmp.name, x=105-(img_w/2), y=pdf.get_y(), w=img_w)
-                else:
-                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 
-                pdf.set_y(pdf.get_y() + img_h + 5)
-                pdf.set_x(25); pdf.set_font('Helvetica', 'I', 10); pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 10, clean_pdf_text(f"Figur V-{i+1}: Dokument visuelt analysert av RIB-agenten."), 0, 1, 'C')
-
     return bytes(pdf.output(dest='S'))
 
-# --- STREAMLIT UI ---
-st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🏢 RIB — Konstruksjon</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for konseptuell dimensjonering, lastveier og stabilitet.</p>", unsafe_allow_html=True)
+# --- 8. UI FOR GEO MODUL ---
+st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
 
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert (SSOT).")
+st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra Project SSOT.")
 
-with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
+with st.expander("1. Prosjekt & Lokasjon (SSOT)", expanded=False):
     c1, c2 = st.columns(2)
-    p_name = c1.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
-    b_type = c2.text_input("Formål / Bygningstype", value=pd_state["b_type"], disabled=True)
-    adresse = st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
-    st.info(f"📍 **Regelverk & Laster:** Agenten vil bruke **{pd_state.get('land', 'Norge')}** for å vurdere snølaster, vindlaster og nasjonale annex for Eurokoder.")
+    st.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
+    st.text_input("Gnr/Bnr", value=f"{pd_state['gnr']} / {pd_state['bnr']}", disabled=True)
 
-with st.expander("2. Valg av Bæresystem & Grunnforhold", expanded=True):
-    c3, c4 = st.columns(2)
-    material_valg = c3.selectbox("Foretrukket hovedbæresystem", ["Massivtre (Krysslimt tre / CLT)", "Stål og Hulldekker", "Plasstøpt Betong", "Prefabrikkert Betong", "Hybrid / Kombinasjon"])
-    fundamentering = c4.selectbox("Forventet fundamenteringsmetode", ["Direkte fundamentering (fjell/faste masser)", "Peling til fjell", "Sålefundament / Kompensert fundamentering", "Uavklart - Vurderes basert på bygg"])
-
-with st.expander("3. Visuelt Grunnlag (Arkitektur / Snitt)", expanded=True):
-    st.info("Viktig: RIB trenger plantegninger og snitt for å analysere bygningsvolumet, foreslå grid-system (spennvidder for dekker), søyleplassering og stabiliserende kjerner.")
+with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
+    st.markdown("For å vurdere potensialet for forurenset grunn, krever veilederen en visuell bedømming av nyere og historiske flyfoto. AI-en integrerer disse i rapporten.")
     
-    # Henter tegninger fra harddisken hvis de finnes!
-    saved_images = []
-    if IMG_DIR.exists():
-        for p in sorted(IMG_DIR.glob("*.jpg")):
-            saved_images.append(Image.open(p).convert("RGB"))
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("🌐 Hent kart automatisk", type="secondary"):
+            with st.spinner("Søker i Matrikkel og Kartkatalog..."):
+                img, source = fetch_kartverket_og_google(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"], google_key)
+                if img:
+                    st.session_state.geo_maps["recent"] = img
+                    st.session_state.geo_maps["source"] = source
+                    st.success(f"✅ Hentet fra {source}!")
+                else: 
+                    st.error("Fant ikke kart. Vennligst last opp manuelt.")
+                    
+        if st.session_state.geo_maps["recent"]:
+            st.image(st.session_state.geo_maps["recent"], caption=f"Valgt: {st.session_state.geo_maps['source']}", use_container_width=True)
+
+    with col_b:
+        st.markdown("##### ⚠️ Manuell opplasting (Fallback)")
+        man_recent = st.file_uploader("Last opp nyere Ortofoto (Valgfritt)", type=['png', 'jpg', 'jpeg'])
+        if man_recent:
+            st.session_state.geo_maps["recent"] = Image.open(man_recent).convert("RGB")
+            st.session_state.geo_maps["source"] = "Manuelt opplastet"
             
-    if len(saved_images) > 0:
-        st.success(f"📎 Fant {len(saved_images)} felles arkitekttegninger fra Project Setup. Disse inkluderes automatisk i RIB-analysen!")
-    else:
-        st.warning("Ingen felles tegninger funnet. Du bør laste opp plan og snitt under.")
+        man_hist = st.file_uploader("Last opp historisk flyfoto (F.eks. fra 1950 for å sjekke tidl. industri)", type=['png', 'jpg', 'jpeg'])
+        if man_hist: st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
+
+with st.expander("3. Laboratoriedata & Plantegninger", expanded=True):
+    st.info("Slipp Excel/CSV-filer med prøvesvar her. AI-en leser verdiene og tilstandsklassifiserer massene.")
+    
+    if "project_images" in st.session_state and len(st.session_state.project_images) > 0:
+        st.success(f"📎 Auto-hentet {len(st.session_state.project_images)} arkitekttegninger fra Project Setup for vurdering av gravegrenser!")
         
-    files = st.file_uploader("Last opp spesifikke konstruksjonstegninger / supplerende snitt", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    files = st.file_uploader("Last opp Excel/CSV med boreresultater:", accept_multiple_files=True, type=['xlsx', 'csv', 'xls'])
 
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button("🚀 Kjør Konstruksjonsanalyse (RIB)", type="primary", use_container_width=True):
-    
-    images_for_ai = saved_images.copy()
+if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", use_container_width=True):
+    if not st.session_state.geo_maps["recent"] and not st.session_state.geo_maps["historical"]:
+        st.error("🛑 **Stopp:** Du må enten hente kart automatisk eller laste opp manuelt i Steg 2.")
+        st.stop()
         
-    if files:
-        with st.spinner("📐 Leser ut supplerende lokale filer..."):
-            try:
-                for f in files: 
-                    f.seek(0)
-                    if f.name.lower().endswith('pdf'):
-                        if fitz is not None: 
-                            doc = fitz.open(stream=f.read(), filetype="pdf")
-                            for page_num in range(min(4, len(doc))): 
-                                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-                                img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
-                                img.thumbnail((1200, 1200))
-                                images_for_ai.append(img)
-                            doc.close() 
-                    else:
-                        img = Image.open(f).convert("RGB")
-                        img.thumbnail((1200, 1200))
-                        images_for_ai.append(img)
-            except Exception as e: 
-                st.error(f"Feil under bildebehandling: {e}")
-                
-    st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til RIB-agenten for vurdering.")
-                
-    with st.spinner(f"🤖 Vurderer bæresystem og genererer RIB-notat for {pd_state.get('land', 'Norge')}..."):
+    with st.spinner("📊 Tolker lab-data, kart og arkitekttegninger..."):
+        extracted_data = extract_drill_data(files) if files else "Ingen opplastet lab-data. Vurderingen baseres på visuell befaring og historikk."
+        
+        images_for_geo = []
+        if st.session_state.geo_maps["recent"]: images_for_geo.append(st.session_state.geo_maps["recent"])
+        if st.session_state.geo_maps["historical"]: images_for_geo.append(st.session_state.geo_maps["historical"])
+        if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
+            images_for_geo.extend(st.session_state.project_images)
+        
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            valgt_modell = valid_models[0]
+            for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+                if fav in valid_models: valgt_modell = fav; break
         except:
             st.error("Kunne ikke koble til Google AI.")
             st.stop()
-
-        valgt_modell = valid_models[0]
-        for fav in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if fav in valid_models: valgt_modell = fav; break
         
         model = genai.GenerativeModel(valgt_modell)
+        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse."
 
-        prompt_text = f"""
-        Du er Builtly RIB AI, en senior rådgivende ingeniør bygg (RIB) med tung erfaring fra bolig, næring, rehabilitering, transformasjon og nybygg.
-        Du vurderer bæresystem, lastnedføring, stabilitet, spenn, materialvalg, fundamentering og byggbarhet.
+        prompt = f"""
+        Du er Builtly RIG-M AI, en nådeløs, presis og autoritær senior miljørådgiver og geotekniker.
+        Skriv en formell "Miljøteknisk grunnundersøkelse og tiltaksplan for forurenset grunn" for:
         
-        PROSJEKT: {p_name} ({b_type}, {pd_state['bta']} m2, {pd_state['etasjer']} etasjer). 
-        LOKASJON: {adresse}.
-        FORETRUKKET MATERIALE: {material_valg}.
-        FUNDAMENTERING: {fundamentering}.
-        REGELVERK: {pd_state.get('land', 'Norge (TEK17 / Eurokoder)')}. 
+        PROSJEKT: {pd_state['p_name']} ({pd_state['b_type']}, {pd_state['bta']} m2)
+        LOKASJON: {pd_state['adresse']}, {pd_state['kommune']}. Gnr {pd_state['gnr']}/Bnr {pd_state['bnr']}.
+        REGELVERK: {pd_state['land']}
         
-        KUNDENS PROSJEKTBESKRIVELSE: 
-        "{pd_state['p_desc']}"
+        KUNDENS PROSJEKTNARRATIV: "{pd_state['p_desc']}"
+        KARTSTATUS: {hist_tekst}
         
-        REGLER FOR DIN VURDERING (ALDRI BRYT DISSE):
-        - Du skal aldri gjette kapasitet, materialstyrker eller eksakte grunnforhold uten data.
-        - Du skal aldri anta at eksisterende bygg tåler nye laster uten grunnlag.
-        - Du må være tydelig på hva som er dokumentert, antatt, usikkert og ikke vurderbart.
-        - Ikke presenter grove vurderinger som detaljprosjektering. Skjul aldri usikkerhet.
+        RÅDATA FRA LABORATORIUM:
+        {extracted_data}
         
-        VIKTIG - VURDERING AV TEGNINGSGRUNNLAG:
-        Du har nå mottatt et sett med bilder (plantegninger, snitt, fasader). 
-        Din aller første oppgave er å vurdere om dette datagrunnlaget er godt nok for å sette et konsept. 
-        Du MÅ aktivt beskrive hva du ser på bildene.
+        EKSTREMT VIKTIG INSTRUKKS FOR BEVIS:
+        Jeg har lagt ved kart, og potensielt arkitekttegninger. 
+        Du MÅ aktivt bevise i teksten at du har sett på bildene OG analysert tallene fra Excel-filen. 
+        Skriv setninger som: 
+        - "Ut ifra vedlagte kart/flyfoto observeres det at..."
+        - "Basert på arkitekttegningene vil gravingen kreve..."
+        - "Laboratorieanalysen (ref. tabell) viser en forurensning av [stoff] i tilstandsklasse..."
+        Hvis prøvene mangler, kritiser dette hardt!
         
-        Bestem deg for ett av tre spor for rapporten:
-        
-        SPOR 1: FULLSTENDIG GRUNNLAG (Du ser tydelige plantegninger og snitt som tillater vurdering av grid, spenn og lastveier)
-        -> Lever en tydelig konstruksjonsfaglig vurdering. Foreslå grid-system, avstivende kjerner og robuste løsninger.
-        
-        SPOR 2: DELVIS GRUNNLAG (Du har noen skisser, men mangler f.eks snitt eller aksemål)
-        -> Lever en foreløpig indikativ vurdering. Skriv "INDIKATIV VURDERING" i konklusjonen. Diskuter mulige spennvidder for {material_valg}, men presiser høyt og tydelig hva som mangler for å låse konseptet.
-        
-        SPOR 3: FOR SVAKT GRUNNLAG (Ingen relevante tegninger som viser bygningskroppen)
-        -> Ikke gjør beregninger eller anta spennvidder. Lever KUN en presis mangelliste for hva arkitekten må levere, samt en overordnet teoretisk risikovurdering for et bygg av typen {b_type}. Skriv "AVVIST / FOR SVAKT GRUNNLAG" i konklusjonen.
-        
-        STRUKTUR PÅ RAPPORTEN (Bruk KUN disse eksakte overskriftene, uansett spor):
-        # 1. SAMMENDRAG OG KONKLUSJON (Angi tydelig om dette er en endelig, indikativ eller avvist vurdering)
-        # 2. VURDERING AV DATAGRUNNLAG (Vær streng! Hva ser du og hva mangler på tegningene?)
-        # 3. LASTER OG FORUTSETNINGER (Snø, vind, nyttelast - angi hva som krever avklaring)
-        # 4. KONSEPT FOR BÆRESYSTEM OG STABILITET (Spenn, geometri, materialvalg, avstivende skiver/kjerner basert på det du ser)
-        # 5. FUNDAMENTERING OG EKSISTERENDE KONSTRUKSJONER (Vurder byggbarhet og risiko knyttet til grunn)
-        # 6. RISIKO, SÅRBARHET OG NESTE STEG (Behov for forsterkning, spesifikke avklaringer mot arkitekt/geotekniker)
+        STRUKTUR (Bruk KUN disse eksakte overskriftene, og skriv dyptgående analyser under hver):
+        # 1. SAMMENDRAG OG KONKLUSJON
+        # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
+        # 3. KARTVERKET OG HISTORISK LOKASJON (Gjør konkrete observasjoner fra kartbildene)
+        # 4. UTFØRTE GRUNNUNDERSØKELSER
+        # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING (Dra inn tall og data fra Excel-uttrekket)
+        # 6. GEOTEKNISKE VURDERINGER (Gjør vurderinger basert på situasjonsplan og omfang av bygg)
+        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv strenge, konkrete tiltak for fjerning/deponering)
         """
         
-        prompt_parts = [prompt_text] + images_for_ai
-
         try:
-            res = model.generate_content(prompt_parts)
-            
-            with st.spinner("Kompilerer RIB-PDF og fletter inn tegninger som vedlegg..."):
-                pdf_data = create_full_report_pdf(p_name, pd_state['c_name'], res.text, images_for_ai)
+            res = model.generate_content([prompt] + images_for_geo)
+            with st.spinner("Kompilerer RIG-PDF og sender til QA-kø..."):
+                pdf_data = create_full_report_pdf(pd_state['p_name'], pd_state['c_name'], res.text, st.session_state.geo_maps["recent"], st.session_state.geo_maps["historical"], st.session_state.geo_maps["source"])
                 
-                # --- SENDER TIL QA-KØ ---
+                # Legger i Review-køen
                 if "pending_reviews" not in st.session_state:
                     st.session_state.pending_reviews = {}
                 if "review_counter" not in st.session_state:
                     st.session_state.review_counter = 1
                     
-                doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB{st.session_state.review_counter:03d}"
+                doc_id = f"PRJ-{datetime.now().strftime('%y')}-GEO{st.session_state.review_counter:03d}"
                 st.session_state.review_counter += 1
-                
-                # Fargekoder status basert på AI-ens vurdering
-                ai_text_lower = res.text.lower()
-                if "for svakt" in ai_text_lower or "avvist" in ai_text_lower:
-                    status = "Rejected - Needs Architecture Data"
-                    badge = "badge-early"
-                elif "indikativ" in ai_text_lower or "delvis" in ai_text_lower:
-                    status = "Indicative Structural Concept"
-                    badge = "badge-roadmap"
-                else:
-                    status = "Pending Senior RIB Review"
-                    badge = "badge-pending"
                 
                 st.session_state.pending_reviews[doc_id] = {
                     "title": pd_state['p_name'],
-                    "module": "RIB (Konstruksjon)",
+                    "module": "RIG-M (Geo & Miljø)",
                     "drafter": "Builtly AI",
-                    "reviewer": "Senior Konstruktør",
-                    "status": status,
-                    "class": badge,
+                    "reviewer": "Senior Miljørådgiver",
+                    "status": "Pending Senior Review",
+                    "class": "badge-pending",
                     "pdf_bytes": pdf_data
                 }
-
-            st.session_state.generated_rib_pdf = pdf_data
-            st.session_state.generated_rib_filename = f"Builtly_RIB_{p_name}.pdf"
-            st.rerun() 
+                
+                st.session_state.generated_geo_pdf = pdf_data
+                st.session_state.generated_geo_filename = f"Builtly_GEO_{pd_state['p_name'].replace(' ', '_')}.pdf"
+                st.rerun()
                 
         except Exception as e: 
             st.error(f"Kritisk feil under generering: {e}")
 
 # --- NEDLASTING OG NAVIGASJON ---
-if "generated_rib_pdf" in st.session_state:
-    st.success("✅ RIB-notat er ferdigstilt og lagt i QA-køen!")
+if "generated_geo_pdf" in st.session_state:
+    st.success("✅ RIG-M Rapport er ferdigstilt og sendt til QA-køen!")
     
     col_dl, col_qa = st.columns(2)
     with col_dl:
-        st.download_button("📄 Last ned RIB-rapport", st.session_state.generated_rib_pdf, st.session_state.generated_rib_filename, type="primary", use_container_width=True)
+        st.download_button("📄 Last ned Geo/Miljø-rapport", st.session_state.generated_geo_pdf, st.session_state.generated_geo_filename, type="primary", use_container_width=True)
     with col_qa:
         if find_page("Review"):
             if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
