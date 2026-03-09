@@ -8,3 +8,6 @@ Pillow
 PyMuPDF
 requests
 openpyxl
+shapely
+pyproj
+rasterio
