@@ -758,7 +758,7 @@ def render_maps(pdf, recent_img, hist_img, source_text):
         max_height = max(max_height, widths[idx] * (img.height / img.width))
     
     # VIKTIG FIKS: Vi flytter hele seksjonen med overskrift og kart til ny side hvis det ikke er plass til begge
-    pdf.ensure_space(max_height + 35) 
+    pdf.ensure_space(max_height + 40) 
     start_y = pdf.get_y()
     for idx, (img_path, caption) in enumerate(paths[:2]):
         pdf.set_xy(x_positions[idx], start_y)
@@ -844,13 +844,13 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
 
         # Spesialhåndtering for Kapittel 3 (Kart) for å unngå splitsing av overskrift og bilde
         if title.startswith("3."):
-            pdf.ensure_space(110) # Krever plass til både tittel og kart
+            pdf.ensure_space(120) # Krever mer plass til både tittel og kart (LÅSING)
 
         pdf.section_title(title)
 
         if title.startswith("1.") and not rendered_intro_boxes:
             # Dynamisk plassering av side-by-side kort (Sikrer at den kun tegnes EN gang)
-            pdf.ensure_space(45)
+            pdf.ensure_space(55)
             start_y = pdf.get_y()
             pdf.kv_card([("Prosjekt", project_data.get("p_name", name)), ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")), ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") , ("Byggtype", project_data.get("b_type", "-")), ("BTA", f"{project_data.get('bta', 0)} m2")], x=20, width=82, title="Prosjektgrunnlag")
             end_left = pdf.get_y()
@@ -870,12 +870,16 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         if title.startswith("3."): render_maps(pdf, recent_img, hist_img, source_text)
 
         if title.startswith("4.") and not lab_package.get("source_overview_df", pd.DataFrame()).empty:
+            # Låser overskrift til tabellbilde
+            pdf.ensure_space(60)
             source_table = render_table_image(lab_package["source_overview_df"], title="Opplastet analysegrunnlag", subtitle="Maskinelt lest og strukturert for rapportering", note="Tabellen viser hvilke kilder som faktisk ligger til grunn for vurderingene i denne genereringen.")
             pdf.table_image(save_temp_image(source_table), width=170, caption="Tabell 1. Oversikt over opplastet lab- og tabellgrunnlag.")
 
         render_ai_section_body(pdf, section.get("lines", []))
 
         if title.startswith("5.") and not lab_package.get("sample_summary_df", pd.DataFrame()).empty:
+            # Låser statistikk og overskrift
+            pdf.ensure_space(120)
             pdf.stats_row([("TK1 / rene", lab_package.get("counts", {}).get("TK1", 0), "TK1"), ("TK2", lab_package.get("counts", {}).get("TK2", 0), "TK2"), ("TK3", lab_package.get("counts", {}).get("TK3", 0), "TK3"), ("TK4-5", sum([lab_package.get("counts", {}).get(tk, 0) for tk in ["TK4", "TK5", "TK>5"]]), "TK5")])
 
             if not lab_package.get("exceedance_df", pd.DataFrame()).empty:
@@ -883,6 +887,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                 pdf.table_image(save_temp_image(top_table), width=170, caption="Tabell 2. Sammendrag av styrende funn i opplastet laboratoriedata.")
 
             if not (excerpt_df := lab_package.get("excerpt_df", pd.DataFrame())).empty:
+                pdf.ensure_space(80)
                 preview = excerpt_df.head(12).copy()
                 preview_img = render_table_image(preview, title="Analyseresultater og massebeskrivelser (utdrag)", subtitle="Fremstilt som rapporttabell i stedet for rå tekstutskrift", row_class_column="Høyeste klasse" if "Høyeste klasse" in preview.columns else None, cell_fill_lookup={(ridx, col): fill for (ridx, col), fill in lab_package.get("cell_fill_lookup", {}).items() if ridx < len(preview)}, note="Celler med farge markerer klassifiserte analyseresultater for de mest styrende parameterne.")
                 pdf.table_image(save_temp_image(preview_img), width=170, caption="Tabell 3. Laboratoriedata presentert i vedleggsformat med klassifiserte nøkkelparametere.")
@@ -1111,8 +1116,12 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             images_for_geo.append(st.session_state.geo_maps["recent"])
         if st.session_state.geo_maps["historical"]:
             images_for_geo.append(st.session_state.geo_maps["historical"])
-        if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
-            images_for_geo.extend(st.session_state.project_images)
+        
+        # Henter bilder fra Project Setup (SSOT) hvis de finnes i mappen
+        if IMG_DIR.exists():
+            for p in sorted(IMG_DIR.glob("*.jpg")):
+                try: images_for_geo.append(Image.open(p).convert("RGB"))
+                except: pass
 
         try:
             valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
@@ -1126,7 +1135,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             st.stop()
 
         model = genai.GenerativeModel(valgt_modell)
-        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse."
+        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler."
 
         prompt = f"""
         Du er Builtly RIG-M AI, en presis senior miljørådgiver og geotekniker.
@@ -1143,29 +1152,28 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         {extracted_data}
 
         KRITISKE INSTRUKSER FOR FORM:
-        - Skriv med kortere avsnitt og tydelig faghierarki.
-        - Bruk punktlister når du beskriver funn, risiko, usikkerhet og tiltak.
-        - Ikke bruk markdown-tabeller.
-        - Bruk underoverskrifter der det er naturlig, gjerne på formatet "## Datagrunnlag", "## Vurdering", "## Konsekvens".
-        - Vær konkret med analyttnavn, prøvepunkt, dybde og verdi når du omtaler laboratoriedata.
-        - IKKE kritiser datagrunnlaget. Du skal anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn noe om manglende stedsnavn eller diskrepans i arkivreferanser.
+        - Start direkte på kapittel 1. Ingen hilsen.
+        - Bruk underoverskrifter der det er naturlig.
+        - Anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn stedsnavn-avvik.
+        
+        KAPITTEL 7 INSTRUKSER:
+        - Skriv en KONKRET og operativ plan for graving, sortering, transport og deponering.
+        - Forbudt: Ikke skriv 'en plan må utarbeides'. Du SKAL utarbeide planen nå med utgangspunkt i de TK-klassene som er påvist.
 
         KRITISKE INSTRUKSER FOR BEVIS:
-        Jeg har lagt ved kart og potensielt arkitekttegninger.
-        Du MÅ aktivt bevise i teksten at du har sett på bildene og analysert tallene fra tabellgrunnlaget.
-        Skriv blant annet setninger som:
+        Jeg har lagt ved kart og arkitekttegninger.
+        Du MÅ aktivt bevise i teksten at du har sett på bildene. Skriv setninger som:
         - "Ut fra vedlagte kart/flyfoto observeres det at ..."
         - "Basert på opplastet analysetabell fremgår det at ..."
-        - "Prøvepunkt SK.. i dybde ... viser ..."
 
-        STRUKTUR (bruk kun disse overskriftene, START DIREKTE PÅ KAPITTEL 1, ALDRI skriv en hilsen før dette!):
+        STRUKTUR:
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
         # 3. KARTVERKET OG HISTORISK LOKASJON
         # 4. UTFØRTE GRUNNUNDERSØKELSER
         # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
         # 6. GEOTEKNISKE VURDERINGER
-        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv en KONKRET og operativ plan for graving, sortering etter tilstandsklasser, transport, deponering og HMS. IKKE skriv at "en plan må utarbeides", du skal SKRIVE planen her med utgangspunkt i verdiene over.)
+        # 7. TILTAKSPLAN OG MASSEHÅNDTERING
         """
 
         try:
