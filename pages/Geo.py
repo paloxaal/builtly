@@ -14,8 +14,17 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
-# --- 1. TEKNISK OPPSETT ---
+# --- 1. TEKNISK OPPSETT & GLOBALE STIER ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
+
+# Definerer stier som manglet (FIKSER NAMEERROR)
+DB_DIR = Path("qa_database")
+IMG_DIR = DB_DIR / "project_images"
+SSOT_FILE = DB_DIR / "ssot.json"
+
+# Oppretter mapper om de ikke finnes
+DB_DIR.mkdir(exist_ok=True)
+IMG_DIR.mkdir(exist_ok=True)
 
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
@@ -849,7 +858,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         pdf.section_title(title)
 
         if title.startswith("1.") and not rendered_intro_boxes:
-            # Dynamisk plassering av side-by-side kort (Sikrer at den kun tegnes EN gang)
+            # Dynamisk plassering av side-by-side kort (Sikrer at den kun tegnes EN gang selv om AI er teit)
             pdf.ensure_space(55)
             start_y = pdf.get_y()
             pdf.kv_card([("Prosjekt", project_data.get("p_name", name)), ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")), ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") , ("Byggtype", project_data.get("b_type", "-")), ("BTA", f"{project_data.get('bta', 0)} m2")], x=20, width=82, title="Prosjektgrunnlag")
@@ -1116,12 +1125,8 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             images_for_geo.append(st.session_state.geo_maps["recent"])
         if st.session_state.geo_maps["historical"]:
             images_for_geo.append(st.session_state.geo_maps["historical"])
-        
-        # Henter bilder fra Project Setup (SSOT) hvis de finnes i mappen
-        if IMG_DIR.exists():
-            for p in sorted(IMG_DIR.glob("*.jpg")):
-                try: images_for_geo.append(Image.open(p).convert("RGB"))
-                except: pass
+        if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
+            images_for_geo.extend(st.session_state.project_images)
 
         try:
             valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
@@ -1135,7 +1140,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             st.stop()
 
         model = genai.GenerativeModel(valgt_modell)
-        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler."
+        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse."
 
         prompt = f"""
         Du er Builtly RIG-M AI, en presis senior miljørådgiver og geotekniker.
@@ -1152,28 +1157,29 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         {extracted_data}
 
         KRITISKE INSTRUKSER FOR FORM:
-        - Start direkte på kapittel 1. Ingen hilsen.
-        - Bruk underoverskrifter der det er naturlig.
-        - Anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn stedsnavn-avvik.
-        
-        KAPITTEL 7 INSTRUKSER:
-        - Skriv en KONKRET og operativ plan for graving, sortering, transport og deponering.
-        - Forbudt: Ikke skriv 'en plan må utarbeides'. Du SKAL utarbeide planen nå med utgangspunkt i de TK-klassene som er påvist.
+        - Skriv med kortere avsnitt og tydelig faghierarki.
+        - Bruk punktlister når du beskriver funn, risiko, usikkerhet og tiltak.
+        - Ikke bruk markdown-tabeller.
+        - Bruk underoverskrifter der det er naturlig, gjerne på formatet "## Datagrunnlag", "## Vurdering", "## Konsekvens" eller "## Anbefalte tiltak".
+        - Vær konkret med analyttnavn, prøvepunkt, dybde og verdi når du omtaler laboratoriedata.
+        - IKKE kritiser datagrunnlaget. Du skal anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn noe om manglende stedsnavn eller diskrepans i arkivreferanser.
 
         KRITISKE INSTRUKSER FOR BEVIS:
-        Jeg har lagt ved kart og arkitekttegninger.
-        Du MÅ aktivt bevise i teksten at du har sett på bildene. Skriv setninger som:
+        Jeg har lagt ved kart og potensielt arkitekttegninger.
+        Du MÅ aktivt bevise i teksten at du har sett på bildene og analysert tallene fra tabellgrunnlaget.
+        Skriv blant annet setninger som:
         - "Ut fra vedlagte kart/flyfoto observeres det at ..."
         - "Basert på opplastet analysetabell fremgår det at ..."
+        - "Prøvepunkt SK.. i dybde ... viser ..."
 
-        STRUKTUR:
+        STRUKTUR (bruk kun disse overskriftene, START DIREKTE PÅ KAPITTEL 1, ALDRI skriv en hilsen før dette!):
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
         # 3. KARTVERKET OG HISTORISK LOKASJON
         # 4. UTFØRTE GRUNNUNDERSØKELSER
         # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
         # 6. GEOTEKNISKE VURDERINGER
-        # 7. TILTAKSPLAN OG MASSEHÅNDTERING
+        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv en KONKRET og operativ plan for graving, sortering etter tilstandsklasser, transport, deponering og HMS. IKKE skriv at "en plan må utarbeides", du skal SKRIVE planen her.)
         """
 
         try:
