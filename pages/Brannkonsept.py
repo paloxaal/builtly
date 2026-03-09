@@ -1,641 +1,1190 @@
-import streamlit as st
-import pandas as pd
-import google.generativeai as genai
-from fpdf import FPDF
-import os
+from __future__ import annotations
+
 import base64
-from datetime import datetime
-import tempfile
-import re
-import requests
-import urllib.parse
 import io
-from PIL import Image, ImageDraw, ImageFont
+import json
+import os
+import re
+import tempfile
+import urllib.parse
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# --- 1. TEKNISK OPPSETT ---
-st.set_page_config(page_title="Brannkonsept (RIBr) | Builtly", layout="wide", initial_sidebar_state="collapsed")
-
-google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key:
-    genai.configure(api_key=google_key)
-else:
-    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
-    st.stop()
+import requests
+import streamlit as st
+from fpdf import FPDF
+from PIL import Image, ImageColor, ImageDraw
 
 try:
-    import fitz  
-except ImportError:
+    import fitz  # PyMuPDF
+except ImportError:  # pragma: no cover
     fitz = None
 
-def render_html(html_string: str):
-    st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
+try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover
+    genai = None
+
+
+# -----------------------------------------------------------------------------
+# Page setup
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Brannkonsept | Builtly",
+    page_icon="BI",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+
+# -----------------------------------------------------------------------------
+# Data structures
+# -----------------------------------------------------------------------------
+@dataclass
+class ProjectData:
+    p_name: str = ""
+    c_name: str = ""
+    p_desc: str = ""
+    adresse: str = ""
+    kommune: str = ""
+    gnr: str = ""
+    bnr: str = ""
+    b_type: str = "Næring"
+    etasjer: int = 1
+    bta: int = 0
+    land: str = "Norge"
+
+    @property
+    def full_address(self) -> str:
+        parts = [self.adresse, self.kommune]
+        return ", ".join([p for p in parts if p])
+
+
+@dataclass
+class UploadedSource:
+    name: str
+    category: str
+    pages: List[Image.Image] = field(default_factory=list)
+    source_kind: str = "uploaded"
+
+
+@dataclass
+class FireMarkupSpec:
+    page_title: str = ""
+    notes: List[str] = field(default_factory=list)
+    legend: List[Dict[str, str]] = field(default_factory=list)
+    elements: List[Dict[str, Any]] = field(default_factory=list)
+
+
+# -----------------------------------------------------------------------------
+# Constants
+# -----------------------------------------------------------------------------
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
+DEFAULT_REPORT_HEADINGS = [
+    "1. Dokumentinformasjon og grunnlag",
+    "2. Formelle forhold og regelverk",
+    "3. Tiltakets omfang og prosjekteringsforutsetninger",
+    "4. Oppsummering hovedføringer brannverntiltak",
+    "5. Fravik og særskilte vurderinger",
+    "6. Kravspesifikasjon",
+    "7. Uavklarte forhold og videre prosjektering",
+    "8. Vedlegg og tegningsliste",
+]
+STYLE_MAP = {
+    "dashed_red": {"stroke": "#d32f2f", "fill": None, "width": 4},
+    "green_band": {"stroke": "#2e7d32", "fill": "#9be79b", "width": 2},
+    "orange_band": {"stroke": "#ef6c00", "fill": "#f6c27a", "width": 2},
+    "blue_access": {"stroke": "#1e5cc6", "fill": None, "width": 6},
+    "pink_fill": {"stroke": "#d16b8d", "fill": "#f6c0d0", "width": 2},
+    "red_arrow": {"stroke": "#d32f2f", "fill": None, "width": 4},
+    "green_arrow": {"stroke": "#2e7d32", "fill": None, "width": 4},
+    "red_callout": {"stroke": "#c62828", "fill": "#fff7f7", "width": 2},
+}
+BENCHMARK_CONVENTIONS = [
+    "egen utomhus-branntegning med kjørbar atkomst, oppstillingsplass og innsatsvei",
+    "egen kjeller-branntegning med avstander, sluser og angrepsvei",
+    "planvise bolig-branntegninger med branncellegrenser, dørklasser, rømningsvei og rømningsretning",
+    "rapport med tegningsliste, prosjekteringsforutsetninger, hovedføringer, fravik og kravspesifikasjoner",
+]
+
+
+# -----------------------------------------------------------------------------
+# State helpers
+# -----------------------------------------------------------------------------
+def init_state() -> None:
+    if "project_data" not in st.session_state:
+        st.session_state.project_data = ProjectData().__dict__.copy()
+    if SSOT_FILE.exists() and not st.session_state.project_data.get("p_name"):
+        try:
+            st.session_state.project_data = json.loads(SSOT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    defaults = {
+        "fire_map": None,
+        "fire_map_source": None,
+        "source_documents": [],
+        "benchmark_documents": [],
+        "generated_fire_drawings": [],
+        "generated_report_text": "",
+        "generated_pdf": None,
+        "drawing_manifest": [],
+        "include_only_module_drawings": True,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+# -----------------------------------------------------------------------------
+# Utility helpers
+# -----------------------------------------------------------------------------
+def project_data() -> ProjectData:
+    data = st.session_state.project_data
+    return ProjectData(**{k: data.get(k, getattr(ProjectData(), k)) for k in ProjectData().__dict__.keys()})
+
+
+def render_html(html_string: str) -> None:
+    st.markdown(html_string.replace("\n", " "), unsafe_allow_html=True)
+
+
+def clean_pdf_text(text: str) -> str:
+    if not text:
+        return ""
+    rep = {
+        "–": "-",
+        "—": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "•": "-",
+    }
+    for old, new in rep.items():
+        text = text.replace(old, new)
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def sanitize_multiline(text: str) -> str:
+    text = text.replace("$", "").replace("_", " ")
+    text = re.sub(r"[-|=]{4,}", " ", text)
+    return clean_pdf_text(text)
+
 
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
-        if os.path.exists(candidate):
-            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
-            with open(candidate, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("utf-8")
+        path = Path(candidate)
+        if path.exists():
+            suffix = path.suffix.lower().replace(".", "") or "png"
+            encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
             return f"data:image/{suffix};base64,{encoded}"
     return ""
+
 
 def find_page(base_name: str) -> str:
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
-        if p.exists(): return str(p)
+        if p.exists():
+            return str(p)
     return ""
 
-def clean_pdf_text(text):
-    if text is None: return ""
-    text = str(text)
-    rep = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">="}
-    for old, new in rep.items(): text = text.replace(old, new)
-    return text.encode("latin-1", "replace").decode("latin-1")
 
-def ironclad_text_formatter(text):
-    text = clean_pdf_text(text)
-    text = text.replace("$", "").replace("*", "").replace("_", "")
-    text = re.sub(r"[-|=]{3,}", " ", text)
-    text = re.sub(r"([^\s]{40})", r"\1 ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def category_from_name(name: str) -> str:
+    lower = name.lower()
+    if "branntegning" in lower:
+        return "Benchmark branntegning"
+    if "ribr" in lower or "brannstrategi" in lower or "brannkonsept" in lower:
+        return "Benchmark rapport"
+    if "landskapsplan" in lower or "utomhus" in lower or "situasjon" in lower:
+        return "Utomhus / situasjon"
+    if "kjeller" in lower or "u1" in lower:
+        return "Kjeller / underetasje"
+    if "plan" in lower:
+        return "Arkitektplan"
+    return "Annet underlag"
 
-# --- 2. PREMIUM CSS ---
-st.markdown("<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>", unsafe_allow_html=True)
-st.markdown("""
+
+def get_model() -> Optional[Any]:
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key or genai is None:
+        return None
+    genai.configure(api_key=api_key)
+    try:
+        valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+    except Exception:
+        return None
+    preferred = next((m for m in ["models/gemini-1.5-pro", "models/gemini-1.5-flash"] if m in valid_models), None)
+    chosen = preferred or (valid_models[0] if valid_models else None)
+    return genai.GenerativeModel(chosen) if chosen else None
+
+
+# -----------------------------------------------------------------------------
+# Document handling
+# -----------------------------------------------------------------------------
+def pdf_to_images(pdf_bytes: bytes, limit: int = 3, scale: float = 1.8) -> List[Image.Image]:
+    images: List[Image.Image] = []
+    if fitz is None:
+        return images
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_idx in range(min(limit, len(doc))):
+            pix = doc.load_page(page_idx).get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            images.append(image)
+        doc.close()
+    except Exception:
+        return []
+    return images
+
+
+def load_shared_project_images() -> List[UploadedSource]:
+    docs: List[UploadedSource] = []
+    if not IMG_DIR.exists():
+        return docs
+    for path in sorted(IMG_DIR.glob("*.jpg")):
+        try:
+            img = Image.open(path).convert("RGB")
+            docs.append(UploadedSource(name=path.name, category="Felles prosjektbilde", pages=[img], source_kind="shared"))
+        except Exception:
+            continue
+    return docs
+
+
+def ingest_streamlit_files(files: Iterable[Any], source_kind: str) -> List[UploadedSource]:
+    documents: List[UploadedSource] = []
+    for file in files:
+        raw = file.read()
+        name = file.name
+        category = category_from_name(name)
+        pages: List[Image.Image] = []
+        if name.lower().endswith(".pdf"):
+            pages = pdf_to_images(raw, limit=4)
+        else:
+            try:
+                pages = [Image.open(io.BytesIO(raw)).convert("RGB")]
+            except Exception:
+                pages = []
+        documents.append(UploadedSource(name=name, category=category, pages=pages, source_kind=source_kind))
+    return documents
+
+
+def build_drawing_manifest(sources: Iterable[UploadedSource]) -> List[Dict[str, str]]:
+    manifest: List[Dict[str, str]] = []
+    for src in sources:
+        manifest.append(
+            {
+                "fil": src.name,
+                "kategori": src.category,
+                "sider lastet": str(len(src.pages)),
+                "kilde": src.source_kind,
+            }
+        )
+    return manifest
+
+
+# -----------------------------------------------------------------------------
+# Map fetch
+# -----------------------------------------------------------------------------
+def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: Optional[str]) -> Tuple[Optional[Image.Image], str]:
+    north: Optional[float] = None
+    east: Optional[float] = None
+    adr_clean = adresse.replace(",", "").strip() if adresse else ""
+    kom_clean = kommune.replace(",", "").strip() if kommune else ""
+
+    queries = []
+    if adr_clean and kom_clean:
+        queries.append(f"{adr_clean} {kom_clean}")
+    if adr_clean:
+        queries.append(adr_clean)
+    if gnr and bnr and kom_clean:
+        queries.append(f"{kom_clean} {gnr}/{bnr}")
+
+    for q in queries:
+        safe_query = urllib.parse.quote(q)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            response = requests.get(url, timeout=4)
+            if response.status_code == 200 and response.json().get("adresser"):
+                hit = response.json()["adresser"][0]
+                point = hit.get("representasjonspunkt", {})
+                north = point.get("nord")
+                east = point.get("øst")
+                break
+        except Exception:
+            continue
+
+    if north and east:
+        min_x, max_x = float(east) - 150, float(east) + 150
+        min_y, max_y = float(north) - 150, float(north) + 150
+        ortho = (
+            "https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1"
+            f"&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=900&height=900&format=image/png"
+        )
+        try:
+            response = requests.get(ortho, timeout=5)
+            if response.status_code == 200 and len(response.content) > 5000:
+                return Image.open(io.BytesIO(response.content)).convert("RGB"), "Kartverket (Norge i bilder)"
+        except Exception:
+            pass
+
+    if api_key and (adr_clean or kom_clean):
+        query = urllib.parse.quote(f"{adr_clean}, {kom_clean}, Norway")
+        url = f"https://maps.googleapis.com/maps/api/staticmap?center={query}&zoom=19&size=700x700&maptype=satellite&key={api_key}"
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                return Image.open(io.BytesIO(response.content)).convert("RGB"), "Google Maps Satellite"
+        except Exception:
+            pass
+
+    return None, "Kart kunne ikke hentes automatisk."
+
+
+# -----------------------------------------------------------------------------
+# AI prompt builders
+# -----------------------------------------------------------------------------
+def build_report_prompt(
+    pd: ProjectData,
+    rk: str,
+    bk: str,
+    sprinkler: str,
+    alarm: str,
+    unresolved: str,
+    deviations: str,
+    manifest: List[Dict[str, str]],
+) -> str:
+    manifest_lines = [f"- {m['fil']} | {m['kategori']} | sider: {m['sider lastet']}" for m in manifest]
+    manifest_text = "\n".join(manifest_lines) if manifest_lines else "- Ingen filer registrert"
+    return f"""
+Du er en senior RIBr som skal skrive et profesjonelt brannkonsept på norsk.
+
+MÅL:
+- bruk konsulentpreg, nøktern tone og tydelige forutsetninger
+- skriv som et reelt prosjekteringsunderlag, ikke som markedsføring
+- vær eksplisitt på hva som er observert og hva som er forutsatt
+- avslutt med en tydelig liste over uavklarte forhold
+
+PROSJEKT:
+- Prosjektnavn: {pd.p_name}
+- Oppdragsgiver: {pd.c_name}
+- Adresse: {pd.full_address}
+- Formål: {pd.b_type}
+- Etasjer: {pd.etasjer}
+- BTA: {pd.bta}
+- Regelverkland: {pd.land}
+- Foreslått risikoklasse: {rk}
+- Foreslått brannklasse: {bk}
+- Sprinklerforutsetning: {sprinkler}
+- Alarmforutsetning: {alarm}
+
+PROSJEKTBESKRIVELSE FRA BRUKER:
+{pd.p_desc or 'Ingen fritekst angitt.'}
+
+TEGNINGSMANIFEST:
+{manifest_text}
+
+BENCHMARK-KRAV TIL LEVERANSE:
+- egen utomhus-del med atkomst, oppstillingsplass og innsatsvei
+- egen kjeller-del med sluser, trapperom, kjellerforhold og avstander
+- planvis omtale av boligplaner med rømningsforhold, brannceller og dørkrav
+- struktur som ligner en rådgiverrapport med grunnlag, formelle forhold, prosjekteringsforutsetninger, hovedføringer, fravik og kravspesifikasjoner
+
+ANGITTE FRAVIK / SÆRSKILTE VURDERINGER FRA BRUKER:
+{deviations or 'Ingen særskilte fravik angitt manuelt.'}
+
+ANGITTE UAVKLARTE FORHOLD FRA BRUKER:
+{unresolved or 'Ingen uavklarte forhold angitt manuelt.'}
+
+SKRIV KUN MED DISSE OVERSKRIFTENE:
+# 1. Dokumentinformasjon og grunnlag
+# 2. Formelle forhold og regelverk
+# 3. Tiltakets omfang og prosjekteringsforutsetninger
+# 4. Oppsummering hovedføringer brannverntiltak
+# 5. Fravik og særskilte vurderinger
+# 6. Kravspesifikasjon
+# 7. Uavklarte forhold og videre prosjektering
+# 8. Vedlegg og tegningsliste
+
+KRITISK:
+- bruk formuleringer som 'Av plantegningen fremgår det at ...' når du ser noe konkret
+- skill tydelig mellom observert, forutsatt og anbefalt
+- ikke oppfinn mål eller klasser som ikke er faglig begrunnet
+""".strip()
+
+
+_DRAWING_JSON_INSTRUCTION = """
+Returner KUN gyldig JSON med denne strukturen:
+{
+  "page_title": "tekst",
+  "notes": ["tekst", "tekst"],
+  "legend": [
+    {"label": "Branncelle EI 60", "style": "dashed_red"},
+    {"label": "Rømningsvei", "style": "green_band"},
+    {"label": "Rømningsretning", "style": "green_arrow"},
+    {"label": "Redningsvei", "style": "orange_band"},
+    {"label": "Innsatsvei", "style": "red_arrow"},
+    {"label": "Kjørbar atkomst", "style": "blue_access"},
+    {"label": "Oppstillingsplass", "style": "pink_fill"}
+  ],
+  "elements": [
+    {"type": "line", "points": [[x1,y1],[x2,y2]], "style": "dashed_red", "label": "EI60"},
+    {"type": "arrow", "points": [[x1,y1],[x2,y2]], "style": "green_arrow", "label": "Rømning"},
+    {"type": "rect", "rect": [x,y,w,h], "style": "pink_fill", "label": "Oppstilling"},
+    {"type": "polyline", "points": [[x1,y1],[x2,y2],[x3,y3]], "style": "blue_access", "label": "Atkomst"},
+    {"type": "note", "at": [x,y], "style": "red_callout", "text": "Merknad"}
+  ]
+}
+Koordinater skal oppgis i pikselkoordinater til originalbildet. Ingen markdown. Ingen forklarende tekst utenfor JSON.
+""".strip()
+
+
+def build_drawing_prompt(pd: ProjectData, drawing_name: str) -> str:
+    return f"""
+Du skal lage et førsteutkast til brannoverlay for tegningen '{drawing_name}'.
+Prosjekt: {pd.p_name}
+Adresse: {pd.full_address}
+Formål: {pd.b_type}
+Etasjer: {pd.etasjer}
+
+Lag et konservativt forslag som ligner rådgivertegningsspråk:
+- marker sannsynlige branncellegrenser
+- marker rømningsvei og rømningsretning
+- marker redningsvei ved balkong/vindu når det er naturlig
+- marker innsatsvei og oppstillingsplass der dette kan utledes av situasjonsplan / kjellerplan
+- bruk korte callouts når forhold bør kontrolleres manuelt
+
+Legg inn note dersom du er usikker. Ikke overtegn hele planløsningen.
+{_DRAWING_JSON_INSTRUCTION}
+""".strip()
+
+
+# -----------------------------------------------------------------------------
+# Drawing overlay rendering
+# -----------------------------------------------------------------------------
+def _safe_color(value: Optional[str], fallback: str = "#000000") -> Tuple[int, int, int]:
+    try:
+        return ImageColor.getrgb(value or fallback)
+    except Exception:
+        return ImageColor.getrgb(fallback)
+
+
+def draw_dashed_line(draw: ImageDraw.ImageDraw, p1: Tuple[int, int], p2: Tuple[int, int], fill: Tuple[int, int, int], width: int, dash: int = 10, gap: int = 6) -> None:
+    x1, y1 = p1
+    x2, y2 = p2
+    length = max(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5, 1.0)
+    dx = (x2 - x1) / length
+    dy = (y2 - y1) / length
+    position = 0.0
+    while position < length:
+        start = position
+        end = min(position + dash, length)
+        s = (int(x1 + dx * start), int(y1 + dy * start))
+        e = (int(x1 + dx * end), int(y1 + dy * end))
+        draw.line([s, e], fill=fill, width=width)
+        position += dash + gap
+
+
+def draw_arrow(draw: ImageDraw.ImageDraw, p1: Tuple[int, int], p2: Tuple[int, int], fill: Tuple[int, int, int], width: int) -> None:
+    draw.line([p1, p2], fill=fill, width=width)
+    x1, y1 = p1
+    x2, y2 = p2
+    vx = x2 - x1
+    vy = y2 - y1
+    length = max((vx * vx + vy * vy) ** 0.5, 1.0)
+    ux = vx / length
+    uy = vy / length
+    wing = 16
+    back = 18
+    left = (int(x2 - ux * back - uy * wing), int(y2 - uy * back + ux * wing))
+    right = (int(x2 - ux * back + uy * wing), int(y2 - uy * back - ux * wing))
+    draw.polygon([p2, left, right], fill=fill)
+
+
+def render_fire_overlay(source_image: Image.Image, spec: FireMarkupSpec) -> Image.Image:
+    canvas = source_image.convert("RGBA")
+    overlay = Image.new("RGBA", canvas.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    for element in spec.elements:
+        style_key = element.get("style", "dashed_red")
+        style = STYLE_MAP.get(style_key, STYLE_MAP["dashed_red"])
+        stroke = _safe_color(style.get("stroke"), "#000000")
+        fill = style.get("fill")
+        fill_rgba = None
+        if fill:
+            r, g, b = _safe_color(fill, "#ffffff")
+            fill_rgba = (r, g, b, 110)
+        width = int(style.get("width", 3))
+        etype = element.get("type")
+
+        if etype == "line":
+            points = element.get("points", [])
+            if len(points) >= 2:
+                for idx in range(len(points) - 1):
+                    p1 = tuple(map(int, points[idx]))
+                    p2 = tuple(map(int, points[idx + 1]))
+                    if style_key == "dashed_red":
+                        draw_dashed_line(draw, p1, p2, stroke, width)
+                    else:
+                        draw.line([p1, p2], fill=stroke, width=width)
+        elif etype == "polyline":
+            points = [tuple(map(int, p)) for p in element.get("points", [])]
+            if len(points) >= 2:
+                draw.line(points, fill=stroke, width=width)
+        elif etype == "arrow":
+            points = element.get("points", [])
+            if len(points) == 2:
+                draw_arrow(draw, tuple(map(int, points[0])), tuple(map(int, points[1])), stroke, width)
+        elif etype == "rect":
+            rect = element.get("rect", [])
+            if len(rect) == 4:
+                x, y, w, h = map(int, rect)
+                draw.rectangle([x, y, x + w, y + h], outline=stroke, width=width, fill=fill_rgba)
+        elif etype == "note":
+            at = element.get("at", [])
+            text = str(element.get("text", "Merknad"))
+            if len(at) == 2:
+                x, y = map(int, at)
+                w = max(200, min(360, 8 * len(text)))
+                h = 44
+                draw.rectangle([x, y, x + w, y + h], outline=stroke, width=2, fill=(255, 255, 255, 225))
+                draw.text((x + 8, y + 12), text, fill=stroke)
+
+        label = element.get("label")
+        if label:
+            if etype in {"rect"} and len(element.get("rect", [])) == 4:
+                x, y, _, _ = map(int, element.get("rect", []))
+                draw.text((x + 6, y - 18), str(label), fill=stroke)
+            elif etype in {"line", "polyline", "arrow"} and element.get("points"):
+                x, y = map(int, element["points"][0])
+                draw.text((x + 6, y + 6), str(label), fill=stroke)
+
+    composed = Image.alpha_composite(canvas, overlay).convert("RGB")
+    return add_standard_legend(composed, spec)
+
+
+def add_standard_legend(image: Image.Image, spec: FireMarkupSpec) -> Image.Image:
+    canvas = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+    legend_entries = spec.legend or [
+        {"label": "Branncelle", "style": "dashed_red"},
+        {"label": "Rømningsvei", "style": "green_band"},
+        {"label": "Rømningsretning", "style": "green_arrow"},
+        {"label": "Innsatsvei", "style": "red_arrow"},
+    ]
+    width, height = canvas.size
+    box_w = min(420, int(width * 0.38))
+    row_h = 28
+    box_h = 78 + row_h * len(legend_entries)
+    x0 = width - box_w - 24
+    y0 = height - box_h - 24
+    draw.rectangle([x0, y0, x0 + box_w, y0 + box_h], fill=(245, 247, 250), outline=(80, 95, 120), width=2)
+    draw.text((x0 + 16, y0 + 14), spec.page_title or "Branntegning", fill=(30, 45, 70))
+    draw.text((x0 + 16, y0 + 38), "Symbolforklaring", fill=(45, 60, 90))
+    for idx, item in enumerate(legend_entries):
+        y = y0 + 64 + idx * row_h
+        style = STYLE_MAP.get(item.get("style", "dashed_red"), STYLE_MAP["dashed_red"])
+        stroke = _safe_color(style.get("stroke"), "#000000")
+        draw.text((x0 + 16, y), item.get("label", ""), fill=(20, 20, 20))
+        sx = x0 + box_w - 110
+        if item.get("style") == "dashed_red":
+            draw_dashed_line(draw, (sx, y + 10), (sx + 70, y + 10), stroke, int(style.get("width", 3)))
+        elif item.get("style") in {"red_arrow", "green_arrow"}:
+            draw_arrow(draw, (sx, y + 10), (sx + 70, y + 10), stroke, int(style.get("width", 3)))
+        elif item.get("style") == "pink_fill":
+            fill = _safe_color(style.get("fill"), "#f6c0d0")
+            draw.rectangle([sx, y, sx + 70, y + 16], outline=stroke, width=2, fill=fill)
+        else:
+            fill = style.get("fill")
+            fill_rgb = _safe_color(fill, "#ffffff") if fill else None
+            draw.rectangle([sx, y, sx + 70, y + 16], outline=stroke, width=2, fill=fill_rgb)
+    return canvas
+
+
+def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+    text = text.strip()
+    if not text:
+        return None
+    fence_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+    if fence_match:
+        text = fence_match.group(1)
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def ai_generate_report(images: List[Image.Image], prompt_text: str) -> str:
+    model = get_model()
+    if model is None:
+        return "\n\n".join([
+            "# 1. Dokumentinformasjon og grunnlag\nGenerer rapport med AI for full funksjon. Denne demoversjonen viser riktig struktur og leveranseformat.",
+            "# 2. Formelle forhold og regelverk\nRegelverk og formelle forhold må bekreftes i prosjektet.",
+            "# 3. Tiltakets omfang og prosjekteringsforutsetninger\nProsjekteringsforutsetninger hentes fra prosjektdata og tegningsgrunnlag.",
+            "# 4. Oppsummering hovedføringer brannverntiltak\nHovedføringer bør omfatte brannklasse, risikoklasse, rømningsprinsipp, alarm og slokkeanlegg.",
+            "# 5. Fravik og særskilte vurderinger\nFravik må dokumenteres eksplisitt og skilles fra preaksepterte løsninger.",
+            "# 6. Kravspesifikasjon\nKravspesifikasjonen bør splittes per tema med ansvarlig fag.",
+            "# 7. Uavklarte forhold og videre prosjektering\nSamle åpne avklaringer som må videreføres til detaljprosjekt.",
+            "# 8. Vedlegg og tegningsliste\nVedlegg skal begrenses til modulens egne branntegninger og tegningsmanifest.",
+        ])
+    parts = [prompt_text] + images
+    response = model.generate_content(parts)
+    return getattr(response, "text", "") or ""
+
+
+def ai_generate_markup(source_image: Image.Image, benchmark_images: List[Image.Image], prompt_text: str) -> FireMarkupSpec:
+    model = get_model()
+    if model is None:
+        return FireMarkupSpec(
+            page_title="Automatisk brannskisse – utkast",
+            notes=["AI-modell ikke tilgjengelig. Dette er et standardisert demonstrasjonsutkast."],
+            legend=[
+                {"label": "Branncelle EI 60", "style": "dashed_red"},
+                {"label": "Rømningsretning", "style": "green_arrow"},
+                {"label": "Rømningsvei", "style": "green_band"},
+            ],
+            elements=[
+                {"type": "note", "at": [80, 80], "style": "red_callout", "text": "Kontroller branncellegrenser manuelt."},
+                {"type": "arrow", "points": [[120, 220], [260, 220]], "style": "green_arrow", "label": "Rømning"},
+            ],
+        )
+    parts = [prompt_text, source_image] + benchmark_images[:2]
+    response = model.generate_content(parts)
+    parsed = try_parse_json(getattr(response, "text", "") or "")
+    if not parsed:
+        return FireMarkupSpec(page_title="Brannskisse – manglende JSON", notes=["AI-respons kunne ikke parses."], elements=[])
+    return FireMarkupSpec(
+        page_title=str(parsed.get("page_title", "Branntegning")),
+        notes=list(parsed.get("notes", [])),
+        legend=list(parsed.get("legend", [])),
+        elements=list(parsed.get("elements", [])),
+    )
+
+
+# -----------------------------------------------------------------------------
+# PDF generator
+# -----------------------------------------------------------------------------
+class CorporateFirePDF(FPDF):
+    def header(self) -> None:  # pragma: no cover - PDF rendering helper
+        if self.page_no() == 1:
+            return
+        self.set_y(12)
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(37, 52, 77)
+        self.cell(0, 8, clean_pdf_text(self.header_title), 0, 1, "R")
+        self.set_draw_color(200, 208, 220)
+        self.line(18, 20, 192, 20)
+        self.set_y(25)
+
+    def footer(self) -> None:  # pragma: no cover - PDF rendering helper
+        self.set_y(-12)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(115, 125, 140)
+        self.cell(0, 8, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "C")
+
+    def chapter_title(self, title: str) -> None:  # pragma: no cover
+        self.ln(4)
+        self.set_font("Helvetica", "B", 14)
+        self.set_text_color(20, 37, 63)
+        self.multi_cell(0, 8, clean_pdf_text(title))
+        self.ln(1)
+
+    def paragraph(self, text: str) -> None:  # pragma: no cover
+        self.set_font("Helvetica", "", 10)
+        self.set_text_color(0, 0, 0)
+        self.multi_cell(0, 5, sanitize_multiline(text))
+        self.ln(1)
+
+
+def create_corporate_report_pdf(
+    pd: ProjectData,
+    report_text: str,
+    manifest: List[Dict[str, str]],
+    fire_drawings: List[Tuple[str, Image.Image]],
+) -> bytes:
+    pdf = CorporateFirePDF()
+    pdf.header_title = f"{pd.p_name} | Brannkonsept"
+    pdf.set_auto_page_break(True, 15)
+    pdf.set_margins(18, 18, 18)
+
+    # Cover page
+    pdf.add_page()
+    logo = logo_data_uri()
+    if logo:
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                header_bytes = base64.b64decode(logo.split(",", 1)[1])
+                Path(tmp.name).write_bytes(header_bytes)
+                pdf.image(tmp.name, x=18, y=18, w=38)
+        except Exception:
+            pass
+    pdf.set_y(52)
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.set_text_color(15, 33, 58)
+    pdf.cell(0, 12, clean_pdf_text("BRANNKONSEPT"), 0, 1)
+    pdf.set_font("Helvetica", "", 14)
+    pdf.set_text_color(55, 68, 89)
+    pdf.multi_cell(0, 8, clean_pdf_text(pd.p_name))
+    pdf.ln(14)
+
+    meta = [
+        ("Oppdragsgiver", pd.c_name or "Ikke angitt"),
+        ("Adresse", pd.full_address or "Ikke angitt"),
+        ("Formål", pd.b_type or "Ikke angitt"),
+        ("Dato", datetime.now().strftime("%d.%m.%Y")),
+        ("Dokument", "Brannkonsept – utkast for intern kvalitetssikring"),
+    ]
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_text_color(32, 47, 70)
+    for key, value in meta:
+        pdf.cell(42, 7, clean_pdf_text(f"{key}:"), 0, 0)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(0, 7, clean_pdf_text(str(value)))
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(32, 47, 70)
+
+    # Manifest page
+    pdf.add_page()
+    pdf.chapter_title("1. Tegningsmanifest")
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_fill_color(232, 237, 244)
+    headers = [(68, "Fil"), (46, "Kategori"), (28, "Sider"), (28, "Kilde")]
+    for width, title in headers:
+        pdf.cell(width, 8, clean_pdf_text(title), 1, 0, fill=True)
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 9)
+    for item in manifest or [{"fil": "Ingen filer registrert", "kategori": "-", "sider lastet": "-", "kilde": "-"}]:
+        pdf.cell(68, 8, clean_pdf_text(item["fil"][:42]), 1)
+        pdf.cell(46, 8, clean_pdf_text(item["kategori"][:26]), 1)
+        pdf.cell(28, 8, clean_pdf_text(item["sider lastet"]), 1)
+        pdf.cell(28, 8, clean_pdf_text(item["kilde"]), 1)
+        pdf.ln()
+
+    # Content pages
+    current_title = None
+    buffer: List[str] = []
+
+    def flush_buffer() -> None:
+        nonlocal current_title, buffer
+        if current_title is None:
+            return
+        pdf.add_page()
+        pdf.chapter_title(current_title)
+        body = "\n".join(buffer).strip() or "Ingen tekst generert."
+        for paragraph in re.split(r"\n\s*\n", body):
+            if paragraph.strip():
+                pdf.paragraph(paragraph.strip())
+        buffer = []
+
+    for raw_line in report_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("# "):
+            flush_buffer()
+            current_title = line[2:].strip()
+        else:
+            buffer.append(raw_line)
+    flush_buffer()
+
+    # Append fire drawings only
+    for title, image in fire_drawings:
+        pdf.add_page()
+        pdf.chapter_title(title)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+            available_w = 174
+            img_w, img_h = image.size
+            aspect = img_h / max(img_w, 1)
+            render_w = available_w
+            render_h = render_w * aspect
+            if render_h > 240:
+                render_h = 240
+                render_w = render_h / max(aspect, 0.01)
+            pdf.image(tmp.name, x=18 + (available_w - render_w) / 2, y=36, w=render_w)
+
+    return bytes(pdf.output(dest="S"))
+
+
+# -----------------------------------------------------------------------------
+# Styling
+# -----------------------------------------------------------------------------
+st.markdown(
+    """
 <style>
-    :root { --bg: #06111a; --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #e53935; --radius-lg: 16px; }
-    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
-    .stApp { background-color: var(--bg) !important; color: var(--text); }
-    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
-    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(229,57,53,0.15)); }
-    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
-    
-    button[kind="primary"] { background: linear-gradient(135deg, #e53935, #ff5252) !important; color: #ffffff !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
-    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(229,57,53,0.3) !important; }
-    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
-    button[kind="secondary"]:hover { background-color: rgba(229,57,53,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
-
-    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
-    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(229,57,53, 0.5) !important; }
-    ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
-    ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
-    ul[data-baseweb="menu"] li:hover { background-color: rgba(229,57,53, 0.1) !important; }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
-    
-    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
-    div[data-testid="stExpander"] details summary p { color: #f5f7fb !important; font-weight: 650 !important; }
-    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
-    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
-    
-    [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
-    [data-testid="stFileUploaderDropzone"]:hover { border-color: #e53935 !important; background-color: rgba(229,57,53, 0.05) !important; }
-    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+:root {
+    --bg: #f4f6fa;
+    --surface: #ffffff;
+    --surface-2: #f8f9fc;
+    --stroke: #d9dee8;
+    --text: #10233d;
+    --muted: #61708a;
+    --accent: #163b6b;
+    --accent-soft: #e9eef7;
+    --ok: #1d6f42;
+    --radius: 16px;
+}
+html, body, [class*="css"] {
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+.stApp {
+    background: var(--bg);
+    color: var(--text);
+}
+header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+.block-container {
+    max-width: 1380px !important;
+    padding-top: 1.3rem !important;
+    padding-bottom: 4rem !important;
+}
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 1.25rem;
+}
+.brand img { height: 48px; }
+.metric-card {
+    background: var(--surface);
+    border: 1px solid var(--stroke);
+    border-radius: var(--radius);
+    padding: 1rem 1.1rem;
+}
+.metric-card .label {
+    font-size: 0.82rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.metric-card .value {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 0.2rem;
+}
+div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div {
+    background: var(--surface) !important;
+    border: 1px solid var(--stroke) !important;
+    border-radius: 12px !important;
+}
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0.5rem;
+}
+.stTabs [data-baseweb="tab"] {
+    background: var(--surface);
+    border: 1px solid var(--stroke);
+    border-radius: 12px;
+    padding: 0.65rem 1rem;
+    color: var(--text);
+}
+.stTabs [aria-selected="true"] {
+    border-color: var(--accent) !important;
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+button[kind="primary"] {
+    background: var(--accent) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 12px !important;
+    font-weight: 700 !important;
+}
+button[kind="secondary"] {
+    background: var(--surface) !important;
+    color: var(--text) !important;
+    border: 1px solid var(--stroke) !important;
+    border-radius: 12px !important;
+}
+div[data-testid="stExpander"] {
+    border: 1px solid var(--stroke) !important;
+    border-radius: 14px !important;
+    background: var(--surface) !important;
+}
+div[data-testid="stAlert"] {
+    border-radius: 14px !important;
+}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# --- 3. SESSION STATE ---
-DB_DIR = Path("qa_database")
-SSOT_FILE = DB_DIR / "ssot.json"
 
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Bolig", "etasjer": 4, "bta": 0, "land": "Norge"}
+# -----------------------------------------------------------------------------
+# App
+# -----------------------------------------------------------------------------
+init_state()
+pd = project_data()
 
-if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
-    with open(SSOT_FILE, "r", encoding="utf-8") as f:
-        st.session_state.project_data = json.load(f)
-
-pd_state = st.session_state.project_data
-
-if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    if find_page("Project"):
-        if st.button("⚙️ Gå til Project Setup", type="primary"):
-            st.switch_page(find_page("Project"))
+if pd.p_name in {"", "Nytt Prosjekt"}:
+    logo = logo_data_uri()
+    if logo:
+        render_html(f"<div class='brand'><img src='{logo}'><div><h2 style='margin:0;'>Builtly</h2></div></div>")
+    st.warning("Prosjektdata må være satt opp før modulen brukes.")
+    target = find_page("Project")
+    if target and st.button("Gå til prosjektoppsett", type="primary"):
+        st.switch_page(target)
     st.stop()
 
-# --- 4. DYNAMISK PDF MOTOR (CORPORATE LAYOUT) ---
-def split_ai_sections(content: str):
-    sections = []
-    current = None
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if line.startswith("#"):
-            if current: sections.append(current)
-            current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
-            continue
-        if current is None: 
-            continue # Ignorerer AI intro
-        current["lines"].append(raw_line.rstrip())
-    if current: sections.append(current)
-    return sections
+logo = logo_data_uri()
+if logo:
+    render_html(
+        f"<div class='brand'><img src='{logo}'><div><div style='font-size:0.8rem;color:#61708a;'>Builtly</div>"
+        f"<h1 style='margin:0;color:#10233d;font-size:2rem;'>Brannkonsept</h1></div></div>"
+    )
+else:
+    st.title("Brannkonsept")
 
-def is_subheading_line(line: str) -> bool:
-    clean = line.strip()
-    if not clean: return False
-    if clean.startswith("##"): return True
-    if clean.endswith(":") and len(clean) < 80 and len(clean.split()) <= 7: return True
-    if clean == clean.upper() and any(ch.isalpha() for ch in clean) and len(clean) < 70: return True
-    return False
+st.caption("Corporate RIBr-modul med delt leveranse for grunnlag, branntegninger og rapport.")
 
-def is_bullet_line(line: str) -> bool:
-    return bool(re.match(r"^([-*•]|\d+\.)\s+", line.strip()))
+head1, head2, head3, head4 = st.columns(4)
+for col, label, value in [
+    (head1, "Prosjekt", pd.p_name),
+    (head2, "Adresse", pd.full_address or "Ikke angitt"),
+    (head3, "Etasjer", str(pd.etasjer)),
+    (head4, "BTA", f"{pd.bta} m²"),
+]:
+    with col:
+        render_html(f"<div class='metric-card'><div class='label'>{label}</div><div class='value'>{value}</div></div>")
 
-def strip_bullet(line: str) -> str:
-    return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
+with st.sidebar:
+    st.write("Dokumentkonvensjoner")
+    for item in BENCHMARK_CONVENTIONS:
+        st.write(f"- {item}")
+    target = find_page("Project")
+    if target and st.button("Til prosjektoppsett", type="secondary"):
+        st.switch_page(target)
 
-class BuiltlyCorporatePDF(FPDF):
-    def header(self):
-        if self.page_no() == 1: return
-        self.set_y(11)
-        self.set_text_color(88, 94, 102)
-        self.set_font("Helvetica", "", 8)
-        self.cell(0, 4, clean_pdf_text(self.header_left), 0, 0, "L")
-        self.cell(0, 4, clean_pdf_text(self.header_right), 0, 1, "R")
-        self.set_draw_color(188, 192, 197)
-        self.line(18, 18, 192, 18)
-        self.set_y(24)
+# Defaults derived from project type
+b_type_lower = (pd.b_type or "").lower()
+default_rk = "RKL 2"
+if "bolig" in b_type_lower:
+    default_rk = "RKL 4"
+elif "sykehus" in b_type_lower or "hotell" in b_type_lower:
+    default_rk = "RKL 6"
+elif "lager" in b_type_lower or "industri" in b_type_lower:
+    default_rk = "RKL 1"
+default_bk = "BKL 1"
+if pd.etasjer in [3, 4]:
+    default_bk = "BKL 2"
+elif pd.etasjer >= 5:
+    default_bk = "BKL 3"
 
-    def footer(self):
-        self.set_y(-12)
-        self.set_draw_color(210, 214, 220)
-        self.line(18, 285, 192, 285)
-        self.set_font("Helvetica", "", 7)
-        self.set_text_color(110, 114, 119)
-        self.cell(60, 5, clean_pdf_text(self.doc_code), 0, 0, "L")
-        self.cell(70, 5, clean_pdf_text("Utkast - krever faglig kontroll"), 0, 0, "C")
-        self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
-    def ensure_space(self, needed_height: float):
-        if self.get_y() + needed_height > 272:
-            self.add_page()
+tab_underlag, tab_strategi, tab_drawings, tab_report = st.tabs(
+    ["Underlag", "Brannstrategi", "Branntegninger", "Rapport"]
+)
 
-    def body_paragraph(self, text, first=False):
-        text = ironclad_text_formatter(text)
-        if not text: return
-        self.set_x(20)
-        self.set_font("Helvetica", "", 10.2 if not first else 10.6)
-        self.set_text_color(35, 39, 43)
-        self.multi_cell(170, 5.5 if not first else 5.7, text)
-        self.ln(1.6)
+with tab_underlag:
+    st.subheader("1. Dokumentgrunnlag")
+    left, right = st.columns([1.15, 1])
+    with left:
+        st.markdown("**Arkitekt- og prosjektunderlag**")
+        source_files = st.file_uploader(
+            "Last opp arkitektplaner, situasjonsplan eller andre kildetegninger",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="source_upload",
+        )
+        st.markdown("**Benchmark fra brannrådgiver**")
+        benchmark_files = st.file_uploader(
+            "Last opp referanse-branntegninger og rapporter som benchmark",
+            type=["pdf", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="benchmark_upload",
+        )
 
-    def subheading(self, text):
-        text = ironclad_text_formatter(text.replace("##", "").rstrip(":"))
-        self.ensure_space(14)
-        self.ln(2)
-        self.set_x(20)
-        self.set_font("Helvetica", "B", 10.8)
-        self.set_text_color(48, 64, 86)
-        self.cell(0, 6, clean_pdf_text(text.upper()), 0, 1)
-        self.set_draw_color(225, 229, 234)
-        self.line(20, self.get_y(), 190, self.get_y())
-        self.ln(2)
-
-    def bullets(self, items, numbered=False):
-        for idx, item in enumerate(items, start=1):
-            clean = ironclad_text_formatter(item)
-            if not clean: continue
-            self.ensure_space(10)
-            self.set_font("Helvetica", "", 10.1)
-            self.set_text_color(35, 39, 43)
-            start_y = self.get_y()
-            self.set_xy(22, start_y)
-            self.cell(6, 5.2, f"{idx}." if numbered else "-", 0, 0, "L")
-            self.set_xy(28, start_y)
-            self.multi_cell(162, 5.2, clean)
-            self.ln(0.8)
-
-    def section_title(self, title: str):
-        self.ensure_space(35)
-        self.ln(2)
-        title = ironclad_text_formatter(title)
-        num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
-        number, text = (num_match.group(1).rstrip("."), num_match.group(2).strip()) if num_match and (num_match.group(1).endswith(".") or num_match.group(2)) else (None, title)
-        
-        self.set_font("Helvetica", "B", 17)
-        self.set_text_color(36, 50, 72)
-        start_y = self.get_y()
-        if number:
-            self.set_xy(20, start_y)
-            self.cell(12, 8, clean_pdf_text(number), 0, 0, "L")
-            self.set_xy(34, start_y)
-            self.multi_cell(156, 8, clean_pdf_text(text.upper()), 0, "L")
-        else:
-            self.set_xy(20, start_y)
-            self.multi_cell(170, 8, clean_pdf_text(text.upper()), 0, "L")
-        self.set_draw_color(204, 209, 216)
-        self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
-        self.ln(5)
-
-    def rounded_rect(self, x, y, w, h, r, style="", corners="1234"):
-        try: super().rounded_rect(x, y, w, h, r, style, corners)
-        except Exception: self.rect(x, y, w, h, style if style in {"F", "FD", "DF"} else "")
-
-    def kv_card(self, items, x=None, width=80, title=None):
-        if x is None: x = self.get_x()
-        height = 10 + (len(items) * 6.3) + (7 if title else 0)
-        self.ensure_space(height + 3)
-        start_y = self.get_y()
-        self.set_fill_color(245, 247, 249)
-        self.set_draw_color(214, 219, 225)
-        self.rounded_rect(x, start_y, width, height, 4, "1234", "DF")
-        yy = start_y + 5
-        if title:
-            self.set_xy(x + 4, yy)
-            self.set_font("Helvetica", "B", 10)
-            self.set_text_color(48, 64, 86)
-            self.cell(width - 8, 5, clean_pdf_text(title.upper()), 0, 1)
-            yy += 7
-        for label, value in items:
-            self.set_xy(x + 4, yy)
-            self.set_font("Helvetica", "B", 8.6)
-            self.set_text_color(72, 79, 87)
-            self.cell(32, 5, clean_pdf_text(label), 0, 0)
-            self.set_font("Helvetica", "", 8.6)
-            self.set_text_color(35, 39, 43)
-            self.multi_cell(width - 38, 5, clean_pdf_text(value))
-            yy = self.get_y() + 1
-        self.set_y(max(self.get_y(), start_y + height))
-        
-    def highlight_box(self, title: str, items, fill=(255, 245, 245), accent=(229, 57, 53)):
-        self.set_font("Helvetica", "", 10)
-        total_text_h = 0
-        for item in items:
-            w = self.get_string_width(clean_pdf_text(item))
-            lines = int((w / 145)) + 1
-            total_text_h += (lines * 5.5) + 2
-
-        box_h = 14 + total_text_h
-        self.ensure_space(box_h + 5)
-        x, y = 20, self.get_y()
-        
-        self.set_fill_color(*fill)
-        self.set_draw_color(245, 200, 200)
-        self.rounded_rect(x, y, 170, box_h, 4, "1234", "DF")
-        self.set_fill_color(*accent)
-        self.rect(x, y, 3, box_h, "F")
-        self.set_xy(x + 6, y + 4)
-        self.set_font("Helvetica", "B", 10.5)
-        self.set_text_color(*accent)
-        self.cell(0, 5, clean_pdf_text(title.upper()), 0, 1)
-        self.set_text_color(35, 39, 43)
-        self.set_font("Helvetica", "", 10)
-        
-        yy = y + 10
-        for item in items:
-            self.set_xy(x + 8, yy)
-            self.cell(5, 5, "-", 0, 0)
-            self.multi_cell(154, 5.2, clean_pdf_text(item))
-            yy = self.get_y() + 2
-            
-        self.set_y(y + box_h + 3)
-
-def build_cover_page(pdf, project_data, brann_data):
-    pdf.add_page()
-    pdf.set_draw_color(120, 124, 130)
-    pdf.line(18, 18, 192, 18)
-    
-    if os.path.exists("logo.png"):
-        try: pdf.image("logo.png", x=150, y=15, w=40)
-        except: pass
-
-    pdf.set_xy(20, 45)
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(100, 105, 110)
-    pdf.cell(80, 6, clean_pdf_text("RAPPORT"), 0, 1, "L")
-
-    pdf.set_x(20)
-    pdf.set_font("Helvetica", "B", 34) 
-    pdf.set_text_color(20, 28, 38)
-    pdf.multi_cell(95, 12, clean_pdf_text(project_data.get("p_name", "Brannkonsept")), 0, 'L')
-    
-    pdf.ln(4)
-    pdf.set_x(20)
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(229, 57, 53) # Rød accentfarge for Brann
-    pdf.multi_cell(95, 6.5, clean_pdf_text("Brannteknisk konsept (RIBr)\nTEK17 Dokumentasjon"), 0, 'L')
-
-    pdf.set_xy(118, 45)
-    meta_items = [
-        ("Oppdragsgiver", project_data.get("c_name") or "-"),
-        ("Kommune", project_data.get("kommune") or "-"),
-        ("Risikoklasse", brann_data['rkl']),
-        ("Brannklasse", brann_data['bkl']),
-        ("Sprinklet", brann_data['sprinkler']),
-        ("Brannalarm", brann_data['alarm']),
-        ("Dato / revisjon", datetime.now().strftime("%d.%m.%Y") + " / 01"),
-        ("Dokumentkode", "Builtly-RIBr-001"),
-    ]
-    pdf.kv_card(meta_items, x=118, width=72)
-
-    pdf.set_fill_color(244, 246, 248)
-    pdf.set_draw_color(220, 224, 228)
-    pdf.rounded_rect(20, 140, 170, 70, 4, "1234", "DF")
-    pdf.set_xy(24, 165)
-    pdf.set_font("Helvetica", "I", 12)
-    pdf.set_text_color(112, 117, 123)
-    pdf.multi_cell(160, 6, clean_pdf_text("Bildevedlegg genereres automatisk bak i rapporten basert på opplastede branntegninger og arkitektur."), 0, "C")
-
-    pdf.set_xy(20, 255)
-    pdf.set_font("Helvetica", "", 8.8)
-    pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(170, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIBr AI på bakgrunn av prosjektdata, opplastede branntegninger og TEK17 preaksepterte ytelser. Dokumentet er et forprosjektutkast og skal underlegges uavhengig kontroll (tiltaksklasse 3) før innsending."))
-
-def render_ai_section_body(pdf, lines):
-    paragraph_buffer, bullet_buffer, first_para, empty_line_count = [], [], True, 0
-
-    def flush_paragraph():
-        nonlocal paragraph_buffer, first_para
-        if paragraph_buffer:
-            text = " ".join(line.strip() for line in paragraph_buffer if line.strip())
-            if text:
-                pdf.body_paragraph(text, first=first_para)
-                first_para = False
-        paragraph_buffer = []
-
-    def flush_bullets():
-        nonlocal bullet_buffer
-        if bullet_buffer:
-            pdf.bullets([strip_bullet(item) for item in bullet_buffer], numbered=all(re.match(r"^\d+\.\s+", item.strip()) for item in bullet_buffer))
-        bullet_buffer = []
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            flush_paragraph()
-            flush_bullets()
-            empty_line_count += 1
-            if empty_line_count == 1: pdf.ln(3) 
-            continue
-        empty_line_count = 0
-        if is_subheading_line(line):
-            flush_paragraph()
-            flush_bullets()
-            pdf.subheading(line)
-            continue
-        if is_bullet_line(line):
-            flush_paragraph()
-            bullet_buffer.append(line)
-            continue
-        flush_bullets()
-        paragraph_buffer.append(line)
-
-    flush_paragraph()
-    flush_bullets()
-
-def create_full_report_pdf(project_data, brann_data, content, maps):
-    pdf = BuiltlyCorporatePDF("P", "mm", "A4")
-    pdf.set_auto_page_break(True, margin=22) 
-    pdf.set_margins(18, 18, 18)
-    pdf.header_left, pdf.header_right, pdf.doc_code = clean_pdf_text(project_data.get("p_name", "Brannkonsept")), clean_pdf_text("Builtly | RIBr"), clean_pdf_text("Builtly-RIBr-001")
-
-    build_cover_page(pdf, project_data, brann_data)
-
-    # Innholdsfortegnelse
-    pdf.add_page()
-    pdf.section_title("INNHOLDSFORTEGNELSE")
-    items = ["1. Sammendrag og hovedføringer", "2. Prosjektbeskrivelse og forutsetninger", "3. Bæreevne og brannskiller (TEK17 §11-4 - §11-8)", "4. Rømning og ledesystem (TEK17 §11-11 - §11-14)", "5. Slokking og brannvesenets tilkomst (TEK17 §11-16 - §11-17)", "Vedlegg: Vurdert tegningsgrunnlag"]
-    pdf.set_font("Helvetica", "", 10.5)
-    pdf.set_text_color(45, 49, 55)
-    for item in items:
-        pdf.ensure_space(9)
-        y = pdf.get_y()
-        pdf.set_x(22)
-        pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
-        pdf.set_draw_color(225, 229, 234)
-        pdf.line(22, y + 6, 188, y + 6)
-        pdf.ln(8)
-    pdf.ln(6)
-    pdf.highlight_box("Om dokumentet", ["Brannkonseptet er strukturert iht. TEK17 kapittel 11.", "Visuelle tolkninger av branntegninger er integrert direkte i teksten under relevante avsnitt."])
-
-    sections = split_ai_sections(content) or [{"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": [content]}]
-    
-    pdf.add_page()
-    for idx, section in enumerate(sections):
-        title = section.get("title", "")
-        
-        if title.startswith("Vedlegg"):
-            pdf.add_page()
-        elif idx > 0:
-            pdf.ensure_space(35)
-            if pdf.get_y() > 35: pdf.ln(8)
-
-        pdf.section_title(title)
-
-        if title.startswith("1."):
-            pdf.ensure_space(30)
-            stats = [
-                ("Risikoklasse", brann_data['rkl'], "TK1"),
-                ("Brannklasse", brann_data['bkl'], "TK4"),
-                ("Sprinkler", "Ja" if "Ja" in brann_data['sprinkler'] else "Nei", "TK2" if "Ja" in brann_data['sprinkler'] else "TK5"),
-                ("Etasjer", str(project_data.get('etasjer', 1)), "TK1")
-            ]
-            pdf.stats_row(stats)
-
-        render_ai_section_body(pdf, section.get("lines", []))
-
-    if maps and len(maps) > 0:
-        pdf.add_page()
-        pdf.section_title("Vedlegg: Vurdert tegningsgrunnlag")
-        for i, m in enumerate(maps):
-            if i > 0: pdf.add_page()
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                m.convert("RGB").save(tmp.name, format="JPEG", quality=85)
-                
-                # Beregn aspektratio for å maksimere bilde på A4
-                aspect = m.height / max(m.width, 1)
-                w = 174
-                h = w * aspect
-                
-                # Sjekk om det blir for høyt for siden (Maks høyde ca 240mm på A4 med marger)
-                if h > 240: 
-                    h = 240
-                    w = h / aspect
-                
-                x = 18 + (174 - w) / 2
-                pdf.image(tmp.name, x=x, y=pdf.get_y(), w=w)
-                
-                pdf.set_y(pdf.get_y() + h + 5)
-                pdf.set_x(18)
-                pdf.set_font('Helvetica', 'I', 9)
-                pdf.set_text_color(100, 100, 100)
-                pdf.cell(0, 8, clean_pdf_text(f"Figur V-{i+1}: Tegningsgrunnlag analysert av Builtly RIBr AI."), 0, 1, 'C')
-
-    out = pdf.output(dest="S")
-    return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
-
-# --- 5. HEADER ---
-top_l, top_r = st.columns([4, 1])
-with top_l:
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-    render_html(logo_html)
-with top_r:
-    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
-    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
-        st.switch_page(find_page("Project"))
-
-st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-
-# --- 6. UI FOR BRANN MODUL ---
-st.markdown("<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🔥 Brannkonsept (RIBr)</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for generering av brannteknisk konsept iht. TEK17/VTEK17 med visuell tegningstolkning.</p>", unsafe_allow_html=True)
-
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra Project SSOT.")
-
-with st.expander("1. Prosjekt & Lokasjon (SSOT)", expanded=False):
-    c1, c2 = st.columns(2)
-    st.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
-    st.text_input("Adresse", value=f"{pd_state['adresse']}, {pd_state['kommune']}", disabled=True)
-
-with st.expander("2. Branntekniske Forutsetninger (VTEK17)", expanded=True):
-    st.info("Angi de tekniske forutsetningene for bygget. Disse legger sterke føringer for AI-ens krav til brannmotstand og rømningsveier.")
-    
-    # Auto-kalkuler default verdier
-    default_rkl = "RKL 4 (Bolig)" if "bolig" in pd_state.get('b_type', '').lower() else "RKL 2 (Kontor)"
-    etasjer = int(pd_state.get('etasjer', 1))
-    default_bkl = "BKL 1" if etasjer <= 2 else "BKL 2" if etasjer <= 4 else "BKL 3"
-    
-    b1, b2 = st.columns(2)
-    rkl = b1.selectbox("Risikoklasse (RKL)", ["RKL 1 (Lager/Garasje)", "RKL 2 (Kontor/Næring)", "RKL 3 (Skole/Bhg)", "RKL 4 (Bolig)", "RKL 5 (Forsamling)", "RKL 6 (Hotell/Sykehus)"], index=["RKL 1", "RKL 2", "RKL 3", "RKL 4", "RKL 5", "RKL 6"].index(default_rkl[:5]))
-    bkl = b2.selectbox("Brannklasse (BKL)", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=["BKL 1", "BKL 2", "BKL 3", "BKL 4"].index(default_bkl))
-    
-    b3, b4 = st.columns(2)
-    sprinkler = b3.radio("Automatisk slokkeanlegg (Sprinkler)", ["Ja, fullsprinklet (NS-EN 12845 / 16925)", "Delvis sprinklet", "Nei, u-sprinklet"])
-    alarm = b4.radio("Brannalarmanlegg", ["Kategori 1 (Optisk/Akustisk)", "Kategori 2 (Heldekkende)", "Ingen / Lokal varsling"])
-
-with st.expander("3. Visuelt Grunnlag (Branntegninger & Utomhusplan)", expanded=True):
-    st.markdown("For at AI-en skal kunne vurdere rømning (rømningsveier, trapperom) og tilkomst for brannvesen (oppstillingsplasser), MÅ du laste opp spesifikke branntegninger og utomhusplaner.")
-    
-    files = st.file_uploader("Last opp Branntegninger (Plan, Snitt, Utomhus)", accept_multiple_files=True, type=["pdf", "png", "jpg"])
-
-st.markdown("<br>", unsafe_allow_html=True)
-if st.button("🚀 GENERER BRANNKONSEPT (TEK17)", type="primary", use_container_width=True):
-    if not files:
-        st.warning("⚠️ For å få en god brannrapport, bør du laste opp minst én branntegning eller planløsning.")
-
-    with st.spinner("📊 Tolker branntegninger for brannceller (røde linjer), rømning (grønne piler) og tilkomst (blå skravur)..."):
-        images_for_brann = []
-        if files:
-            for f in files: 
-                f.seek(0)
-                if f.name.lower().endswith('pdf'):
-                    if fitz is not None: 
-                        doc = fitz.open(stream=f.read(), filetype="pdf")
-                        for page_num in range(min(5, len(doc))): # Begrenser til 5 sider for memory
-                            # BRUKER HØYERE MATRIX (2.0) FOR Å FÅ MED SMÅ TEKSTER (EI60 etc)
-                            pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                            img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
-                            img.thumbnail((2000, 2000))
-                            images_for_brann.append(img)
-                        doc.close() 
+        btn1, btn2, btn3 = st.columns(3)
+        with btn1:
+            if st.button("Oppdater dokumentsett", type="primary", use_container_width=True):
+                shared = load_shared_project_images()
+                st.session_state.source_documents = shared + ingest_streamlit_files(source_files or [], "uploaded")
+                st.session_state.benchmark_documents = ingest_streamlit_files(benchmark_files or [], "benchmark")
+                all_docs = st.session_state.source_documents + st.session_state.benchmark_documents
+                st.session_state.drawing_manifest = build_drawing_manifest(all_docs)
+                st.success(f"Dokumentsett oppdatert. Totalt {len(all_docs)} filer registrert.")
+        with btn2:
+            if st.button("Hent prosjektkart", type="secondary", use_container_width=True):
+                img, source = fetch_map_image(pd.adresse, pd.kommune, pd.gnr, pd.bnr, os.environ.get("GOOGLE_API_KEY"))
+                if img is not None:
+                    st.session_state.fire_map = img
+                    st.session_state.fire_map_source = source
+                    st.success(f"Kart hentet fra {source}.")
                 else:
-                    img = Image.open(f).convert("RGB")
-                    img.thumbnail((2000, 2000))
-                    images_for_brann.append(img)
+                    st.warning(source)
+        with btn3:
+            st.checkbox(
+                "Rapport skal kun vedlegge brannmodulens egne tegninger",
+                key="include_only_module_drawings",
+            )
 
-        try:
-            valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
-            valgt_modell = valid_models[0]
-            for fav in ["models/gemini-1.5-pro", "models/gemini-1.5-flash"]:
-                if fav in valid_models:
-                    valgt_modell = fav
-                    break
-        except Exception:
-            st.error("Kunne ikke koble til Google AI.")
-            st.stop()
+    with right:
+        st.markdown("**Prosjektoppsummering**")
+        st.write(f"- Oppdragsgiver: {pd.c_name or 'Ikke angitt'}")
+        st.write(f"- Formål: {pd.b_type or 'Ikke angitt'}")
+        st.write(f"- Beskrivelse: {pd.p_desc or 'Ingen beskrivelse registrert'}")
+        if st.session_state.fire_map is not None:
+            st.image(st.session_state.fire_map, caption=st.session_state.fire_map_source, use_container_width=True)
 
-        model = genai.GenerativeModel(valgt_modell)
-        
-        brann_data = {
-            'rkl': rkl, 'bkl': bkl, 'sprinkler': sprinkler, 'alarm': alarm
-        }
+    docs_to_show: List[UploadedSource] = st.session_state.source_documents + st.session_state.benchmark_documents
+    if docs_to_show:
+        st.markdown("**Manifest**")
+        st.dataframe(st.session_state.drawing_manifest, use_container_width=True, hide_index=True)
+        with st.expander("Forhåndsvis dokumenter", expanded=False):
+            for doc in docs_to_show:
+                st.markdown(f"**{doc.name}** · {doc.category} · {doc.source_kind}")
+                cols = st.columns(min(3, max(1, len(doc.pages))))
+                for idx, page in enumerate(doc.pages[:3]):
+                    with cols[idx % len(cols)]:
+                        st.image(page, caption=f"Side {idx + 1}", use_container_width=True)
+    else:
+        st.info("Ingen dokumenter er lastet inn ennå.")
 
-        prompt = f"""
-        Du er Builtly RIBr AI, en ledende, autoritær og svært grundig senior branningeniør.
-        Skriv et formelt og komplett "Brannteknisk konsept" (Brannstrategi) i henhold til TEK17 og VTEK17.
+with tab_strategi:
+    st.subheader("2. Faglige forutsetninger")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        rk = st.selectbox("Risikoklasse", ["RKL 1", "RKL 2", "RKL 4", "RKL 6"], index=["RKL 1", "RKL 2", "RKL 4", "RKL 6"].index(default_rk))
+    with c2:
+        bk = st.selectbox("Brannklasse", ["BKL 1", "BKL 2", "BKL 3", "BKL 4"], index=["BKL 1", "BKL 2", "BKL 3", "BKL 4"].index(default_bk))
+    with c3:
+        sprinkler = st.selectbox("Slokkeanlegg", ["Ikke avklart", "Boligsprinkler", "Konvensjonell sprinkler", "Kombinasjon boligsprinkler og sprinkler"], index=0)
+    with c4:
+        alarm = st.selectbox("Brannalarm", ["Ikke avklart", "Heldekkende adresserbart anlegg", "Manuell varsling", "Blandet løsning"], index=1)
 
-        PROSJEKT: {pd_state['p_name']} ({pd_state['b_type']}, {pd_state['bta']} m2, {pd_state['etasjer']} etasjer)
-        LOKASJON: {pd_state['adresse']}, {pd_state['kommune']}. 
-        REGELVERK: {pd_state['land']}
+    unresolved = st.text_area(
+        "Uavklarte forhold som skal inn i rapporten",
+        placeholder="Eksempel: innsatsvei til p-kjeller må dokumenteres nærmere i detaljfasen.",
+        height=120,
+    )
+    deviations = st.text_area(
+        "Fravik / særskilte vurderinger",
+        placeholder="Eksempel: ledesystem, ventilasjon, overskridelse av avstand til rømningsvei eller andre fravik som skal vurderes særskilt.",
+        height=120,
+    )
 
-        KUNDENS PROSJEKTNARRATIV: "{pd_state['p_desc']}"
+    st.markdown("**Målbilde for rapporten**")
+    for heading in DEFAULT_REPORT_HEADINGS:
+        st.write(f"- {heading}")
 
-        LÅSTE BRANNTEKNISKE FORUTSETNINGER:
-        - Risikoklasse: {rkl}
-        - Brannklasse: {bkl}
-        - Slokkeanlegg: {sprinkler}
-        - Alarmanlegg: {alarm}
+    sources_for_report = [page for doc in st.session_state.source_documents for page in doc.pages]
+    if st.session_state.fire_map is not None:
+        sources_for_report = sources_for_report + [st.session_state.fire_map]
 
-        KRITISKE INSTRUKSER FOR VISUELL ANALYSE (BRANNTEGNINGER):
-        Jeg har lagt ved branntegninger. Du SKAL studere dem nøye og se etter standard fargekoder:
-        - Røde linjer: Dette er brannceller (Ofte merket med EI30, EI60, EI90).
-        - Grønne felt/piler: Dette er rømningsveier og trapperom (f.eks. Tr1).
-        - Blått / Rosa felt utendørs: Dette er oppstillingsplasser og kjørbar atkomst for brannbil (110).
-        
-        DU MÅ BEVISE AT DU HAR SETT PÅ BILDENE. Skriv setninger som:
-        - "Av vedlagte branntegning (plan X) fremgår det at rømning foregår via..."
-        - "Tegningen viser branncellebegrensende vegger klassifisert som..."
-        - "Utomhusplanen viser oppstillingsplass for stigebil plassert..."
-        Hvis tegningene mangler viktig info (f.eks. avstander, rømning over terreng), må du påpeke dette som en risiko!
+    if st.button("Generer rapportutkast", type="primary"):
+        prompt = build_report_prompt(
+            pd=pd,
+            rk=rk,
+            bk=bk,
+            sprinkler=sprinkler,
+            alarm=alarm,
+            unresolved=unresolved,
+            deviations=deviations,
+            manifest=st.session_state.drawing_manifest,
+        )
+        with st.spinner("Genererer rapportutkast..."):
+            st.session_state.generated_report_text = ai_generate_report(sources_for_report, prompt)
+        st.success("Rapportutkast generert.")
 
-        KRAV TIL FORMATERING:
-        - Start direkte på kapittel 1. Ingen hilsen eller metatekst!
-        - Bruk punktlister med bindestrek (-) for oppramsing.
-        - IKKE bruk tabeller (forbudt tegn: "|").
-        - Bruk teknisk, presist språk (R60, EI60, A2-s1,d0, Tr1-trapperom).
-        - Forklar konsekvensen av forutsetningene (F.eks: Siden bygget har {sprinkler}, kan krav til rømningstid økes/krav til materialer lempes).
+    if st.session_state.generated_report_text:
+        st.markdown("**Rapportutkast**")
+        st.text_area("Utkast", st.session_state.generated_report_text, height=420)
 
-        STRUKTUR (Bruk KUN disse eksakte overskriftene med #):
-        # 1. SAMMENDRAG OG HOVEDFØRINGER
-        # 2. PROSJEKTBESKRIVELSE OG FORUTSETNINGER
-        # 3. BÆREEVNE OG BRANNSKILLER (TEK17 §11-4 - §11-8) (Konkretiser krav til konstruksjoner og brannceller her, bruk tegningene!)
-        # 4. RØMNING OG LEDESYSTEM (TEK17 §11-11 - §11-14) (Beskriv rømningstraseer, Tr1/Tr2, avstander sett på tegning)
-        # 5. SLOKKING OG BRANNVESENETS TILKOMST (TEK17 §11-16 - §11-17) (Vurder innsatstid, oppstillingsplass og brannsmitte mellom bygg)
-        """
+with tab_drawings:
+    st.subheader("3. Branntegninger fra vanlige tegninger")
+    source_candidates = [doc for doc in st.session_state.source_documents if doc.pages]
+    benchmark_candidates = [doc for doc in st.session_state.benchmark_documents if doc.pages]
+    if source_candidates:
+        chosen_name = st.selectbox("Velg kildetegning", [doc.name for doc in source_candidates])
+        selected_doc = next(doc for doc in source_candidates if doc.name == chosen_name)
+        selected_page_idx = st.slider("Side", 1, len(selected_doc.pages), 1)
+        selected_page = selected_doc.pages[selected_page_idx - 1]
 
-        try:
-            res = model.generate_content([prompt] + images_for_brann)
-            with st.spinner("Kompilerer RIBr-PDF og sender til QA-kø..."):
-                pdf_data = create_full_report_pdf(pd_state, brann_data, res.text, images_for_brann)
+        prev1, prev2 = st.columns([1.25, 1])
+        with prev1:
+            st.image(selected_page, caption=f"Kildetegning: {selected_doc.name} · side {selected_page_idx}", use_container_width=True)
+        with prev2:
+            st.markdown("**Benchmark-konvensjoner brukt som referanse**")
+            for item in BENCHMARK_CONVENTIONS:
+                st.write(f"- {item}")
+            if benchmark_candidates:
+                bench_preview = benchmark_candidates[0].pages[0]
+                st.image(bench_preview, caption=f"Benchmark: {benchmark_candidates[0].name}", use_container_width=True)
 
-                if "pending_reviews" not in st.session_state:
-                    st.session_state.pending_reviews = {}
-                if "review_counter" not in st.session_state:
-                    st.session_state.review_counter = 1
+        if st.button("Foreslå brannoverlay", type="primary"):
+            prompt = build_drawing_prompt(pd, selected_doc.name)
+            benchmark_pages = [doc.pages[0] for doc in benchmark_candidates if doc.pages]
+            with st.spinner("Genererer tegningsforslag..."):
+                spec = ai_generate_markup(selected_page, benchmark_pages, prompt)
+                rendered = render_fire_overlay(selected_page, spec)
+                st.session_state.generated_fire_drawings.append(
+                    {
+                        "title": spec.page_title or f"Branntegning – {selected_doc.name}",
+                        "source": selected_doc.name,
+                        "page": selected_page_idx,
+                        "spec": spec,
+                        "image": rendered,
+                    }
+                )
+            st.success("Brannskisse generert som førsteutkast.")
 
-                doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIBR{st.session_state.review_counter:03d}"
-                st.session_state.review_counter += 1
+    else:
+        st.info("Last inn minst én kildetegning i fanen Underlag for å generere branntegning.")
 
-                st.session_state.pending_reviews[doc_id] = {
-                    "title": pd_state["p_name"],
-                    "module": "RIBr (Brannkonsept)",
-                    "drafter": "Builtly AI",
-                    "reviewer": "Senior Branningeniør",
-                    "status": "Pending Senior Review",
-                    "class": "badge-phase2",
-                    "pdf_bytes": pdf_data,
-                }
+    if st.session_state.generated_fire_drawings:
+        st.markdown("**Genererte branntegninger**")
+        for idx, item in enumerate(st.session_state.generated_fire_drawings, start=1):
+            with st.expander(f"{idx}. {item['title']}", expanded=(idx == len(st.session_state.generated_fire_drawings))):
+                st.image(item["image"], caption=f"Kilde: {item['source']} · side {item['page']}", use_container_width=True)
+                notes = item["spec"].notes if isinstance(item["spec"], FireMarkupSpec) else []
+                if notes:
+                    st.write("Merknader:")
+                    for note in notes:
+                        st.write(f"- {note}")
 
-                st.session_state.generated_brann_pdf = pdf_data
-                st.session_state.generated_brann_filename = f"Builtly_RIBr_{pd_state['p_name'].replace(' ', '_')}.pdf"
-                st.rerun()
+with tab_report:
+    st.subheader("4. Eksport")
+    report_text = st.text_area(
+        "Endelig rapporttekst",
+        value=st.session_state.generated_report_text,
+        height=360,
+        placeholder="Generer rapportutkast i fanen Brannstrategi eller lim inn redigert tekst her.",
+    )
 
-        except Exception as e:
-            st.error(f"Kritisk feil under generering: {e}")
+    drawings_for_export: List[Tuple[str, Image.Image]] = []
+    for item in st.session_state.generated_fire_drawings:
+        drawings_for_export.append((item["title"], item["image"]))
 
-# --- NEDLASTING OG NAVIGASJON ---
-if "generated_brann_pdf" in st.session_state:
-    st.success("✅ Brannkonsept er ferdigstilt og sendt til QA-køen!")
+    if st.button("Bygg PDF", type="primary"):
+        pdf_bytes = create_corporate_report_pdf(
+            pd=pd,
+            report_text=report_text,
+            manifest=st.session_state.drawing_manifest,
+            fire_drawings=drawings_for_export,
+        )
+        st.session_state.generated_pdf = pdf_bytes
+        st.success("PDF bygget.")
 
-    col_dl, col_qa = st.columns(2)
-    with col_dl:
-        st.download_button("📄 Last ned Brannkonsept (PDF)", st.session_state.generated_brann_pdf, st.session_state.generated_brann_filename, type="primary", use_container_width=True)
-    with col_qa:
-        if find_page("Review"):
-            if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
-                st.switch_page(find_page("Review"))
+    if st.session_state.generated_pdf:
+        st.download_button(
+            "Last ned brannkonsept PDF",
+            data=st.session_state.generated_pdf,
+            file_name=f"Brannkonsept_{pd.p_name.replace(' ', '_')}.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
+
+        st.caption(
+            "Eksporten følger manifest + rapportutkast + genererte branntegninger. Inputtegninger vedlegges ikke ukritisk."
+        )
