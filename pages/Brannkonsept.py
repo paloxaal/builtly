@@ -66,7 +66,6 @@ def ironclad_text_formatter(text):
     return text
 
 def pick_model_name() -> str:
-    """Finner beste tilgjengelige modell for å unngå 404 feil."""
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         for preferred in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash', 'models/gemini-pro']:
@@ -109,20 +108,19 @@ def is_bullet_line(line: str) -> bool:
 def strip_bullet(line: str) -> str:
     return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
 
-# --- INITIALISERER PROSJEKTDATA (SSOT) ---
+# --- INITIALISERER PROSJEKTDATA ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Bolig", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "source_documents" not in st.session_state:
     st.session_state.source_documents = []
 if "generated_fire_drawings" not in st.session_state:
     st.session_state.generated_fire_drawings = []
-if "brann_kart" not in st.session_state:
-    st.session_state.brann_kart = None
+if "generated_pdf" not in st.session_state:
+    st.session_state.generated_pdf = None
 
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
     st.session_state.project_data = json.loads(SSOT_FILE.read_text(encoding="utf-8"))
 
-# DEFINERER pd_state GLOBALT HER FOR Å UNNGÅ NAMEERROR
 pd_state = st.session_state.project_data
 
 if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
@@ -134,7 +132,7 @@ if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
         st.switch_page(target)
     st.stop()
 
-# --- 3. DATAKLASSER OG KART ---
+# --- 3. DATAKLASSER FOR BRANNTEGNINGER ---
 @dataclass
 class FireMarkupSpec:
     page_title: str = ""
@@ -160,33 +158,7 @@ def pdf_to_images(pdf_bytes: bytes, limit: int = 5, scale: float = 2.0) -> List[
     except Exception: pass
     return images
 
-def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
-    adr_clean = adresse.replace(",", "").strip() if adresse else ""
-    kom_clean = kommune.replace(",", "").strip() if kommune else ""
-    queries = [f"{adr_clean} {kom_clean}", adr_clean, f"{kom_clean} {gnr}/{bnr}"]
-    nord, ost = None, None
-    for q in queries:
-        safe_query = urllib.parse.quote(q)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
-        try:
-            resp = requests.get(url, timeout=4)
-            if resp.status_code == 200 and resp.json().get('adresser'):
-                hit = resp.json()['adresser'][0]
-                nord, ost = hit.get('representasjonspunkt', {}).get('nord'), hit.get('representasjonspunkt', {}).get('øst')
-                break
-        except: pass
-    if nord and ost:
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
-        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        try:
-            r1 = requests.get(url_orto, timeout=5)
-            if r1.status_code == 200 and len(r1.content) > 5000:
-                return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Kartverket (Norge i Bilder)"
-        except: pass
-    return None, "Kunne ikke hente kart."
-
-# --- 4. PDF MOTOR ---
+# --- 4. PDF MOTOR (CORPORATE LAYOUT) ---
 class BuiltlyCorporatePDF(FPDF):
     def header(self):
         if self.page_no() == 1: return
@@ -206,7 +178,7 @@ class BuiltlyCorporatePDF(FPDF):
         if self.get_y() + h > 272: self.add_page()
 
     def section_title(self, title: str):
-        self.ensure_space(20); self.ln(2)
+        self.ensure_space(30); self.ln(2)
         self.set_font("Helvetica", "B", 17); self.set_text_color(36, 50, 72)
         self.set_x(20); self.multi_cell(170, 8, clean_pdf_text(title.upper()), 0, "L")
         self.set_draw_color(204, 209, 216); self.line(20, self.get_y() + 1, 190, self.get_y() + 1); self.ln(5)
@@ -257,53 +229,6 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_xy(x + 4, yy); self.set_font("Helvetica", "B", 8.6); self.set_text_color(72, 79, 87); self.cell(32, 5, clean_pdf_text(l), 0, 0); self.set_font("Helvetica", "", 8.6); self.set_text_color(35, 39, 43); self.multi_cell(width - 38, 5, clean_pdf_text(v)); yy = self.get_y() + 1
         self.set_y(max(self.get_y(), start_y + h))
 
-# --- 5. AI TEGNE-LOGIKK ---
-def draw_dashed_line(draw, p1, p2, fill, width, dash=10, gap=6):
-    x1, y1, x2, y2 = p1[0], p1[1], p2[0], p2[1]
-    length = max(((x2 - x1)**2 + (y2 - y1)**2)**0.5, 1.0)
-    dx, dy = (x2-x1)/length, (y2-y1)/length
-    curr = 0.0
-    while curr < length:
-        draw.line([(int(x1+dx*curr), int(y1+dy*curr)), (int(x1+dx*min(curr+dash, length)), int(y1+dy*min(curr+dash, length)))], fill=fill, width=width)
-        curr += dash + gap
-
-def draw_arrow(draw, p1, p2, fill, width):
-    draw.line([p1, p2], fill=fill, width=width)
-    vx, vy = p2[0]-p1[0], p2[1]-p1[1]
-    L = max((vx**2 + vy**2)**0.5, 1.0)
-    ux, uy = vx/L, vy/L
-    w, b = 16, 18
-    left = (int(p2[0]-ux*b-uy*w), int(p2[1]-uy*b+ux*w))
-    right = (int(p2[0]-ux*b+uy*w), int(p2[1]-uy*b-ux*w))
-    draw.polygon([p2, left, right], fill=fill)
-
-def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Image:
-    try:
-        data = json.loads(re.search(r"(\{.*\})", spec_json.strip().replace("\n",""), re.S).group(1))
-    except: return source_image
-    canvas = source_image.convert("RGBA")
-    overlay = Image.new("RGBA", canvas.size, (255,255,255,0))
-    draw = ImageDraw.Draw(overlay)
-    for el in data.get("elements", []):
-        style = STYLE_MAP.get(el.get("style", "dashed_red"), STYLE_MAP["dashed_red"])
-        stroke = ImageColor.getrgb(style.get("stroke"))
-        width = int(style.get("width", 3))
-        if el["type"] == "line" and len(el.get("points", [])) >= 2:
-            for i in range(len(el["points"])-1):
-                p1, p2 = tuple(el["points"][i]), tuple(el["points"][i+1])
-                if el.get("style") == "dashed_red": draw_dashed_line(draw, p1, p2, stroke, width)
-                else: draw.line([p1, p2], fill=stroke, width=width)
-        elif el["type"] == "arrow" and len(el.get("points", [])) == 2:
-            draw_arrow(draw, tuple(el["points"][0]), tuple(el["points"][1]), stroke, width)
-    return Image.alpha_composite(canvas, overlay).convert("RGB")
-
-def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
-    match = re.search(r"(\{.*\})", text.strip().replace("\n", ""), re.S)
-    if match:
-        try: return json.loads(match.group(1))
-        except: return None
-    return None
-
 def build_cover_page(pdf, pd_state, brann_data, cover_img):
     pdf.add_page()
     if os.path.exists("logo.png"): pdf.image("logo.png", x=150, y=15, w=40)
@@ -328,7 +253,7 @@ def create_full_report_pdf(pd_state, brann_data, content, sketches, raw_imgs):
     sections = split_ai_sections(content)
     pdf.add_page()
     for idx, sec in enumerate(sections):
-        if idx > 0: pdf.ensure_space(30); pdf.ln(8)
+        if idx > 0: pdf.ensure_space(35); pdf.ln(8)
         pdf.section_title(sec['title'])
         if sec['title'].startswith("1."):
             pdf.stats_row([("Risikoklasse", brann_data['rkl'], "TK1"), ("Brannklasse", brann_data['bkl'], "TK4"), ("Sprinkler", "Ja" if "Ja" in brann_data['sprinkler'] else "Nei", "TK2"), ("Etasjer", str(pd_state['etasjer']), "TK1")])
@@ -344,20 +269,70 @@ def create_full_report_pdf(pd_state, brann_data, content, sketches, raw_imgs):
             pdf.image(tmp.name, x=18, y=pdf.get_y(), w=174)
     return bytes(pdf.output(dest="S"))
 
-# --- 6. PREMIUM CSS & UI ---
+# --- 5. AI TEGNE-LOGIKK ---
+def draw_dashed_line(draw, p1, p2, fill, width, dash=10, gap=6):
+    x1, y1, x2, y2 = p1[0], p1[1], p2[0], p2[1]
+    length = max(((x2 - x1)**2 + (y2 - y1)**2)**0.5, 1.0)
+    dx, dy = (x2-x1)/length, (y2-y1)/length
+    curr = 0.0
+    while curr < length:
+        draw.line([(int(x1+dx*curr), int(y1+dy*curr)), (int(x1+dx*min(curr+dash, length)), int(y1+dy*min(curr+dash, length)))], fill=fill, width=width)
+        curr += dash + gap
+
+def draw_arrow(draw, p1, p2, fill, width):
+    draw.line([p1, p2], fill=fill, width=width)
+    vx, vy = p2[0]-p1[0], p2[1]-p1[1]
+    L = max((vx**2 + vy**2)**0.5, 1.0)
+    ux, uy = vx/L, vy/L
+    w, b = 16, 18
+    left = (int(p2[0]-ux*b-uy*w), int(p2[1]-uy*b+ux*w))
+    right = (int(p2[0]-ux*b+uy*w), int(p2[1]-uy*b-ux*w))
+    draw.polygon([p2, left, right], fill=fill)
+
+def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+    match = re.search(r"(\{.*\})", text.strip().replace("\n",""), re.S)
+    if match:
+        try: return json.loads(match.group(1))
+        except: return None
+    return None
+
+def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Image:
+    parsed = try_parse_json(spec_json)
+    if not parsed: return source_image
+    canvas = source_image.convert("RGBA")
+    overlay = Image.new("RGBA", canvas.size, (255,255,255,0))
+    draw = ImageDraw.Draw(overlay)
+    for el in parsed.get("elements", []):
+        style = STYLE_MAP.get(el.get("style", "dashed_red"), STYLE_MAP["dashed_red"])
+        stroke = ImageColor.getrgb(style.get("stroke"))
+        width = int(style.get("width", 3))
+        if el["type"] == "line" and len(el.get("points", [])) >= 2:
+            for i in range(len(el["points"])-1):
+                p1, p2 = tuple(el["points"][i]), tuple(el["points"][i+1])
+                if el.get("style") == "dashed_red": draw_dashed_line(draw, p1, p2, stroke, width)
+                else: draw.line([p1, p2], fill=stroke, width=width)
+        elif el["type"] == "arrow" and len(el.get("points", [])) == 2:
+            draw_arrow(draw, tuple(el["points"][0]), tuple(el["points"][1]), stroke, width)
+    return Image.alpha_composite(canvas, overlay).convert("RGB")
+
+# --- 6. UI ---
 st.markdown("""
 <style>
+    :root { --bg: #06111a; --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #e53935; --radius-lg: 16px; }
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .stApp { background-color: var(--bg) !important; color: var(--text); }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(229,57,53,0.15)); }
     button[kind="primary"] { background: linear-gradient(135deg, #e53935, #ff5252) !important; color: white !important; font-weight: 750 !important; border-radius: 12px !important; }
     div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; background-color: #0c1520 !important; border-radius: 12px !important; }
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    .stTextInput input, div[data-baseweb="select"] * { color: #ffffff !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- HEADER ---
 top_l, top_r = st.columns([4, 1])
 with top_l:
     logo_uri = logo_data_uri()
-    if logo_uri: render_html(f"<img src='{logo_uri}' class='brand-logo'>")
+    if logo_uri: render_html(f"<div style='margin-bottom:2rem;'><img src='{logo_uri}' class='brand-logo'></div>")
     else: st.title("Builtly")
 with top_r:
     if st.button("← Tilbake til SSOT", type="secondary", use_container_width=True): st.switch_page(find_page("Project"))
@@ -366,7 +341,6 @@ st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem;'
 st.markdown("<h1>🔥 Brannkonsept (RIBr)</h1>", unsafe_allow_html=True)
 st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra SSOT.")
 
-# --- UI EKSPANDERE ---
 with st.expander("1. Branntekniske Forutsetninger", expanded=True):
     c1, c2 = st.columns(2)
     rkl = c1.selectbox("Risikoklasse (RKL)", ["RKL 1", "RKL 2", "RKL 4", "RKL 6"], index=2)
@@ -389,19 +363,12 @@ with st.expander("3. AI-Assistert Branntegning (Tegn på plan)", expanded=True):
         sel_doc_name = st.selectbox("Velg tegning for AI-skisse", [d['name'] for d in st.session_state.source_documents])
         sel_doc = next(d for d in st.session_state.source_documents if d['name'] == sel_doc_name)
         pg_cnt = len(sel_doc['pages'])
-        
-        # FIKSER SLIDER-BUG: Bare vis slider hvis det er flere sider
-        sel_pg_idx = 1
-        if pg_cnt > 1:
-            sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1)
-        
+        sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1) if pg_cnt > 1 else 1
         sel_pg = sel_doc['pages'][sel_pg_idx-1]
         st.image(sel_pg, use_container_width=True)
-        
         if st.button("🎨 Foreslå brann-overlay med AI", type="primary"):
             with st.spinner("AI studerer planen og tegner inn brannkrav..."):
-                model_name = pick_model_name()
-                model = genai.GenerativeModel(model_name)
+                model = genai.GenerativeModel(pick_model_name())
                 prompt = f"Lag et førsteutkast til brannoverlay for '{sel_doc_name}'. RKL: {rkl}, BKL: {bkl}. Returner KUN JSON: " + '{"elements":[{"type":"line","points":[[100,100],[500,100]],"style":"dashed_red","label":"EI60"}]}'
                 res = model.generate_content([prompt, sel_pg])
                 rendered = render_fire_overlay(sel_pg, res.text)
@@ -410,21 +377,17 @@ with st.expander("3. AI-Assistert Branntegning (Tegn på plan)", expanded=True):
                 st.image(rendered, width=600)
     else: st.info("Last opp tegninger i steg 2 først.")
 
-# --- GENERERING ---
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_container_width=True):
     with st.spinner("Analyserer underlag og skriver rapport..."):
         try:
-            model_name = pick_model_name()
-            model = genai.GenerativeModel(model_name)
+            model = genai.GenerativeModel(pick_model_name())
             all_imgs = [p for d in st.session_state.get("source_documents", []) for p in d['pages']][:5]
-            
             prompt = f"""
             Du er en senior RIBr. Skriv et komplett Brannkonsept iht. TEK17 for {pd_state['p_name']}.
             Forutsetninger: {rkl}, {bkl}, Sprinkler: {spr_opt}, Alarm: {alarm_opt}.
             START DIREKTE PÅ KAPITTEL 1. Ingen hilsen.
             I KAPITTEL 7: Skriv en KONKRET og operativ tiltaksplan (f.eks. hvilke skiller som skal være EI60).
-            Anta at alt datagrunnlag er 100% korrekt.
             Struktur:
             # 1. SAMMENDRAG
             # 2. PROSJEKTBESKRIVELSE
@@ -435,21 +398,11 @@ if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_c
             # 7. TILTAKSPLAN FOR DETALJPROSJEKT
             """
             res = model.generate_content([prompt] + all_imgs)
-            
-            # --- BYGG PDF ---
-            pdf_data = create_full_report_pdf(
-                pd_state, 
-                {'rkl':rkl, 'bkl':bkl, 'sprinkler':spr_opt, 'alarm':alarm_opt},
-                res.text,
-                st.session_state.get("generated_fire_drawings", []),
-                all_imgs
-            )
-            
+            pdf_data = create_full_report_pdf(pd_state, {'rkl':rkl, 'bkl':bkl, 'sprinkler':spr_opt, 'alarm':alarm_opt}, res.text, st.session_state.get("generated_fire_drawings", []), all_imgs)
             st.session_state.generated_pdf = pdf_data
             st.rerun()
-        except Exception as e:
-            st.error(f"Feil under generering: {e}")
+        except Exception as e: st.error(f"Feil: {e}")
 
 if st.session_state.get("generated_pdf"):
-    st.success("✅ Brannkonseptet er ferdigstilt!")
+    st.success("✅ Brannkonsept ferdigstilt!")
     st.download_button("📄 Last ned RIBr-rapport", st.session_state.generated_pdf, f"Builtly_RIBr_{pd_state['p_name']}.pdf", type="primary", use_container_width=True)
