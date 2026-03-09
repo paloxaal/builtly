@@ -1,14 +1,17 @@
 import base64
+import warnings
 import io
 import json
 import math
 import os
 import re
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -124,10 +127,22 @@ def clamp_int(value: int, low: int, high: int) -> int:
 
 
 def as_pdf_bytes(pdf_obj: FPDF) -> bytes:
-    raw = pdf_obj.output(dest="S")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        raw = pdf_obj.output()
     if isinstance(raw, str):
         return raw.encode("latin-1")
     return bytes(raw)
+
+
+def request_rerun() -> None:
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
 
 
 def safe_temp_image(img: Image.Image, suffix: str = ".png") -> str:
@@ -174,6 +189,72 @@ def split_ai_sections(content: str) -> List[Dict[str, Any]]:
     if current:
         sections.append(current)
     return sections
+
+
+def sanitize_report_text(text: Any) -> str:
+    value = clean_pdf_text(text or "")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"```(?:markdown|md|txt)?", "", value, flags=re.I)
+    value = value.replace("```", "")
+    value = value.replace("**", "").replace("__", "")
+    value = re.sub(r"^\s*###\s*", "## ", value, flags=re.M)
+    value = re.sub(r"^\s*##(?!#)\s*", "## ", value, flags=re.M)
+    value = re.sub(r"^\s*#(?!#)\s*", "# ", value, flags=re.M)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
+
+
+def parse_report_blocks(report_text: str) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    paragraph_lines: List[str] = []
+    bullet_lines: List[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        if paragraph_lines:
+            paragraph = ironclad_text_formatter(" ".join(paragraph_lines))
+            if paragraph:
+                blocks.append({"type": "paragraph", "text": paragraph})
+            paragraph_lines = []
+
+    def flush_bullets() -> None:
+        nonlocal bullet_lines
+        if bullet_lines:
+            items = [ironclad_text_formatter(item) for item in bullet_lines if ironclad_text_formatter(item)]
+            if items:
+                blocks.append({"type": "bullets", "items": items})
+            bullet_lines = []
+
+    for raw_line in sanitize_report_text(report_text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_bullets()
+            continue
+        if line.startswith("# "):
+            flush_paragraph()
+            flush_bullets()
+            blocks.append({"type": "heading", "level": 1, "text": line[2:].strip()})
+            continue
+        if line.startswith("## "):
+            flush_paragraph()
+            flush_bullets()
+            blocks.append({"type": "heading", "level": 2, "text": line[3:].strip()})
+            continue
+        if is_bullet_line(line):
+            flush_paragraph()
+            bullet_lines.append(strip_bullet(line))
+            continue
+        if is_subheading_line(line) and not line.endswith("."):
+            flush_paragraph()
+            flush_bullets()
+            blocks.append({"type": "heading", "level": 2, "text": line.replace(":", "").strip()})
+            continue
+        paragraph_lines.append(line)
+
+    flush_paragraph()
+    flush_bullets()
+    return blocks
 
 
 def get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -285,6 +366,8 @@ if "generated_pdf" not in st.session_state:
     st.session_state.generated_pdf = None
 if "generated_report_text" not in st.session_state:
     st.session_state.generated_report_text = ""
+if "brann_manual_edits_dirty" not in st.session_state:
+    st.session_state.brann_manual_edits_dirty = False
 
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
     try:
@@ -778,8 +861,179 @@ def merge_analysis(ai_result: Optional[Dict[str, Any]], heuristic_result: Dict[s
     return ai_result
 
 
+def split_lines_to_list(text: str) -> List[str]:
+    values: List[str] = []
+    for raw in (text or "").splitlines():
+        clean = ironclad_text_formatter(raw)
+        if clean:
+            values.append(clean)
+    return values
+
+
+def default_label_for_style(style: str) -> str:
+    for legend_group in DEFAULT_LEGENDS.values():
+        for item in legend_group:
+            if item.get("style") == style:
+                return clean_pdf_text(item.get("label", ""))
+    fallback = {
+        "note_box": "Kommentar",
+        "door_class": "EI2 30-C Sa",
+        "core_fill": "Kjerne",
+    }
+    return fallback.get(style, clean_pdf_text(style.replace("_", " ").title()))
+
+
+def default_element_for_type(etype: str, style: str = "fire_compartment") -> Dict[str, Any]:
+    label = default_label_for_style(style)
+    if etype in {"box", "area_fill", "note_box", "door_tag"}:
+        rect = [0.62, 0.12, 0.82, 0.22]
+        if etype == "area_fill":
+            rect = [0.56, 0.16, 0.84, 0.28]
+        elif etype == "note_box":
+            rect = [0.60, 0.72, 0.92, 0.88]
+        elif etype == "door_tag":
+            rect = [0.68, 0.18, 0.82, 0.24]
+        return {"element_id": uuid4().hex[:10], "type": etype, "rect": rect, "style": style, "label": label}
+    return {
+        "element_id": uuid4().hex[:10],
+        "type": etype,
+        "points": [[0.60, 0.18], [0.82, 0.18]],
+        "style": style,
+        "label": label,
+    }
+
+
+def normalize_element(element: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = deepcopy(element or {})
+    normalized["element_id"] = str(normalized.get("element_id") or uuid4().hex[:10])
+    etype = str(normalized.get("type") or "box")
+    style = str(normalized.get("style") or "fire_compartment")
+    if style not in FIRE_STYLE_LIBRARY:
+        style = "fire_compartment"
+    normalized["type"] = etype
+    normalized["style"] = style
+    normalized["label"] = clean_pdf_text(normalized.get("label") or default_label_for_style(style))
+
+    if etype in {"box", "area_fill", "note_box", "door_tag"}:
+        rect = normalized.get("rect") or [0.62, 0.12, 0.82, 0.22]
+        try:
+            x0, y0, x1, y1 = [clamp01(float(v)) for v in rect[:4]]
+        except Exception:
+            x0, y0, x1, y1 = 0.62, 0.12, 0.82, 0.22
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        if abs(x1 - x0) < 0.01:
+            x1 = clamp01(x0 + 0.04)
+        if abs(y1 - y0) < 0.01:
+            y1 = clamp01(y0 + 0.04)
+        normalized["rect"] = [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
+        normalized.pop("points", None)
+    else:
+        points = normalized.get("points") or [[0.60, 0.18], [0.82, 0.18]]
+        cleaned_points: List[List[float]] = []
+        for pt in points:
+            if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                continue
+            try:
+                cleaned_points.append([round(clamp01(float(pt[0])), 4), round(clamp01(float(pt[1])), 4)])
+            except Exception:
+                continue
+        if len(cleaned_points) < 2:
+            cleaned_points = [[0.60, 0.18], [0.82, 0.18]]
+        normalized["points"] = cleaned_points[:12]
+        normalized.pop("rect", None)
+    return normalized
+
+
+def ensure_legend_defaults(page_kind: str, legends: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    seen = set()
+    for item in (legends or []) + DEFAULT_LEGENDS.get(page_kind, DEFAULT_LEGENDS["general_plan"]):
+        style = item.get("style") or "fire_compartment"
+        label = clean_pdf_text(item.get("label") or default_label_for_style(style))
+        key = (label, style)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({"label": label, "style": style})
+    return cleaned[:8]
+
+
+def normalize_analysis_payload(analysis: Dict[str, Any], page_kind: str) -> Dict[str, Any]:
+    normalized = deepcopy(analysis or {})
+    normalized["page_kind"] = normalized.get("page_kind") if normalized.get("page_kind") in PAGE_KIND_LABELS else page_kind
+    normalized["page_title"] = clean_pdf_text(normalized.get("page_title") or "")
+    normalized["drawing_summary"] = ironclad_text_formatter(normalized.get("drawing_summary") or "")
+    normalized["analysis_notes"] = [ironclad_text_formatter(v) for v in (normalized.get("analysis_notes") or []) if ironclad_text_formatter(v)][:8]
+    normalized["assumptions"] = [ironclad_text_formatter(v) for v in (normalized.get("assumptions") or []) if ironclad_text_formatter(v)][:8]
+    normalized["elements"] = [normalize_element(element) for element in (normalized.get("elements") or [])][:28]
+    legend_seed = list(normalized.get("legend_items") or [])
+    for element in normalized["elements"]:
+        style = element.get("style") or "fire_compartment"
+        if style == "note_box":
+            continue
+        legend_seed.append({"label": default_label_for_style(style), "style": style})
+    normalized["legend_items"] = ensure_legend_defaults(normalized["page_kind"], legend_seed)
+    qa = normalized.get("qa") or {}
+    try:
+        qa["confidence"] = float(qa.get("confidence", 0.45))
+    except Exception:
+        qa["confidence"] = 0.45
+    qa["human_review_focus"] = [ironclad_text_formatter(v) for v in (qa.get("human_review_focus") or []) if ironclad_text_formatter(v)][:8]
+    normalized["qa"] = qa
+    normalized["mode"] = normalized.get("mode") or "heuristic"
+    return normalized
+
+
+def element_display_name(element: Dict[str, Any]) -> str:
+    label = clean_pdf_text(element.get("label") or "Uten etikett")
+    style = element.get("style") or "fire_compartment"
+    etype = element.get("type") or "box"
+    return f"{label} - {etype} / {style}"
+
+
+def parse_points_text(raw: str) -> List[List[float]]:
+    if not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise ValueError("Punktlisten ma vaere gyldig JSON, f.eks. [[0.1, 0.2], [0.3, 0.2]].") from exc
+    if not isinstance(parsed, list):
+        raise ValueError("Punktlisten ma vaere en liste med koordinatpar.")
+    points: List[List[float]] = []
+    for item in parsed:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            raise ValueError("Hvert punkt ma besta av [x, y].")
+        points.append([clamp01(float(item[0])), clamp01(float(item[1]))])
+    if len(points) < 2:
+        raise ValueError("Du ma angi minst to punkt.")
+    return points
+
+
+def points_to_text(points: List[List[float]]) -> str:
+    return json.dumps(points or [], ensure_ascii=False, indent=2)
+
+
+def invalidate_generated_outputs() -> None:
+    st.session_state.generated_fire_drawings_pdf = None
+    st.session_state.generated_pdf = None
+    st.session_state.generated_report_text = ""
+    st.session_state.brann_manual_edits_dirty = True
+
+
+def refresh_analysis_item(item: Dict[str, Any]) -> None:
+    page = item["page"]
+    item["analysis"] = normalize_analysis_payload(item.get("analysis") or {}, item.get("page_kind") or page.page_kind)
+    item["page_kind"] = item["analysis"].get("page_kind", page.page_kind)
+    item["annotated_image"] = render_overlay(page, item["analysis"])
+    invalidate_generated_outputs()
+
+
 def analyze_page(page: SourcePage, brann_data: Dict[str, Any], manual_notes: str = "") -> Dict[str, Any]:
-    heuristic = heuristic_markup_for_page(page, brann_data)
+    heuristic = normalize_analysis_payload(heuristic_markup_for_page(page, brann_data), page.page_kind)
     if not AI_AVAILABLE or page.page_kind not in DRAWABLE_PAGE_KINDS:
         return heuristic
 
@@ -787,7 +1041,8 @@ def analyze_page(page: SourcePage, brann_data: Dict[str, Any], manual_notes: str
         model = genai.GenerativeModel(pick_model_name())
         response = model.generate_content([drawing_prompt_for_page(page, brann_data, manual_notes), page.image])
         parsed = try_parse_json(extract_response_text(response))
-        return merge_analysis(parsed, heuristic)
+        merged = merge_analysis(parsed, heuristic)
+        return normalize_analysis_payload(merged, page.page_kind)
     except Exception:
         return heuristic
 
@@ -1158,6 +1413,10 @@ def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "") -> Imag
 # 10. PDF-MOTOR (BASERT PAA GEO-UTTRYKK)
 # -----------------------------------------------------------------------------
 class BuiltlyCorporatePDF(FPDF):
+    body_left = 20
+    body_width = 170
+    content_bottom = 272
+
     def header(self) -> None:
         if self.page_no() == 1:
             return
@@ -1180,13 +1439,35 @@ class BuiltlyCorporatePDF(FPDF):
         self.cell(70, 5, clean_pdf_text("Utkast - krever faglig kontroll"), 0, 0, "C")
         self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
-    def ensure_space(self, needed_height: float) -> None:
-        if self.get_y() + needed_height > 272:
+    def estimate_wrapped_lines(self, text: str, width: float) -> int:
+        clean = clean_pdf_text(text)
+        if not clean:
+            return 1
+        words = clean.split()
+        if not words:
+            return 1
+        lines = 1
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            if self.get_string_width(candidate) <= width:
+                current = candidate
+            else:
+                lines += 1
+                current = word
+        return max(lines, 1)
+
+    def estimate_multicell_height(self, text: str, width: float, line_height: float) -> float:
+        return self.estimate_wrapped_lines(text, width) * line_height
+
+    def will_overflow(self, needed_height: float, keep_with_next: float = 0.0) -> bool:
+        return self.get_y() + needed_height + keep_with_next > self.content_bottom
+
+    def ensure_space(self, needed_height: float, keep_with_next: float = 0.0) -> None:
+        if self.will_overflow(needed_height, keep_with_next):
             self.add_page()
 
-    def section_title(self, title: str) -> None:
-        self.ensure_space(20)
-        self.ln(2)
+    def section_title(self, title: str, keep_with_next: float = 14.0) -> None:
         title = ironclad_text_formatter(title)
         num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
         number = None
@@ -1194,7 +1475,12 @@ class BuiltlyCorporatePDF(FPDF):
         if num_match and (num_match.group(1).endswith(".") or num_match.group(2)):
             number = num_match.group(1).rstrip(".")
             text = num_match.group(2).strip()
-        self.set_font("Helvetica", "B", 17)
+        self.set_font("Helvetica", "B", 17.2)
+        available_width = 156 if number else 170
+        lines = self.estimate_wrapped_lines(clean_pdf_text(text.upper()), available_width)
+        needed_height = 4 + (lines * 8.0) + 7
+        self.ensure_space(needed_height, keep_with_next)
+        self.ln(2)
         self.set_text_color(36, 50, 72)
         start_y = self.get_y()
         if number:
@@ -1205,40 +1491,62 @@ class BuiltlyCorporatePDF(FPDF):
         else:
             self.set_xy(20, start_y)
             self.multi_cell(170, 8, clean_pdf_text(text.upper()), 0, "L")
+        line_y = self.get_y() + 1.2
         self.set_draw_color(204, 209, 216)
-        self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
+        self.line(20, line_y, 190, line_y)
         self.ln(5)
+
+    def subheading(self, text: str, keep_with_next: float = 10.0) -> None:
+        text = ironclad_text_formatter(text.replace("##", "").replace("###", "").rstrip(":"))
+        self.set_font("Helvetica", "B", 13.0)
+        lines = self.estimate_wrapped_lines(clean_pdf_text(text.upper()), 170)
+        needed_height = 3 + (lines * 6.2) + 4
+        self.ensure_space(needed_height, keep_with_next)
+        self.ln(1.6)
+        self.set_x(20)
+        self.set_text_color(48, 64, 86)
+        self.multi_cell(170, 6.1, clean_pdf_text(text.upper()), 0, "L")
+        self.set_draw_color(225, 229, 234)
+        self.line(20, self.get_y() + 0.8, 190, self.get_y() + 0.8)
+        self.ln(2.6)
+
+    def appendix_item_title(self, text: str, keep_with_next: float = 18.0) -> None:
+        text = ironclad_text_formatter(text)
+        self.set_font("Helvetica", "B", 11.7)
+        lines = self.estimate_wrapped_lines(clean_pdf_text(text.upper()), 170)
+        needed_height = 2 + (lines * 5.6) + 4
+        self.ensure_space(needed_height, keep_with_next)
+        self.ln(1.2)
+        self.set_x(20)
+        self.set_text_color(48, 64, 86)
+        self.multi_cell(170, 5.6, clean_pdf_text(text.upper()), 0, "L")
+        self.set_draw_color(225, 229, 234)
+        self.line(20, self.get_y() + 0.5, 190, self.get_y() + 0.5)
+        self.ln(2)
 
     def body_paragraph(self, text: str, first: bool = False) -> None:
         text = ironclad_text_formatter(text)
         if not text:
             return
+        line_height = 5.7 if first else 5.5
+        font_size = 10.6 if first else 10.2
+        self.set_font("Helvetica", "", font_size)
+        estimated = self.estimate_multicell_height(text, 170, line_height)
+        self.ensure_space(min(max(estimated + 2, 10), 40))
         self.set_x(20)
-        self.set_font("Helvetica", "", 10.2 if not first else 10.6)
         self.set_text_color(35, 39, 43)
-        self.multi_cell(170, 5.5 if not first else 5.7, text)
+        self.multi_cell(170, line_height, text)
         self.ln(1.6)
 
-    def subheading(self, text: str) -> None:
-        text = ironclad_text_formatter(text.replace("##", "").replace("###", "").rstrip(":"))
-        self.ensure_space(14)
-        self.ln(2)
-        self.set_x(20)
-        self.set_font("Helvetica", "B", 10.8)
-        self.set_text_color(48, 64, 86)
-        self.cell(0, 6, clean_pdf_text(text.upper()), 0, 1)
-        self.set_draw_color(225, 229, 234)
-        self.line(20, self.get_y(), 190, self.get_y())
-        self.ln(2)
-
     def bullets(self, items: Iterable[str], numbered: bool = False) -> None:
+        self.set_font("Helvetica", "", 10.1)
+        self.set_text_color(35, 39, 43)
         for idx, item in enumerate(items, start=1):
             clean = ironclad_text_formatter(item)
             if not clean:
                 continue
-            self.ensure_space(10)
-            self.set_font("Helvetica", "", 10.1)
-            self.set_text_color(35, 39, 43)
+            estimated = self.estimate_multicell_height(clean, 162, 5.2) + 1.4
+            self.ensure_space(max(estimated, 7.2))
             start_y = self.get_y()
             self.set_xy(22, start_y)
             self.cell(6, 5.2, f"{idx}." if numbered else "-", 0, 0, "L")
@@ -1283,8 +1591,7 @@ class BuiltlyCorporatePDF(FPDF):
         self.set_font("Helvetica", "", 10)
         total_text_h = 0
         for item in items:
-            width = self.get_string_width(clean_pdf_text(item))
-            lines = int((width / 145)) + 1
+            lines = self.estimate_wrapped_lines(clean_pdf_text(item), 145)
             total_text_h += (lines * 5.5) + 2
         box_h = 16 + total_text_h
         self.ensure_space(box_h + 5)
@@ -1347,6 +1654,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_text_color(104, 109, 116)
             self.multi_cell(width, 4, clean_pdf_text(caption), 0, "L")
         self.ln(6)
+
 
 
 def build_cover_page(pdf: BuiltlyCorporatePDF, project_data: Dict[str, Any], brann_data: Dict[str, Any], cover_img: Optional[Image.Image]) -> None:
@@ -1447,7 +1755,7 @@ def build_toc_page(pdf: BuiltlyCorporatePDF, include_appendices: bool = True) ->
 def create_analysis_register(analyses: List[Dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for item in analyses:
-        confidence = item.get("qa", {}).get("confidence")
+        confidence = item.get("analysis", {}).get("qa", {}).get("confidence")
         rows.append(
             {
                 "Dokument": clean_pdf_text(item.get("doc_name", "")),
@@ -1459,6 +1767,56 @@ def create_analysis_register(analyses: List[Dict[str, Any]]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def estimate_image_block_height_mm(image: Image.Image, width: float = 170, caption: str = "") -> float:
+    height = width * (image.height / max(image.width, 1))
+    caption_h = 6 if caption else 0
+    return height + caption_h + 8
+
+
+def estimate_following_block_height(pdf: BuiltlyCorporatePDF, block: Optional[Dict[str, Any]]) -> float:
+    if not block:
+        return 10.0
+    if block.get("type") == "paragraph":
+        return min(24.0, pdf.estimate_multicell_height(block.get("text", ""), 170, 5.5) + 4)
+    if block.get("type") == "bullets":
+        first_item = (block.get("items") or [""])[0]
+        return min(22.0, pdf.estimate_multicell_height(first_item, 162, 5.2) + 5)
+    if block.get("type") == "heading":
+        return 15.0 if block.get("level") == 2 else 21.0
+    return 10.0
+
+
+def render_report_content(pdf: BuiltlyCorporatePDF, report_text: str) -> None:
+    blocks = parse_report_blocks(report_text)
+    if not blocks:
+        return
+
+    first_paragraph_after_heading = False
+    for idx, block in enumerate(blocks):
+        next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
+        second_next = blocks[idx + 2] if idx + 2 < len(blocks) else None
+
+        if block.get("type") == "heading":
+            first_paragraph_after_heading = True
+            if block.get("level") == 1:
+                keep = estimate_following_block_height(pdf, next_block)
+                if next_block and next_block.get("type") == "heading" and next_block.get("level") == 2:
+                    keep += 8 + estimate_following_block_height(pdf, second_next)
+                pdf.section_title(block.get("text", ""), keep_with_next=keep)
+            else:
+                pdf.subheading(block.get("text", ""), keep_with_next=estimate_following_block_height(pdf, next_block))
+            continue
+
+        if block.get("type") == "paragraph":
+            pdf.body_paragraph(block.get("text", ""), first=first_paragraph_after_heading)
+            first_paragraph_after_heading = False
+            continue
+
+        if block.get("type") == "bullets":
+            pdf.bullets(block.get("items") or [])
+            first_paragraph_after_heading = False
 
 
 def create_fire_drawings_pdf(project_data: Dict[str, Any], brann_data: Dict[str, Any], analyses: List[Dict[str, Any]]) -> bytes:
@@ -1486,7 +1844,8 @@ def create_fire_drawings_pdf(project_data: Dict[str, Any], brann_data: Dict[str,
         title = f"{item.get('doc_name', '')} - side {item.get('page_number', '')}: {item.get('page_title', '')}"
         comparison = make_comparison_image(item["page"].image, item["annotated_image"], title)
         comparison_path = safe_temp_image(comparison, ".jpg")
-        pdf.section_title(clean_pdf_text(item.get("page_title", title)))
+        heading_text = clean_pdf_text(item.get("page_title", title))
+        pdf.appendix_item_title(heading_text, keep_with_next=estimate_image_block_height_mm(comparison, width=170, caption=title) + 8)
         pdf.image_block(comparison_path, width=170, caption=title)
 
         notes = item.get("analysis", {}).get("analysis_notes") or []
@@ -1538,34 +1897,10 @@ def create_full_report_pdf(project_data: Dict[str, Any], brann_data: Dict[str, A
     ]
     pdf.highlight_box("Prosjektunderlag", facts)
 
-    sections = split_ai_sections(report_text or "")
-    for idx, section in enumerate(sections):
-        pdf.add_page() if idx == 0 else None
-        pdf.section_title(section["title"])
-        first_paragraph = True
-        buffered_bullets: List[str] = []
-        for line in section["lines"]:
-            stripped = line.strip()
-            if not stripped:
-                if buffered_bullets:
-                    pdf.bullets(buffered_bullets)
-                    buffered_bullets = []
-                continue
-            if is_subheading_line(stripped):
-                if buffered_bullets:
-                    pdf.bullets(buffered_bullets)
-                    buffered_bullets = []
-                pdf.subheading(stripped)
-            elif is_bullet_line(stripped):
-                buffered_bullets.append(strip_bullet(stripped))
-            else:
-                if buffered_bullets:
-                    pdf.bullets(buffered_bullets)
-                    buffered_bullets = []
-                pdf.body_paragraph(stripped, first=first_paragraph)
-                first_paragraph = False
-        if buffered_bullets:
-            pdf.bullets(buffered_bullets)
+    sanitized_report = sanitize_report_text(report_text or "")
+    if sanitized_report:
+        pdf.add_page()
+        render_report_content(pdf, sanitized_report)
 
     if analyses:
         pdf.add_page()
@@ -1582,7 +1917,8 @@ def create_full_report_pdf(project_data: Dict[str, Any], brann_data: Dict[str, A
             caption = f"{item.get('doc_name', '')} - side {item.get('page_number', '')} - {item.get('page_title', '')}"
             comparison = make_comparison_image(item["page"].image, item["annotated_image"], caption)
             comparison_path = safe_temp_image(comparison, ".jpg")
-            pdf.section_title(clean_pdf_text(item.get("page_title", caption)))
+            heading_text = clean_pdf_text(item.get("page_title", caption))
+            pdf.appendix_item_title(heading_text, keep_with_next=estimate_image_block_height_mm(comparison, width=170, caption=caption) + 8)
             pdf.image_block(comparison_path, width=170, caption=caption)
             notes = item.get("analysis", {}).get("analysis_notes") or []
             assumptions = item.get("analysis", {}).get("assumptions") or []
@@ -1686,7 +2022,7 @@ STILKRAV:
 
 def generate_report_text(project_data: Dict[str, Any], brann_data: Dict[str, Any], analyses: List[Dict[str, Any]], manual_notes: str) -> str:
     if not AI_AVAILABLE:
-        return f"""
+        return sanitize_report_text(f"""
 # 1 INNLEDNING
 ## 1.1 Grunnlag
 Rapporten er utarbeidet pa bakgrunn av prosjektdata og automatisert tegningsanalyse av opplastede tegninger. Underlaget bor kvalitetssikres av ansvarlig RIBr.
@@ -1723,11 +2059,11 @@ Boligplaner analyseres for trapperom, korridorer, balkonger og mulige redningsfl
 Branntegninger for plan, kjeller og utomhus maa oppdateres i takt med detaljprosjektering og vedlegges neste revisjon av rapporten.
 # 5 KONKLUSJON
 Underlaget gir et godt grunnlag for et mer profesjonelt og operativt brannkonsept, men endelige ytelser og fravik ma kvalitetssikres i detaljprosjekteringen.
-"""
+""")
 
     model = genai.GenerativeModel(pick_model_name())
     response = model.generate_content(build_report_prompt(project_data, brann_data, analyses, manual_notes))
-    text = extract_response_text(response).strip()
+    text = sanitize_report_text(extract_response_text(response).strip())
     return text
 
 
@@ -1776,6 +2112,162 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+
+def render_analysis_editor(item: Dict[str, Any]) -> None:
+    page = item["page"]
+    item["analysis"] = normalize_analysis_payload(item.get("analysis") or {}, item.get("page_kind") or page.page_kind)
+    item["page_kind"] = item["analysis"].get("page_kind", page.page_kind)
+    item["page_title"] = clean_pdf_text(item.get("page_title") or item["analysis"].get("page_title") or page.page_title)
+
+    key_root = re.sub(r"[^0-9A-Za-z_]+", "_", page.uid)
+    analysis = item["analysis"]
+    page_kind_options = list(PAGE_KIND_LABELS.keys())
+    current_kind = item.get("page_kind", page.page_kind)
+    kind_index = page_kind_options.index(current_kind) if current_kind in page_kind_options else 0
+
+    st.caption("V2: finrediger sideinfo, kontrollpunkter og overlay-elementer direkte i appen før PDF genereres.")
+
+    with st.form(key=f"{key_root}_page_meta_form"):
+        selected_kind = st.selectbox(
+            "Tegningstype for siden",
+            page_kind_options,
+            index=kind_index,
+            format_func=lambda x: PAGE_KIND_LABELS.get(x, x),
+        )
+        new_title = st.text_input("Tegningstittel", value=item.get("page_title", ""))
+        new_summary = st.text_area("Oppsummering", value=analysis.get("drawing_summary", ""), height=100)
+        meta_cols = st.columns(2)
+        new_notes = meta_cols[0].text_area(
+            "Analysepunkter (en per linje)",
+            value="\n".join(analysis.get("analysis_notes", [])),
+            height=140,
+        )
+        new_assumptions = meta_cols[1].text_area(
+            "Forutsetninger / ma avklares (en per linje)",
+            value="\n".join(analysis.get("assumptions", [])),
+            height=140,
+        )
+        save_page = st.form_submit_button("Oppdater sideinfo og tekst", use_container_width=True)
+    if save_page:
+        item["page_title"] = clean_pdf_text(new_title) or item.get("page_title", page.page_title)
+        analysis["page_title"] = item["page_title"]
+        analysis["page_kind"] = selected_kind
+        item["page_kind"] = selected_kind
+        analysis["drawing_summary"] = ironclad_text_formatter(new_summary)
+        analysis["analysis_notes"] = split_lines_to_list(new_notes)
+        analysis["assumptions"] = split_lines_to_list(new_assumptions)
+        item["analysis"] = analysis
+        refresh_analysis_item(item)
+        request_rerun()
+
+    fill_style = "staging_area" if item.get("page_kind") == "site_plan" else "escape_route"
+    arrow_style = "attack_route" if item.get("page_kind") in {"site_plan", "parking_plan", "general_plan"} else "escape_arrow"
+
+    st.markdown("**Legg til nytt overlayelement**")
+    add_cols = st.columns(4)
+    if add_cols[0].button("Ny boks", key=f"{key_root}_add_box", use_container_width=True):
+        analysis.setdefault("elements", []).append(default_element_for_type("box", "fire_compartment"))
+        item["analysis"] = analysis
+        refresh_analysis_item(item)
+        request_rerun()
+    if add_cols[1].button("Nytt felt", key=f"{key_root}_add_fill", use_container_width=True):
+        analysis.setdefault("elements", []).append(default_element_for_type("area_fill", fill_style))
+        item["analysis"] = analysis
+        refresh_analysis_item(item)
+        request_rerun()
+    if add_cols[2].button("Ny pil", key=f"{key_root}_add_arrow", use_container_width=True):
+        analysis.setdefault("elements", []).append(default_element_for_type("arrow", arrow_style))
+        item["analysis"] = analysis
+        refresh_analysis_item(item)
+        request_rerun()
+    if add_cols[3].button("Ny notatboks", key=f"{key_root}_add_note", use_container_width=True):
+        analysis.setdefault("elements", []).append(default_element_for_type("note_box", "note_box"))
+        item["analysis"] = analysis
+        refresh_analysis_item(item)
+        request_rerun()
+
+    rect_types = {"box", "area_fill", "note_box", "door_tag"}
+    type_options = ["box", "area_fill", "arrow", "band", "dashed_polyline", "polyline", "note_box", "door_tag"]
+    style_options = list(FIRE_STYLE_LIBRARY.keys())
+
+    if not analysis.get("elements"):
+        st.info("Ingen overlay-elementer ennå. Legg til elementer over, eller kjør ny analyse.")
+        return
+
+    st.markdown("**Eksisterende elementer**")
+    for idx, element in enumerate(list(analysis.get("elements") or [])):
+        element = normalize_element(element)
+        analysis["elements"][idx] = element
+        element_id = element.get("element_id") or f"{key_root}_{idx}"
+        expander_title = f"Element {idx + 1}: {element_display_name(element)}"
+        with st.expander(expander_title, expanded=False):
+            with st.form(key=f"{key_root}_{element_id}_form"):
+                type_index = type_options.index(element.get("type")) if element.get("type") in type_options else 0
+                style_index = style_options.index(element.get("style")) if element.get("style") in style_options else 0
+                etype = st.selectbox("Type", type_options, index=type_index)
+                style = st.selectbox("Stil", style_options, index=style_index)
+                label = st.text_input("Etikett", value=element.get("label", ""))
+
+                points_text = ""
+                if etype in rect_types:
+                    rect = element.get("rect") or [0.62, 0.12, 0.82, 0.22]
+                    cols = st.columns(4)
+                    x0 = cols[0].number_input("x0", min_value=0.0, max_value=1.0, value=float(rect[0]), step=0.01, format="%.3f", key=f"{key_root}_{element_id}_x0")
+                    y0 = cols[1].number_input("y0", min_value=0.0, max_value=1.0, value=float(rect[1]), step=0.01, format="%.3f", key=f"{key_root}_{element_id}_y0")
+                    x1 = cols[2].number_input("x1", min_value=0.0, max_value=1.0, value=float(rect[2]), step=0.01, format="%.3f", key=f"{key_root}_{element_id}_x1")
+                    y1 = cols[3].number_input("y1", min_value=0.0, max_value=1.0, value=float(rect[3]), step=0.01, format="%.3f", key=f"{key_root}_{element_id}_y1")
+                else:
+                    points_text = st.text_area(
+                        "Punkter (JSON)",
+                        value=points_to_text(element.get("points") or []),
+                        height=150,
+                    )
+
+                btn_cols = st.columns(3)
+                save_element = btn_cols[0].form_submit_button("Oppdater element", use_container_width=True)
+                duplicate_element = btn_cols[1].form_submit_button("Dupliser", use_container_width=True)
+                delete_element = btn_cols[2].form_submit_button("Slett", use_container_width=True)
+
+            if save_element:
+                updated = deepcopy(element)
+                updated["type"] = etype
+                updated["style"] = style
+                updated["label"] = clean_pdf_text(label) or default_label_for_style(style)
+                if etype in rect_types:
+                    updated["rect"] = [x0, y0, x1, y1]
+                    updated.pop("points", None)
+                else:
+                    try:
+                        updated["points"] = parse_points_text(points_text)
+                        updated.pop("rect", None)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        updated = None
+                if updated is not None:
+                    analysis["elements"][idx] = normalize_element(updated)
+                    item["analysis"] = analysis
+                    refresh_analysis_item(item)
+                    request_rerun()
+
+            if duplicate_element:
+                duplicate = deepcopy(element)
+                duplicate["element_id"] = uuid4().hex[:10]
+                if duplicate.get("rect"):
+                    x0, y0, x1, y1 = duplicate["rect"]
+                    duplicate["rect"] = [clamp01(x0 + 0.02), clamp01(y0 + 0.02), clamp01(x1 + 0.02), clamp01(y1 + 0.02)]
+                if duplicate.get("points"):
+                    duplicate["points"] = [[clamp01(pt[0] + 0.02), clamp01(pt[1] + 0.02)] for pt in duplicate["points"]]
+                analysis["elements"].insert(idx + 1, normalize_element(duplicate))
+                item["analysis"] = analysis
+                refresh_analysis_item(item)
+                request_rerun()
+
+            if delete_element:
+                analysis["elements"].pop(idx)
+                item["analysis"] = analysis
+                refresh_analysis_item(item)
+                request_rerun()
 
 
 # -----------------------------------------------------------------------------
@@ -1860,6 +2352,7 @@ with st.expander("2. Last opp grunnlag og referanser", expanded=True):
             st.session_state.generated_fire_drawings_pdf = None
             st.session_state.generated_pdf = None
             st.session_state.generated_report_text = ""
+            st.session_state.brann_manual_edits_dirty = False
         st.success(f"Klargjort {len(st.session_state.brann_source_pages)} sider for tegningsanalyse.")
 
     source_pages: List[SourcePage] = st.session_state.brann_source_pages
@@ -1876,10 +2369,9 @@ with st.expander("2. Last opp grunnlag og referanser", expanded=True):
 # -----------------------------------------------------------------------------
 with st.expander("3. Analyser tegninger og generer branntegninger", expanded=True):
     source_pages = st.session_state.brann_source_pages
-    drawable_pages = [page for page in source_pages if page.page_kind in DRAWABLE_PAGE_KINDS]
 
     if not source_pages:
-        st.info("Last opp og klargjør dokumenter i steg 2 først.")
+        st.info("Last opp og klargjor dokumenter i steg 2 forst.")
     else:
         page_options = {
             f"{page.doc_name} | side {page.page_number} | {PAGE_KIND_LABELS.get(page.page_kind, page.page_kind)} | {page.page_title}": page.uid
@@ -1909,7 +2401,7 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
                         {
                             "doc_name": page.doc_name,
                             "page_number": page.page_number,
-                            "page_title": page.page_title,
+                            "page_title": clean_pdf_text(analysis.get("page_title") or page.page_title),
                             "page_kind": analysis.get("page_kind", page.page_kind),
                             "page": page,
                             "analysis": analysis,
@@ -1919,34 +2411,53 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
                     progress.progress(idx / max(len(candidates), 1))
                 st.session_state.brann_analyses = analyses
                 st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                st.session_state.generated_pdf = None
+                st.session_state.generated_report_text = ""
+                st.session_state.brann_manual_edits_dirty = False
                 st.success(f"Generert {len(analyses)} branntegningsutkast.")
 
     analyses = st.session_state.brann_analyses
     if analyses:
+        if st.session_state.brann_manual_edits_dirty:
+            st.warning("Manuelle endringer er registrert. Oppdater branntegning-PDF eller generer komplett rapport pa nytt i steg 4.")
+            if st.button("Oppdater branntegning-PDF fra redigerte markeringer", key="refresh_fire_pdf_after_edits", type="secondary", use_container_width=True):
+                with st.spinner("Oppdaterer vedlegg med redigerte markeringer..."):
+                    st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                    st.session_state.brann_manual_edits_dirty = False
+                st.success("Branntegning-PDF er oppdatert.")
+
         st.markdown("##### Forhaandsvisning av genererte branntegninger")
         for item in analyses:
-            analysis = item["analysis"]
-            with st.expander(f"{item['doc_name']} | side {item['page_number']} | {item['page_title']}", expanded=False):
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("**Original**")
-                    st.image(item["page"].image, use_container_width=True)
-                with c2:
-                    st.markdown("**Branntegning**")
-                    st.image(item["annotated_image"], use_container_width=True)
-                st.markdown(f"**Tegningstype:** {PAGE_KIND_LABELS.get(item['page_kind'], item['page_kind'])}")
-                st.markdown(f"**Oppsummering:** {analysis.get('drawing_summary', '-')}")
-                if analysis.get("analysis_notes"):
-                    st.markdown("**Analysepunkter**")
-                    for note in analysis.get("analysis_notes", [])[:6]:
-                        st.markdown(f"- {note}")
-                if analysis.get("assumptions"):
-                    st.markdown("**Forutsetninger / ma avklares**")
-                    for note in analysis.get("assumptions", [])[:5]:
-                        st.markdown(f"- {note}")
-                if analysis.get("legend_items"):
-                    legends = ", ".join([x.get("label", "") for x in analysis.get("legend_items", [])])
-                    st.caption(f"Symbolsett: {legends}")
+            item["analysis"] = normalize_analysis_payload(item.get("analysis") or {}, item.get("page_kind") or item["page"].page_kind)
+            item["page_kind"] = item["analysis"].get("page_kind", item["page"].page_kind)
+            item["page_title"] = clean_pdf_text(item.get("page_title") or item["analysis"].get("page_title") or item["page"].page_title)
+            expander_title = f"{item['doc_name']} | side {item['page_number']} | {item['page_title']}"
+            with st.expander(expander_title, expanded=False):
+                preview_tab, edit_tab = st.tabs(["Forhaandsvisning", "V2 finredigering"])
+                with preview_tab:
+                    analysis = item["analysis"]
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("**Original**")
+                        st.image(item["page"].image, use_container_width=True)
+                    with c2:
+                        st.markdown("**Branntegning**")
+                        st.image(item["annotated_image"], use_container_width=True)
+                    st.markdown(f"**Tegningstype:** {PAGE_KIND_LABELS.get(item['page_kind'], item['page_kind'])}")
+                    st.markdown(f"**Oppsummering:** {analysis.get('drawing_summary', '-')}")
+                    if analysis.get("analysis_notes"):
+                        st.markdown("**Analysepunkter**")
+                        for note in analysis.get("analysis_notes", [])[:6]:
+                            st.markdown(f"- {note}")
+                    if analysis.get("assumptions"):
+                        st.markdown("**Forutsetninger / ma avklares**")
+                        for note in analysis.get("assumptions", [])[:5]:
+                            st.markdown(f"- {note}")
+                    if analysis.get("legend_items"):
+                        legends = ", ".join([x.get("label", "") for x in analysis.get("legend_items", [])])
+                        st.caption(f"Symbolsett: {legends}")
+                with edit_tab:
+                    render_analysis_editor(item)
 
 
 # -----------------------------------------------------------------------------
@@ -1958,6 +2469,9 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
     if not analyses:
         st.info("Du ma generere minst ett branntegningsutkast i steg 3 for a bygge rapport og vedlegg.")
     else:
+        if st.session_state.brann_manual_edits_dirty:
+            st.warning("Det finnes manuelle endringer som ikke er bakt inn i siste eksport ennå. Generer vedlegg eller komplett rapport pa nytt.")
+
         col_a, col_b = st.columns([2, 1])
         with col_a:
             st.markdown("Rapporten kombinerer tegningsanalyse, profesjonelt brannfaglig tekstutkast og vedlagte branntegninger i samme PDF.")
@@ -1970,6 +2484,11 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                     mime="application/pdf",
                     use_container_width=True,
                 )
+            elif st.button("Bygg branntegning-PDF", key="build_fire_pdf_step4", type="secondary", use_container_width=True):
+                with st.spinner("Setter sammen branntegningsvedlegg..."):
+                    st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                    st.session_state.brann_manual_edits_dirty = False
+                st.success("Branntegning-PDF er klar.")
 
         if st.button("🚀 Generer komplett brannkonsept med rapport og vedlegg", type="primary", use_container_width=True):
             with st.spinner("Skriver rapport og setter sammen vedlegg..."):
@@ -1977,6 +2496,8 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                 report_pdf = create_full_report_pdf(pd_state, brann_data, report_text, analyses)
                 st.session_state.generated_report_text = report_text
                 st.session_state.generated_pdf = report_pdf
+                st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                st.session_state.brann_manual_edits_dirty = False
             st.success("Brannkonsept og vedlagte branntegninger er generert.")
 
         if st.session_state.get("generated_report_text"):
