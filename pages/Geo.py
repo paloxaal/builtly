@@ -251,7 +251,6 @@ def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_cla
     if note: draw.text((side_pad, y + 8), note, font=font_subtitle, fill=subtitle_fill)
     return img
 
-
 def save_temp_image(img: Image.Image, suffix: str = ".png"):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     img.save(tmp.name)
@@ -474,9 +473,8 @@ class BuiltlyCorporatePDF(FPDF):
         self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
     def ensure_space(self, needed_height: float):
-        if self.get_y() + needed_height > 274:
+        if self.get_y() + needed_height > 272:
             self.add_page()
-            self.set_y(26)
 
     def body_paragraph(self, text, first=False):
         text = ironclad_text_formatter(text)
@@ -568,12 +566,12 @@ class BuiltlyCorporatePDF(FPDF):
     def highlight_box(self, title: str, items, fill=(245, 247, 250), accent=(50, 77, 106)):
         self.set_font("Helvetica", "", 10)
         
-        # DYNAMISK HØYDEBEREGNING: Skal forhindre at tekst "sklir ut" under boksen
+        # DYNAMISK HØYDEBEREGNING: Forhindrer at tekst "sklir ut" under boksen
         total_text_h = 0
         for item in items:
             w = self.get_string_width(clean_pdf_text(item))
-            lines = int((w / 148) + 1)
-            total_text_h += (lines * 5.2) + 2
+            lines = int((w / 145)) + 1
+            total_text_h += (lines * 5.5) + 2
 
         box_h = 14 + total_text_h
         self.ensure_space(box_h + 5)
@@ -657,27 +655,28 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     
     # 1. Logo Top Right
     if os.path.exists("logo.png"):
-        try: pdf.image("logo.png", x=155, y=10, w=35)
+        try: pdf.image("logo.png", x=145, y=12, w=45)
         except: pass
 
     # 2. Overskrift og Tittel
-    pdf.set_xy(20, 30)
+    pdf.set_xy(20, 35)
     pdf.set_font("Helvetica", "", 12)
     pdf.set_text_color(100, 105, 110)
     pdf.cell(80, 6, clean_pdf_text("RAPPORT"), 0, 1, "L")
 
     pdf.set_x(20)
-    pdf.set_font("Helvetica", "B", 34) # Mye større forside-tittel!
+    pdf.set_font("Helvetica", "B", 32) # Stor forside-tittel!
     pdf.set_text_color(20, 28, 38)
-    pdf.multi_cell(140, 12, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")))
+    # Begrenser bredden til 90 slik at den ikke kolliderer med faktaboksen
+    pdf.multi_cell(90, 12, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")))
     
-    pdf.ln(3)
+    pdf.ln(4)
     pdf.set_x(20)
     pdf.set_font("Helvetica", "", 13)
     pdf.set_text_color(64, 68, 74)
-    pdf.multi_cell(95, 6, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
+    pdf.multi_cell(90, 6, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
 
-    # 3. Faktaboks Høyre side
+    # 3. Faktaboks Høyre side (Låst til X=118, Y=35)
     pdf.set_xy(118, 35)
     meta_items = [
         ("Oppdragsgiver", client or "-"),
@@ -692,7 +691,7 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     if recent_img:
         try: img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
         except: pass
-    elif hist_img: 
+    elif hist_img: # Kun som fallback hvis recent mangler
         try: img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
         except: pass
 
@@ -701,15 +700,15 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
         with Image.open(img_path) as tmp_img:
             aspect = tmp_img.height / max(tmp_img.width, 1)
         
-        # Max dimensions for single cover image:
+        # Max dimensions for single cover image (bredde 170, maks høyde 130)
         w = 170
         h = w * aspect
-        if h > 140:
-            h = 140
+        if h > 130:
+            h = 130
             w = h / aspect
         
         x = 20 + (170 - w) / 2
-        y = max(pdf.get_y() + 15, 95)
+        y = max(pdf.get_y() + 15, 105) # Sørger for at den starter under tekst/bokser
         
         pdf.set_xy(x, y)
         pdf.figure_image(img_path, width=w, caption=caption)
@@ -724,12 +723,9 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
 
     # 5. Ansvarsfraskrivelse (Alltid låst i bunn)
     pdf.set_xy(20, 255)
-    if os.path.exists("logo.png"):
-        try: pdf.image("logo.png", x=165, y=240, w=25)
-        except: pass
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(165, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
+    pdf.multi_cell(170, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
 
 def build_toc_page(pdf, include_appendices=False):
     pdf.add_page()
@@ -825,7 +821,8 @@ def build_lab_summary_texts(lab_package):
 
 def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text, lab_package, project_data):
     pdf = BuiltlyCorporatePDF("P", "mm", "A4")
-    pdf.set_auto_page_break(False)
+    # SLÅR PÅ AUTOMATISK SIDEBRYTING FOR Å FIKSE TEKST OVER BUNNLINJE:
+    pdf.set_auto_page_break(True, margin=22) 
     pdf.set_margins(18, 18, 18)
     pdf.header_left, pdf.header_right, pdf.doc_code = clean_pdf_text(project_data.get("p_name", name)), clean_pdf_text("Builtly | RIG-M"), clean_pdf_text("Builtly-RIGM-001")
 
@@ -834,7 +831,8 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
 
     sections = split_ai_sections(content) or [{"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": [content]}]
 
-    # DYNAMISK SIDEFLYTT (Fikser de halvtomme sidene!)
+    rendered_intro_boxes = False
+    
     pdf.add_page()
     for idx, section in enumerate(sections):
         title = section.get("title", "")
@@ -848,8 +846,8 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
 
         pdf.section_title(title)
 
-        if title.startswith("1."):
-            # Dynamisk plassering av side-by-side kort
+        if title.startswith("1.") and not rendered_intro_boxes:
+            # Dynamisk plassering av side-by-side kort (Sikrer at den kun tegnes EN gang selv om AI er teit)
             pdf.ensure_space(50)
             start_y = pdf.get_y()
             pdf.kv_card([("Prosjekt", project_data.get("p_name", name)), ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")), ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") , ("Byggtype", project_data.get("b_type", "-")), ("BTA", f"{project_data.get('bta', 0)} m2")], x=20, width=82, title="Prosjektgrunnlag")
@@ -864,6 +862,8 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
             if summary_items := build_lab_summary_texts(lab_package):
                 pdf.highlight_box("Nøkkelfunn fra lab-data", summary_items)
                 pdf.ln(4)
+                
+            rendered_intro_boxes = True
 
         if title.startswith("3."): render_maps(pdf, recent_img, hist_img, source_text)
 
@@ -977,7 +977,6 @@ if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
             st.switch_page(find_page("Project"))
     st.stop()
 
-# SUPERVIKTIG: Definerer variabelen!
 pd_state = st.session_state.project_data
 
 # --- 9. HEADER ---
@@ -1157,7 +1156,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         - "Basert på opplastet analysetabell fremgår det at ..."
         - "Prøvepunkt SK.. i dybde ... viser ..."
 
-        STRUKTUR (bruk kun disse overskriftene):
+        STRUKTUR (bruk kun disse overskriftene, START DIREKTE PÅ KAPITTEL 1, ALDRI skriv en hilsen før dette!):
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
         # 3. KARTVERKET OG HISTORISK LOKASJON
