@@ -430,7 +430,9 @@ def split_ai_sections(content: str):
             if current: sections.append(current)
             current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
             continue
-        if current is None: current = {"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": []}
+        if current is None: 
+            # SILER UT AI-INTRO: Ignorerer alt som skrives før den første overskriften!
+            continue
         current["lines"].append(raw_line.rstrip())
     if current: sections.append(current)
     return sections
@@ -564,9 +566,19 @@ class BuiltlyCorporatePDF(FPDF):
         self.set_y(max(self.get_y(), start_y + height))
 
     def highlight_box(self, title: str, items, fill=(245, 247, 250), accent=(50, 77, 106)):
-        box_h = 16 + (len(items) * 6.5)
+        self.set_font("Helvetica", "", 10)
+        
+        # DYNAMISK HØYDEBEREGNING: Skal forhindre at tekst "sklir ut" under boksen
+        total_text_h = 0
+        for item in items:
+            w = self.get_string_width(clean_pdf_text(item))
+            lines = int((w / 148) + 1)
+            total_text_h += (lines * 5.2) + 2
+
+        box_h = 14 + total_text_h
         self.ensure_space(box_h + 5)
         x, y = 20, self.get_y()
+        
         self.set_fill_color(*fill)
         self.set_draw_color(217, 223, 230)
         self.rounded_rect(x, y, 170, box_h, 4, "1234", "DF")
@@ -578,12 +590,14 @@ class BuiltlyCorporatePDF(FPDF):
         self.cell(0, 5, clean_pdf_text(title.upper()), 0, 1)
         self.set_text_color(35, 39, 43)
         self.set_font("Helvetica", "", 10)
+        
         yy = y + 10
         for item in items:
             self.set_xy(x + 8, yy)
             self.cell(5, 5, "-", 0, 0)
-            self.multi_cell(154, 5, clean_pdf_text(item))
-            yy = self.get_y() + 1
+            self.multi_cell(154, 5.2, clean_pdf_text(item))
+            yy = self.get_y() + 2
+            
         self.set_y(y + box_h + 3)
 
     def stats_row(self, stats):
@@ -640,32 +654,45 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     pdf.add_page()
     pdf.set_draw_color(120, 124, 130)
     pdf.line(18, 18, 192, 18)
+    
+    # 1. Logo Top Right
     if os.path.exists("logo.png"):
-        try: pdf.image("logo.png", x=156, y=242, w=28)
+        try: pdf.image("logo.png", x=155, y=10, w=35)
         except: pass
 
-    pdf.set_xy(20, 28)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.set_text_color(86, 90, 95)
+    # 2. Overskrift og Tittel
+    pdf.set_xy(20, 30)
+    pdf.set_font("Helvetica", "", 12)
+    pdf.set_text_color(100, 105, 110)
     pdf.cell(80, 6, clean_pdf_text("RAPPORT"), 0, 1, "L")
 
     pdf.set_x(20)
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_text_color(28, 33, 41)
-    pdf.multi_cell(100, 10, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")))
+    pdf.set_font("Helvetica", "B", 34) # Mye større forside-tittel!
+    pdf.set_text_color(20, 28, 38)
+    pdf.multi_cell(140, 12, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")))
+    
+    pdf.ln(3)
     pdf.set_x(20)
     pdf.set_font("Helvetica", "", 13)
     pdf.set_text_color(64, 68, 74)
-    pdf.multi_cell(95, 7, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
+    pdf.multi_cell(95, 6, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
 
-    pdf.set_xy(118, 34)
-    pdf.kv_card([("Oppdragsgiver", client or "-"), ("Emne", "Geo & Miljø (RIG-M)"), ("Dato / revisjon", datetime.now().strftime("%d.%m.%Y") + " / 01"), ("Dokumentkode", "Builtly-RIGM-001")], x=118, width=64)
+    # 3. Faktaboks Høyre side
+    pdf.set_xy(118, 35)
+    meta_items = [
+        ("Oppdragsgiver", client or "-"),
+        ("Emne", "Geo & Miljø (RIG-M)"),
+        ("Dato / revisjon", datetime.now().strftime("%d.%m.%Y") + " / 01"),
+        ("Dokumentkode", "Builtly-RIGM-001"),
+    ]
+    pdf.kv_card(meta_items, x=118, width=72)
 
+    # 4. Forsidebilde (Kun ett bilde, max skalert)
     img_paths = []
     if recent_img:
         try: img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
         except: pass
-    elif hist_img: # Kun som fallback hvis recent mangler
+    elif hist_img: 
         try: img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
         except: pass
 
@@ -674,32 +701,35 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
         with Image.open(img_path) as tmp_img:
             aspect = tmp_img.height / max(tmp_img.width, 1)
         
-        # Maksimer bildet på forsiden (maks bredde 162, maks høyde 110)
-        w = 162
+        # Max dimensions for single cover image:
+        w = 170
         h = w * aspect
-        if h > 110:
-            h = 110
+        if h > 140:
+            h = 140
             w = h / aspect
         
-        x = 20 + (162 - w) / 2
-        y = 115
+        x = 20 + (170 - w) / 2
+        y = max(pdf.get_y() + 15, 95)
         
         pdf.set_xy(x, y)
         pdf.figure_image(img_path, width=w, caption=caption)
     else:
         pdf.set_fill_color(244, 246, 248)
         pdf.set_draw_color(220, 224, 228)
-        pdf.rounded_rect(20, 118, 162, 78, 4, "1234", "DF")
+        pdf.rounded_rect(20, 115, 170, 80, 4, "1234", "DF")
         pdf.set_xy(24, 146)
         pdf.set_font("Helvetica", "I", 12)
         pdf.set_text_color(112, 117, 123)
-        pdf.multi_cell(150, 6, clean_pdf_text("Kartgrunnlag legges inn automatisk eller via manuell opplasting i modulen."), 0, "C")
+        pdf.multi_cell(160, 6, clean_pdf_text("Kartgrunnlag legges inn automatisk eller via manuell opplasting i modulen."), 0, "C")
 
-    # Justerer ansvarsfraskrivelsen slik at den alltid ligger trygt i bunnen (uavhengig av bildehøyde)
+    # 5. Ansvarsfraskrivelse (Alltid låst i bunn)
     pdf.set_xy(20, 255)
+    if os.path.exists("logo.png"):
+        try: pdf.image("logo.png", x=165, y=240, w=25)
+        except: pass
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(160, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
+    pdf.multi_cell(165, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
 
 def build_toc_page(pdf, include_appendices=False):
     pdf.add_page()
@@ -716,7 +746,7 @@ def build_toc_page(pdf, include_appendices=False):
         pdf.set_draw_color(225, 229, 234)
         pdf.line(22, y + 6, 188, y + 6)
         pdf.ln(8)
-    pdf.ln(4)
+    pdf.ln(6)
     pdf.highlight_box("Dokumentoppsett", ["Rapporten er bygget med tydelig seksjonshierarki, figurtekster og dedikerte tabellvedlegg for laboratoriedata.", "Opplastede lab-data sammenstilles i egne analyseresultattabeller fremfor å ligge skjult som råtekst i brødteksten."])
 
 def render_maps(pdf, recent_img, hist_img, source_text):
@@ -819,7 +849,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
         pdf.section_title(title)
 
         if title.startswith("1."):
-            # Dynamisk plassering av side-by-side kort (Fikser overlapp/gap)
+            # Dynamisk plassering av side-by-side kort
             pdf.ensure_space(50)
             start_y = pdf.get_y()
             pdf.kv_card([("Prosjekt", project_data.get("p_name", name)), ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")), ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") , ("Byggtype", project_data.get("b_type", "-")), ("BTA", f"{project_data.get('bta', 0)} m2")], x=20, width=82, title="Prosjektgrunnlag")
