@@ -11,7 +11,6 @@ import re
 import requests
 import urllib.parse
 import io
-import textwrap
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
@@ -29,7 +28,6 @@ else:
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
-
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
         if os.path.exists(candidate):
@@ -39,48 +37,18 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
-
 def find_page(base_name: str) -> str:
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
-        if p.exists():
-            return str(p)
+        if p.exists(): return str(p)
     return ""
 
-
-def go_home():
-    main_file = None
-    for f in Path(".").glob("*.py"):
-        if f.name.lower() not in ["setup.py", "test.py"]:
-            main_file = str(f)
-            break
-    if main_file:
-        st.switch_page(main_file)
-
-# --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
-DB_DIR = Path("qa_database")
-IMG_DIR = DB_DIR / "project_images"
-SSOT_FILE = DB_DIR / "ssot.json"
-
-def init_db():
-    DB_DIR.mkdir(exist_ok=True)
-    IMG_DIR.mkdir(exist_ok=True)
-
-init_db()
-
-# --- 3. TEKST- OG PDF HJELPERE ---
 def clean_pdf_text(text):
-    if text is None:
-        return ""
+    if text is None: return ""
     text = str(text)
-    rep = {
-        "–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", 
-        "…": "...", "•": "-", "≤": "<=", "≥": ">="
-    }
-    for old, new in rep.items():
-        text = text.replace(old, new)
+    rep = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">="}
+    for old, new in rep.items(): text = text.replace(old, new)
     return text.encode("latin-1", "replace").decode("latin-1")
-
 
 def ironclad_text_formatter(text):
     text = clean_pdf_text(text)
@@ -90,38 +58,26 @@ def ironclad_text_formatter(text):
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-
 def nb_value(value):
-    if value is None or value == "":
-        return "-"
+    if value is None or value == "": return "-"
     if isinstance(value, float):
-        if value.is_integer():
-            return str(int(value))
-        if abs(value) >= 100:
-            txt = f"{value:.0f}"
-        elif abs(value) >= 10:
-            txt = f"{value:.1f}"
-        else:
-            txt = f"{value:.3f}".rstrip("0").rstrip(".")
+        if value.is_integer(): return str(int(value))
+        if abs(value) >= 100: txt = f"{value:.0f}"
+        elif abs(value) >= 10: txt = f"{value:.1f}"
+        else: txt = f"{value:.3f}".rstrip("0").rstrip(".")
         return txt.replace(".", ",")
-    if isinstance(value, int):
-        return str(value)
+    if isinstance(value, int): return str(value)
     return clean_pdf_text(str(value))
 
-
 def parse_numeric(value):
-    if value is None:
-        return None, None
-    if isinstance(value, (int, float)):
-        return float(value), None
+    if value is None: return None, None
+    if isinstance(value, (int, float)): return float(value), None
     txt = str(value).strip()
-    if not txt:
-        return None, None
+    if not txt: return None, None
     qualifier = None
     txt = txt.replace(" ", "").replace(",", ".")
     low = txt.lower()
-    if low in {"nd", "n.d.", "n.d", "na", "nan"}:
-        return None, "nd"
+    if low in {"nd", "n.d.", "n.d", "na", "nan"}: return None, "nd"
     if txt.startswith("<"):
         qualifier = "<"
         txt = txt[1:]
@@ -129,20 +85,15 @@ def parse_numeric(value):
         qualifier = ">"
         txt = txt[1:]
     txt = txt.replace("mg/kg", "")
-    try:
-        return float(txt), qualifier
-    except Exception:
-        return None, qualifier
-
+    try: return float(txt), qualifier
+    except Exception: return None, qualifier
 
 def strip_empty_edges(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
+    if df.empty: return df
     df2 = df.copy()
     df2 = df2.dropna(axis=0, how="all")
     df2 = df2.dropna(axis=1, how="all")
     return df2
-
 
 ANALYTE_COLUMN_MAP = {
     "TOC (%)": 7, "As": 8, "Pb": 9, "Cd": 12, "Cr (tot)": 13, "Cu": 14, "Hg": 17, 
@@ -152,46 +103,28 @@ ANALYTE_COLUMN_MAP = {
 
 DISPLAY_ANALYTES = ["As", "Pb", "Ni", "Zn", "C12-C35", "Sum 16", "B(a)p"]
 CLASS_ORDER = {"TK1": 1, "TK2": 2, "TK3": 3, "TK4": 4, "TK5": 5, "TK>5": 6}
-CLASS_LABELS = {
-    "TK1": "Tilstandsklasse 1", "TK2": "Tilstandsklasse 2", "TK3": "Tilstandsklasse 3",
-    "TK4": "Tilstandsklasse 4", "TK5": "Tilstandsklasse 5", "TK>5": "Over TK5",
-}
 CLASS_FILL = {
     "TK1": (214, 236, 255), "TK2": (196, 235, 176), "TK3": (255, 242, 153),
     "TK4": (255, 202, 128), "TK5": (255, 153, 153), "TK>5": (232, 97, 97),
 }
-CLASS_TEXT_FILL = {
-    "TK1": (65, 102, 140), "TK2": (70, 112, 60), "TK3": (130, 107, 0),
-    "TK4": (140, 73, 0), "TK5": (120, 0, 0), "TK>5": (120, 0, 0),
-}
-
 
 def get_font(size: int, bold: bool = False):
-    candidates = []
-    if bold:
-        candidates.extend(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"])
-    else:
-        candidates.extend(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"])
+    candidates = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
     for path in candidates:
         if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size=size)
-            except Exception:
-                pass
+            try: return ImageFont.truetype(path, size=size)
+            except Exception: pass
     return ImageFont.load_default()
-
 
 def wrap_text_px(text: str, font, max_width: int):
     text = clean_pdf_text(text)
     if not text: return [""]
     words = text.split()
     if not words: return [""]
-    lines = []
-    current = words[0]
+    lines, current = [], words[0]
     for word in words[1:]:
         candidate = f"{current} {word}"
-        if font.getbbox(candidate)[2] <= max_width:
-            current = candidate
+        if font.getbbox(candidate)[2] <= max_width: current = candidate
         else:
             lines.append(current)
             current = word
@@ -209,20 +142,14 @@ def wrap_text_px(text: str, font, max_width: int):
         final_lines.append(line)
     return final_lines or [""]
 
-
 def class_rank(class_code: str) -> int:
     return CLASS_ORDER.get(class_code or "", 0)
-
 
 def classify_value(value, analyte: str, thresholds: dict):
     if analyte not in thresholds.get("TK1", {}): return None
     num, qualifier = parse_numeric(value)
     if num is None: return None
-    tk1 = thresholds["TK1"].get(analyte)
-    tk2 = thresholds["TK2"].get(analyte)
-    tk3 = thresholds["TK3"].get(analyte)
-    tk4 = thresholds["TK4"].get(analyte)
-    tk5 = thresholds["TK5"].get(analyte)
+    tk1, tk2, tk3, tk4, tk5 = [thresholds[tk].get(analyte) if tk in thresholds else None for tk in ["TK1", "TK2", "TK3", "TK4", "TK5"]]
     if tk1 is None: return None
     if qualifier == "<" and num <= tk1: return "TK1"
     if num <= tk1: return "TK1"
@@ -232,13 +159,9 @@ def classify_value(value, analyte: str, thresholds: dict):
     if tk5 is not None and num <= tk5: return "TK5"
     return "TK>5"
 
-
 def split_dataframe(df: pd.DataFrame, chunk_size: int):
     if df is None or df.empty: return []
-    chunks = []
-    for start in range(0, len(df), chunk_size):
-        chunks.append(df.iloc[start:start + chunk_size].reset_index(drop=True))
-    return chunks
+    return [df.iloc[start:start + chunk_size].reset_index(drop=True) for start in range(0, len(df), chunk_size)]
 
 # --- 4. BILDER OG TABELL RENDERER ---
 def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_class_column: str = None, cell_fill_lookup: dict = None, note: str = ""):
@@ -742,15 +665,27 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     if recent_img:
         try: img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
         except: pass
-    if hist_img:
+    elif hist_img: # Kun som fallback hvis recent mangler
         try: img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
         except: pass
 
     if img_paths:
-        y, x_positions, widths = 110, [20, 106], [78, 78]
-        for idx, (img_path, caption) in enumerate(img_paths[:2]):
-            pdf.set_xy(x_positions[idx], y)
-            pdf.figure_image(img_path, width=widths[idx], caption=caption)
+        img_path, caption = img_paths[0]
+        with Image.open(img_path) as tmp_img:
+            aspect = tmp_img.height / max(tmp_img.width, 1)
+        
+        # Maksimer bildet på forsiden (maks bredde 162, maks høyde 110)
+        w = 162
+        h = w * aspect
+        if h > 110:
+            h = 110
+            w = h / aspect
+        
+        x = 20 + (162 - w) / 2
+        y = 115
+        
+        pdf.set_xy(x, y)
+        pdf.figure_image(img_path, width=w, caption=caption)
     else:
         pdf.set_fill_color(244, 246, 248)
         pdf.set_draw_color(220, 224, 228)
@@ -760,7 +695,8 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
         pdf.set_text_color(112, 117, 123)
         pdf.multi_cell(150, 6, clean_pdf_text("Kartgrunnlag legges inn automatisk eller via manuell opplasting i modulen."), 0, "C")
 
-    pdf.set_xy(20, 214)
+    # Justerer ansvarsfraskrivelsen slik at den alltid ligger trygt i bunnen (uavhengig av bildehøyde)
+    pdf.set_xy(20, 255)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
     pdf.multi_cell(160, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
@@ -936,7 +872,152 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
     out = pdf.output(dest="S")
     return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
 
-# --- 7. UI OG RESTERENDE KODE (BEHOLDES UENDRET FRA FORRIGE) ---
+# --- 7. UI OG RESTERENDE KODE ---
+st.markdown("<style>/* Skjuler Streamlit-branding */\n#MainMenu {visibility: hidden;}\nfooter {visibility: hidden;}\nheader {visibility: hidden;}</style>", unsafe_allow_html=True)
+st.markdown(
+    """
+<style>
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
+    }
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
+
+    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
+
+    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
+
+    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
+    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
+    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
+    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
+
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
+    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important; }
+    ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
+    ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
+    ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
+    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
+
+    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
+    div[data-testid="stExpander"] details summary:hover { background-color: rgba(255,255,255,0.03) !important; }
+    div[data-testid="stExpander"] details summary p { color: #f5f7fb !important; font-weight: 650 !important; }
+    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
+    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
+    div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
+
+    [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
+    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
+    [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.05) !important; border: 1px solid rgba(56, 194, 201, 0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] * { color: #f5f7fb !important; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# --- 8. SESSION STATE (UI) ---
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {
+        "p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", "etasjer": 1, "bta": 0, "land": "Norge"
+    }
+
+if "geo_maps" not in st.session_state:
+    st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
+
+if st.session_state.project_data.get("p_name") == "":
+    if SSOT_FILE.exists():
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
+    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
+    if find_page("Project"):
+        if st.button("⚙️ Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
+    st.stop()
+
+# SUPERVIKTIG: Definerer variabelen!
+pd_state = st.session_state.project_data
+
+# --- 9. HEADER ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
+
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+
+# --- 10. KARTVERKET + GOOGLE MAPS FALLBACK ---
+def fetch_kartverket_og_google(adresse, kommune, gnr, bnr, api_key):
+    nord, ost = None, None
+    adr_clean = adresse.replace(",", "").strip() if adresse else ""
+    kom_clean = kommune.replace(",", "").strip() if kommune else ""
+
+    queries = []
+    if adr_clean and kom_clean:
+        queries.append(f"{adr_clean} {kom_clean}")
+    if adr_clean:
+        queries.append(adr_clean)
+    if gnr and bnr and kom_clean:
+        queries.append(f"{kom_clean} {gnr}/{bnr}")
+
+    for q in queries:
+        safe_query = urllib.parse.quote(q)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=4)
+            if resp.status_code == 200 and resp.json().get("adresser"):
+                hit = resp.json()["adresser"][0]
+                nord = hit.get("representasjonspunkt", {}).get("nord")
+                ost = hit.get("representasjonspunkt", {}).get("øst")
+                break
+        except Exception:
+            pass
+
+    if nord and ost:
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
+        url_orto = (
+            "https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1"
+            f"&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+        )
+        try:
+            r1 = requests.get(url_orto, timeout=5)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket (Norge i Bilder)"
+        except Exception:
+            pass
+
+    if api_key and (adr_clean or kom_clean):
+        query = f"{adr_clean}, {kom_clean}, Norway"
+        safe_query = urllib.parse.quote(query)
+        url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
+        try:
+            r2 = requests.get(url_gmaps, timeout=5)
+            if r2.status_code == 200:
+                return Image.open(io.BytesIO(r2.content)).convert("RGB"), "Google Maps Satellite"
+        except Exception:
+            pass
+
+    return None, "Kunne ikke hente kart."
+
+
+# --- 11. UI FOR GEO MODUL ---
 st.markdown("<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
 
