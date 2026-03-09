@@ -18,11 +18,6 @@ import requests
 import streamlit as st
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
-from pyproj import CRS, Transformer
-from rasterio.io import MemoryFile
-from shapely import affinity
-from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
-from shapely.ops import unary_union
 
 try:
     import google.generativeai as genai
@@ -280,591 +275,6 @@ def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Ima
             continue
     return images
 
-# --- 4. GEOSPATIAL HJELPERE ---
-DEFAULT_FLOOR_HEIGHT_M = 3.2
-
-
-def largest_polygon(geom: Any) -> Optional[Polygon]:
-    if geom is None:
-        return None
-    if isinstance(geom, Polygon):
-        return geom.buffer(0)
-    if isinstance(geom, MultiPolygon):
-        if not geom.geoms:
-            return None
-        return max((g.buffer(0) for g in geom.geoms), key=lambda g: g.area, default=None)
-    try:
-        if getattr(geom, "geom_type", "") == "Polygon":
-            return Polygon(geom).buffer(0)
-    except Exception:
-        pass
-    return None
-
-
-def polygon_to_coords(poly: Optional[Polygon], precision: int = 2) -> List[List[float]]:
-    if poly is None or poly.is_empty:
-        return []
-    return [[round(float(x), precision), round(float(y), precision)] for x, y in list(poly.exterior.coords)]
-
-
-def bounds_look_like_lonlat(bounds: Tuple[float, float, float, float]) -> bool:
-    minx, miny, maxx, maxy = bounds
-    return (
-        -180.0 <= minx <= 180.0
-        and -180.0 <= maxx <= 180.0
-        and -90.0 <= miny <= 90.0
-        and -90.0 <= maxy <= 90.0
-    )
-
-
-def utm_crs_from_lonlat(lon: float, lat: float) -> CRS:
-    zone = int((lon + 180.0) // 6.0) + 1
-    epsg = 32600 + zone if lat >= 0 else 32700 + zone
-    return CRS.from_epsg(epsg)
-
-
-def transform_polygon(poly: Polygon, src_crs: CRS, dst_crs: CRS) -> Polygon:
-    if poly is None or src_crs is None or dst_crs is None or src_crs == dst_crs:
-        return poly
-    transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
-    coords = [transformer.transform(x, y) for x, y in list(poly.exterior.coords)]
-    return Polygon(coords).buffer(0)
-
-
-def parse_coordinate_text(text: str) -> Optional[Polygon]:
-    if not text or not text.strip():
-        return None
-    coords: List[Tuple[float, float]] = []
-    normalized = text.replace(";", "\n")
-    for raw_line in normalized.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = [part.strip() for part in re.split(r"[\s,]+", line) if part.strip()]
-        if len(parts) < 2:
-            continue
-        x = safe_float(parts[0], None)
-        y = safe_float(parts[1], None)
-        if x is None or y is None:
-            continue
-        coords.append((float(x), float(y)))
-    if len(coords) < 3:
-        return None
-    if coords[0] != coords[-1]:
-        coords.append(coords[0])
-    poly = Polygon(coords).buffer(0)
-    return largest_polygon(poly)
-
-
-def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
-    if not isinstance(obj, dict):
-        return []
-    gtype = obj.get("type")
-    if gtype == "FeatureCollection":
-        return [feature for feature in obj.get("features", []) if isinstance(feature, dict)]
-    if gtype == "Feature":
-        return [obj]
-    if gtype in {"Polygon", "MultiPolygon"}:
-        return [{"type": "Feature", "geometry": obj, "properties": {}}]
-    return []
-
-
-def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
-    poly = largest_polygon(poly)
-    if poly is None:
-        return None, None, {"is_geographic": False}
-    info: Dict[str, Any] = {"is_geographic": False}
-    if bounds_look_like_lonlat(poly.bounds):
-        centroid = poly.centroid
-        dst_crs = utm_crs_from_lonlat(float(centroid.x), float(centroid.y))
-        info = {
-            "is_geographic": True,
-            "centroid_lon": float(centroid.x),
-            "centroid_lat": float(centroid.y),
-            "crs": dst_crs.to_string(),
-        }
-        return transform_polygon(poly, CRS.from_epsg(4326), dst_crs), dst_crs, info
-    return poly, None, info
-
-
-def load_site_polygon_input(uploaded_geojson: Any, coordinate_text: str) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
-    if uploaded_geojson is not None:
-        try:
-            uploaded_geojson.seek(0)
-            raw = uploaded_geojson.read()
-            if isinstance(raw, str):
-                raw = raw.encode("utf-8")
-            obj = json.loads(raw.decode("utf-8-sig"))
-            features = extract_geojson_features(obj)
-            polys: List[Polygon] = []
-            for feature in features:
-                geom = feature.get("geometry")
-                if not geom:
-                    continue
-                poly = largest_polygon(shape(geom))
-                if poly is not None:
-                    polys.append(poly)
-            if polys:
-                poly = max(polys, key=lambda p: p.area)
-                poly_local, crs_obj, info = normalize_polygon_to_local(poly)
-                info["source"] = f"GeoJSON: {getattr(uploaded_geojson, 'name', 'polygon')}"
-                return poly_local, crs_obj, info
-        except Exception as exc:
-            return None, None, {"source": "GeoJSON", "error": str(exc)}
-
-    poly = parse_coordinate_text(coordinate_text)
-    if poly is not None:
-        poly_local, crs_obj, info = normalize_polygon_to_local(poly)
-        info["source"] = "Koordinatliste"
-        return poly_local, crs_obj, info
-
-    return None, None, {"source": "Manuell rektangeltomt"}
-
-
-def coerce_height_from_properties(properties: Dict[str, Any], default_height_m: float = 9.0) -> float:
-    if not properties:
-        return default_height_m
-    props = {str(k).lower(): v for k, v in properties.items()}
-    direct_keys = [
-        "height_m", "height", "hoyde", "building:height", "gesimshoyde", "max_height", "z", "elevation_m"
-    ]
-    level_keys = ["building:levels", "levels", "etasjer", "floors", "stories"]
-    for key in direct_keys:
-        if key in props:
-            value = safe_float(props.get(key), 0.0)
-            if value > 0:
-                return value
-    for key in level_keys:
-        if key in props:
-            value = safe_float(props.get(key), 0.0)
-            if value > 0:
-                return value * DEFAULT_FLOOR_HEIGHT_M
-    return default_height_m
-
-
-def normalize_polygon_for_site(poly: Polygon, site_crs: Optional[CRS]) -> Tuple[Optional[Polygon], Optional[CRS]]:
-    poly = largest_polygon(poly)
-    if poly is None:
-        return None, site_crs
-    if bounds_look_like_lonlat(poly.bounds):
-        centroid = poly.centroid
-        src_crs = CRS.from_epsg(4326)
-        dst_crs = site_crs or utm_crs_from_lonlat(float(centroid.x), float(centroid.y))
-        return transform_polygon(poly, src_crs, dst_crs), dst_crs
-    return poly, site_crs
-
-
-def load_neighbors_from_geojson(uploaded_geojson: Any, site_polygon: Optional[Polygon], site_crs: Optional[CRS], default_height_m: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    neighbors: List[Dict[str, Any]] = []
-    meta: Dict[str, Any] = {"source": "Ingen nabofil"}
-    if uploaded_geojson is None:
-        return neighbors, meta
-    try:
-        uploaded_geojson.seek(0)
-        raw = uploaded_geojson.read()
-        if isinstance(raw, str):
-            raw = raw.encode("utf-8")
-        obj = json.loads(raw.decode("utf-8-sig"))
-        features = extract_geojson_features(obj)
-        for feature in features:
-            geom = feature.get("geometry")
-            if not geom:
-                continue
-            poly = largest_polygon(shape(geom))
-            poly, site_crs = normalize_polygon_for_site(poly, site_crs)
-            if poly is None:
-                continue
-            if site_polygon is not None and poly.distance(site_polygon) > 250.0:
-                continue
-            height_m = coerce_height_from_properties(feature.get("properties", {}), default_height_m=default_height_m)
-            neighbors.append(
-                {
-                    "polygon": poly.buffer(0),
-                    "height_m": float(height_m),
-                    "source": "GeoJSON",
-                    "distance_m": float(poly.distance(site_polygon)) if site_polygon is not None else 0.0,
-                }
-            )
-        meta = {"source": f"GeoJSON: {getattr(uploaded_geojson, 'name', 'naboer')}", "count": len(neighbors)}
-    except Exception as exc:
-        meta = {"source": "GeoJSON", "error": str(exc), "count": len(neighbors)}
-    return neighbors, meta
-
-
-def fetch_osm_neighbors(lat: Optional[float], lon: Optional[float], site_polygon: Optional[Polygon], site_crs: Optional[CRS], radius_m: float, default_height_m: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    if lat is None or lon is None:
-        return [], {"source": "OSM", "error": "Mangler lat/lon for OSM-oppslag"}
-    query = (
-        f'[out:json][timeout:25];'
-        f'(way["building"](around:{int(radius_m)},{lat},{lon});'
-        f'relation["building"](around:{int(radius_m)},{lat},{lon}););'
-        'out geom tags;'
-    )
-    try:
-        resp = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data=query.encode("utf-8"),
-            headers={"User-Agent": "BuiltlyFeasibility/1.0"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
-        return [], {"source": "OSM", "error": str(exc)}
-
-    neighbors: List[Dict[str, Any]] = []
-    dst_crs = site_crs or utm_crs_from_lonlat(lon, lat)
-    transformer = Transformer.from_crs(CRS.from_epsg(4326), dst_crs, always_xy=True)
-    for element in payload.get("elements", []):
-        geometry = element.get("geometry") or []
-        if len(geometry) < 3:
-            continue
-        try:
-            coords = [transformer.transform(float(node["lon"]), float(node["lat"])) for node in geometry]
-            if coords[0] != coords[-1]:
-                coords.append(coords[0])
-            poly = largest_polygon(Polygon(coords).buffer(0))
-            if poly is None:
-                continue
-            if site_polygon is not None and poly.distance(site_polygon) > radius_m + 20.0:
-                continue
-            tags = element.get("tags", {}) or {}
-            height_m = coerce_height_from_properties(tags, default_height_m=default_height_m)
-            neighbors.append(
-                {
-                    "polygon": poly,
-                    "height_m": float(height_m),
-                    "source": "OSM",
-                    "distance_m": float(poly.distance(site_polygon)) if site_polygon is not None else 0.0,
-                }
-            )
-        except Exception:
-            continue
-    return neighbors, {"source": "OSM Overpass", "count": len(neighbors)}
-
-
-def terrain_points_from_csv_bytes(data: bytes, site_crs: Optional[CRS]) -> np.ndarray:
-    df = pd.read_csv(io.BytesIO(data), sep=None, engine="python")
-    cols = {str(col).lower(): col for col in df.columns}
-
-    x_col = next((cols[key] for key in ["x", "east", "easting", "ost", "utm_x", "lon", "longitude"] if key in cols), None)
-    y_col = next((cols[key] for key in ["y", "north", "northing", "nord", "utm_y", "lat", "latitude"] if key in cols), None)
-    z_col = next((cols[key] for key in ["z", "elev", "elevation", "kote", "height", "h"] if key in cols), None)
-    if x_col is None or y_col is None or z_col is None:
-        raise ValueError("Fant ikke x/y/z-kolonner i terrengfilen.")
-
-    x = df[x_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
-    y = df[y_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
-    z = df[z_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
-    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    x, y, z = x[mask], y[mask], z[mask]
-    if len(x) < 3:
-        raise ValueError("Terrengfilen trenger minst 3 gyldige punkter.")
-
-    if np.nanmax(np.abs(x)) <= 180 and np.nanmax(np.abs(y)) <= 90:
-        if site_crs is None:
-            site_crs = utm_crs_from_lonlat(float(np.nanmean(x)), float(np.nanmean(y)))
-        transformer = Transformer.from_crs(CRS.from_epsg(4326), site_crs, always_xy=True)
-        x, y = transformer.transform(x.tolist(), y.tolist())
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
-    return np.column_stack([x, y, z])
-
-
-def terrain_points_from_raster_bytes(data: bytes, site_polygon: Optional[Polygon], site_crs: Optional[CRS]) -> np.ndarray:
-    if site_polygon is None or site_crs is None:
-        raise ValueError("Rasterterreng krever georeferert tomtepolygon.")
-    with MemoryFile(data) as memfile:
-        with memfile.open() as ds:
-            if ds.crs is None:
-                raise ValueError("Raster mangler CRS.")
-            to_raster = Transformer.from_crs(site_crs, ds.crs, always_xy=True)
-            to_site = Transformer.from_crs(ds.crs, site_crs, always_xy=True)
-            site_coords = [to_raster.transform(x, y) for x, y in list(site_polygon.buffer(50).exterior.coords)]
-            site_raster = Polygon(site_coords).buffer(0)
-            minx, miny, maxx, maxy = site_raster.bounds
-            xs = np.linspace(minx, maxx, 18)
-            ys = np.linspace(miny, maxy, 18)
-            pts: List[Tuple[float, float, float]] = []
-            for rx in xs:
-                for ry in ys:
-                    try:
-                        value = next(ds.sample([(float(rx), float(ry))]))[0]
-                    except Exception:
-                        continue
-                    if value is None or not np.isfinite(value):
-                        continue
-                    lx, ly = to_site.transform(float(rx), float(ry))
-                    if site_polygon.buffer(60).contains(Point(lx, ly)):
-                        pts.append((float(lx), float(ly), float(value)))
-            if len(pts) < 3:
-                raise ValueError("Kunne ikke hente nok terrengpunkter fra rasteret.")
-            return np.asarray(pts, dtype=float)
-
-
-def load_terrain_input(uploaded_terrain: Any, site_polygon: Optional[Polygon], site_crs: Optional[CRS]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    if uploaded_terrain is None:
-        return None, {"source": "Ingen terrengfil"}
-    try:
-        uploaded_terrain.seek(0)
-        raw = uploaded_terrain.read()
-        suffix = Path(getattr(uploaded_terrain, "name", "terrain")).suffix.lower()
-        if suffix in {".csv", ".txt"}:
-            points = terrain_points_from_csv_bytes(raw, site_crs)
-        elif suffix in {".tif", ".tiff", ".asc"}:
-            points = terrain_points_from_raster_bytes(raw, site_polygon, site_crs)
-        else:
-            raise ValueError("Stotter forelopig CSV/TXT eller GeoTIFF/ASC for terreng.")
-
-        x = points[:, 0]
-        y = points[:, 1]
-        z = points[:, 2]
-        A = np.column_stack([x, y, np.ones(len(x))])
-        coeff, *_ = np.linalg.lstsq(A, z, rcond=None)
-        a, b, c = [float(v) for v in coeff]
-        z_pred = A @ coeff
-        rmse = float(np.sqrt(np.mean((z - z_pred) ** 2)))
-        terrain = {
-            "a": a,
-            "b": b,
-            "c": c,
-            "min_elev_m": float(np.min(z)),
-            "max_elev_m": float(np.max(z)),
-            "relief_m": float(np.max(z) - np.min(z)),
-            "slope_pct": float(np.sqrt(a ** 2 + b ** 2) * 100.0),
-            "grade_ew_pct": float(a * 100.0),
-            "grade_ns_pct": float(b * 100.0),
-            "rmse_m": rmse,
-            "point_count": int(len(points)),
-            "source": getattr(uploaded_terrain, "name", "terreng"),
-        }
-        return terrain, {"source": terrain["source"], "point_count": int(len(points))}
-    except Exception as exc:
-        return None, {"source": "Terreng", "error": str(exc)}
-
-
-def terrain_elevation_at(x: float, y: float, terrain: Optional[Dict[str, Any]]) -> float:
-    if not terrain:
-        return 0.0
-    return float(terrain["a"] * x + terrain["b"] * y + terrain["c"])
-
-
-def terrain_slope_along_azimuth(terrain: Optional[Dict[str, Any]], azimuth_deg: float) -> float:
-    if not terrain:
-        return 0.0
-    ux = math.sin(math.radians(azimuth_deg))
-    uy = math.cos(math.radians(azimuth_deg))
-    return float((terrain["a"] * ux) + (terrain["b"] * uy))
-
-
-def minimum_rotated_dims(poly: Polygon) -> Tuple[float, float, float]:
-    rect = poly.minimum_rotated_rectangle
-    coords = list(rect.exterior.coords)[:4]
-    edges = []
-    for i in range(4):
-        x1, y1 = coords[i]
-        x2, y2 = coords[(i + 1) % 4]
-        dist = math.hypot(x2 - x1, y2 - y1)
-        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
-        edges.append((dist, angle))
-    edges.sort(key=lambda item: item[0], reverse=True)
-    width = edges[0][0]
-    depth = edges[1][0] if len(edges) > 1 else edges[0][0]
-    angle = edges[0][1]
-    return float(width), float(depth), float(angle)
-
-
-def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygon], polygon_setback_m: float, neighbors: Optional[List[Dict[str, Any]]] = None, terrain: Optional[Dict[str, Any]] = None, polygon_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    neighbors = neighbors or []
-    polygon_meta = polygon_meta or {}
-    if site_polygon_input is None:
-        site_polygon = box(0.0, 0.0, site.site_width_m, site.site_depth_m)
-        buildable_polygon = box(
-            max(0.0, site.side_setback_m),
-            max(0.0, site.front_setback_m),
-            max(site.side_setback_m + 8.0, site.site_width_m - site.side_setback_m),
-            max(site.front_setback_m + 8.0, site.site_depth_m - site.rear_setback_m),
-        ).intersection(site_polygon)
-        source = "Rektangulert fallback"
-    else:
-        site_polygon = largest_polygon(site_polygon_input)
-        source = polygon_meta.get("source", "Tomtepolygon")
-        buildable_polygon = site_polygon.buffer(-max(0.0, polygon_setback_m)) if polygon_setback_m > 0 else site_polygon
-        buildable_polygon = largest_polygon(buildable_polygon)
-        if buildable_polygon is None or buildable_polygon.is_empty or buildable_polygon.area < 20.0:
-            buildable_polygon = largest_polygon(site_polygon.buffer(-max(0.5, polygon_setback_m * 0.35))) or site_polygon
-
-    site_width, site_depth, orientation_deg = minimum_rotated_dims(site_polygon)
-    buildable_area = float(buildable_polygon.area) if buildable_polygon is not None else 0.0
-    site_area = float(site_polygon.area)
-    filtered_neighbors = []
-    for neighbor in neighbors:
-        poly = largest_polygon(neighbor.get("polygon"))
-        if poly is None:
-            continue
-        if poly.intersects(site_polygon):
-            continue
-        if poly.distance(site_polygon) > 250.0:
-            continue
-        filtered_neighbors.append(
-            {
-                **neighbor,
-                "polygon": poly,
-                "distance_m": float(poly.distance(site_polygon)),
-            }
-        )
-    filtered_neighbors.sort(key=lambda item: item.get("distance_m", 0.0))
-
-    return {
-        "site_polygon": site_polygon,
-        "buildable_polygon": buildable_polygon,
-        "site_area_m2": site_area,
-        "site_width_m": site_width,
-        "site_depth_m": site_depth,
-        "buildable_area_m2": buildable_area,
-        "orientation_deg": orientation_deg,
-        "neighbors": filtered_neighbors,
-        "terrain": terrain,
-        "source": source,
-        "polygon_meta": polygon_meta,
-    }
-
-
-def rects_to_polygon(rects: List[Dict[str, float]]) -> Polygon:
-    polys = [box(r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"]) for r in rects]
-    return unary_union(polys).buffer(0)
-
-
-def fit_footprint_into_polygon(footprint: Polygon, container: Polygon) -> Tuple[Polygon, float, float]:
-    if container.contains(footprint):
-        return footprint, 1.0, 1.0
-
-    footprint = affinity.translate(
-        footprint,
-        xoff=container.centroid.x - footprint.centroid.x,
-        yoff=container.centroid.y - footprint.centroid.y,
-    )
-    best = footprint
-    best_ratio = footprint.intersection(container).area / max(footprint.area, 1e-6)
-
-    minx, miny, maxx, maxy = container.bounds
-    step_x = max((maxx - minx) / 8.0, 2.0)
-    step_y = max((maxy - miny) / 8.0, 2.0)
-    offsets = [(i * step_x, j * step_y) for i in range(-2, 3) for j in range(-2, 3)]
-    for dx, dy in offsets:
-        candidate = affinity.translate(footprint, xoff=dx, yoff=dy)
-        ratio = candidate.intersection(container).area / max(candidate.area, 1e-6)
-        if container.contains(candidate):
-            return candidate, 1.0, 1.0
-        if ratio > best_ratio:
-            best = candidate
-            best_ratio = ratio
-
-    contained = None
-    lo, hi = 0.22, 1.0
-    base = best
-    for _ in range(24):
-        mid = (lo + hi) / 2.0
-        scaled = affinity.scale(base, xfact=mid, yfact=mid, origin=base.centroid)
-        if container.contains(scaled):
-            contained = scaled
-            lo = mid
-        else:
-            hi = mid
-    if contained is not None:
-        return contained, lo, 1.0
-    fallback = affinity.scale(base, xfact=0.55, yfact=0.55, origin=base.centroid)
-    return fallback.intersection(container).buffer(0), 0.55, best_ratio
-
-
-def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_footprint_m2: float) -> Tuple[Polygon, Dict[str, Any]]:
-    width, depth, orientation_deg = minimum_rotated_dims(buildable_polygon)
-    rotated = affinity.rotate(buildable_polygon, -orientation_deg, origin=buildable_polygon.centroid)
-    minx, miny, maxx, maxy = rotated.bounds
-    geom = build_typology_geometry(typology, target_footprint_m2, maxx - minx, maxy - miny)
-    footprint = rects_to_polygon(geom["rects"])
-    footprint = affinity.translate(footprint, xoff=minx, yoff=miny)
-    footprint, fit_scale, containment_ratio = fit_footprint_into_polygon(footprint, rotated)
-    footprint = affinity.rotate(footprint, orientation_deg, origin=buildable_polygon.centroid).buffer(0)
-    rotated_footprint = affinity.rotate(footprint, -orientation_deg, origin=buildable_polygon.centroid)
-    fx0, fy0, fx1, fy1 = rotated_footprint.bounds
-    return footprint, {
-        "fit_scale": round(float(fit_scale), 3),
-        "containment_ratio": round(float(containment_ratio), 3),
-        "footprint_width_m": round(float(fx1 - fx0), 1),
-        "footprint_depth_m": round(float(fy1 - fy0), 1),
-        "orientation_deg": round(float(orientation_deg), 1),
-    }
-
-
-def sample_points_in_polygon(poly: Polygon, spacing_m: float = 6.0, max_points: int = 180) -> List[Point]:
-    poly = largest_polygon(poly) or poly
-    if poly is None or poly.is_empty:
-        return []
-    minx, miny, maxx, maxy = poly.bounds
-    points: List[Point] = []
-    x = minx + (spacing_m / 2.0)
-    while x < maxx:
-        y = miny + (spacing_m / 2.0)
-        while y < maxy:
-            p = Point(x, y)
-            if poly.contains(p):
-                points.append(p)
-            y += spacing_m
-        x += spacing_m
-    if not points:
-        points = [poly.representative_point()]
-    if len(points) > max_points:
-        idx = np.linspace(0, len(points) - 1, max_points).astype(int)
-        points = [points[i] for i in idx]
-    return points
-
-
-def solar_azimuth_deg(latitude_deg: float, day_of_year: int, solar_hour: float) -> float:
-    lat = math.radians(latitude_deg)
-    decl = solar_declination_rad(day_of_year)
-    hour_angle = math.radians(15.0 * (solar_hour - 12.0))
-    az = math.degrees(
-        math.atan2(
-            math.sin(hour_angle),
-            (math.cos(hour_angle) * math.sin(lat)) - (math.tan(decl) * math.cos(lat)),
-        )
-    )
-    return (az + 180.0) % 360.0
-
-
-def adjusted_shadow_length_m(height_m: float, altitude_deg: float, terrain: Optional[Dict[str, Any]], shadow_azimuth_deg: float) -> float:
-    if altitude_deg <= 0.5:
-        return height_m * 50.0
-    slope = terrain_slope_along_azimuth(terrain, shadow_azimuth_deg)
-    denom = math.tan(math.radians(altitude_deg)) + slope
-    denom = max(0.02, denom)
-    return float(height_m / denom)
-
-
-def build_shadow_polygon(footprint: Polygon, height_m: float, sun_azimuth_deg: float, altitude_deg: float, terrain: Optional[Dict[str, Any]]) -> Optional[Polygon]:
-    if footprint is None or footprint.is_empty or altitude_deg <= 0.5 or height_m <= 0.0:
-        return None
-    shadow_az = (sun_azimuth_deg + 180.0) % 360.0
-    length = adjusted_shadow_length_m(height_m, altitude_deg, terrain, shadow_az)
-    dx = math.sin(math.radians(shadow_az)) * length
-    dy = math.cos(math.radians(shadow_az)) * length
-    translated = affinity.translate(footprint, xoff=dx, yoff=dy)
-    return unary_union([footprint, translated]).convex_hull.buffer(0)
-
-
-def serialize_neighbor_geometries(neighbors: List[Dict[str, Any]], max_neighbors: int = 20) -> List[Dict[str, Any]]:
-    serialized = []
-    for neighbor in neighbors[:max_neighbors]:
-        serialized.append(
-            {
-                "coords": polygon_to_coords(neighbor.get("polygon")),
-                "height_m": round(float(neighbor.get("height_m", 0.0)), 1),
-                "distance_m": round(float(neighbor.get("distance_m", 0.0)), 1),
-            }
-        )
-    return serialized
-
 
 # --- 4. ANALYSEMOTOR ---
 @dataclass
@@ -893,12 +303,6 @@ class SiteInputs:
     parking_area_per_space_m2: float
     latitude_deg: float
     north_rotation_deg: float
-    polygon_setback_m: float = 0.0
-    site_geometry_source: str = "Rektangel"
-    polygon_crs: str = ""
-    neighbor_count: int = 0
-    terrain_slope_pct: float = 0.0
-    terrain_relief_m: float = 0.0
 
 
 @dataclass
@@ -912,7 +316,6 @@ class OptionResult:
     saleable_area_m2: float
     footprint_width_m: float
     footprint_depth_m: float
-    buildable_area_m2: float
     open_space_ratio: float
     target_fit_pct: float
     unit_count: int
@@ -922,14 +325,10 @@ class OptionResult:
     solar_score: float
     estimated_equinox_sun_hours: float
     estimated_winter_sun_hours: float
-    sunlit_open_space_pct: float
     winter_noon_shadow_m: float
     equinox_noon_shadow_m: float
     summer_afternoon_shadow_m: float
     efficiency_ratio: float
-    neighbor_count: int
-    terrain_slope_pct: float
-    terrain_relief_m: float
     notes: List[str]
     score: float
     geometry: Dict[str, Any]
@@ -1055,18 +454,11 @@ def shadow_length_m(height_m: float, altitude_deg: float) -> float:
     return height_m / max(0.03, math.tan(math.radians(altitude_deg)))
 
 
-def derive_limits(site: SiteInputs, geodata_context: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
-    if geodata_context:
-        buildable_width = max(8.0, geodata_context.get("site_width_m", site.site_width_m))
-        buildable_depth = max(8.0, geodata_context.get("site_depth_m", site.site_depth_m))
-        buildable_area = max(0.0, geodata_context.get("buildable_area_m2", site.site_area_m2))
-        site_area = max(1.0, geodata_context.get("site_area_m2", site.site_area_m2))
-    else:
-        buildable_width = max(8.0, site.site_width_m - (2.0 * site.side_setback_m))
-        buildable_depth = max(8.0, site.site_depth_m - site.front_setback_m - site.rear_setback_m)
-        buildable_area = buildable_width * buildable_depth
-        site_area = site.site_area_m2
-    max_footprint_by_bya = site_area * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
+def derive_limits(site: SiteInputs) -> Dict[str, float]:
+    buildable_width = max(8.0, site.site_width_m - (2.0 * site.side_setback_m))
+    buildable_depth = max(8.0, site.site_depth_m - site.front_setback_m - site.rear_setback_m)
+    buildable_area = buildable_width * buildable_depth
+    max_footprint_by_bya = site.site_area_m2 * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
     max_footprint = min(buildable_area, max_footprint_by_bya)
     floors_from_height = max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))) if site.max_height_m > 0 else site.max_floors
     allowed_floors = max(1, min(site.max_floors, floors_from_height))
@@ -1079,85 +471,145 @@ def derive_limits(site: SiteInputs, geodata_context: Optional[Dict[str, Any]] = 
     }
 
 
-def evaluate_solar(
-    site: SiteInputs,
-    site_polygon: Polygon,
-    footprint_polygon: Polygon,
-    building_height_m: float,
+def build_typology_geometry(
     typology: str,
-    neighbors: Optional[List[Dict[str, Any]]] = None,
-    terrain: Optional[Dict[str, Any]] = None,
-) -> Dict[str, float]:
-    neighbors = neighbors or []
-    open_space = site_polygon.difference(footprint_polygon).buffer(0)
-    if open_space.is_empty:
-        open_space = site_polygon
+    target_footprint_m2: float,
+    buildable_width_m: float,
+    buildable_depth_m: float,
+) -> Dict[str, Any]:
+    rects: List[Dict[str, float]] = []
 
-    spacing = max(4.5, min(10.0, math.sqrt(max(open_space.area, 1.0) / 85.0)))
-    sample_points = sample_points_in_polygon(largest_polygon(open_space) or open_space, spacing_m=spacing)
-    if not sample_points:
-        sample_points = [site_polygon.representative_point()]
+    if typology == "Lamell":
+        depth = clamp(14.0, 10.0, max(10.0, buildable_depth_m * 0.75))
+        depth = min(depth, buildable_depth_m * 0.75)
+        depth = max(10.0, min(depth, buildable_depth_m))
+        width = min(buildable_width_m, max(18.0, target_footprint_m2 / max(depth, 1.0)))
+        if width * depth > target_footprint_m2 * 1.08:
+            width = target_footprint_m2 / max(depth, 1.0)
+        width = min(width, buildable_width_m)
+        x = (buildable_width_m - width) / 2.0
+        y = (buildable_depth_m - depth) / 2.0
+        rects = [{"x": x, "y": y, "w": width, "h": depth}]
+        area = width * depth
+        return {
+            "rects": rects,
+            "footprint_width_m": width,
+            "footprint_depth_m": depth,
+            "footprint_area_m2": area,
+            "clear_south_m": max(4.0, y),
+            "courtyard_width_m": 0.0,
+        }
 
-    def sunlit_fraction(day_of_year: int, solar_hour: float) -> float:
-        altitude = solar_altitude_deg(site.latitude_deg, day_of_year, solar_hour)
-        if altitude <= 0.5:
-            return 0.0
-        azimuth = (solar_azimuth_deg(site.latitude_deg, day_of_year, solar_hour) - site.north_rotation_deg) % 360.0
-        shadow_polys: List[Polygon] = []
-        own_shadow = build_shadow_polygon(footprint_polygon, building_height_m, azimuth, altitude, terrain)
-        if own_shadow is not None:
-            shadow_polys.append(own_shadow)
-        for neighbor in neighbors:
-            shadow = build_shadow_polygon(neighbor["polygon"], float(neighbor.get("height_m", 0.0)), azimuth, altitude, terrain)
-            if shadow is not None:
-                shadow_polys.append(shadow)
-        if not shadow_polys:
-            return 1.0
-        shadow_union = unary_union(shadow_polys).buffer(0)
-        sunlit = 0
-        for point in sample_points:
-            if not shadow_union.covers(point):
-                sunlit += 1
-        return float(sunlit / max(1, len(sample_points)))
+    if typology == "Punkthus":
+        side = min(buildable_width_m * 0.82, buildable_depth_m * 0.82, math.sqrt(max(target_footprint_m2, 1.0)))
+        side = max(14.0, side)
+        x = (buildable_width_m - side) / 2.0
+        y = (buildable_depth_m - side) / 2.0
+        rects = [{"x": x, "y": y, "w": side, "h": side}]
+        area = side * side
+        return {
+            "rects": rects,
+            "footprint_width_m": side,
+            "footprint_depth_m": side,
+            "footprint_area_m2": area,
+            "clear_south_m": max(6.0, y),
+            "courtyard_width_m": 0.0,
+        }
 
-    equinox_hours = [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
-    winter_hours = [10.0, 11.0, 12.0, 13.0, 14.0]
+    # Tun / U-form
+    wing = min(11.5, buildable_width_m * 0.22, buildable_depth_m * 0.22)
+    outer_w = min(buildable_width_m, max(24.0, buildable_width_m * 0.82))
+    outer_d = min(buildable_depth_m, max(22.0, buildable_depth_m * 0.78))
+    x0 = (buildable_width_m - outer_w) / 2.0
+    y0 = (buildable_depth_m - outer_d) / 2.0
 
-    equinox_fracs = [sunlit_fraction(80, hour) for hour in equinox_hours]
-    winter_fracs = [sunlit_fraction(355, hour) for hour in winter_hours]
-    equinox_hours_sum = float(sum(equinox_fracs))
-    winter_hours_sum = float(sum(winter_fracs))
-    mean_equinox = float(np.mean(equinox_fracs)) if equinox_fracs else 0.0
-    winter_noon_frac = sunlit_fraction(355, 12.0)
-    noon_equinox_frac = sunlit_fraction(80, 12.0)
+    rects = [
+        {"x": x0, "y": y0, "w": outer_w, "h": wing},
+        {"x": x0, "y": y0, "w": wing, "h": outer_d},
+        {"x": x0 + outer_w - wing, "y": y0, "w": wing, "h": outer_d},
+    ]
+    area = sum(rect["w"] * rect["h"] for rect in rects)
+    if area > max(target_footprint_m2, 1.0):
+        scale = math.sqrt(target_footprint_m2 / area)
+        center_x = buildable_width_m / 2.0
+        center_y = buildable_depth_m / 2.0
+        scaled_rects = []
+        for rect in rects:
+            cx = rect["x"] + rect["w"] / 2.0
+            cy = rect["y"] + rect["h"] / 2.0
+            new_w = rect["w"] * scale
+            new_h = rect["h"] * scale
+            new_cx = center_x + (cx - center_x) * scale
+            new_cy = center_y + (cy - center_y) * scale
+            scaled_rects.append(
+                {
+                    "x": new_cx - new_w / 2.0,
+                    "y": new_cy - new_h / 2.0,
+                    "w": new_w,
+                    "h": new_h,
+                }
+            )
+        rects = scaled_rects
+        area = sum(rect["w"] * rect["h"] for rect in rects)
 
+    width = max(rect["x"] + rect["w"] for rect in rects) - min(rect["x"] for rect in rects)
+    depth = max(rect["y"] + rect["h"] for rect in rects) - min(rect["y"] for rect in rects)
+    courtyard_width = max(0.0, width - (2.0 * wing))
+    clear_south = max(6.0, depth - wing)
+    return {
+        "rects": rects,
+        "footprint_width_m": width,
+        "footprint_depth_m": depth,
+        "footprint_area_m2": area,
+        "clear_south_m": clear_south,
+        "courtyard_width_m": courtyard_width,
+    }
+
+
+def evaluate_solar(site: SiteInputs, geometry: Dict[str, Any], building_height_m: float, typology: str) -> Dict[str, float]:
     winter_alt = solar_altitude_deg(site.latitude_deg, 355, 12.0)
     equinox_alt = solar_altitude_deg(site.latitude_deg, 80, 12.0)
     summer_alt = solar_altitude_deg(site.latitude_deg, 172, 15.0)
-    winter_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) + 180.0) % 360.0
-    equinox_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 80, 12.0) - site.north_rotation_deg) + 180.0) % 360.0
-    summer_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 172, 15.0) - site.north_rotation_deg) + 180.0) % 360.0
-    winter_shadow = adjusted_shadow_length_m(building_height_m, winter_alt, terrain, winter_shadow_az)
-    equinox_shadow = adjusted_shadow_length_m(building_height_m, equinox_alt, terrain, equinox_shadow_az)
-    summer_shadow = adjusted_shadow_length_m(building_height_m, summer_alt, terrain, summer_shadow_az)
 
-    typology_bonus = {"Punkthus": 0.06, "Lamell": 0.04, "Tun": -0.02}.get(typology, 0.0)
-    neighbor_penalty = min(0.12, 0.012 * len(neighbors))
+    winter_shadow = shadow_length_m(building_height_m, winter_alt)
+    equinox_shadow = shadow_length_m(building_height_m, equinox_alt)
+    summer_shadow = shadow_length_m(building_height_m, summer_alt)
+
+    clear_south = geometry.get("clear_south_m", 8.0)
+    courtyard_bonus = min(0.18, geometry.get("courtyard_width_m", 0.0) / 120.0)
+    typology_bonus = {"Punkthus": 0.08, "Lamell": 0.04, "Tun": -0.02}.get(typology, 0.0)
+
+    equinox_ratio = clear_south / max(1.0, equinox_shadow)
+    winter_ratio = clear_south / max(1.0, winter_shadow)
+
+    equinox_hours = clamp(2.5 + (equinox_ratio * 4.6), 1.0, 8.0)
+    winter_hours = clamp(0.4 + (winter_ratio * 2.2), 0.0, 4.0)
+
+    orientation_penalty = 0.0
+    if typology == "Lamell":
+        orientation_penalty = abs(math.sin(math.radians(site.north_rotation_deg))) * 8.0
+    elif typology == "Tun":
+        orientation_penalty = abs(math.sin(math.radians(site.north_rotation_deg))) * 4.0
+    else:
+        orientation_penalty = abs(math.sin(math.radians(site.north_rotation_deg))) * 2.0
+
     solar_score = 100.0 * clamp(
-        (0.54 * mean_equinox) + (0.26 * winter_noon_frac) + (0.14 * noon_equinox_frac) + typology_bonus - neighbor_penalty,
+        0.56 * min(1.0, equinox_ratio)
+        + 0.19 * min(1.0, winter_ratio)
+        + courtyard_bonus
+        + typology_bonus,
         0.18,
         1.0,
-    )
+    ) - orientation_penalty
     solar_score = clamp(solar_score, 18.0, 100.0)
 
     return {
         "solar_score": solar_score,
-        "estimated_equinox_sun_hours": round(equinox_hours_sum, 2),
-        "estimated_winter_sun_hours": round(winter_hours_sum, 2),
-        "sunlit_open_space_pct": round(mean_equinox * 100.0, 1),
-        "winter_noon_shadow_m": round(winter_shadow, 1),
-        "equinox_noon_shadow_m": round(equinox_shadow, 1),
-        "summer_afternoon_shadow_m": round(summer_shadow, 1),
+        "estimated_equinox_sun_hours": equinox_hours,
+        "estimated_winter_sun_hours": winter_hours,
+        "winter_noon_shadow_m": winter_shadow,
+        "equinox_noon_shadow_m": equinox_shadow,
+        "summer_afternoon_shadow_m": summer_shadow,
     }
 
 
@@ -1179,17 +631,14 @@ def rank_score(
     )
 
 
-def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context: Optional[Dict[str, Any]] = None) -> List[OptionResult]:
-    geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
-    limits = derive_limits(site, geodata_context)
-    site_polygon = geodata_context["site_polygon"]
-    buildable_polygon = geodata_context["buildable_polygon"]
-    neighbors = geodata_context.get("neighbors", [])
-    terrain = geodata_context.get("terrain")
-
+def generate_options(site: SiteInputs, mix_specs: List[MixSpec]) -> List[OptionResult]:
+    limits = derive_limits(site)
+    buildable_width = limits["buildable_width"]
+    buildable_depth = limits["buildable_depth"]
     max_footprint = limits["max_footprint"]
     allowed_floors = int(limits["allowed_floors"])
-    if max_footprint <= 0 or buildable_polygon is None or buildable_polygon.is_empty:
+
+    if max_footprint <= 0:
         return []
 
     templates = [
@@ -1200,21 +649,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
     options: List[OptionResult] = []
     target_bta = max(site.desired_bta_m2, 1.0)
-    serialized_neighbors = serialize_neighbor_geometries(neighbors)
-    terrain_summary = {
-        "slope_pct": round(float((terrain or {}).get("slope_pct", 0.0)), 1),
-        "relief_m": round(float((terrain or {}).get("relief_m", 0.0)), 1),
-        "grade_ns_pct": round(float((terrain or {}).get("grade_ns_pct", 0.0)), 2),
-        "grade_ew_pct": round(float((terrain or {}).get("grade_ew_pct", 0.0)), 2),
-        "point_count": int((terrain or {}).get("point_count", 0)),
-        "source": (terrain or {}).get("source", ""),
-    }
 
     for template in templates:
         typology = template["typology"]
         target_footprint = max_footprint * template["coverage"]
-        footprint_polygon, placement = create_typology_footprint(buildable_polygon, typology, target_footprint)
-        footprint_area = float(footprint_polygon.area)
+        geometry = build_typology_geometry(typology, target_footprint, buildable_width, buildable_depth)
+        footprint_area = geometry["footprint_area_m2"]
 
         floors_needed = math.ceil(target_bta / max(footprint_area, 1.0))
         floors = clamp(floors_needed + template["floor_bias"], 2, allowed_floors)
@@ -1227,27 +667,19 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         actual_efficiency = clamp(site.efficiency_ratio + template["eff_adj"], 0.66, 0.88)
         saleable_area = gross_bta * actual_efficiency
 
-        mix_counts, _ = allocate_unit_mix(saleable_area, mix_specs)
+        mix_counts, mix_area_used = allocate_unit_mix(saleable_area, mix_specs)
         unit_count = sum(mix_counts.values())
         parking_spaces = int(math.ceil(unit_count * site.parking_ratio_per_unit)) if unit_count > 0 else 0
-        open_space_ratio = max(0.0, 1.0 - (footprint_area / max(geodata_context["site_area_m2"], 1.0)))
         parking_pressure_area = parking_spaces * site.parking_area_per_space_m2
+        open_space_ratio = max(0.0, 1.0 - (footprint_area / max(site.site_area_m2, 1.0)))
         parking_pressure_pct = (
-            100.0 * parking_pressure_area / max(geodata_context["site_area_m2"] * open_space_ratio, 1.0)
+            100.0 * parking_pressure_area / max(site.site_area_m2 * open_space_ratio, 1.0)
             if open_space_ratio > 0
             else 100.0
         )
 
         height_m = floors * site.floor_to_floor_m
-        solar = evaluate_solar(
-            site=site,
-            site_polygon=site_polygon,
-            footprint_polygon=footprint_polygon,
-            building_height_m=height_m,
-            typology=typology,
-            neighbors=neighbors,
-            terrain=terrain,
-        )
+        solar = evaluate_solar(site, geometry, height_m, typology)
         target_fit_pct = 100.0 * gross_bta / target_bta if target_bta > 0 else 100.0
 
         notes: List[str] = []
@@ -1258,20 +690,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         else:
             notes.append("Treffer ønsket volum relativt godt i tidligfase.")
 
-        if placement.get("fit_scale", 1.0) < 0.92:
-            notes.append("Tomtepolygonen gir et mer krevende byggefelt; volumet er skalert ned for å holde seg innenfor reelle grenser.")
-
         if solar["solar_score"] < 55:
-            notes.append("Svakere solforhold når faktisk tomtepolygon og naboer tas med; videre 3D-kontroll anbefales.")
+            notes.append("Svak indikativ sol/situasjon; særlig vinter og skuldersesong kan bli krevende.")
         elif solar["solar_score"] < 70:
-            notes.append("Middels solforhold med reell kontekst; verifiser uteareal og nord-/sydvendte fasader videre.")
+            notes.append("Middels indikativ sol/situasjon; bør testes videre med mer presis solmodell.")
         else:
-            notes.append("God indikativ soltilgang også når nabohøyder og terreng legges inn i modellen.")
-
-        if terrain and terrain.get("slope_pct", 0.0) > 12.0:
-            notes.append("Terrenget er relativt bratt; sokkel, kjeller og adkomst bør testes videre mot kotegrunnlag.")
-        elif terrain and terrain.get("slope_pct", 0.0) > 5.0:
-            notes.append("Terrenget er merkbart skrånende og vil påvirke parkering, innganger og uteopphold.")
+            notes.append("God indikativ soltilgang i forhold til høyde og åpne flater.")
 
         if parking_pressure_pct > 90:
             notes.append("Parkering legger stort press på tilgjengelig uteareal dersom alt skal løses på terreng.")
@@ -1283,7 +707,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         elif typology == "Punkthus":
             notes.append("Punkthus gir ofte best lys og sikt, men taper gjerne litt effektivitet og kjerneøkonomi.")
         else:
-            notes.append("Tun/U-form gir høy arealutnyttelse og tydelig uterom, men er mest sårbar for skygge fra egne fløyer og naboer.")
+            notes.append("Tun/U-form gir høy arealutnyttelse og tydelig uterom, men kan gi mer krevende solforhold.")
 
         score = rank_score(
             target_fit_pct=target_fit_pct,
@@ -1293,33 +717,17 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             parking_pressure_pct=parking_pressure_pct,
         )
 
-        winter_alt = solar_altitude_deg(site.latitude_deg, 355, 12.0)
-        winter_az = (solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) % 360.0
-        winter_shadow_poly = build_shadow_polygon(footprint_polygon, height_m, winter_az, winter_alt, terrain)
-
-        geometry = {
-            "site_polygon_coords": polygon_to_coords(site_polygon),
-            "buildable_polygon_coords": polygon_to_coords(buildable_polygon),
-            "footprint_polygon_coords": polygon_to_coords(footprint_polygon),
-            "winter_shadow_polygon_coords": polygon_to_coords(winter_shadow_poly) if winter_shadow_poly is not None else [],
-            "neighbor_polygons": serialized_neighbors,
-            "terrain_summary": terrain_summary,
-            "placement": placement,
-            "site_source": geodata_context.get("source", "Tomt"),
-        }
-
         options.append(
             OptionResult(
                 name=template["name"],
                 typology=typology,
                 floors=floors,
-                building_height_m=round(height_m, 1),
+                building_height_m=height_m,
                 footprint_area_m2=round(footprint_area, 1),
                 gross_bta_m2=round(gross_bta, 1),
                 saleable_area_m2=round(saleable_area, 1),
-                footprint_width_m=placement["footprint_width_m"],
-                footprint_depth_m=placement["footprint_depth_m"],
-                buildable_area_m2=round(geodata_context["buildable_area_m2"], 1),
+                footprint_width_m=round(geometry["footprint_width_m"], 1),
+                footprint_depth_m=round(geometry["footprint_depth_m"], 1),
                 open_space_ratio=round(open_space_ratio, 3),
                 target_fit_pct=round(target_fit_pct, 1),
                 unit_count=unit_count,
@@ -1329,14 +737,10 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 solar_score=round(solar["solar_score"], 1),
                 estimated_equinox_sun_hours=round(solar["estimated_equinox_sun_hours"], 1),
                 estimated_winter_sun_hours=round(solar["estimated_winter_sun_hours"], 1),
-                sunlit_open_space_pct=round(solar["sunlit_open_space_pct"], 1),
                 winter_noon_shadow_m=round(solar["winter_noon_shadow_m"], 1),
                 equinox_noon_shadow_m=round(solar["equinox_noon_shadow_m"], 1),
                 summer_afternoon_shadow_m=round(solar["summer_afternoon_shadow_m"], 1),
                 efficiency_ratio=round(actual_efficiency, 3),
-                neighbor_count=len(neighbors),
-                terrain_slope_pct=round(float((terrain or {}).get("slope_pct", 0.0)), 1),
-                terrain_relief_m=round(float((terrain or {}).get("relief_m", 0.0)), 1),
                 notes=notes,
                 score=score,
                 geometry=geometry,
@@ -1354,55 +758,28 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     draw = ImageDraw.Draw(img, "RGBA")
     font = ImageFont.load_default()
 
-    site_coords = option.geometry.get("site_polygon_coords") or polygon_to_coords(box(0, 0, site.site_width_m, site.site_depth_m))
-    buildable_coords = option.geometry.get("buildable_polygon_coords") or site_coords
-    footprint_coords = option.geometry.get("footprint_polygon_coords") or []
-    shadow_coords = option.geometry.get("winter_shadow_polygon_coords") or []
-    neighbor_polys = option.geometry.get("neighbor_polygons", [])
-    terrain_summary = option.geometry.get("terrain_summary", {})
+    scale = min(
+        (canvas_w - (2 * margin)) / max(site.site_width_m, 1.0),
+        (canvas_h - (2 * margin)) / max(site.site_depth_m, 1.0),
+    )
 
-    all_coords = list(site_coords)
-    for item in neighbor_polys[:20]:
-        all_coords.extend(item.get("coords", []))
-    if shadow_coords:
-        all_coords.extend(shadow_coords)
-    if not all_coords:
-        all_coords = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    def sx(x_m: float) -> float:
+        return margin + (x_m * scale)
 
-    xs = [pt[0] for pt in all_coords]
-    ys = [pt[1] for pt in all_coords]
-    minx, maxx = min(xs), max(xs)
-    miny, maxy = min(ys), max(ys)
-    width = max(1.0, maxx - minx)
-    height = max(1.0, maxy - miny)
-    scale = min((canvas_w - (2 * margin)) / width, (canvas_h - (2 * margin)) / height)
+    def sy(y_m: float) -> float:
+        return margin + (y_m * scale)
 
-    def map_pt(pt: List[float]) -> Tuple[float, float]:
-        x, y = pt
-        px = margin + ((x - minx) * scale)
-        py = canvas_h - margin - ((y - miny) * scale)
-        return px, py
+    site_box = [sx(0), sy(0), sx(site.site_width_m), sy(site.site_depth_m)]
+    buildable_x = site.side_setback_m
+    buildable_y = site.front_setback_m
+    buildable_w = max(0.0, site.site_width_m - (2.0 * site.side_setback_m))
+    buildable_h = max(0.0, site.site_depth_m - site.front_setback_m - site.rear_setback_m)
+    buildable_box = [sx(buildable_x), sy(buildable_y), sx(buildable_x + buildable_w), sy(buildable_y + buildable_h)]
 
-    def draw_poly(coords: List[List[float]], fill: Tuple[int, int, int, int], outline: Tuple[int, int, int, int], width_px: int = 2) -> None:
-        if not coords:
-            return
-        pts = [map_pt(pt) for pt in coords]
-        if len(pts) < 3:
-            return
-        draw.polygon(pts, fill=fill, outline=outline)
-        if width_px > 1:
-            draw.line(pts + [pts[0]], fill=outline, width=width_px)
+    draw.rounded_rectangle(site_box, radius=12, outline=(130, 151, 178, 255), width=3, fill=(13, 24, 36, 255))
+    draw.rounded_rectangle(buildable_box, radius=10, outline=(56, 189, 248, 220), width=2, fill=(56, 189, 248, 26))
 
-    draw_poly(site_coords, fill=(13, 24, 36, 255), outline=(130, 151, 178, 255), width_px=3)
-    draw_poly(buildable_coords, fill=(56, 189, 248, 28), outline=(56, 189, 248, 230), width_px=2)
-
-    for neighbor in neighbor_polys[:20]:
-        draw_poly(neighbor.get("coords", []), fill=(120, 130, 145, 120), outline=(180, 190, 205, 220), width_px=1)
-
-    if shadow_coords:
-        draw_poly(shadow_coords, fill=(255, 213, 79, 45), outline=(255, 213, 79, 150), width_px=1)
-    draw_poly(footprint_coords, fill=(34, 197, 94, 215), outline=(220, 252, 231, 255), width_px=2)
-
+    # North arrow
     arrow_x = canvas_w - 70
     arrow_y = 70
     draw.line((arrow_x, arrow_y + 30, arrow_x, arrow_y - 20), fill=(245, 247, 251, 255), width=4)
@@ -1411,28 +788,52 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         fill=(245, 247, 251, 255),
     )
     draw.text((arrow_x - 7, arrow_y + 36), "N", fill=(245, 247, 251, 255), font=font)
-    draw.text((arrow_x - 30, arrow_y + 52), f"rot {site.north_rotation_deg:.0f}°", fill=(159, 176, 195, 255), font=font)
+    draw.text((arrow_x - 22, arrow_y + 52), f"rot {site.north_rotation_deg:.0f}°", fill=(159, 176, 195, 255), font=font)
 
-    placement = option.geometry.get("placement", {})
+    rects = option.geometry.get("rects", [])
+    footprint_bbox = [1e9, 1e9, -1e9, -1e9]
+    for rect in rects:
+        px0, py0 = sx(buildable_x + rect["x"]), sy(buildable_y + rect["y"])
+        px1, py1 = sx(buildable_x + rect["x"] + rect["w"]), sy(buildable_y + rect["y"] + rect["h"])
+        footprint_bbox[0] = min(footprint_bbox[0], px0)
+        footprint_bbox[1] = min(footprint_bbox[1], py0)
+        footprint_bbox[2] = max(footprint_bbox[2], px1)
+        footprint_bbox[3] = max(footprint_bbox[3], py1)
+
+    if footprint_bbox[0] < footprint_bbox[2]:
+        shadow_px = option.winter_noon_shadow_m * scale
+        shadow_box = [
+            footprint_bbox[0],
+            max(margin, footprint_bbox[1] - shadow_px),
+            footprint_bbox[2],
+            footprint_bbox[1],
+        ]
+        draw.rectangle(shadow_box, fill=(255, 213, 79, 50), outline=(255, 213, 79, 140))
+
+    for rect in rects:
+        px0, py0 = sx(buildable_x + rect["x"]), sy(buildable_y + rect["y"])
+        px1, py1 = sx(buildable_x + rect["x"] + rect["w"]), sy(buildable_y + rect["y"] + rect["h"])
+        draw.rounded_rectangle(
+            [px0, py0, px1, py1],
+            radius=8,
+            fill=(34, 197, 94, 215),
+            outline=(220, 252, 231, 255),
+            width=2,
+        )
+
     draw.text((margin, 16), f"{option.name} | {option.typology}", fill=(245, 247, 251, 255), font=font)
     draw.text(
-        (margin, canvas_h - 60),
-        f"Tomt via {option.geometry.get('site_source', 'geometri')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count}",
+        (margin, canvas_h - 48),
+        f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Hoyde {option.building_height_m:.1f} m | Vinterskygge kl 12 ca. {option.winter_noon_shadow_m:.0f} m",
         fill=(200, 211, 223, 255),
         font=font,
     )
     draw.text(
-        (margin, canvas_h - 40),
-        f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Høyde {option.building_height_m:.1f} m | Vinterskygge kl 12 ca. {option.winter_noon_shadow_m:.0f} m",
-        fill=(200, 211, 223, 255),
+        (margin, canvas_h - 28),
+        f"Tomt {site.site_width_m:.0f} x {site.site_depth_m:.0f} m | Byggefelt markert med bla ramme",
+        fill=(159, 176, 195, 255),
         font=font,
     )
-    terrain_line = (
-        f"Terreng fall {terrain_summary.get('slope_pct', 0):.1f}% | Relieff {terrain_summary.get('relief_m', 0):.1f} m"
-        if terrain_summary.get("point_count", 0) > 0
-        else f"Plasseringstilpasning {placement.get('fit_scale', 1.0):.2f} | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}%"
-    )
-    draw.text((margin, canvas_h - 20), terrain_line, fill=(159, 176, 195, 255), font=font)
 
     return img.convert("RGB")
 
@@ -1456,12 +857,10 @@ def build_deterministic_report(
             "# 1. OPPSUMMERING\n"
             "Ingen alternativ kunne genereres fordi tomtegeometri eller reguleringsgrenser er for svake.\n\n"
             "# 2. GRUNNLAG\n"
-            "- Kontroller tomtepolygon, byggegrenser, BYA/BRA og evt. terreng- eller nabodata.\n"
+            "- Kontroller tomteareal, bredde/dybde, byggegrenser og BYA/BRA.\n"
         )
 
     best = options[0]
-    using_polygon = site.site_geometry_source not in {"Rektangulert fallback", "Rektangel", "Manuell rektangeltomt"}
-    terrain_active = best.terrain_relief_m > 0.0 or best.terrain_slope_pct > 0.0
     lines = []
     lines.append("# 1. OPPSUMMERING")
     lines.append(
@@ -1469,83 +868,52 @@ def build_deterministic_report(
         f"Det gir omtrent {best.gross_bta_m2:.0f} m2 BTA, {best.saleable_area_m2:.0f} m2 salgbart areal "
         f"og ca. {best.unit_count} boliger innenfor dagens oppgitte rammer."
     )
-    if using_polygon:
-        lines.append(
-            f"Analysen bruker faktisk tomtepolygon ({site.site_geometry_source}), reelt byggefelt på ca. {best.buildable_area_m2:.0f} m2 "
-            f"og {best.neighbor_count} nabobygg i sol/skygge-vurderingen."
-        )
-    if terrain_active:
-        lines.append(
-            f"Terrenggrunnlag er brukt som en forenklet flate med ca. {best.terrain_slope_pct:.1f}% gjennomsnittlig fall og "
-            f"{best.terrain_relief_m:.1f} m lokalt relieff."
-        )
     lines.append("")
     lines.append("# 2. GRUNNLAG")
-    lines.append(f"- Tomteareal brukt i motor: {site.site_area_m2:.0f} m2")
-    lines.append(f"- Tomtedimensjon (omsluttende orientert rektangel): ca. {site.site_width_m:.1f} x {site.site_depth_m:.1f} m")
+    lines.append(f"- Tomteareal: {site.site_area_m2:.0f} m2")
+    lines.append(f"- Tomtedimensjon: ca. {site.site_width_m:.1f} x {site.site_depth_m:.1f} m")
     lines.append(
-        f"- Byggegrenser / inntrekk: front {site.front_setback_m:.1f} m, bak {site.rear_setback_m:.1f} m, side {site.side_setback_m:.1f} m, "
-        f"polygonbuffer {site.polygon_setback_m:.1f} m"
+        f"- Byggegrenser: front {site.front_setback_m:.1f} m, bak {site.rear_setback_m:.1f} m, side {site.side_setback_m:.1f} m"
     )
     lines.append(f"- Maks BYA: {site.max_bya_pct:.1f}%")
-    lines.append(f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m2'}")
+    lines.append(
+        f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m2'}"
+    )
     lines.append(f"- Maks etasjer: {site.max_floors}")
-    lines.append(f"- Maks høyde: {site.max_height_m:.1f} m")
-    lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m2")
-    lines.append(f"- Solanalyse basert på breddegrad: {site.latitude_deg:.3f}")
-    lines.append(f"- Geometrikilde: {site.site_geometry_source}")
-    lines.append(f"- Nabobygg brukt i analysen: {site.neighbor_count}")
+    lines.append(f"- Maks hoyde: {site.max_height_m:.1f} m")
+    lines.append(f"- Onsket BTA: {site.desired_bta_m2:.0f} m2")
+    lines.append(f"- Solanalyse basert pa breddegrad: {site.latitude_deg:.3f}")
     lines.append(f"- Visuelt grunnlag lastet opp: {'ja' if has_visual_input else 'nei'}")
-    if site.polygon_crs:
-        lines.append(f"- CRS / projeksjon for polygon: {site.polygon_crs}")
     if parsed_hints:
         lines.append(f"- Tolket fra fritekst: {json.dumps(parsed_hints, ensure_ascii=False)}")
     lines.append("")
     lines.append("# 3. VIKTIGSTE FORUTSETNINGER")
     lines.append("- Analysen er deterministisk og skjematisk; den erstatter ikke detaljert reguleringstolkning.")
-    lines.append("- Sol/skygge er oppgradert til en 2.5D-vurdering med faktisk tomtepolygon, nabohøyder og enkel terrengflate når dette er lagt inn.")
-    lines.append("- Leilighetsmiks beregnes ut fra salgbart areal og gjennomsnittsstørrelser, ikke full planløsning.")
-    lines.append("- Terreng brukes som et regressjonsplan / forenklet flate, ikke full detaljmodell av murer, skjæringer eller støttemurer.")
+    lines.append("- Sol/skygge er indikativ og er ikke en full 3D-simulering mot faktisk nabobebyggelse og terreng.")
+    lines.append("- Leilighetsmiks beregnes ut fra salgbart areal og gjennomsnittsstorrelser, ikke full planlosning.")
     lines.append("")
     lines.append("# 4. TOMT OG KONTEKST")
-    if using_polygon:
-        lines.append(
-            f"Tomten er analysert som faktisk polygon i stedet for rektangulær boks. Dette gir mer realistisk byggefelt, "
-            f"bedre kontroll på fotavtrykk og en mer troverdig sol-/skyggevurdering mot omkringliggende volum."
-        )
-    else:
-        lines.append(
-            "Tomten er analysert som rektangulær fallback fordi faktisk polygon ikke er lastet inn. Resultatene er fortsatt nyttige, "
-            "men geometrisk presisjon blir svakere enn med ekte tomtegrense."
-        )
-    if best.neighbor_count > 0:
-        lines.append(
-            f"Det er brukt {best.neighbor_count} nabobygg i analysen. Disse påvirker særlig solbelyst uteareal og vinter-/skuldersesongskygger."
-        )
-    else:
-        lines.append("Det er ikke lagt inn nabovolumer, så skyggevurderingen gjelder primært eget volum på tomten.")
-    if terrain_active:
-        lines.append(
-            f"Terrengflaten viser omtrent {best.terrain_slope_pct:.1f}% gjennomsnittlig fall. Dette påvirker adkomst, underetasje, parkering og skyggeutbredelse."
-        )
+    lines.append(
+        "Tomten analyseres som et forenklet byggefelt innenfor oppgitte tomtedimensjoner, byggegrenser og breddegrad. "
+        "Eventuelle opplastede kart og ortofoto brukes kun som visuell kontekst i rapporten."
+    )
     lines.append("")
     lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
     lines.append(
-        f"Maks fotavtrykk styres av kombinasjonen av BYA og faktisk byggefelt. I denne runden er beregnet buildbar flate ca. {best.buildable_area_m2:.0f} m2. "
-        f"Høydebegrensning og etasjeantall gir et indikativt tak på {min(site.max_floors, max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))))} etasjer."
+        f"Maks fotavtrykk styres primart av BYA og byggegrenser. Høydebegrensning og etasjeantall gir et indikativt tak pa {min(site.max_floors, max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))))} etasjer."
     )
     lines.append("")
     lines.append("# 6. ARKITEKTONISK VURDERING")
     lines.append(
-        f"{best.typology} fremstår som sterkest i denne runden fordi kombinasjonen av volumtreff, solscore ({best.solar_score:.0f}/100), "
-        f"solbelyst uteareal ({best.sunlit_open_space_pct:.0f}%) og utnyttelse av faktisk byggefelt er best balansert."
+        f"{best.typology} fremstar som sterkest i denne runden fordi kombinasjonen av volumtreff, solscore ({best.solar_score:.0f}/100) "
+        f"og utnyttelse av byggefeltet er best balansert."
     )
     lines.append("")
     lines.append("# 7. MULIGE UTVIKLINGSGREP")
     for option in options:
         lines.append(
             f"- {option.name}: {option.typology}, {option.floors} etasjer, {option.gross_bta_m2:.0f} m2 BTA, "
-            f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100 og ca. {option.sunlit_open_space_pct:.0f}% solbelyst uteareal."
+            f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
         )
     lines.append("")
     lines.append("# 8. ALTERNATIVER")
@@ -1554,12 +922,10 @@ def build_deterministic_report(
         lines.append(
             f"- Typologi: {option.typology}\n"
             f"- Fotavtrykk: {option.footprint_area_m2:.0f} m2 ({option.footprint_width_m:.1f} x {option.footprint_depth_m:.1f} m)\n"
-            f"- Buildbar flate: {option.buildable_area_m2:.0f} m2\n"
             f"- BTA: {option.gross_bta_m2:.0f} m2\n"
             f"- Salgbart areal: {option.saleable_area_m2:.0f} m2\n"
             f"- Leiligheter: {option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})\n"
             f"- Parkering: {option.parking_spaces} plasser\n"
-            f"- Solbelyst uteareal (skuldersesong): ca. {option.sunlit_open_space_pct:.0f}%\n"
             f"- Vinterskygge kl 12: ca. {option.winter_noon_shadow_m:.0f} m\n"
             f"- Skuldersesong soltimer: ca. {option.estimated_equinox_sun_hours:.1f} timer"
         )
@@ -1568,13 +934,13 @@ def build_deterministic_report(
     lines.append("")
     lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
     lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
-    lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
-    lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag hvis prosjektet går videre til konkret skisse.")
+    lines.append("- Legg inn reell tomtepolygon og nabohoyder for neste trinn dersom dere vil ha presis sol/skygge.")
+    lines.append("- Koble gjerne modulen videre til faktiske planlosningsregler eller BIM for a ga fra volum til plan.")
     lines.append("")
     lines.append("# 10. ANBEFALING / NESTE STEG")
     lines.append(
-        f"Start videre bearbeiding med {best.name}. Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
-        f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell dersom prosjektet skal løftes videre."
+        f"Start videre bearbeiding med {best.name}. Neste steg er a lage presis tomtepolygon, justere kjerner og trapper, "
+        f"og kontrollere sol/skygge mot naboer og uteareal i et mer detaljert analyseoppsett."
     )
     return "\n".join(lines)
 
@@ -1953,7 +1319,7 @@ st.markdown(
 )
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
-    "Oppgradert modul med geospatial feasibility-motor: faktisk tomtepolygon, nabohoyder, terreng, volumalternativer og leilighetsmiks."
+    "Oppgradert modul med faktisk feasibility-motor: volumalternativer, areal, leilighetsmiks og indikativ sol/skygge."
     "</p>",
     unsafe_allow_html=True,
 )
@@ -1977,9 +1343,7 @@ with st.expander("1. Prosjekt og lokasjon (SSOT)", expanded=True):
     c5.text_input("Land", value=pd_state.get("land", "Norge"), disabled=True)
 
 with st.expander("2. Tomtegeometri og regulering", expanded=True):
-    st.info(
-        "Denne delen er ny: dere kan fortsatt bruke rektangulære fallback-tall, men modulen støtter nå også faktisk tomtepolygon, naboer og terreng."
-    )
+    st.info("Denne delen er ny: her legger dere inn faktisk tomtestorrelse, byggegrenser og reguleringsrammer som grunnlag for volumstudien.")
     regulation_text = st.text_area(
         "Fritekst fra reguleringsplan (valgfritt, motoren henter ut BYA/BRA/hoyde hvis den finner noe)",
         placeholder="Lim inn planbestemmelser, f.eks. %-BYA 35, maks gesimshoyde 12 m, 4 etasjer ...",
@@ -1991,15 +1355,14 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
 
     d1, d2, d3 = st.columns(3)
     default_site_area = max(1500.0, float(pd_state.get("bta", 0)) * 1.25) if pd_state.get("bta", 0) else 2500.0
-    site_area_m2 = d1.number_input("Tomteareal fallback (m2)", min_value=100.0, value=float(default_site_area), step=50.0)
-    site_width_m = d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0)
-    site_depth_m = d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0)
+    site_area_m2 = d1.number_input("Tomteareal (m2)", min_value=100.0, value=float(default_site_area), step=50.0)
+    site_width_m = d2.number_input("Tomtebredde (m)", min_value=10.0, value=45.0, step=1.0)
+    site_depth_m = d3.number_input("Tomtedybde (m)", min_value=10.0, value=55.0, step=1.0)
 
-    s1, s2, s3, s4 = st.columns(4)
+    s1, s2, s3 = st.columns(3)
     front_setback_m = s1.number_input("Byggegrense mot gate / front (m)", min_value=0.0, value=4.0, step=0.5)
     rear_setback_m = s2.number_input("Bakre byggegrense (m)", min_value=0.0, value=4.0, step=0.5)
     side_setback_m = s3.number_input("Sideavstand (m)", min_value=0.0, value=4.0, step=0.5)
-    polygon_setback_m = s4.number_input("Polygonbuffer / inntrekk (m)", min_value=0.0, value=4.0, step=0.5)
 
     r1, r2, r3, r4 = st.columns(4)
     max_bya_pct = r1.number_input("Maks BYA (%)", min_value=1.0, max_value=100.0, value=float(parsed.get("max_bya_pct", 35.0)), step=1.0)
@@ -2007,51 +1370,7 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     max_floors = r3.number_input("Maks etasjer", min_value=1, max_value=30, value=int(parsed.get("max_floors", max(3, int(pd_state.get("etasjer", 4))))), step=1)
     max_height_m = r4.number_input("Maks hoyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
-with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
-    st.markdown("##### Tomtepolygon")
-    g1, g2 = st.columns(2)
-    with g1:
-        site_polygon_upload = st.file_uploader(
-            "Last opp tomtepolygon (GeoJSON)",
-            type=["geojson", "json"],
-            key="site_polygon_geojson",
-        )
-    with g2:
-        site_polygon_text = st.text_area(
-            "Eller lim inn koordinater (x,y eller lon,lat per linje)",
-            height=120,
-            placeholder="597380,6643012\n597412,6643005\n597428,6643046\n...",
-        )
-
-    st.markdown("##### Nabobebyggelse")
-    n1, n2, n3 = st.columns([1.5, 1, 1])
-    neighbor_mode = n1.radio(
-        "Kilde for naboer",
-        ["Ingen", "Last opp GeoJSON", "Hent fra OSM rundt tomten"],
-        horizontal=False,
-    )
-    default_neighbor_height_m = n2.number_input("Fallback nabohoeyde (m)", min_value=3.0, max_value=80.0, value=9.0, step=0.5)
-    neighbor_radius_m = n3.number_input("Radius for nabosok (m)", min_value=30.0, max_value=400.0, value=160.0, step=10.0)
-    neighbor_geojson = None
-    if neighbor_mode == "Last opp GeoJSON":
-        neighbor_geojson = st.file_uploader(
-            "Nabobygg (GeoJSON med polygoner og gjerne height / levels / etasjer)",
-            type=["geojson", "json"],
-            key="neighbor_geojson",
-        )
-
-    st.markdown("##### Terreng")
-    terrain_upload = st.file_uploader(
-        "Terrenggrunnlag (CSV/TXT med x,y,z eller GeoTIFF/ASC)",
-        type=["csv", "txt", "tif", "tiff", "asc"],
-        key="terrain_upload",
-    )
-    st.caption(
-        "GeoJSON for tomt/naboer kan ligge i lon/lat eller i meter. Terreng kan lastes opp som punktfil med x,y,z eller georeferert raster."
-    )
-
 with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
-
     st.info("Her styrer dere hvor aggressivt motoren skal sikte mot volum, effektivitet og miks.")
     a1, a2, a3, a4 = st.columns(4)
     desired_bta_m2 = a1.number_input(
@@ -2131,11 +1450,10 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
 with st.expander("5. Hva modulen faktisk gjor na", expanded=False):
     st.markdown(
         """
-- Leser **ekte tomtepolygon** via GeoJSON eller koordinatliste.
-- Regner **3 volumalternativer** (lamell, punkthus, tun/U-form) innenfor faktisk byggefelt.
-- Leser **nabobebyggelse** via GeoJSON eller OSM og bruker hoyder i sol/skygge.
-- Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
-- Regner **fotavtrykk, BTA, salgbarhetsareal, boligantall, leilighetsmiks og parkeringstrykk**.
+- Lager **3 volumalternativer** (lamell, punkthus, tun/U-form).
+- Regner **fotavtrykk, BTA, salgbarhetsareal, boligantall og leilighetsmiks**.
+- Estimerer **parkeringstrykk** mot uteareal.
+- Lager **indikativ sol/skygge** ut fra breddegrad, hoyde og aapne flater.
 - Bruker eventuelt AI bare til a forklare funnene. Tallene kommer fra motoren.
 """
     )
@@ -2151,31 +1469,7 @@ if run_analysis:
     images_for_context.extend(load_uploaded_visuals(uploaded_files))
 
     lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
-
-    site_polygon_input, site_crs, polygon_meta = load_site_polygon_input(site_polygon_upload, site_polygon_text)
-    latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
-    longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
-
-    neighbor_inputs: List[Dict[str, Any]] = []
-    neighbor_meta: Dict[str, Any] = {"source": "Ingen naboer"}
-    if neighbor_mode == "Last opp GeoJSON":
-        neighbor_inputs, neighbor_meta = load_neighbors_from_geojson(
-            neighbor_geojson,
-            site_polygon_input,
-            site_crs,
-            default_neighbor_height_m,
-        )
-    elif neighbor_mode == "Hent fra OSM rundt tomten":
-        neighbor_inputs, neighbor_meta = fetch_osm_neighbors(
-            latitude_deg,
-            longitude_deg,
-            site_polygon_input,
-            site_crs,
-            neighbor_radius_m,
-            default_neighbor_height_m,
-        )
-
-    terrain_ctx, terrain_meta = load_terrain_input(terrain_upload, site_polygon_input, site_crs)
+    latitude_deg = lat_geocoded if lat_geocoded is not None else latitude_manual
 
     site = SiteInputs(
         site_area_m2=site_area_m2,
@@ -2195,35 +1489,13 @@ if run_analysis:
         parking_area_per_space_m2=parking_area_per_space_m2,
         latitude_deg=latitude_deg,
         north_rotation_deg=north_rotation_deg,
-        polygon_setback_m=polygon_setback_m,
-        site_geometry_source=polygon_meta.get("source", "Rektangel"),
-        polygon_crs=(site_crs.to_string() if site_crs is not None else polygon_meta.get("crs", "")),
-        neighbor_count=len(neighbor_inputs),
-        terrain_slope_pct=float((terrain_ctx or {}).get("slope_pct", 0.0)),
-        terrain_relief_m=float((terrain_ctx or {}).get("relief_m", 0.0)),
     )
 
-    geodata_context = prepare_site_context(
-        site=site,
-        site_polygon_input=site_polygon_input,
-        polygon_setback_m=polygon_setback_m,
-        neighbors=neighbor_inputs,
-        terrain=terrain_ctx,
-        polygon_meta=polygon_meta,
-    )
-    site.site_area_m2 = float(geodata_context["site_area_m2"])
-    site.site_width_m = float(geodata_context["site_width_m"])
-    site.site_depth_m = float(geodata_context["site_depth_m"])
-    site.site_geometry_source = geodata_context.get("source", site.site_geometry_source)
-    site.neighbor_count = len(geodata_context.get("neighbors", []))
-    site.terrain_slope_pct = float((terrain_ctx or {}).get("slope_pct", 0.0))
-    site.terrain_relief_m = float((terrain_ctx or {}).get("relief_m", 0.0))
-
-    with st.spinner("Regner volumalternativer med faktisk tomtepolygon, naboer og terreng ..."):
-        options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+    with st.spinner("Regner volumalternativer, areal og indikativ sol/skygge ..."):
+        options = generate_options(site, mix_inputs)
 
     if not options:
-        st.error("Klarte ikke å generere alternativer. Kontroller tomtepolygon, byggegrenser og BYA.")
+        st.error("Klarte ikke a generere alternativer. Kontroller tomtedimensjoner, byggegrenser og BYA.")
         st.stop()
 
     option_images = [render_plan_diagram(site, option) for option in options]
@@ -2241,9 +1513,6 @@ if run_analysis:
                     "parsed_regulation_hints": parsed,
                     "visual_input_count": len(images_for_context),
                     "geocoding_source": geo_source,
-                    "polygon_meta": polygon_meta,
-                    "neighbor_meta": neighbor_meta,
-                    "terrain_meta": terrain_meta,
                 }
                 prompt = f"""
 Du er senior arkitekt og utviklingsradgiver. Du far et ferdig, deterministisk analysegrunnlag i JSON.
@@ -2267,7 +1536,7 @@ KRAV:
 10. ANBEFALING / NESTE STEG
 
 - Tallene i JSON er kilde til sannhet.
-- Sol/skygge skal omtales som indikativ 2.5D, ikke full detaljsimulering.
+- Sol/skygge skal omtales som indikativ.
 - Leilighetsmiks skal beskrives som kapasitetsestimat.
 - Ikke skriv om noe du ikke vet.
 """
@@ -2299,8 +1568,8 @@ KRAV:
     best = options[0]
     st.session_state.pending_reviews[doc_id] = {
         "title": pd_state.get("p_name", "Nytt Prosjekt"),
-        "module": "ARK (Mulighetsstudie v3)",
-        "drafter": "Builtly AI + Geospatial Feasibility Engine",
+        "module": "ARK (Mulighetsstudie v2)",
+        "drafter": "Builtly AI + Feasibility Engine",
         "reviewer": "Senior Arkitekt",
         "status": "Pending Lead Architect Review",
         "class": "badge-pending",
@@ -2313,12 +1582,9 @@ KRAV:
         "report_text": final_report_text,
         "geo_source": geo_source,
         "option_images": option_images,
-        "polygon_meta": polygon_meta,
-        "neighbor_meta": neighbor_meta,
-        "terrain_meta": terrain_meta,
     }
     st.session_state.generated_ark_pdf = pdf_bytes
-    st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
+    st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v2.pdf"
     st.rerun()
 
 
@@ -2329,9 +1595,8 @@ if "analysis_results" in st.session_state:
     for option_data in result["options"]:
         options.append(OptionResult(**option_data))
 
-    st.success("Mulighetsstudie er generert med faktisk tomtepolygon, nabohoyder og terreng der dette er lagt inn.")
+    st.success("Mulighetsstudie er generert med volumalternativer, leilighetsmiks og indikativ sol/skygge.")
     best = options[0]
-    site_result = result.get("site", {})
 
     k1, k2, k3, k4 = st.columns(4)
     with k1:
@@ -2343,33 +1608,6 @@ if "analysis_results" in st.session_state:
     with k4:
         st.markdown("<div class='kpi-card'><div class='metric-title'>Solscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(best.solar_score), unsafe_allow_html=True)
 
-    g1, g2, g3, g4 = st.columns(4)
-    with g1:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Geometrikilde</div><div class='metric-value'>{}</div></div>".format(site_result.get("site_geometry_source", "-")), unsafe_allow_html=True)
-    with g2:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Buildbart areal</div><div class='metric-value'>{:.0f} m2</div></div>".format(best.buildable_area_m2), unsafe_allow_html=True)
-    with g3:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Naboer brukt</div><div class='metric-value'>{}</div></div>".format(best.neighbor_count), unsafe_allow_html=True)
-    with g4:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Terreng fall</div><div class='metric-value'>{:.1f}%</div></div>".format(best.terrain_slope_pct), unsafe_allow_html=True)
-
-    polygon_meta = result.get("polygon_meta", {})
-    neighbor_meta = result.get("neighbor_meta", {})
-    terrain_meta = result.get("terrain_meta", {})
-    meta_lines = []
-    if polygon_meta:
-        meta_lines.append(f"Tomt: {polygon_meta.get('source', '-')}")
-    if neighbor_meta:
-        meta_lines.append(f"Naboer: {neighbor_meta.get('source', '-')} ({neighbor_meta.get('count', best.neighbor_count)})")
-        if neighbor_meta.get("error"):
-            meta_lines.append(f"Nabo-feil: {neighbor_meta.get('error')}")
-    if terrain_meta:
-        meta_lines.append(f"Terreng: {terrain_meta.get('source', '-')}")
-        if terrain_meta.get("error"):
-            meta_lines.append(f"Terreng-feil: {terrain_meta.get('error')}")
-    if meta_lines:
-        st.caption(" | ".join(meta_lines))
-
     st.markdown("### Alternativsammenligning")
     comparison_df = pd.DataFrame(
         [
@@ -2378,17 +1616,14 @@ if "analysis_results" in st.session_state:
                 "Typologi": option.typology,
                 "Etasjer": option.floors,
                 "Fotavtrykk m2": option.footprint_area_m2,
-                "Buildbart areal m2": option.buildable_area_m2,
                 "BTA m2": option.gross_bta_m2,
                 "Salgbart m2": option.saleable_area_m2,
                 "Boliger": option.unit_count,
                 "Parkering": option.parking_spaces,
                 "Solscore": option.solar_score,
-                "Solbelyst uteareal %": option.sunlit_open_space_pct,
                 "Skuldersesong soltimer": option.estimated_equinox_sun_hours,
                 "Vinter skygge kl12 m": option.winter_noon_shadow_m,
-                "Terreng fall %": option.terrain_slope_pct,
-                "Naboer": option.neighbor_count,
+                "Open space %": round(option.open_space_ratio * 100.0, 1),
                 "Score": option.score,
             }
             for option in options
@@ -2403,7 +1638,7 @@ if "analysis_results" in st.session_state:
             st.image(image, caption=f"{option.name} - {option.typology}", use_container_width=True)
             st.caption(
                 f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | "
-                f"solscore {option.solar_score:.0f}/100 | uteareal sol {option.sunlit_open_space_pct:.0f}%"
+                f"solscore {option.solar_score:.0f}/100"
             )
 
     st.markdown("### Leilighetsmiks per alternativ")
@@ -2416,17 +1651,14 @@ if "analysis_results" in st.session_state:
     mix_df = pd.DataFrame(mix_rows).fillna(0)
     st.dataframe(mix_df, use_container_width=True, hide_index=True)
 
-    st.markdown("### Sol/skygge og terreng")
+    st.markdown("### Sol/skyggeindikatorer")
     solar_df = pd.DataFrame(
         {
             option.name: {
-                "Solbelyst uteareal %": option.sunlit_open_space_pct,
                 "Skuldersesong soltimer": option.estimated_equinox_sun_hours,
                 "Vinter soltimer": option.estimated_winter_sun_hours,
                 "Vinterskygge kl 12 (m)": option.winter_noon_shadow_m,
                 "Sommerskygge kl 15 (m)": option.summer_afternoon_shadow_m,
-                "Terreng fall %": option.terrain_slope_pct,
-                "Terreng relieff m": option.terrain_relief_m,
             }
             for option in options
         }
@@ -2450,4 +1682,3 @@ if "analysis_results" in st.session_state:
         if find_page("Review"):
             if st.button("Ga til QA for godkjenning", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
-
