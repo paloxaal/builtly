@@ -30,7 +30,6 @@ def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
 
-
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
         if os.path.exists(candidate):
@@ -41,7 +40,6 @@ def logo_data_uri() -> str:
     return ""
 
 
-
 def find_page(base_name: str) -> str:
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
@@ -50,27 +48,38 @@ def find_page(base_name: str) -> str:
     return ""
 
 
+def go_home():
+    main_file = None
+    for f in Path(".").glob("*.py"):
+        if f.name.lower() not in ["setup.py", "test.py"]:
+            main_file = str(f)
+            break
+    if main_file:
+        st.switch_page(main_file)
 
+# --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
+DB_DIR = Path("qa_database")
+IMG_DIR = DB_DIR / "project_images"
+SSOT_FILE = DB_DIR / "ssot.json"
+
+def init_db():
+    DB_DIR.mkdir(exist_ok=True)
+    IMG_DIR.mkdir(exist_ok=True)
+
+init_db()
+
+# --- 3. TEKST- OG PDF HJELPERE ---
 def clean_pdf_text(text):
     if text is None:
         return ""
     text = str(text)
     rep = {
-        "–": "-",
-        "—": "-",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "…": "...",
-        "•": "-",
-        "≤": "<=",
-        "≥": ">=",
+        "–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", 
+        "…": "...", "•": "-", "≤": "<=", "≥": ">="
     }
     for old, new in rep.items():
         text = text.replace(old, new)
     return text.encode("latin-1", "replace").decode("latin-1")
-
 
 
 def ironclad_text_formatter(text):
@@ -80,7 +89,6 @@ def ironclad_text_formatter(text):
     text = re.sub(r"([^\s]{40})", r"\1 ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
-
 
 
 def nb_value(value):
@@ -99,7 +107,6 @@ def nb_value(value):
     if isinstance(value, int):
         return str(value)
     return clean_pdf_text(str(value))
-
 
 
 def parse_numeric(value):
@@ -128,7 +135,6 @@ def parse_numeric(value):
         return None, qualifier
 
 
-
 def strip_empty_edges(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -139,71 +145,33 @@ def strip_empty_edges(df: pd.DataFrame) -> pd.DataFrame:
 
 
 ANALYTE_COLUMN_MAP = {
-    "TOC (%)": 7,
-    "As": 8,
-    "Pb": 9,
-    "Cd": 12,
-    "Cr (tot)": 13,
-    "Cu": 14,
-    "Hg": 17,
-    "Ni": 18,
-    "Zn": 19,
-    "Bensen": 22,
-    "Toluen": 23,
-    "Etylbensen": 24,
-    "Xylener": 25,
-    "C10-C12": 26,
-    "C12-C35": 28,
-    "Sum 16": 30,
-    "B(a)p": 34,
-    "Beskrivelse": 35,
+    "TOC (%)": 7, "As": 8, "Pb": 9, "Cd": 12, "Cr (tot)": 13, "Cu": 14, "Hg": 17, 
+    "Ni": 18, "Zn": 19, "Bensen": 22, "Toluen": 23, "Etylbensen": 24, "Xylener": 25, 
+    "C10-C12": 26, "C12-C35": 28, "Sum 16": 30, "B(a)p": 34, "Beskrivelse": 35,
 }
 
 DISPLAY_ANALYTES = ["As", "Pb", "Ni", "Zn", "C12-C35", "Sum 16", "B(a)p"]
 CLASS_ORDER = {"TK1": 1, "TK2": 2, "TK3": 3, "TK4": 4, "TK5": 5, "TK>5": 6}
 CLASS_LABELS = {
-    "TK1": "Tilstandsklasse 1",
-    "TK2": "Tilstandsklasse 2",
-    "TK3": "Tilstandsklasse 3",
-    "TK4": "Tilstandsklasse 4",
-    "TK5": "Tilstandsklasse 5",
-    "TK>5": "Over TK5",
+    "TK1": "Tilstandsklasse 1", "TK2": "Tilstandsklasse 2", "TK3": "Tilstandsklasse 3",
+    "TK4": "Tilstandsklasse 4", "TK5": "Tilstandsklasse 5", "TK>5": "Over TK5",
 }
 CLASS_FILL = {
-    "TK1": (214, 236, 255),
-    "TK2": (196, 235, 176),
-    "TK3": (255, 242, 153),
-    "TK4": (255, 202, 128),
-    "TK5": (255, 153, 153),
-    "TK>5": (232, 97, 97),
+    "TK1": (214, 236, 255), "TK2": (196, 235, 176), "TK3": (255, 242, 153),
+    "TK4": (255, 202, 128), "TK5": (255, 153, 153), "TK>5": (232, 97, 97),
 }
 CLASS_TEXT_FILL = {
-    "TK1": (65, 102, 140),
-    "TK2": (70, 112, 60),
-    "TK3": (130, 107, 0),
-    "TK4": (140, 73, 0),
-    "TK5": (120, 0, 0),
-    "TK>5": (120, 0, 0),
+    "TK1": (65, 102, 140), "TK2": (70, 112, 60), "TK3": (130, 107, 0),
+    "TK4": (140, 73, 0), "TK5": (120, 0, 0), "TK>5": (120, 0, 0),
 }
-
 
 
 def get_font(size: int, bold: bool = False):
     candidates = []
     if bold:
-        candidates.extend(
-            [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-            ]
-        )
+        candidates.extend(["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"])
     else:
-        candidates.extend(
-            [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-            ]
-        )
+        candidates.extend(["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf"])
     for path in candidates:
         if os.path.exists(path):
             try:
@@ -213,14 +181,11 @@ def get_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-
 def wrap_text_px(text: str, font, max_width: int):
     text = clean_pdf_text(text)
-    if not text:
-        return [""]
+    if not text: return [""]
     words = text.split()
-    if not words:
-        return [""]
+    if not words: return [""]
     lines = []
     current = words[0]
     for word in words[1:]:
@@ -245,88 +210,55 @@ def wrap_text_px(text: str, font, max_width: int):
     return final_lines or [""]
 
 
-
 def class_rank(class_code: str) -> int:
     return CLASS_ORDER.get(class_code or "", 0)
 
 
-
 def classify_value(value, analyte: str, thresholds: dict):
-    if analyte not in thresholds.get("TK1", {}):
-        return None
+    if analyte not in thresholds.get("TK1", {}): return None
     num, qualifier = parse_numeric(value)
-    if num is None:
-        return None
+    if num is None: return None
     tk1 = thresholds["TK1"].get(analyte)
     tk2 = thresholds["TK2"].get(analyte)
     tk3 = thresholds["TK3"].get(analyte)
     tk4 = thresholds["TK4"].get(analyte)
     tk5 = thresholds["TK5"].get(analyte)
-    if tk1 is None:
-        return None
-    if qualifier == "<" and num <= tk1:
-        return "TK1"
-    if num <= tk1:
-        return "TK1"
-    if tk2 is not None and num <= tk2:
-        return "TK2"
-    if tk3 is not None and num <= tk3:
-        return "TK3"
-    if tk4 is not None and num <= tk4:
-        return "TK4"
-    if tk5 is not None and num <= tk5:
-        return "TK5"
+    if tk1 is None: return None
+    if qualifier == "<" and num <= tk1: return "TK1"
+    if num <= tk1: return "TK1"
+    if tk2 is not None and num <= tk2: return "TK2"
+    if tk3 is not None and num <= tk3: return "TK3"
+    if tk4 is not None and num <= tk4: return "TK4"
+    if tk5 is not None and num <= tk5: return "TK5"
     return "TK>5"
 
 
-
 def split_dataframe(df: pd.DataFrame, chunk_size: int):
-    if df is None or df.empty:
-        return []
+    if df is None or df.empty: return []
     chunks = []
     for start in range(0, len(df), chunk_size):
         chunks.append(df.iloc[start:start + chunk_size].reset_index(drop=True))
     return chunks
 
-
-
-def render_table_image(
-    df: pd.DataFrame,
-    title: str,
-    subtitle: str = "",
-    row_class_column: str = None,
-    cell_fill_lookup: dict = None,
-    note: str = "",
-):
+# --- 4. BILDER OG TABELL RENDERER ---
+def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_class_column: str = None, cell_fill_lookup: dict = None, note: str = ""):
     df = df.copy().fillna("")
-    title = clean_pdf_text(title)
-    subtitle = clean_pdf_text(subtitle)
-    note = clean_pdf_text(note)
+    title, subtitle, note = clean_pdf_text(title), clean_pdf_text(subtitle), clean_pdf_text(note)
 
-    font_title = get_font(34, bold=True)
-    font_subtitle = get_font(18, bold=False)
-    font_header = get_font(18, bold=True)
-    font_body = get_font(17, bold=False)
+    font_title, font_subtitle = get_font(34, bold=True), get_font(18, bold=False)
+    font_header, font_body = get_font(18, bold=True), get_font(17, bold=False)
 
-    side_pad = 28
-    top_pad = 24
-    cell_pad_x = 10
-    cell_pad_y = 9
-    table_width = 1520
+    side_pad, top_pad, cell_pad_x, cell_pad_y, table_width = 28, 24, 10, 9, 1520
 
     width_weights = []
     for col in df.columns:
         col_txt = str(col)
-        if col_txt in {"Prøvepunkt", "Dybde", "Dybde (m)", "Fil", "Ark", "Høyeste klasse", "Styrende parameter"}:
-            width_weights.append(1.0)
-        elif col_txt in DISPLAY_ANALYTES or col_txt in {"Styrende verdi", "Klasse"}:
-            width_weights.append(0.9)
-        elif "Beskrivelse" in col_txt or "Kommentar" in col_txt:
-            width_weights.append(2.8)
-        elif col_txt in {"Datatype", "Innhold"}:
-            width_weights.append(1.8)
-        else:
-            width_weights.append(1.3)
+        if col_txt in {"Prøvepunkt", "Dybde", "Dybde (m)", "Fil", "Ark", "Høyeste klasse", "Styrende parameter"}: width_weights.append(1.0)
+        elif col_txt in DISPLAY_ANALYTES or col_txt in {"Styrende verdi", "Klasse"}: width_weights.append(0.9)
+        elif "Beskrivelse" in col_txt or "Kommentar" in col_txt: width_weights.append(2.8)
+        elif col_txt in {"Datatype", "Innhold"}: width_weights.append(1.8)
+        else: width_weights.append(1.3)
+        
     total_weight = sum(width_weights) or 1
     col_widths = [max(95, int(table_width * w / total_weight)) for w in width_weights]
 
@@ -337,12 +269,10 @@ def render_table_image(
         header_wrapped[col] = wrapped
         header_height = max(header_height, len(wrapped) * 24 + (cell_pad_y * 2))
 
-    row_heights = []
-    wrapped_cells = []
+    row_heights, wrapped_cells = [], []
     for ridx in range(len(df)):
         row = df.iloc[ridx]
-        row_wrap = {}
-        row_height = 0
+        row_wrap, row_height = {}, 0
         for col, width in zip(df.columns, col_widths):
             wrapped = wrap_text_px(str(row[col]), font_body, width - (cell_pad_x * 2))
             row_wrap[col] = wrapped
@@ -353,38 +283,21 @@ def render_table_image(
     title_height = 66
     subtitle_height = 26 if subtitle else 0
     note_height = 32 if note else 0
-    total_height = (
-        top_pad
-        + title_height
-        + subtitle_height
-        + 14
-        + header_height
-        + sum(row_heights)
-        + note_height
-        + 28
-    )
-    image_width = table_width + side_pad * 2
-    image_height = total_height + 10
-
+    total_height = top_pad + title_height + subtitle_height + 14 + header_height + sum(row_heights) + note_height + 28
+    
+    image_width, image_height = table_width + side_pad * 2, total_height + 10
     img = Image.new("RGB", (image_width, image_height), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
-    band_fill = (236, 240, 245)
-    header_fill = (46, 62, 84)
-    alt_fill = (248, 250, 252)
-    grid_fill = (205, 212, 220)
-    title_fill = (29, 45, 68)
-    subtitle_fill = (96, 108, 122)
-    text_fill = (35, 38, 43)
+    band_fill, header_fill, alt_fill = (236, 240, 245), (46, 62, 84), (248, 250, 252)
+    grid_fill, title_fill, subtitle_fill, text_fill = (205, 212, 220), (29, 45, 68), (96, 108, 122), (35, 38, 43)
 
     draw.rounded_rectangle((12, 12, image_width - 12, image_height - 12), radius=18, outline=(219, 225, 232), width=2, fill=(255, 255, 255))
     draw.rounded_rectangle((18, 18, image_width - 18, 18 + title_height + subtitle_height + 10), radius=16, fill=band_fill)
     draw.text((side_pad, 28), title, font=font_title, fill=title_fill)
-    if subtitle:
-        draw.text((side_pad, 28 + 40), subtitle, font=font_subtitle, fill=subtitle_fill)
+    if subtitle: draw.text((side_pad, 28 + 40), subtitle, font=font_subtitle, fill=subtitle_fill)
 
-    x = side_pad
-    y = top_pad + title_height + subtitle_height + 10
+    x, y = side_pad, top_pad + title_height + subtitle_height + 10
     for col, width in zip(df.columns, col_widths):
         draw.rectangle((x, y, x + width, y + header_height), fill=header_fill)
         yy = y + cell_pad_y
@@ -401,12 +314,9 @@ def render_table_image(
         if row_class_column and row_class_column in row and str(row[row_class_column]) in CLASS_FILL:
             rf = CLASS_FILL[str(row[row_class_column])]
             base_fill = tuple(int((c + 255 * 3) / 4) for c in rf)
-        x = side_pad
-        row_height = row_heights[ridx]
+        x, row_height = side_pad, row_heights[ridx]
         for col, width in zip(df.columns, col_widths):
-            cell_fill = base_fill
-            if cell_fill_lookup and (ridx, str(col)) in cell_fill_lookup:
-                cell_fill = cell_fill_lookup[(ridx, str(col))]
+            cell_fill = cell_fill_lookup.get((ridx, str(col)), base_fill) if cell_fill_lookup else base_fill
             draw.rectangle((x, y, x + width, y + row_height), fill=cell_fill, outline=grid_fill, width=1)
             yy = y + cell_pad_y
             for line in wrapped_cells[ridx][col]:
@@ -415,11 +325,8 @@ def render_table_image(
             x += width
         y += row_height
 
-    if note:
-        draw.text((side_pad, y + 8), note, font=font_subtitle, fill=subtitle_fill)
-
+    if note: draw.text((side_pad, y + 8), note, font=font_subtitle, fill=subtitle_fill)
     return img
-
 
 
 def save_temp_image(img: Image.Image, suffix: str = ".png"):
@@ -428,414 +335,200 @@ def save_temp_image(img: Image.Image, suffix: str = ".png"):
     tmp.close()
     return tmp.name
 
-
-
+# --- 5. DATA EXTRACTION LOGIC ---
 def read_generic_table(file_name: str, file_bytes: bytes):
     try:
-        if file_name.lower().endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(file_bytes))
-        else:
-            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
+        df = pd.read_csv(io.BytesIO(file_bytes)) if file_name.lower().endswith(".csv") else pd.read_excel(io.BytesIO(file_bytes), sheet_name=0)
         df = strip_empty_edges(df)
-        if df.empty:
-            return None
+        if df.empty: return None
         df = df.head(30).copy()
         df.columns = [clean_pdf_text(str(c)) for c in df.columns]
         return df
     except Exception:
         return None
 
-
-
 def is_multiconsult_summary_sheet(ws) -> bool:
-    checks = [
-        clean_pdf_text(ws.cell(18, 1).value),
-        clean_pdf_text(ws.cell(19, 8).value),
-        clean_pdf_text(ws.cell(20, 28).value),
-    ]
+    checks = [clean_pdf_text(ws.cell(18, 1).value), clean_pdf_text(ws.cell(19, 8).value), clean_pdf_text(ws.cell(20, 28).value)]
     haystack = " ".join(checks)
     return "Prøvepunkt" in haystack and "TUNGMETALLER" in haystack and "C12-C35" in haystack
-
-
 
 def extract_metadata_lines(ws):
     lines = []
     for row in range(1, 11):
-        vals = []
-        for col in [1, 21]:
-            val = ws.cell(row, col).value
-            if val:
-                vals.append(clean_pdf_text(val))
-        if vals:
-            lines.append(" | ".join(vals))
+        vals = [clean_pdf_text(ws.cell(row, col).value) for col in [1, 21] if ws.cell(row, col).value]
+        if vals: lines.append(" | ".join(vals))
     return lines
-
-
 
 def extract_multiconsult_summary(file_name: str, file_bytes: bytes):
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    target_sheet = None
-    for ws in wb.worksheets:
-        if is_multiconsult_summary_sheet(ws):
-            target_sheet = ws
-            break
-    if target_sheet is None:
-        return None
+    target_sheet = next((ws for ws in wb.worksheets if is_multiconsult_summary_sheet(ws)), None)
+    if not target_sheet: return None
 
-    ws = target_sheet
-    rows = []
-    thresholds = {}
-    metadata_lines = extract_metadata_lines(ws)
-    current_sample = None
-    table_started = False
+    ws, rows, thresholds, metadata_lines = target_sheet, [], {}, extract_metadata_lines(target_sheet)
+    current_sample, table_started = None, False
 
     for r in range(1, min(ws.max_row, 220) + 1):
-        a_val = ws.cell(r, 1).value
+        a_txt = clean_pdf_text(ws.cell(r, 1).value).strip()
         e_val = ws.cell(r, 5).value
-        a_txt = clean_pdf_text(a_val).strip()
 
         if a_txt == "Prøvepunkt":
             table_started = True
             continue
-        if not table_started:
-            continue
-        if a_txt == "Analyse" and rows:
-            break
+        if not table_started: continue
+        if a_txt == "Analyse" and rows: break
+        
         if a_txt.startswith("Tilstandsklasse"):
-            match = re.search(r"(\d)", a_txt)
-            if match:
+            if match := re.search(r"(\d)", a_txt):
                 tk = f"TK{match.group(1)}"
                 thresholds[tk] = {}
                 for analyte, col_idx in ANALYTE_COLUMN_MAP.items():
-                    if analyte in {"TOC (%)", "Beskrivelse"}:
-                        continue
-                    value, _ = parse_numeric(ws.cell(r, col_idx).value)
-                    thresholds[tk][analyte] = value
+                    if analyte not in {"TOC (%)", "Beskrivelse"}:
+                        val, _ = parse_numeric(ws.cell(r, col_idx).value)
+                        thresholds[tk][analyte] = val
             continue
-        if re.match(r"^SK\d+", a_txt):
-            current_sample = a_txt
+            
+        if re.match(r"^SK\d+", a_txt): current_sample = a_txt
         if current_sample and e_val:
             row = {
-                "Fil": clean_pdf_text(file_name),
-                "Ark": clean_pdf_text(ws.title),
-                "Prøvepunkt": current_sample,
-                "Dybde (m)": clean_pdf_text(e_val),
-                "Beskrivelse": clean_pdf_text(ws.cell(r, ANALYTE_COLUMN_MAP["Beskrivelse"]).value),
+                "Fil": clean_pdf_text(file_name), "Ark": clean_pdf_text(ws.title),
+                "Prøvepunkt": current_sample, "Dybde (m)": clean_pdf_text(e_val),
+                "Beskrivelse": clean_pdf_text(ws.cell(r, ANALYTE_COLUMN_MAP["Beskrivelse"]).value)
             }
             any_result = False
             for analyte, col_idx in ANALYTE_COLUMN_MAP.items():
-                if analyte == "Beskrivelse":
-                    continue
+                if analyte == "Beskrivelse": continue
                 value = ws.cell(r, col_idx).value
                 row[analyte] = value
-                if value not in (None, ""):
-                    any_result = True
-            if any_result:
-                rows.append(row)
+                if value not in (None, ""): any_result = True
+            if any_result: rows.append(row)
 
-    if not rows:
-        return None
+    if not rows: return None
 
     for row in rows:
-        row["class_rank"] = 0
-        row["Høyeste klasse"] = "-"
-        row["Styrende parameter"] = "-"
-        row["Styrende verdi"] = "-"
-        row["_cell_classes"] = {}
+        row.update({"class_rank": 0, "Høyeste klasse": "-", "Styrende parameter": "-", "Styrende verdi": "-", "_cell_classes": {}})
         for analyte in DISPLAY_ANALYTES:
             ccode = classify_value(row.get(analyte), analyte, thresholds)
             row["_cell_classes"][analyte] = ccode
             if class_rank(ccode) > row["class_rank"]:
-                row["class_rank"] = class_rank(ccode)
-                row["Høyeste klasse"] = ccode
-                row["Styrende parameter"] = analyte
-                row["Styrende verdi"] = nb_value(row.get(analyte))
+                row.update({"class_rank": class_rank(ccode), "Høyeste klasse": ccode, "Styrende parameter": analyte, "Styrende verdi": nb_value(row.get(analyte))})
         if row["Høyeste klasse"] == "-" and row.get("Beskrivelse"):
-            row["Høyeste klasse"] = "TK1"
-            row["class_rank"] = 1
+            row.update({"Høyeste klasse": "TK1", "class_rank": 1})
 
     detail_df = pd.DataFrame(rows)
     detail_df["class_rank"] = detail_df["class_rank"].fillna(0).astype(int)
-    detail_df = detail_df.sort_values(["class_rank", "Prøvepunkt"], ascending=[False, True]).reset_index(drop=True)
-
+    
     summary_rows = []
     for sample, grp in detail_df.groupby("Prøvepunkt", sort=True):
         best = grp.sort_values(["class_rank"], ascending=[False]).iloc[0]
-        summary_rows.append(
-            {
-                "Prøvepunkt": sample,
-                "Høyeste klasse": best["Høyeste klasse"],
-                "Dybde (m)": best["Dybde (m)"],
-                "Styrende parameter": best["Styrende parameter"],
-                "Styrende verdi": best["Styrende verdi"],
-                "Beskrivelse": best["Beskrivelse"],
-                "class_rank": int(best["class_rank"]),
-            }
-        )
+        summary_rows.append({k: best[k] for k in ["Prøvepunkt", "Høyeste klasse", "Dybde (m)", "Styrende parameter", "Styrende verdi", "Beskrivelse", "class_rank"]})
+        
     summary_df = pd.DataFrame(summary_rows).sort_values(["class_rank", "Prøvepunkt"], ascending=[False, True]).reset_index(drop=True)
-
     exceedance_df = summary_df[summary_df["class_rank"] >= 2].copy()
-    if exceedance_df.empty:
-        exceedance_df = summary_df.head(8).copy()
-    exceedance_df = exceedance_df.drop(columns=["class_rank"], errors="ignore")
-
-    excerpt_cols = ["Prøvepunkt", "Dybde (m)", "Beskrivelse"] + DISPLAY_ANALYTES + ["Høyeste klasse"]
-    excerpt_df = detail_df[excerpt_cols].copy()
-    for col in DISPLAY_ANALYTES:
-        excerpt_df[col] = excerpt_df[col].map(nb_value)
+    if exceedance_df.empty: exceedance_df = summary_df.head(8).copy()
+    
+    excerpt_df = detail_df[["Prøvepunkt", "Dybde (m)", "Beskrivelse"] + DISPLAY_ANALYTES + ["Høyeste klasse"]].copy()
+    for col in DISPLAY_ANALYTES: excerpt_df[col] = excerpt_df[col].map(nb_value)
 
     cell_fill_lookup = {}
     for ridx, row in detail_df.reset_index(drop=True).iterrows():
         for analyte in DISPLAY_ANALYTES:
-            ccode = row["_cell_classes"].get(analyte)
-            if ccode in CLASS_FILL:
-                fill = CLASS_FILL[ccode]
-                cell_fill_lookup[(ridx, analyte)] = fill
-        ccode = row.get("Høyeste klasse")
-        if ccode in CLASS_FILL:
+            if ccode := row["_cell_classes"].get(analyte):
+                if ccode in CLASS_FILL: cell_fill_lookup[(ridx, analyte)] = CLASS_FILL[ccode]
+        if (ccode := row.get("Høyeste klasse")) in CLASS_FILL:
             cell_fill_lookup[(ridx, "Høyeste klasse")] = CLASS_FILL[ccode]
 
-    threshold_records = []
-    for tk in ["TK1", "TK2", "TK3", "TK4", "TK5"]:
-        if tk in thresholds:
-            threshold_records.append(
-                {
-                    "Klasse": tk,
-                    "As": nb_value(thresholds[tk].get("As")),
-                    "Pb": nb_value(thresholds[tk].get("Pb")),
-                    "Ni": nb_value(thresholds[tk].get("Ni")),
-                    "Zn": nb_value(thresholds[tk].get("Zn")),
-                    "C12-C35": nb_value(thresholds[tk].get("C12-C35")),
-                    "Sum 16": nb_value(thresholds[tk].get("Sum 16")),
-                    "B(a)p": nb_value(thresholds[tk].get("B(a)p")),
-                }
-            )
-    threshold_df = pd.DataFrame(threshold_records)
-
+    threshold_df = pd.DataFrame([{"Klasse": tk, **{k: nb_value(thresholds[tk].get(k)) for k in DISPLAY_ANALYTES}} for tk in ["TK1", "TK2", "TK3", "TK4", "TK5"] if tk in thresholds])
     counts = {tk: int((summary_df["Høyeste klasse"] == tk).sum()) for tk in ["TK1", "TK2", "TK3", "TK4", "TK5", "TK>5"]}
-    prompt_lines = []
-    prompt_lines.append(f"KILDE: {file_name} | Ark: {ws.title}")
-    prompt_lines.extend(metadata_lines[:8])
-    prompt_lines.append(f"Antall delprøver i analysetabellen: {len(detail_df)}")
-    prompt_lines.append(f"Antall prøvepunkt i analysetabellen: {summary_df['Prøvepunkt'].nunique()}")
-    prompt_lines.append("Høyeste registrerte klasser per prøvepunkt:")
-    for _, row in summary_df.head(12).iterrows():
-        prompt_lines.append(
-            f"- {row['Prøvepunkt']} | Dybde {row['Dybde (m)']} | {row['Styrende parameter']} = {row['Styrende verdi']} | {row['Høyeste klasse']} | {row['Beskrivelse']}"
-        )
+
+    prompt_lines = [f"KILDE: {file_name} | Ark: {ws.title}"] + metadata_lines[:8] + [
+        f"Antall delprøver i analysetabellen: {len(detail_df)}", f"Antall prøvepunkt i analysetabellen: {summary_df['Prøvepunkt'].nunique()}", "Høyeste registrerte klasser per prøvepunkt:"
+    ] + [f"- {r['Prøvepunkt']} | Dybde {r['Dybde (m)']} | {r['Styrende parameter']} = {r['Styrende verdi']} | {r['Høyeste klasse']} | {r['Beskrivelse']}" for _, r in summary_df.head(12).iterrows()]
+
     if not threshold_df.empty:
         prompt_lines.append("Tilstandsklassegrenser (utdrag):")
-        for _, row in threshold_df.iterrows():
-            prompt_lines.append(
-                f"- {row['Klasse']}: As {row['As']}, Pb {row['Pb']}, Ni {row['Ni']}, Zn {row['Zn']}, C12-C35 {row['C12-C35']}, Sum16 {row['Sum 16']}, B(a)p {row['B(a)p']}"
-            )
+        for _, r in threshold_df.iterrows(): prompt_lines.append(f"- {r['Klasse']}: As {r['As']}, Pb {r['Pb']}, Ni {r['Ni']}, Zn {r['Zn']}, C12-C35 {r['C12-C35']}, Sum16 {r['Sum 16']}, B(a)p {r['B(a)p']}")
 
-    source_overview_df = pd.DataFrame(
-        [
-            {
-                "Fil": clean_pdf_text(file_name),
-                "Datatype": "Miljøteknisk analysetabell",
-                "Ark": clean_pdf_text(ws.title),
-                "Innhold": f"{summary_df['Prøvepunkt'].nunique()} prøvepunkt / {len(detail_df)} delprøver",
-                "Kommentar": "Gjenkjent Multiconsult-oppsett med tilstandsklassegrenser og massebeskrivelser",
-            }
-        ]
-    )
+    source_overview_df = pd.DataFrame([{"Fil": clean_pdf_text(file_name), "Datatype": "Miljøteknisk analysetabell", "Ark": clean_pdf_text(ws.title), "Innhold": f"{summary_df['Prøvepunkt'].nunique()} prøvepunkt / {len(detail_df)} delprøver", "Kommentar": "Gjenkjent Multiconsult-oppsett med tilstandsklassegrenser og massebeskrivelser"}])
 
-    return {
-        "type": "multiconsult_summary",
-        "prompt_text": "\n".join(prompt_lines),
-        "source_overview_df": source_overview_df,
-        "detail_df": detail_df,
-        "sample_summary_df": summary_df.drop(columns=["class_rank"], errors="ignore"),
-        "exceedance_df": exceedance_df,
-        "excerpt_df": excerpt_df,
-        "threshold_df": threshold_df,
-        "counts": counts,
-        "cell_fill_lookup": cell_fill_lookup,
-        "metadata_lines": metadata_lines,
-    }
-
-
+    return {"type": "multiconsult_summary", "prompt_text": "\n".join(prompt_lines), "source_overview_df": source_overview_df, "detail_df": detail_df, "sample_summary_df": summary_df.drop(columns=["class_rank"], errors="ignore"), "exceedance_df": exceedance_df.drop(columns=["class_rank"], errors="ignore"), "excerpt_df": excerpt_df, "threshold_df": threshold_df, "counts": counts, "cell_fill_lookup": cell_fill_lookup, "metadata_lines": metadata_lines}
 
 def extract_drill_data(files):
-    if not files:
-        return {
-            "prompt_text": "Ingen Excel/CSV-data ble lastet opp.",
-            "source_overview_df": pd.DataFrame(),
-            "sample_summary_df": pd.DataFrame(),
-            "exceedance_df": pd.DataFrame(),
-            "excerpt_df": pd.DataFrame(),
-            "threshold_df": pd.DataFrame(),
-            "counts": {},
-            "cell_fill_lookup": {},
-            "metadata_lines": [],
-        }
-
-    prompt_parts = []
-    source_overview = []
-    sample_summaries = []
-    exceedances = []
-    excerpts = []
-    thresholds = []
-    counts = {tk: 0 for tk in ["TK1", "TK2", "TK3", "TK4", "TK5", "TK>5"]}
-    cell_fill_lookup = {}
-    metadata_lines = []
-    excerpt_offset = 0
+    if not files: return {"prompt_text": "Ingen Excel/CSV-data ble lastet opp.", "source_overview_df": pd.DataFrame(), "sample_summary_df": pd.DataFrame(), "exceedance_df": pd.DataFrame(), "excerpt_df": pd.DataFrame(), "threshold_df": pd.DataFrame(), "counts": {}, "cell_fill_lookup": {}, "metadata_lines": []}
+    
+    prompt_parts, source_overview, sample_summaries, exceedances, excerpts, thresholds, counts, cell_fill_lookup, metadata_lines, excerpt_offset = [], [], [], [], [], [], {tk: 0 for tk in ["TK1", "TK2", "TK3", "TK4", "TK5", "TK>5"]}, {}, [], 0
 
     for f in files:
-        file_name = clean_pdf_text(f.name)
-        try:
-            file_bytes = f.getvalue() if hasattr(f, "getvalue") else f.read()
-        except Exception:
-            f.seek(0)
-            file_bytes = f.read()
-
-        extracted = None
-        if file_name.lower().endswith((".xlsx", ".xlsm", ".xlsx", ".xls")):
-            try:
-                extracted = extract_multiconsult_summary(file_name, file_bytes)
-            except Exception:
-                extracted = None
+        file_name, file_bytes = clean_pdf_text(f.name), f.getvalue() if hasattr(f, "getvalue") else f.read()
+        extracted = extract_multiconsult_summary(file_name, file_bytes) if file_name.lower().endswith((".xlsx", ".xlsm", ".xls")) else None
 
         if extracted:
             prompt_parts.append(extracted["prompt_text"])
-            if not extracted["source_overview_df"].empty:
-                source_overview.append(extracted["source_overview_df"])
-            if not extracted["sample_summary_df"].empty:
-                sample_summaries.append(extracted["sample_summary_df"])
-            if not extracted["exceedance_df"].empty:
-                exceedances.append(extracted["exceedance_df"])
+            if not extracted["source_overview_df"].empty: source_overview.append(extracted["source_overview_df"])
+            if not extracted["sample_summary_df"].empty: sample_summaries.append(extracted["sample_summary_df"])
+            if not extracted["exceedance_df"].empty: exceedances.append(extracted["exceedance_df"])
             if not extracted["excerpt_df"].empty:
-                excerpt_df = extracted["excerpt_df"].copy()
-                excerpts.append(excerpt_df)
-                for (ridx, col), fill in extracted["cell_fill_lookup"].items():
-                    cell_fill_lookup[(excerpt_offset + ridx, col)] = fill
-                excerpt_offset += len(excerpt_df)
-            if not extracted["threshold_df"].empty:
-                thresholds.append(extracted["threshold_df"])
+                excerpts.append(extracted["excerpt_df"])
+                for (ridx, col), fill in extracted["cell_fill_lookup"].items(): cell_fill_lookup[(excerpt_offset + ridx, col)] = fill
+                excerpt_offset += len(extracted["excerpt_df"])
+            if not extracted["threshold_df"].empty: thresholds.append(extracted["threshold_df"])
             metadata_lines.extend(extracted.get("metadata_lines", []))
-            for tk, val in extracted.get("counts", {}).items():
-                counts[tk] = counts.get(tk, 0) + int(val)
+            for tk, val in extracted.get("counts", {}).items(): counts[tk] = counts.get(tk, 0) + int(val)
             continue
 
         generic_df = read_generic_table(file_name, file_bytes)
         if generic_df is not None:
             prompt_parts.append(f"KILDE: {file_name}\n{generic_df.head(20).to_csv(index=False, sep=';')}")
-            source_overview.append(
-                pd.DataFrame(
-                    [
-                        {
-                            "Fil": file_name,
-                            "Datatype": "Generisk tabellfil",
-                            "Ark": "Første ark",
-                            "Innhold": f"{len(generic_df)} rader / {len(generic_df.columns)} kolonner (utdrag)",
-                            "Kommentar": "Ikke gjenkjent som standard analysematrise - vist som strukturert utdrag",
-                        }
-                    ]
-                )
-            )
+            source_overview.append(pd.DataFrame([{"Fil": file_name, "Datatype": "Generisk tabellfil", "Ark": "Første ark", "Innhold": f"{len(generic_df)} rader / {len(generic_df.columns)} kolonner", "Kommentar": "Ikke gjenkjent som standard analysematrise - vist som strukturert utdrag"}]))
             preview = generic_df.head(15).copy()
-            if len(preview.columns) > 8:
-                preview = preview.iloc[:, :8]
+            if len(preview.columns) > 8: preview = preview.iloc[:, :8]
             preview.insert(0, "Fil", file_name)
             excerpts.append(preview)
             excerpt_offset += len(preview)
         else:
             prompt_parts.append(f"KILDE: {file_name}\n[Kunne ikke lese filinnholdet strukturert]")
-            source_overview.append(
-                pd.DataFrame(
-                    [
-                        {
-                            "Fil": file_name,
-                            "Datatype": "Ukjent filstruktur",
-                            "Ark": "-",
-                            "Innhold": "Kunne ikke parse data automatisk",
-                            "Kommentar": "AI må være eksplisitt om usikkerhet og manglende maskinlesbart datagrunnlag",
-                        }
-                    ]
-                )
-            )
-
-    source_overview_df = pd.concat(source_overview, ignore_index=True) if source_overview else pd.DataFrame()
-    sample_summary_df = pd.concat(sample_summaries, ignore_index=True) if sample_summaries else pd.DataFrame()
-    exceedance_df = pd.concat(exceedances, ignore_index=True) if exceedances else pd.DataFrame()
-    excerpt_df = pd.concat(excerpts, ignore_index=True) if excerpts else pd.DataFrame()
-    threshold_df = thresholds[0] if thresholds else pd.DataFrame()
-
-    if not sample_summary_df.empty and "Høyeste klasse" in sample_summary_df.columns:
-        sample_summary_df["class_rank"] = sample_summary_df["Høyeste klasse"].map(class_rank)
-        sample_summary_df = sample_summary_df.sort_values(["class_rank", "Prøvepunkt"], ascending=[False, True]).drop(columns=["class_rank"]).reset_index(drop=True)
-    if not exceedance_df.empty and "Høyeste klasse" in exceedance_df.columns:
-        exceedance_df["class_rank"] = exceedance_df["Høyeste klasse"].map(class_rank)
-        exceedance_df = exceedance_df.sort_values(["class_rank", "Prøvepunkt"], ascending=[False, True]).drop(columns=["class_rank"]).reset_index(drop=True)
-
-    prompt_text = "\n\n".join(part for part in prompt_parts if part)
-    if not prompt_text:
-        prompt_text = "Ingen Excel/CSV-data ble lastet opp."
 
     return {
-        "prompt_text": prompt_text,
-        "source_overview_df": source_overview_df,
-        "sample_summary_df": sample_summary_df,
-        "exceedance_df": exceedance_df,
-        "excerpt_df": excerpt_df,
-        "threshold_df": threshold_df,
-        "counts": counts,
-        "cell_fill_lookup": cell_fill_lookup,
-        "metadata_lines": metadata_lines,
+        "prompt_text": "\n\n".join(part for part in prompt_parts if part) or "Ingen Excel/CSV-data ble lastet opp.",
+        "source_overview_df": pd.concat(source_overview, ignore_index=True) if source_overview else pd.DataFrame(),
+        "sample_summary_df": pd.concat(sample_summaries, ignore_index=True) if sample_summaries else pd.DataFrame(),
+        "exceedance_df": pd.concat(exceedances, ignore_index=True) if exceedances else pd.DataFrame(),
+        "excerpt_df": pd.concat(excerpts, ignore_index=True) if excerpts else pd.DataFrame(),
+        "threshold_df": thresholds[0] if thresholds else pd.DataFrame(),
+        "counts": counts, "cell_fill_lookup": cell_fill_lookup, "metadata_lines": metadata_lines
     }
 
-
-
+# --- 6. DYNAMISK PDF MOTOR (CORPORATE LAYOUT) ---
 def split_ai_sections(content: str):
     sections = []
     current = None
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if line.startswith("#"):
-            title = ironclad_text_formatter(line.lstrip("#").strip())
-            if current:
-                sections.append(current)
-            current = {"title": title, "lines": []}
+            if current: sections.append(current)
+            current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
             continue
-        if current is None:
-            current = {"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": []}
+        if current is None: current = {"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": []}
         current["lines"].append(raw_line.rstrip())
-    if current:
-        sections.append(current)
+    if current: sections.append(current)
     return sections
-
-
 
 def is_subheading_line(line: str) -> bool:
     clean = line.strip()
-    if not clean:
-        return False
-    if clean.startswith("##"):
-        return True
-    if clean.endswith(":") and len(clean) < 80 and len(clean.split()) <= 7:
-        return True
-    if clean == clean.upper() and any(ch.isalpha() for ch in clean) and len(clean) < 70:
-        return True
+    if not clean: return False
+    if clean.startswith("##"): return True
+    if clean.endswith(":") and len(clean) < 80 and len(clean.split()) <= 7: return True
+    if clean == clean.upper() and any(ch.isalpha() for ch in clean) and len(clean) < 70: return True
     return False
 
-
-
 def is_bullet_line(line: str) -> bool:
-    clean = line.strip()
-    return bool(re.match(r"^([-*•]|\d+\.)\s+", clean))
-
-
+    return bool(re.match(r"^([-*•]|\d+\.)\s+", line.strip()))
 
 def strip_bullet(line: str) -> str:
     return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
 
-
 class BuiltlyCorporatePDF(FPDF):
     def header(self):
-        if self.page_no() == 1:
-            return
+        if self.page_no() == 1: return
         self.set_y(11)
         self.set_text_color(88, 94, 102)
         self.set_font("Helvetica", "", 8)
@@ -860,13 +553,9 @@ class BuiltlyCorporatePDF(FPDF):
             self.add_page()
             self.set_y(26)
 
-    def add_spacer(self, h=4):
-        self.ln(h)
-
     def body_paragraph(self, text, first=False):
         text = ironclad_text_formatter(text)
-        if not text:
-            return
+        if not text: return
         self.set_x(20)
         self.set_font("Helvetica", "", 10.2 if not first else 10.6)
         self.set_text_color(35, 39, 43)
@@ -888,29 +577,24 @@ class BuiltlyCorporatePDF(FPDF):
     def bullets(self, items, numbered=False):
         for idx, item in enumerate(items, start=1):
             clean = ironclad_text_formatter(item)
-            if not clean:
-                continue
+            if not clean: continue
             self.ensure_space(10)
-            marker = f"{idx}." if numbered else chr(149)
             self.set_font("Helvetica", "", 10.1)
             self.set_text_color(35, 39, 43)
             start_y = self.get_y()
             self.set_xy(22, start_y)
-            self.cell(6, 5.2, marker, 0, 0, "L")
+            self.cell(6, 5.2, f"{idx}." if numbered else "-", 0, 0, "L")
             self.set_xy(28, start_y)
             self.multi_cell(162, 5.2, clean)
             self.ln(0.8)
 
     def section_title(self, title: str):
-        self.ensure_space(22)
-        self.ln(1)
+        self.ensure_space(35)
+        self.ln(2)
         title = ironclad_text_formatter(title)
         num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
-        number = None
-        text = title
-        if num_match and (num_match.group(1).endswith(".") or num_match.group(2)):
-            number = num_match.group(1).rstrip(".")
-            text = num_match.group(2).strip()
+        number, text = (num_match.group(1).rstrip("."), num_match.group(2).strip()) if num_match and (num_match.group(1).endswith(".") or num_match.group(2)) else (None, title)
+        
         self.set_font("Helvetica", "B", 17)
         self.set_text_color(36, 50, 72)
         start_y = self.get_y()
@@ -926,14 +610,13 @@ class BuiltlyCorporatePDF(FPDF):
         self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
         self.ln(5)
 
+    def rounded_rect(self, x, y, w, h, r, style="", corners="1234"):
+        try: super().rounded_rect(x, y, w, h, r, style, corners)
+        except Exception: self.rect(x, y, w, h, style if style in {"F", "FD", "DF"} else "")
+
     def kv_card(self, items, x=None, width=80, title=None):
-        if x is None:
-            x = self.get_x()
-        start_y = self.get_y()
-        row_h = 6.3
-        height = 10 + (len(items) * row_h)
-        if title:
-            height += 7
+        if x is None: x = self.get_x()
+        height = 10 + (len(items) * 6.3) + (7 if title else 0)
         self.ensure_space(height + 3)
         start_y = self.get_y()
         self.set_fill_color(245, 247, 249)
@@ -957,18 +640,10 @@ class BuiltlyCorporatePDF(FPDF):
             yy = self.get_y() + 1
         self.set_y(max(self.get_y(), start_y + height))
 
-    def rounded_rect(self, x, y, w, h, r, style="", corners="1234"):
-        # Compatibility wrapper for fpdf variants.
-        try:
-            super().rounded_rect(x, y, w, h, r, style, corners)
-        except Exception:
-            self.rect(x, y, w, h, style if style in {"F", "FD", "DF"} else "")
-
     def highlight_box(self, title: str, items, fill=(245, 247, 250), accent=(50, 77, 106)):
-        box_h = 14 + (len(items) * 6.2)
-        self.ensure_space(box_h + 3)
-        x = 20
-        y = self.get_y()
+        box_h = 16 + (len(items) * 6.5)
+        self.ensure_space(box_h + 5)
+        x, y = 20, self.get_y()
         self.set_fill_color(*fill)
         self.set_draw_color(217, 223, 230)
         self.rounded_rect(x, y, 170, box_h, 4, "1234", "DF")
@@ -983,23 +658,18 @@ class BuiltlyCorporatePDF(FPDF):
         yy = y + 10
         for item in items:
             self.set_xy(x + 8, yy)
-            self.cell(5, 5, chr(149), 0, 0)
+            self.cell(5, 5, "-", 0, 0)
             self.multi_cell(154, 5, clean_pdf_text(item))
             yy = self.get_y() + 1
         self.set_y(y + box_h + 3)
 
     def stats_row(self, stats):
-        if not stats:
-            return
-        self.ensure_space(24)
-        box_w = 41
-        gap = 2.5
-        x0 = 20
-        y = self.get_y()
+        if not stats: return
+        self.ensure_space(26)
+        box_w, gap, x0, y = 40, 3.3, 20, self.get_y()
         for idx, (label, value, class_code) in enumerate(stats):
             x = x0 + idx * (box_w + gap)
-            fill = CLASS_FILL.get(class_code, (245, 247, 249))
-            self.set_fill_color(*fill)
+            self.set_fill_color(*CLASS_FILL.get(class_code, (245, 247, 249)))
             self.set_draw_color(216, 220, 226)
             self.rounded_rect(x, y, box_w, 20, 3, "1234", "DF")
             self.set_xy(x, y + 3)
@@ -1010,14 +680,13 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_font("Helvetica", "", 7.8)
             self.set_text_color(75, 80, 87)
             self.multi_cell(box_w, 4, clean_pdf_text(label), 0, "C")
-        self.set_y(y + 23)
+        self.set_y(y + 24)
 
     def figure_image(self, image_path, width=82, caption=""):
         img = Image.open(image_path)
         height = width * (img.height / img.width)
-        self.ensure_space(height + 12)
-        x = self.get_x()
-        y = self.get_y()
+        self.ensure_space(height + 15)
+        x, y = self.get_x(), self.get_y()
         self.set_draw_color(219, 223, 228)
         self.rect(x, y, width, height)
         self.image(image_path, x=x, y=y, w=width)
@@ -1032,9 +701,8 @@ class BuiltlyCorporatePDF(FPDF):
     def table_image(self, img_path, width=170, caption=""):
         img = Image.open(img_path)
         height = width * (img.height / img.width)
-        self.ensure_space(height + 10)
-        x = 20
-        y = self.get_y()
+        self.ensure_space(height + 15)
+        x, y = 20, self.get_y()
         self.image(img_path, x=x, y=y, w=width)
         self.set_y(y + height + 2)
         if caption:
@@ -1042,8 +710,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_font("Helvetica", "I", 7.7)
             self.set_text_color(104, 109, 116)
             self.multi_cell(width, 4, clean_pdf_text(caption), 0, "L")
-        self.ln(3)
-
+        self.ln(6)
 
 
 def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_text):
@@ -1051,10 +718,8 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     pdf.set_draw_color(120, 124, 130)
     pdf.line(18, 18, 192, 18)
     if os.path.exists("logo.png"):
-        try:
-            pdf.image("logo.png", x=156, y=242, w=28)
-        except Exception:
-            pass
+        try: pdf.image("logo.png", x=156, y=242, w=28)
+        except: pass
 
     pdf.set_xy(20, 28)
     pdf.set_font("Helvetica", "", 11)
@@ -1070,31 +735,19 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     pdf.set_text_color(64, 68, 74)
     pdf.multi_cell(95, 7, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
 
-    meta_items = [
-        ("Oppdragsgiver", client or "-"),
-        ("Emne", "Geo & Miljø (RIG-M)"),
-        ("Dato / revisjon", datetime.now().strftime("%d.%m.%Y") + " / 01"),
-        ("Dokumentkode", "Builtly-RIGM-001"),
-    ]
     pdf.set_xy(118, 34)
-    pdf.kv_card(meta_items, x=118, width=64)
+    pdf.kv_card([("Oppdragsgiver", client or "-"), ("Emne", "Geo & Miljø (RIG-M)"), ("Dato / revisjon", datetime.now().strftime("%d.%m.%Y") + " / 01"), ("Dokumentkode", "Builtly-RIGM-001")], x=118, width=64)
 
     img_paths = []
     if recent_img:
-        try:
-            img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
-        except Exception:
-            pass
+        try: img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
+        except: pass
     if hist_img:
-        try:
-            img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
-        except Exception:
-            pass
+        try: img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
+        except: pass
 
     if img_paths:
-        y = 110
-        x_positions = [20, 106]
-        widths = [78, 78]
+        y, x_positions, widths = 110, [20, 106], [78, 78]
         for idx, (img_path, caption) in enumerate(img_paths[:2]):
             pdf.set_xy(x_positions[idx], y)
             pdf.figure_image(img_path, width=widths[idx], caption=caption)
@@ -1110,35 +763,13 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     pdf.set_xy(20, 214)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(
-        160,
-        4.5,
-        clean_pdf_text(
-            "Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."
-        ),
-    )
-
-
+    pdf.multi_cell(160, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIG-M AI på bakgrunn av prosjektdata, opplastet laboratoriemateriale og tilgjengelig kartgrunnlag. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før bruk i prosjektering, byggesak eller myndighetsdialog."))
 
 def build_toc_page(pdf, include_appendices=False):
     pdf.add_page()
     pdf.section_title("INNHOLDSFORTEGNELSE")
-    items = [
-        "1. Sammendrag og konklusjon",
-        "2. Innledning og prosjektbeskrivelse",
-        "3. Kartverket og historisk lokasjon",
-        "4. Utførte grunnundersøkelser",
-        "5. Resultater: grunnforhold og forurensning",
-        "6. Geotekniske vurderinger",
-        "7. Tiltaksplan og massehåndtering",
-    ]
-    if include_appendices:
-        items.extend(
-            [
-                "Vedlegg A. Sammenstilling av analyseresultater",
-                "Vedlegg B. Tilstandsklassegrenser (utdrag)",
-            ]
-        )
+    items = ["1. Sammendrag og konklusjon", "2. Innledning og prosjektbeskrivelse", "3. Kartverket og historisk lokasjon", "4. Utførte grunnundersøkelser", "5. Resultater: grunnforhold og forurensning", "6. Geotekniske vurderinger", "7. Tiltaksplan og massehåndtering"]
+    if include_appendices: items.extend(["Vedlegg A. Sammenstilling av analyseresultater", "Vedlegg B. Tilstandsklassegrenser (utdrag)"])
     pdf.set_font("Helvetica", "", 10.5)
     pdf.set_text_color(45, 49, 55)
     for item in items:
@@ -1150,33 +781,21 @@ def build_toc_page(pdf, include_appendices=False):
         pdf.line(22, y + 6, 188, y + 6)
         pdf.ln(8)
     pdf.ln(4)
-    pdf.highlight_box(
-        "Dokumentoppsett",
-        [
-            "Rapporten er bygget med tydelig seksjonshierarki, figurtekster og dedikerte tabellvedlegg for laboratoriedata.",
-            "Opplastede lab-data sammenstilles i egne analyseresultattabeller fremfor å ligge skjult som råtekst i brødteksten.",
-        ],
-    )
-
-
+    pdf.highlight_box("Dokumentoppsett", ["Rapporten er bygget med tydelig seksjonshierarki, figurtekster og dedikerte tabellvedlegg for laboratoriedata.", "Opplastede lab-data sammenstilles i egne analyseresultattabeller fremfor å ligge skjult som råtekst i brødteksten."])
 
 def render_maps(pdf, recent_img, hist_img, source_text):
     paths = []
-    if recent_img:
-        paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Figur 1. Nyere ortofoto. Kilde: {source_text}"))
-    if hist_img:
-        paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Figur 2. Historisk flyfoto"))
+    if recent_img: paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Figur 1. Nyere ortofoto. Kilde: {source_text}"))
+    if hist_img: paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Figur 2. Historisk flyfoto"))
     if not paths:
         pdf.highlight_box("Kartgrunnlag", ["Ingen kart- eller flyfoto ble lagt ved i denne genereringen."])
         return
-    widths = [82, 82]
-    y0 = pdf.get_y()
-    x_positions = [20, 108]
-    max_height = 0
+    
+    widths, x_positions, max_height = [82, 82], [20, 108], 0
     for idx, (img_path, caption) in enumerate(paths[:2]):
         img = Image.open(img_path)
-        h = widths[idx] * (img.height / img.width)
-        max_height = max(max_height, h)
+        max_height = max(max_height, widths[idx] * (img.height / img.width))
+    
     pdf.ensure_space(max_height + 18)
     start_y = pdf.get_y()
     for idx, (img_path, caption) in enumerate(paths[:2]):
@@ -1184,12 +803,8 @@ def render_maps(pdf, recent_img, hist_img, source_text):
         pdf.figure_image(img_path, width=widths[idx], caption=caption)
     pdf.set_y(start_y + max_height + 14)
 
-
-
 def render_ai_section_body(pdf, lines):
-    paragraph_buffer = []
-    bullet_buffer = []
-    first_para = True
+    paragraph_buffer, bullet_buffer, first_para, empty_line_count = [], [], True, 0
 
     def flush_paragraph():
         nonlocal paragraph_buffer, first_para
@@ -1203,9 +818,7 @@ def render_ai_section_body(pdf, lines):
     def flush_bullets():
         nonlocal bullet_buffer
         if bullet_buffer:
-            numbered = all(re.match(r"^\d+\.\s+", item.strip()) for item in bullet_buffer)
-            items = [strip_bullet(item) for item in bullet_buffer]
-            pdf.bullets(items, numbered=numbered)
+            pdf.bullets([strip_bullet(item) for item in bullet_buffer], numbered=all(re.match(r"^\d+\.\s+", item.strip()) for item in bullet_buffer))
         bullet_buffer = []
 
     for raw_line in lines:
@@ -1213,8 +826,10 @@ def render_ai_section_body(pdf, lines):
         if not line:
             flush_paragraph()
             flush_bullets()
-            pdf.add_spacer(1)
+            empty_line_count += 1
+            if empty_line_count == 1: pdf.ln(3) # Unngå evig lange blanke avsnitt (Fikser "Luften")
             continue
+        empty_line_count = 0
         if is_subheading_line(line):
             flush_paragraph()
             flush_bullets()
@@ -1230,316 +845,98 @@ def render_ai_section_body(pdf, lines):
     flush_paragraph()
     flush_bullets()
 
-
-
 def build_lab_summary_texts(lab_package):
     counts = lab_package.get("counts", {})
     summary_items = []
     if counts:
-        summary_items.append(f"Prøvepunkter i TK2 eller høyere: {counts.get('TK2', 0) + counts.get('TK3', 0) + counts.get('TK4', 0) + counts.get('TK5', 0) + counts.get('TK>5', 0)}")
-        summary_items.append(f"Prøvepunkter med høyeste nivå i TK3 eller høyere: {counts.get('TK3', 0) + counts.get('TK4', 0) + counts.get('TK5', 0) + counts.get('TK>5', 0)}")
+        summary_items.append(f"Prøvepunkter i TK2 eller høyere: {sum([counts.get(tk, 0) for tk in ['TK2', 'TK3', 'TK4', 'TK5', 'TK>5']])}")
+        summary_items.append(f"Prøvepunkter med høyeste nivå i TK3 eller høyere: {sum([counts.get(tk, 0) for tk in ['TK3', 'TK4', 'TK5', 'TK>5']])}")
         summary_items.append(f"Prøvepunkter med høyeste nivå i TK5 eller over: {counts.get('TK5', 0) + counts.get('TK>5', 0)}")
     if not lab_package.get("exceedance_df", pd.DataFrame()).empty:
-        first_rows = lab_package["exceedance_df"].head(3)
-        for _, row in first_rows.iterrows():
-            summary_items.append(
-                f"{row['Prøvepunkt']} ({row['Dybde (m)']} m): {row['Styrende parameter']} = {row['Styrende verdi']} ({row['Høyeste klasse']})."
-            )
+        for _, row in lab_package["exceedance_df"].head(3).iterrows():
+            summary_items.append(f"{row['Prøvepunkt']} ({row['Dybde (m)']} m): {row['Styrende parameter']} = {row['Styrende verdi']} ({row['Høyeste klasse']}).")
     return summary_items[:6]
-
-
 
 def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text, lab_package, project_data):
     pdf = BuiltlyCorporatePDF("P", "mm", "A4")
     pdf.set_auto_page_break(False)
     pdf.set_margins(18, 18, 18)
-    pdf.header_left = clean_pdf_text(project_data.get("p_name", name))
-    pdf.header_right = clean_pdf_text("Builtly | RIG-M")
-    pdf.doc_code = clean_pdf_text("Builtly-RIGM-001")
+    pdf.header_left, pdf.header_right, pdf.doc_code = clean_pdf_text(project_data.get("p_name", name)), clean_pdf_text("Builtly | RIG-M"), clean_pdf_text("Builtly-RIGM-001")
 
     build_cover_page(pdf, project_data, client, recent_img, hist_img, source_text)
-    include_appendices = not lab_package.get("excerpt_df", pd.DataFrame()).empty
-    build_toc_page(pdf, include_appendices=include_appendices)
+    build_toc_page(pdf, include_appendices=not lab_package.get("excerpt_df", pd.DataFrame()).empty)
 
-    sections = split_ai_sections(content)
-    if not sections:
-        sections = [{"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": [content]}]
+    sections = split_ai_sections(content) or [{"title": "1. SAMMENDRAG OG KONKLUSJON", "lines": [content]}]
 
-    for section in sections:
+    # DYNAMISK SIDEFLYTT (Fikser de halvtomme sidene!)
+    pdf.add_page()
+    for idx, section in enumerate(sections):
         title = section.get("title", "")
-        pdf.add_page()
+        
+        # Hvis det er et vedlegg, tvang-start på ny side, ellers la det flyte med sikret avstand
+        if title.startswith("Vedlegg"):
+            pdf.add_page()
+        elif idx > 0:
+            pdf.ensure_space(35)
+            if pdf.get_y() > 35: pdf.ln(8)
+
         pdf.section_title(title)
 
         if title.startswith("1."):
-            facts = [
-                ("Prosjekt", project_data.get("p_name", name)),
-                ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")),
-                ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") ,
-                ("Byggtype", project_data.get("b_type", "-")),
-                ("BTA", f"{project_data.get('bta', 0)} m2"),
-            ]
-            pdf.kv_card(facts, x=20, width=82, title="Prosjektgrunnlag")
-            data_basis = [
-                ("Kartgrunnlag", "Nyere + historisk" if recent_img and hist_img else "Delvis kartgrunnlag" if recent_img or hist_img else "Ikke vedlagt"),
-                ("Lab-data", "Opplastet" if not lab_package.get("source_overview_df", pd.DataFrame()).empty else "Ikke opplastet"),
-                ("Regelverk", project_data.get("land", "Norge")),
-            ]
-            prev_y = pdf.get_y()
-            pdf.set_xy(108, prev_y - 44 if prev_y > 70 else prev_y)
-            pdf.kv_card(data_basis, x=108, width=82, title="Datagrunnlag")
-            pdf.set_y(max(prev_y, pdf.get_y()) + 2)
-            summary_items = build_lab_summary_texts(lab_package)
-            if summary_items:
+            # Dynamisk plassering av side-by-side kort (Fikser overlapp/gap)
+            pdf.ensure_space(50)
+            start_y = pdf.get_y()
+            pdf.kv_card([("Prosjekt", project_data.get("p_name", name)), ("Lokasjon", f"{project_data.get('adresse', '')}, {project_data.get('kommune', '')}".strip(", ")), ("Gnr/Bnr", f"{project_data.get('gnr', '-')}/{project_data.get('bnr', '-')}") , ("Byggtype", project_data.get("b_type", "-")), ("BTA", f"{project_data.get('bta', 0)} m2")], x=20, width=82, title="Prosjektgrunnlag")
+            end_left = pdf.get_y()
+            
+            pdf.set_xy(108, start_y)
+            pdf.kv_card([("Kartgrunnlag", "Nyere + historisk" if recent_img and hist_img else "Delvis kartgrunnlag" if recent_img or hist_img else "Ikke vedlagt"), ("Lab-data", "Opplastet" if not lab_package.get("source_overview_df", pd.DataFrame()).empty else "Ikke opplastet"), ("Regelverk", project_data.get("land", "Norge"))], x=108, width=82, title="Datagrunnlag")
+            end_right = pdf.get_y()
+            
+            pdf.set_y(max(end_left, end_right) + 6)
+            
+            if summary_items := build_lab_summary_texts(lab_package):
                 pdf.highlight_box("Nøkkelfunn fra lab-data", summary_items)
+                pdf.ln(4)
 
-        if title.startswith("3."):
-            render_maps(pdf, recent_img, hist_img, source_text)
+        if title.startswith("3."): render_maps(pdf, recent_img, hist_img, source_text)
 
         if title.startswith("4.") and not lab_package.get("source_overview_df", pd.DataFrame()).empty:
-            source_table = render_table_image(
-                lab_package["source_overview_df"],
-                title="Opplastet analysegrunnlag",
-                subtitle="Maskinelt lest og strukturert for rapportering",
-                note="Tabellen viser hvilke kilder som faktisk ligger til grunn for vurderingene i denne genereringen.",
-            )
-            source_path = save_temp_image(source_table)
-            pdf.table_image(source_path, width=170, caption="Tabell 1. Oversikt over opplastet lab- og tabellgrunnlag.")
+            source_table = render_table_image(lab_package["source_overview_df"], title="Opplastet analysegrunnlag", subtitle="Maskinelt lest og strukturert for rapportering", note="Tabellen viser hvilke kilder som faktisk ligger til grunn for vurderingene i denne genereringen.")
+            pdf.table_image(save_temp_image(source_table), width=170, caption="Tabell 1. Oversikt over opplastet lab- og tabellgrunnlag.")
 
         render_ai_section_body(pdf, section.get("lines", []))
 
         if title.startswith("5.") and not lab_package.get("sample_summary_df", pd.DataFrame()).empty:
-            stats = [
-                ("TK1 / rene", lab_package.get("counts", {}).get("TK1", 0), "TK1"),
-                ("TK2", lab_package.get("counts", {}).get("TK2", 0), "TK2"),
-                ("TK3", lab_package.get("counts", {}).get("TK3", 0), "TK3"),
-                ("TK4-5", lab_package.get("counts", {}).get("TK4", 0) + lab_package.get("counts", {}).get("TK5", 0) + lab_package.get("counts", {}).get("TK>5", 0), "TK5"),
-            ]
-            pdf.stats_row(stats)
+            pdf.stats_row([("TK1 / rene", lab_package.get("counts", {}).get("TK1", 0), "TK1"), ("TK2", lab_package.get("counts", {}).get("TK2", 0), "TK2"), ("TK3", lab_package.get("counts", {}).get("TK3", 0), "TK3"), ("TK4-5", sum([lab_package.get("counts", {}).get(tk, 0) for tk in ["TK4", "TK5", "TK>5"]]), "TK5")])
 
             if not lab_package.get("exceedance_df", pd.DataFrame()).empty:
-                top_table = render_table_image(
-                    lab_package["exceedance_df"].head(12),
-                    title="Høyeste påviste nivå per prøvepunkt",
-                    subtitle="Styrende parameter og klassifisering",
-                    row_class_column="Høyeste klasse",
-                    note="Radfarge følger høyeste registrerte tilstandsklasse per prøvepunkt.",
-                )
-                top_path = save_temp_image(top_table)
-                pdf.table_image(top_path, width=170, caption="Tabell 2. Sammendrag av styrende funn i opplastet laboratoriedata.")
+                top_table = render_table_image(lab_package["exceedance_df"].head(12), title="Høyeste påviste nivå per prøvepunkt", subtitle="Styrende parameter og klassifisering", row_class_column="Høyeste klasse", note="Radfarge følger høyeste registrerte tilstandsklasse per prøvepunkt.")
+                pdf.table_image(save_temp_image(top_table), width=170, caption="Tabell 2. Sammendrag av styrende funn i opplastet laboratoriedata.")
 
-            excerpt_df = lab_package.get("excerpt_df", pd.DataFrame())
-            if not excerpt_df.empty:
+            if not (excerpt_df := lab_package.get("excerpt_df", pd.DataFrame())).empty:
                 preview = excerpt_df.head(12).copy()
-                preview_img = render_table_image(
-                    preview,
-                    title="Analyseresultater og massebeskrivelser (utdrag)",
-                    subtitle="Fremstilt som rapporttabell i stedet for rå tekstutskrift",
-                    row_class_column="Høyeste klasse" if "Høyeste klasse" in preview.columns else None,
-                    cell_fill_lookup={
-                        (ridx, col): fill
-                        for (ridx, col), fill in lab_package.get("cell_fill_lookup", {}).items()
-                        if ridx < len(preview)
-                    },
-                    note="Celler med farge markerer klassifiserte analyseresultater for de mest styrende parameterne.",
-                )
-                preview_path = save_temp_image(preview_img)
-                pdf.table_image(preview_path, width=170, caption="Tabell 3. Laboratoriedata presentert i vedleggsformat med klassifiserte nøkkelparametere.")
+                preview_img = render_table_image(preview, title="Analyseresultater og massebeskrivelser (utdrag)", subtitle="Fremstilt som rapporttabell i stedet for rå tekstutskrift", row_class_column="Høyeste klasse" if "Høyeste klasse" in preview.columns else None, cell_fill_lookup={(ridx, col): fill for (ridx, col), fill in lab_package.get("cell_fill_lookup", {}).items() if ridx < len(preview)}, note="Celler med farge markerer klassifiserte analyseresultater for de mest styrende parameterne.")
+                pdf.table_image(save_temp_image(preview_img), width=170, caption="Tabell 3. Laboratoriedata presentert i vedleggsformat med klassifiserte nøkkelparametere.")
 
-    excerpt_df = lab_package.get("excerpt_df", pd.DataFrame())
-    if not excerpt_df.empty:
+    if not (excerpt_df := lab_package.get("excerpt_df", pd.DataFrame())).empty:
         chunks = split_dataframe(excerpt_df, 12)
         for idx, chunk in enumerate(chunks, start=1):
             pdf.add_page()
             pdf.section_title(f"Vedlegg A. Sammenstilling av analyseresultater ({idx}/{len(chunks)})")
-            lookup = {
-                (ridx, col): fill
-                for (ridx, col), fill in lab_package.get("cell_fill_lookup", {}).items()
-                if ridx >= (idx - 1) * 12 and ridx < idx * 12
-            }
-            adjusted_lookup = {
-                (ridx - ((idx - 1) * 12), col): fill for (ridx, col), fill in lookup.items()
-            }
-            raw_img = render_table_image(
-                chunk.reset_index(drop=True),
-                title="Vedleggstabell - analyseresultater",
-                subtitle="Opplastet lab-data i rapportvennlig vedleggsformat",
-                row_class_column="Høyeste klasse" if "Høyeste klasse" in chunk.columns else None,
-                cell_fill_lookup=adjusted_lookup,
-                note="Utvalgte analyttkolonner er beholdt for å gjøre vedlegget lesbart i A4-format.",
-            )
-            raw_path = save_temp_image(raw_img)
-            pdf.table_image(raw_path, width=170, caption=f"Vedlegg A{idx}. Strukturert tabellutdrag fra opplastet laboratoriedata.")
+            raw_img = render_table_image(chunk.reset_index(drop=True), title="Vedleggstabell - analyseresultater", subtitle="Opplastet lab-data i rapportvennlig vedleggsformat", row_class_column="Høyeste klasse" if "Høyeste klasse" in chunk.columns else None, cell_fill_lookup={(ridx - ((idx - 1) * 12), col): fill for (ridx, col), fill in {(r, c): f for (r, c), f in lab_package.get("cell_fill_lookup", {}).items() if r >= (idx - 1) * 12 and r < idx * 12}.items()}, note="Utvalgte analyttkolonner er beholdt for å gjøre vedlegget lesbart i A4-format.")
+            pdf.table_image(save_temp_image(raw_img), width=170, caption=f"Vedlegg A{idx}. Strukturert tabellutdrag fra opplastet laboratoriedata.")
 
-    threshold_df = lab_package.get("threshold_df", pd.DataFrame())
-    if threshold_df is not None and not threshold_df.empty:
+    if not (threshold_df := lab_package.get("threshold_df", pd.DataFrame())).empty:
         pdf.add_page()
         pdf.section_title("Vedlegg B. Tilstandsklassegrenser (utdrag)")
-        threshold_img = render_table_image(
-            threshold_df,
-            title="Tilstandsklassegrenser brukt i klassifisering",
-            subtitle="Utvalgte parametere fra opplastet vedlegg",
-            row_class_column="Klasse",
-            note="Grenseverdiene er brukt til å markere relevante analyttceller i tabellene over.",
-        )
-        threshold_path = save_temp_image(threshold_img)
-        pdf.table_image(threshold_path, width=165, caption="Vedlegg B. Utdrag av tilstandsklassegrenser for sentrale analyttgrupper.")
+        threshold_img = render_table_image(threshold_df, title="Tilstandsklassegrenser brukt i klassifisering", subtitle="Utvalgte parametere fra opplastet vedlegg", row_class_column="Klasse", note="Grenseverdiene er brukt til å markere relevante analyttceller i tabellene over.")
+        pdf.table_image(save_temp_image(threshold_img), width=165, caption="Vedlegg B. Utdrag av tilstandsklassegrenser for sentrale analyttgrupper.")
 
     out = pdf.output(dest="S")
-    if isinstance(out, (bytes, bytearray)):
-        return bytes(out)
-    return out.encode("latin-1")
+    return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
 
-
-# --- 2. PREMIUM CSS (SAMME SOM PROJECT & BRANN) ---
-st.markdown(
-    """
-<style>
-    :root {
-        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
-        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
-        --accent: #38bdf8; --radius-lg: 16px; --radius-xl: 24px;
-    }
-    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
-    .stApp { background-color: var(--bg) !important; color: var(--text); }
-    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
-    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
-
-    .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-
-    .top-shell { margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; }
-
-    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; border: none !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; transition: all 0.2s ease !important; }
-    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important; }
-    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; transition: all 0.2s; }
-    button[kind="secondary"]:hover { background-color: rgba(56,194,201,0.1) !important; border-color: var(--accent) !important; color: var(--accent) !important; transform: translateY(-2px) !important;}
-
-    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
-    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus { border: none !important; }
-    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within { border-color: var(--accent) !important; box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important; }
-    ul[data-baseweb="menu"] { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
-    ul[data-baseweb="menu"] li { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; }
-    ul[data-baseweb="menu"] li:hover { background-color: rgba(56, 194, 201, 0.1) !important; }
-    div[data-testid="InputInstructions"], div[data-testid="InputInstructions"] > span { color: #9fb0c3 !important; -webkit-text-fill-color: #9fb0c3 !important; }
-    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label { color: #c8d3df !important; font-weight: 600 !important; font-size: 0.95rem !important; margin-bottom: 4px !important; }
-
-    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
-    div[data-testid="stExpander"] details summary:hover { background-color: rgba(255,255,255,0.03) !important; }
-    div[data-testid="stExpander"] details summary p { color: #f5f7fb !important; font-weight: 650 !important; }
-    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
-    div[data-testid="stExpanderDetails"] { background: transparent !important; color: #f5f7fb !important; }
-    div[data-testid="stExpanderDetails"] > div > div > div { background-color: transparent !important; }
-
-    [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; padding: 2rem !important; }
-    [data-testid="stFileUploaderDropzone"]:hover { border-color: #38c2c9 !important; background-color: rgba(56, 194, 201, 0.05) !important; }
-    [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
-    [data-testid="stFileUploaderFileData"] { background-color: rgba(255,255,255,0.02) !important; color: #f5f7fb !important; border-radius: 8px !important;}
-    [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.05) !important; border: 1px solid rgba(56, 194, 201, 0.2) !important; border-radius: 12px !important; }
-    [data-testid="stAlert"] * { color: #f5f7fb !important; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# --- 3. SESSION STATE LOGIKK ---
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {
-        "p_name": "",
-        "c_name": "",
-        "p_desc": "",
-        "adresse": "",
-        "kommune": "",
-        "gnr": "",
-        "bnr": "",
-        "b_type": "Næring",
-        "etasjer": 1,
-        "bta": 0,
-        "land": "Norge",
-    }
-if "geo_maps" not in st.session_state:
-    st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
-if "project_images" not in st.session_state:
-    st.session_state.project_images = []
-
-if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    st.warning("⚠️ **Handling kreves:** Du må sette opp prosjektdataen før du kan bruke denne modulen.")
-    if find_page("Project"):
-        if st.button("⚙️ Gå til Project Setup", type="primary"):
-            st.switch_page(find_page("Project"))
-    st.stop()
-
-# --- 4. HEADER ---
-top_l, top_r = st.columns([4, 1])
-with top_l:
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
-    render_html(logo_html)
-with top_r:
-    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
-    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
-        st.switch_page(find_page("Project"))
-
-st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-pd_state = st.session_state.project_data
-
-
-# --- 5. KARTVERKET + GOOGLE MAPS FALLBACK ---
-def fetch_kartverket_og_google(adresse, kommune, gnr, bnr, api_key):
-    nord, ost = None, None
-    adr_clean = adresse.replace(",", "").strip() if adresse else ""
-    kom_clean = kommune.replace(",", "").strip() if kommune else ""
-
-    queries = []
-    if adr_clean and kom_clean:
-        queries.append(f"{adr_clean} {kom_clean}")
-    if adr_clean:
-        queries.append(adr_clean)
-    if gnr and bnr and kom_clean:
-        queries.append(f"{kom_clean} {gnr}/{bnr}")
-
-    for q in queries:
-        safe_query = urllib.parse.quote(q)
-        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
-        try:
-            resp = requests.get(url, timeout=4)
-            if resp.status_code == 200 and resp.json().get("adresser"):
-                hit = resp.json()["adresser"][0]
-                nord = hit.get("representasjonspunkt", {}).get("nord")
-                ost = hit.get("representasjonspunkt", {}).get("øst")
-                break
-        except Exception:
-            pass
-
-    if nord and ost:
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
-        url_orto = (
-            "https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1"
-            f"&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
-        )
-        try:
-            r1 = requests.get(url_orto, timeout=5)
-            if r1.status_code == 200 and len(r1.content) > 5000:
-                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket (Norge i Bilder)"
-        except Exception:
-            pass
-
-    if api_key and (adr_clean or kom_clean):
-        query = f"{adr_clean}, {kom_clean}, Norway"
-        safe_query = urllib.parse.quote(query)
-        url_gmaps = f"https://maps.googleapis.com/maps/api/staticmap?center={safe_query}&zoom=19&size=600x600&maptype=satellite&key={api_key}"
-        try:
-            r2 = requests.get(url_gmaps, timeout=5)
-            if r2.status_code == 200:
-                return Image.open(io.BytesIO(r2.content)).convert("RGB"), "Google Maps Satellite"
-        except Exception:
-            pass
-
-    return None, "Kunne ikke hente kart."
-
-
-# --- 8. UI FOR GEO MODUL ---
+# --- 7. UI OG RESTERENDE KODE (BEHOLDES UENDRET FRA FORRIGE) ---
 st.markdown("<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
 st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent for miljøteknisk grunnundersøkelse og tiltaksplan.</p>", unsafe_allow_html=True)
 
