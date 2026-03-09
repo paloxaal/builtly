@@ -189,90 +189,434 @@ def extract_drill_data(files):
     return extracted_text if extracted_text else "Ingen Excel/CSV-data ble lastet opp."
 
 # --- 7. DYNAMISK PDF MOTOR FOR GEO (Fikset for JPEG/RGB) ---
+
+
+def canonical_label(text):
+    text = clean_pdf_text(text or "")
+    text = text.strip().strip(':').strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text.upper()
+
+
+def split_short_label(text, known_labels=None):
+    work = (text or "").strip()
+    if work.startswith('- ') or work.startswith('* '):
+        work = work[2:].strip()
+    if ':' not in work:
+        return None
+    label, value = work.split(':', 1)
+    label = label.strip()
+    value = value.strip()
+    if not label or not value:
+        return None
+    if len(label) > 42 or len(label.split()) > 5:
+        return None
+    canon = canonical_label(label)
+    if known_labels and canon in known_labels:
+        return label.rstrip(':'), value
+    if re.match(r'^[A-Za-z0-9ÆØÅæøå /()\-]+$', label):
+        return label.rstrip(':'), value
+    return None
+
+
 class BuiltlyProPDF(FPDF):
     def header(self):
         if self.page_no() > 1:
-            self.set_y(15); self.set_font('Helvetica', 'B', 10); self.set_text_color(26, 43, 72)
+            self.set_y(15)
+            self.set_font('Helvetica', 'B', 10)
+            self.set_text_color(26, 43, 72)
             self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: RIG-M-001"), 0, 1, 'R')
-            self.set_draw_color(200, 200, 200); self.line(25, 25, 185, 25); self.set_y(30)
+            self.set_draw_color(200, 200, 200)
+            self.line(25, 25, 185, 25)
+            self.set_y(30)
+
     def footer(self):
-        self.set_y(-15); self.set_font('Helvetica', 'I', 8); self.set_text_color(150, 150, 150)
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.set_text_color(150, 150, 150)
         self.cell(0, 10, clean_pdf_text(f'UTKAST - KREVER FAGLIG KONTROLL | Side {self.page_no()}'), 0, 0, 'C')
+
     def check_space(self, height):
-        if self.get_y() + height > 270: 
-            self.add_page(); self.set_margins(25, 25, 25); self.set_x(25)
+        if self.get_y() + height > 270:
+            self.add_page()
+            self.set_margins(25, 25, 25)
+            self.set_x(25)
+
+    def draw_rule(self, y=None, x1=25, x2=185, color=(224, 228, 233), width=0.2):
+        if y is None:
+            y = self.get_y()
+        self.set_draw_color(*color)
+        self.set_line_width(width)
+        self.line(x1, y, x2, y)
+        self.set_line_width(0.2)
+
+    def draw_section_heading(self, text, level=1):
+        text = clean_pdf_text(text.replace('#', '').strip())
+        if level == 1:
+            self.check_space(18)
+            self.ln(8)
+            self.set_x(25)
+            self.set_font('Helvetica', 'B', 14)
+            self.set_text_color(26, 43, 72)
+            self.multi_cell(0, 7, text)
+            y = self.get_y() + 0.8
+            self.draw_rule(y=y, x1=25, x2=58, color=(76, 100, 133), width=0.6)
+            self.ln(4)
+        else:
+            self.check_space(14)
+            self.ln(5)
+            self.set_x(25)
+            self.set_font('Helvetica', 'B', 11.5)
+            self.set_text_color(54, 69, 92)
+            self.multi_cell(0, 6, text.upper())
+            self.ln(1.5)
+
+    def draw_topic_heading(self, text):
+        text = clean_pdf_text(text.strip())
+        self.check_space(14)
+        if self.get_y() > 55:
+            self.draw_rule(y=self.get_y() + 1.5, x1=25, x2=185, color=(232, 235, 239), width=0.2)
+            self.ln(6)
+        self.set_x(25)
+        self.set_font('Helvetica', 'B', 12)
+        self.set_text_color(50, 65, 85)
+        self.multi_cell(0, 6, text)
+        self.ln(1.5)
+
+    def draw_bullet(self, x, y, size=1.35, color=(56, 70, 92)):
+        self.set_fill_color(*color)
+        self.rect(x, y, size, size, 'F')
+
+    def draw_meta_row(self, label, value, with_bullet=False):
+        label = clean_pdf_text(label.rstrip(':').strip() + ':')
+        value = clean_pdf_text(value.strip())
+        self.check_space(10)
+        base_x = 25
+        if with_bullet:
+            self.draw_bullet(base_x + 0.6, self.get_y() + 2.2, size=1.2, color=(105, 123, 148))
+            base_x += 5
+        label_w = min(max(self.get_string_width(label) + 6, 30), 62)
+        self.set_x(base_x)
+        self.set_font('Helvetica', 'B', 9.3)
+        self.set_text_color(55, 68, 90)
+        self.cell(label_w, 5.5, label, 0, 0)
+        self.set_text_color(40, 40, 40)
+        self.set_font('Helvetica', '', 10)
+        self.multi_cell(185 - base_x - label_w, 5.5, value)
+        self.ln(0.8)
+
+    def draw_field_block(self, label, value):
+        label = canonical_label(label)
+        value = clean_pdf_text(value.strip())
+        if not value:
+            return
+        self.check_space(14)
+        chip_w = min(max(self.get_string_width(label) + 6, 22), 60)
+        self.set_x(25)
+        self.set_fill_color(236, 241, 246)
+        self.set_text_color(104, 122, 145)
+        self.set_font('Helvetica', 'B', 7.6)
+        self.cell(chip_w, 5.2, label, 0, 1, 'C', True)
+        self.ln(1.0)
+        self.set_x(31)
+        self.set_font('Helvetica', '', 10)
+        self.set_text_color(40, 40, 40)
+        self.multi_cell(154, 5.25, value)
+        self.ln(2.0)
+
+    def draw_bullet_item(self, text):
+        text = clean_pdf_text(text.strip())
+        if not text:
+            return
+        self.check_space(8)
+        bullet_x = 29
+        y = self.get_y() + 2.2
+        self.draw_bullet(bullet_x, y, size=1.2, color=(92, 108, 130))
+        self.set_x(34)
+        self.set_font('Helvetica', '', 10)
+        self.set_text_color(40, 40, 40)
+        self.multi_cell(151, 5.25, text)
+        self.ln(0.8)
+
+    def draw_paragraph(self, text):
+        text = clean_pdf_text(text.strip())
+        if not text:
+            return
+        self.check_space(8)
+        self.set_x(25)
+        self.set_font('Helvetica', '', 10)
+        self.set_text_color(40, 40, 40)
+        self.multi_cell(160, 5.35, text)
+        self.ln(1.2)
+
+    def draw_cover_meta_items(self, items):
+        for label, value in items:
+            self.draw_meta_row(label.rstrip(':'), value, with_bullet=False)
+
+
+def render_report_body(pdf, content, field_labels=None, metadata_sections=None):
+    field_labels = {canonical_label(x) for x in (field_labels or [])}
+    metadata_sections = {canonical_label(x) for x in (metadata_sections or [])}
+    current_section = ""
+    lines = [ironclad_text_formatter(x) for x in content.split('\n')]
+    i = 0
+
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        if not line:
+            pdf.ln(2)
+            i += 1
+            continue
+
+        safe = line.replace('**', '').replace('_', '').strip()
+        canon = canonical_label(safe)
+
+        if safe.startswith('# ') or re.match(r'^\d+\.\s', safe):
+            current_section = canonical_label(re.sub(r'^#+\s*', '', safe))
+            pdf.draw_section_heading(re.sub(r'^#+\s*', '', safe), level=1)
+            i += 1
+            continue
+
+        if safe.startswith('## ') or safe.startswith('### '):
+            pdf.draw_section_heading(re.sub(r'^#+\s*', '', safe), level=2)
+            i += 1
+            continue
+
+        if canon in field_labels and len(canon.split()) <= 4:
+            value_parts = []
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    if value_parts:
+                        break
+                    j += 1
+                    continue
+                nxt_safe = nxt.replace('**', '').replace('_', '').strip()
+                nxt_canon = canonical_label(nxt_safe)
+                if nxt_safe.startswith('#') or re.match(r'^\d+\.\s', nxt_safe):
+                    break
+                if nxt_safe.startswith('## ') or nxt_safe.startswith('### '):
+                    break
+                if nxt_canon in field_labels:
+                    break
+                if nxt_safe.startswith('- ') or nxt_safe.startswith('* '):
+                    if value_parts:
+                        break
+                value_parts.append(nxt_safe)
+                j += 1
+            if value_parts:
+                pdf.draw_field_block(canon, ' '.join(value_parts))
+                i = j
+                continue
+
+        short = split_short_label(safe, known_labels=field_labels)
+        if short:
+            label, value = short
+            if current_section in metadata_sections:
+                pdf.draw_meta_row(label, value, with_bullet=False)
+            elif canonical_label(label) in field_labels:
+                pdf.draw_field_block(label, value)
+            else:
+                pdf.draw_meta_row(label, value, with_bullet=safe.startswith('- ') or safe.startswith('* '))
+            i += 1
+            continue
+
+        if (safe.upper() == safe and len(safe) <= 85 and len(safe.split()) <= 10 and not safe.endswith(':')
+                and canon not in field_labels and not re.match(r'^[A-Z0-9]+$', safe)):
+            pdf.draw_topic_heading(safe)
+            i += 1
+            continue
+
+        if safe.startswith('- ') or safe.startswith('* '):
+            pdf.draw_bullet_item(safe[2:])
+            i += 1
+            continue
+
+        pdf.draw_paragraph(safe)
+        i += 1
+
 
 def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text):
     pdf = BuiltlyProPDF()
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
-    
+
     pdf.add_page()
-    if os.path.exists("logo.png"): pdf.image("logo.png", x=25, y=20, w=50)
-    pdf.set_y(100); pdf.set_font('Helvetica', 'B', 24); pdf.set_text_color(26, 43, 72)
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=25, y=20, w=50)
+
+    pdf.set_y(100)
+    pdf.set_font('Helvetica', 'B', 24)
+    pdf.set_text_color(26, 43, 72)
     pdf.cell(0, 15, clean_pdf_text("GEOTEKNISK & MILJØTEKNISK RAPPORT"), 0, 1, 'L')
-    pdf.set_font('Helvetica', '', 16); pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L'); pdf.ln(30)
-    
-    metadata = [("OPPDRAGSGIVER:", client), ("DATO:", datetime.now().strftime("%d. %m. %Y")), ("UTARBEIDET AV:", "Builtly RIG-M AI Engine"), ("REGELVERK:", pd_state.get('land', 'Ukjent'))]
-    for l, v in metadata:
-        pdf.set_x(25); pdf.set_font('Helvetica', 'B', 10); pdf.cell(50, 8, clean_pdf_text(l), 0, 0)
-        pdf.set_font('Helvetica', '', 10); pdf.cell(0, 8, clean_pdf_text(v), 0, 1)
+    pdf.set_font('Helvetica', '', 16)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, clean_pdf_text(f"INKLUDERT TILTAKSPLAN: {pdf.p_name}"), 0, 1, 'L')
+    pdf.ln(30)
 
-    pdf.add_page(); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 16); pdf.set_text_color(26, 43, 72)
-    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1); pdf.ln(5)
-    toc = ["1. SAMMENDRAG OG KONKLUSJON", "2. INNLEDNING OG PROSJEKTBESKRIVELSE", "3. KARTVERKET OG HISTORISK LOKASJON", "4. UTFØRTE GRUNNUNDERSØKELSER", "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING", "6. GEOTEKNISKE VURDERINGER", "7. TILTAKSPLAN OG MASSEHÅNDTERING"]
-    pdf.set_font('Helvetica', '', 11); pdf.set_text_color(0, 0, 0)
-    for t in toc:
-        pdf.set_x(25); pdf.cell(0, 10, clean_pdf_text(t), 0, 1); pdf.set_draw_color(220, 220, 220); pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+    pdf.draw_cover_meta_items([
+        ("OPPDRAGSGIVER:", client),
+        ("DATO:", datetime.now().strftime("%d. %m. %Y")),
+        ("UTARBEIDET AV:", "Builtly RIG-M AI Engine"),
+        ("REGELVERK:", pd_state.get('land', 'Ukjent'))
+    ])
 
     pdf.add_page()
-    for raw_line in content.split('\n'):
-        line = raw_line.strip()
-        if not line: pdf.ln(4); continue
-            
-        if line.startswith('# 3. KARTVERKET'):
-            pdf.check_space(180); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(4)
-            
-            # Kartbilder med JPEG konvertering for sikker utskrift
+    pdf.set_x(25)
+    pdf.set_font('Helvetica', 'B', 16)
+    pdf.set_text_color(26, 43, 72)
+    pdf.cell(0, 20, "INNHOLDSFORTEGNELSE", 0, 1)
+    pdf.ln(5)
+    toc = [
+        "1. SAMMENDRAG OG KONKLUSJON",
+        "2. INNLEDNING OG PROSJEKTBESKRIVELSE",
+        "3. KARTVERKET OG HISTORISK LOKASJON",
+        "4. UTFØRTE GRUNNUNDERSØKELSER",
+        "5. RESULTATER: GRUNNFORHOLD OG FORURENSNING",
+        "6. GEOTEKNISKE VURDERINGER",
+        "7. TILTAKSPLAN OG MASSEHÅNDTERING"
+    ]
+    for t in toc:
+        pdf.set_x(25)
+        pdf.set_font('Helvetica', '', 11)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, clean_pdf_text(t), 0, 1)
+        pdf.set_draw_color(220, 220, 220)
+        pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+
+    field_labels = {
+        canonical_label(x) for x in [
+            "Dokumenttittel", "Prosjekt", "Lokasjon", "Dato", "Utarbeidet av",
+            "Tema", "Vurdering", "Risiko", "Tiltak", "Anbefaling", "Kapasitet",
+            "Mål", "Fase", "Ansvarlig", "Indikator", "Kontroll", "Avvikshåndtering"
+        ]
+    }
+    metadata_sections = {canonical_label("1. SAMMENDRAG OG KONKLUSJON")}
+
+    pdf.add_page()
+    current_section = ""
+    lines = [ironclad_text_formatter(x) for x in content.split('\n')]
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+        if not line:
+            pdf.ln(2)
+            i += 1
+            continue
+
+        safe = line.replace('**', '').replace('_', '').strip()
+        canon = canonical_label(safe)
+
+        if safe.startswith('# 3. KARTVERKET') or canon.startswith('3. KARTVERKET OG HISTORISK LOKASJON'):
+            current_section = canonical_label(re.sub(r'^#+\s*', '', safe))
+            pdf.draw_section_heading(re.sub(r'^#+\s*', '', safe), level=1)
+            pdf.check_space(95)
+            y_pos = pdf.get_y() + 1
             if recent_img and hist_img:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t1, tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t2:
-                    recent_img.convert("RGB").save(t1.name, format="JPEG"); hist_img.convert("RGB").save(t2.name, format="JPEG")
-                    y_pos = pdf.get_y()
-                    pdf.image(t1.name, x=25, y=y_pos, w=75); pdf.image(t2.name, x=110, y=y_pos, w=75)
-                    pdf.set_y(y_pos + 75 * (recent_img.height / recent_img.width) + 5)
-                    pdf.set_font('Helvetica', 'I', 8); pdf.set_text_color(100, 100, 100); pdf.set_x(25)
-                    pdf.cell(75, 5, clean_pdf_text(f"Fig 1: Nyere ({source_text})"), 0, 0, 'C'); pdf.set_x(110); pdf.cell(75, 5, clean_pdf_text("Fig 2: Historisk"), 0, 1, 'C'); pdf.ln(5)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as t1, tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as t2:
+                    recent_img.convert('RGB').save(t1.name, format='JPEG', quality=90)
+                    hist_img.convert('RGB').save(t2.name, format='JPEG', quality=90)
+                    pdf.image(t1.name, x=25, y=y_pos, w=75)
+                    pdf.image(t2.name, x=110, y=y_pos, w=75)
+                    img_h = 75 * (recent_img.height / recent_img.width)
+                    pdf.set_y(y_pos + img_h + 5)
+                    pdf.set_font('Helvetica', 'I', 8)
+                    pdf.set_text_color(100, 100, 100)
+                    pdf.set_x(25)
+                    pdf.cell(75, 5, clean_pdf_text(f"Figur 1: Nyere ({source_text})"), 0, 0, 'C')
+                    pdf.set_x(110)
+                    pdf.cell(75, 5, clean_pdf_text("Figur 2: Historisk"), 0, 1, 'C')
+                    pdf.ln(4)
             elif recent_img:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t1:
-                    recent_img.convert("RGB").save(t1.name, format="JPEG")
-                    pdf.image(t1.name, x=45, y=pdf.get_y(), w=120)
-                    pdf.set_y(pdf.get_y() + 120 * (recent_img.height / recent_img.width) + 5)
-                    pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(100, 100, 100); pdf.set_x(25); pdf.cell(0, 5, clean_pdf_text(f"Figur 1: Kartgrunnlag. Kilde: {source_text}"), 0, 1, 'C'); pdf.ln(5)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as t1:
+                    recent_img.convert('RGB').save(t1.name, format='JPEG', quality=90)
+                    img_w = 120
+                    img_h = img_w * (recent_img.height / recent_img.width)
+                    pdf.image(t1.name, x=45, y=y_pos, w=img_w)
+                    pdf.set_y(y_pos + img_h + 5)
+                    pdf.set_font('Helvetica', 'I', 9)
+                    pdf.set_text_color(100, 100, 100)
+                    pdf.cell(0, 5, clean_pdf_text(f"Figur 1: Kartgrunnlag. Kilde: {source_text}"), 0, 1, 'C')
+                    pdf.ln(4)
             else:
-                pdf.set_font('Helvetica', 'I', 9); pdf.set_text_color(150, 0, 0); pdf.set_x(25); pdf.cell(0, 5, f"Merknad: Intet kartgrunnlag er innhentet.", 0, 1, 'L'); pdf.ln(5)
-            pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0); continue
-            
-        elif line.startswith('# ') or re.match(r'^\d\.\s[A-Z]', line):
-            pdf.check_space(30); pdf.ln(8); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 14); pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.ln(2); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        elif line.startswith('##'):
-            pdf.check_space(20); pdf.ln(6); pdf.set_x(25); pdf.set_font('Helvetica', 'B', 12); pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace('#', '').strip())); pdf.set_font('Helvetica', '', 10); pdf.set_text_color(0, 0, 0)
-        else:
-            pdf.set_font('Helvetica', '', 10)
-            safe_text = ironclad_text_formatter(line)
-            if safe_text.strip() == "": continue
-            try:
-                if safe_text.startswith('- ') or safe_text.startswith('* '):
-                    pdf.set_x(30); pdf.multi_cell(145, 5, safe_text); pdf.set_x(25)
-                else:
-                    pdf.set_x(25); pdf.multi_cell(150, 5, safe_text)
-            except Exception: pdf.ln(2)
-                
+                pdf.set_font('Helvetica', 'I', 9)
+                pdf.set_text_color(150, 0, 0)
+                pdf.cell(0, 5, clean_pdf_text("Merknad: Intet kartgrunnlag er innhentet."), 0, 1, 'L')
+                pdf.ln(4)
+            i += 1
+            continue
+
+        if safe.startswith('# ') or re.match(r'^\d+\.\s', safe):
+            current_section = canonical_label(re.sub(r'^#+\s*', '', safe))
+            pdf.draw_section_heading(re.sub(r'^#+\s*', '', safe), level=1)
+            i += 1
+            continue
+
+        if safe.startswith('## ') or safe.startswith('### '):
+            pdf.draw_section_heading(re.sub(r'^#+\s*', '', safe), level=2)
+            i += 1
+            continue
+
+        if canon in field_labels and len(canon.split()) <= 4:
+            value_parts = []
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt:
+                    if value_parts:
+                        break
+                    j += 1
+                    continue
+                nxt_safe = nxt.replace('**', '').replace('_', '').strip()
+                nxt_canon = canonical_label(nxt_safe)
+                if nxt_safe.startswith('#') or re.match(r'^\d+\.\s', nxt_safe):
+                    break
+                if nxt_safe.startswith('## ') or nxt_safe.startswith('### '):
+                    break
+                if nxt_canon in field_labels:
+                    break
+                if nxt_safe.startswith('- ') or nxt_safe.startswith('* '):
+                    if value_parts:
+                        break
+                value_parts.append(nxt_safe)
+                j += 1
+            if value_parts:
+                pdf.draw_field_block(canon, ' '.join(value_parts))
+                i = j
+                continue
+
+        short = split_short_label(safe, known_labels=field_labels)
+        if short:
+            label, value = short
+            if current_section in metadata_sections:
+                pdf.draw_meta_row(label, value, with_bullet=False)
+            elif canonical_label(label) in field_labels:
+                pdf.draw_field_block(label, value)
+            else:
+                pdf.draw_meta_row(label, value, with_bullet=safe.startswith('- ') or safe.startswith('* '))
+            i += 1
+            continue
+
+        if (safe.upper() == safe and len(safe) <= 85 and len(safe.split()) <= 10 and not safe.endswith(':')
+                and canon not in field_labels and not re.match(r'^[A-Z0-9]+$', safe)):
+            pdf.draw_topic_heading(safe)
+            i += 1
+            continue
+
+        if safe.startswith('- ') or safe.startswith('* '):
+            pdf.draw_bullet_item(safe[2:])
+            i += 1
+            continue
+
+        pdf.draw_paragraph(safe)
+        i += 1
+
     return bytes(pdf.output(dest='S'))
+
 
 # --- 8. UI FOR GEO MODUL ---
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🌍 Geo & Miljø (RIG-M)</h1>", unsafe_allow_html=True)
