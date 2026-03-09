@@ -757,7 +757,8 @@ def render_maps(pdf, recent_img, hist_img, source_text):
         img = Image.open(img_path)
         max_height = max(max_height, widths[idx] * (img.height / img.width))
     
-    pdf.ensure_space(max_height + 18)
+    # VIKTIG FIKS: Vi flytter hele seksjonen med overskrift og kart til ny side hvis det ikke er plass til begge
+    pdf.ensure_space(max_height + 35) 
     start_y = pdf.get_y()
     for idx, (img_path, caption) in enumerate(paths[:2]):
         pdf.set_xy(x_positions[idx], start_y)
@@ -840,6 +841,10 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
             pdf.add_page()
         elif idx > 0:
             if pdf.get_y() > 30: pdf.ln(6) # Pustepause mellom kapittel
+
+        # Spesialhåndtering for Kapittel 3 (Kart) for å unngå splitsing av overskrift og bilde
+        if title.startswith("3."):
+            pdf.ensure_space(110) # Krever plass til både tittel og kart
 
         pdf.section_title(title)
 
@@ -1143,7 +1148,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         - Ikke bruk markdown-tabeller.
         - Bruk underoverskrifter der det er naturlig, gjerne på formatet "## Datagrunnlag", "## Vurdering", "## Konsekvens".
         - Vær konkret med analyttnavn, prøvepunkt, dybde og verdi når du omtaler laboratoriedata.
-        - IKKE kritiser datagrunnlaget. Du skal anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn noe om manglende stedsnavn.
+        - IKKE kritiser datagrunnlaget. Du skal anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn noe om manglende stedsnavn eller diskrepans i arkivreferanser.
 
         KRITISKE INSTRUKSER FOR BEVIS:
         Jeg har lagt ved kart og potensielt arkitekttegninger.
@@ -1160,7 +1165,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         # 4. UTFØRTE GRUNNUNDERSØKELSER
         # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
         # 6. GEOTEKNISKE VURDERINGER
-        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv en KONKRET og operativ plan for graving, sortering etter tilstandsklasser, transport, deponering og HMS. IKKE skriv at "en plan må utarbeides", du skal SKRIVE planen her.)
+        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv en KONKRET og operativ plan for graving, sortering etter tilstandsklasser, transport, deponering og HMS. IKKE skriv at "en plan må utarbeides", du skal SKRIVE planen her med utgangspunkt i verdiene over.)
         """
 
         try:
