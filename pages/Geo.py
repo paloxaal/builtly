@@ -251,6 +251,7 @@ def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_cla
     if note: draw.text((side_pad, y + 8), note, font=font_subtitle, fill=subtitle_fill)
     return img
 
+
 def save_temp_image(img: Image.Image, suffix: str = ".png"):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     img.save(tmp.name)
@@ -430,7 +431,7 @@ def split_ai_sections(content: str):
             current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
             continue
         if current is None: 
-            # SILER UT AI-INTRO: Ignorerer alt som skrives før den første overskriften!
+            # SILER UT AI-INTRO: Ignorer alt før den første faktiske overskriften
             continue
         current["lines"].append(raw_line.rstrip())
     if current: sections.append(current)
@@ -650,34 +651,33 @@ class BuiltlyCorporatePDF(FPDF):
 
 def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_text):
     pdf.add_page()
-    pdf.set_draw_color(120, 124, 130)
-    pdf.line(18, 18, 192, 18)
     
-    # 1. Logo Top Right
+    # 1. Logo Top Right (Over streken / ingen strek nødvendig her)
     if os.path.exists("logo.png"):
-        try: pdf.image("logo.png", x=145, y=12, w=45)
+        try: pdf.image("logo.png", x=150, y=15, w=40)
         except: pass
 
     # 2. Overskrift og Tittel
-    pdf.set_xy(20, 35)
-    pdf.set_font("Helvetica", "", 12)
+    pdf.set_xy(20, 45)
+    pdf.set_font("Helvetica", "B", 11)
     pdf.set_text_color(100, 105, 110)
     pdf.cell(80, 6, clean_pdf_text("RAPPORT"), 0, 1, "L")
 
     pdf.set_x(20)
-    pdf.set_font("Helvetica", "B", 32) # Stor forside-tittel!
+    pdf.set_font("Helvetica", "B", 34) # Stor forside-tittel!
     pdf.set_text_color(20, 28, 38)
-    # Begrenser bredden til 90 slik at den ikke kolliderer med faktaboksen
-    pdf.multi_cell(90, 12, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")))
+    # Begrenser bredden til 95, ALIGN L for å unngå strekking/mellomroms-bug
+    pdf.multi_cell(95, 12, clean_pdf_text(project_data.get("p_name", "Geo & Miljø")), 0, 'L')
     
     pdf.ln(4)
     pdf.set_x(20)
-    pdf.set_font("Helvetica", "", 13)
+    pdf.set_font("Helvetica", "B", 14) # FET, som bedt om
     pdf.set_text_color(64, 68, 74)
-    pdf.multi_cell(90, 6, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"))
+    # ALIGN L fikser de stygge mellomrommene!
+    pdf.multi_cell(95, 6.5, clean_pdf_text("Miljøteknisk grunnundersøkelse, geoteknisk vurdering og overordnet tiltaksplan"), 0, 'L')
 
-    # 3. Faktaboks Høyre side (Låst til X=118, Y=35)
-    pdf.set_xy(118, 35)
+    # 3. Faktaboks Høyre side (Låst til X=118, Y=45)
+    pdf.set_xy(118, 45)
     meta_items = [
         ("Oppdragsgiver", client or "-"),
         ("Emne", "Geo & Miljø (RIG-M)"),
@@ -691,7 +691,7 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
     if recent_img:
         try: img_paths.append((save_temp_image(recent_img.convert("RGB"), ".jpg"), f"Nyere ortofoto ({source_text})"))
         except: pass
-    elif hist_img: # Kun som fallback hvis recent mangler
+    elif hist_img: 
         try: img_paths.append((save_temp_image(hist_img.convert("RGB"), ".jpg"), "Historisk flyfoto"))
         except: pass
 
@@ -700,7 +700,6 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
         with Image.open(img_path) as tmp_img:
             aspect = tmp_img.height / max(tmp_img.width, 1)
         
-        # Max dimensions for single cover image (bredde 170, maks høyde 130)
         w = 170
         h = w * aspect
         if h > 130:
@@ -708,7 +707,7 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
             w = h / aspect
         
         x = 20 + (170 - w) / 2
-        y = max(pdf.get_y() + 15, 105) # Sørger for at den starter under tekst/bokser
+        y = max(pdf.get_y() + 15, 115) # Sørger for at den starter under tekst/bokser
         
         pdf.set_xy(x, y)
         pdf.figure_image(img_path, width=w, caption=caption)
@@ -821,7 +820,6 @@ def build_lab_summary_texts(lab_package):
 
 def create_full_report_pdf(name, client, content, recent_img, hist_img, source_text, lab_package, project_data):
     pdf = BuiltlyCorporatePDF("P", "mm", "A4")
-    # SLÅR PÅ AUTOMATISK SIDEBRYTING FOR Å FIKSE TEKST OVER BUNNLINJE:
     pdf.set_auto_page_break(True, margin=22) 
     pdf.set_margins(18, 18, 18)
     pdf.header_left, pdf.header_right, pdf.doc_code = clean_pdf_text(project_data.get("p_name", name)), clean_pdf_text("Builtly | RIG-M"), clean_pdf_text("Builtly-RIGM-001")
