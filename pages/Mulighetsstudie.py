@@ -199,7 +199,7 @@ def geo_runtime_notes() -> List[str]:
     return notes
 
 
-# --- 3. GEODATA / KART ---
+# --- 3. GEODATA / KART (SKUDDSIKKER VERSJON) ---
 
 def get_kommunenummer(input_str: str) -> Optional[str]:
     """Oversatt bynavn til riktig 4-sifret kommunenummer fra Kartverket API."""
@@ -241,55 +241,44 @@ def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str, bounds: Optional[Tuple[float, float, float, float]] = None) -> Tuple[Optional[Image.Image], str]:
-    # 1. HØYESTE PRIORITET: Bruk eksakte koordinater hvis vi har hentet tomt (bounds i EPSG:25833)
+    # 1. HØYESTE PRIORITET: Bruk eksakte koordinater hvis tomt er hentet!
     if bounds is not None:
         minx, miny, maxx, maxy = bounds
-        # Legg på 50 meter margin rundt tomten for kartvisning
+        # Legg på 80 meter margin rundt tomten for å se naboskapet
         url_orto = (
             "https://wms.geonorge.no/skwms1/wms.nib"
             "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
-            f"&styles=&srs=EPSG:25833&bbox={minx-60},{miny-60},{maxx+60},{maxy+60}"
+            f"&styles=&srs=EPSG:25833&bbox={minx-80},{miny-80},{maxx+80},{maxy+80}"
             "&width=1000&height=1000&format=image/png"
         )
         try:
-            r1 = requests.get(url_orto, timeout=10)
+            r1 = requests.get(url_orto, timeout=12)
             if r1.status_code == 200 and len(r1.content) > 5000:
                 return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Ortofoto (via Eksakt Tomtegrense)"
         except Exception:
             pass
 
-    # 2. MELLOMPRIORITET: Vanlig adressesøk mot Kartverket
+    # 2. MELLOMPRIORITET: Hvis vi ikke har tomt, prøv vanlig adressesøk
     nord, ost = None, None
     adr_clean = adresse.replace(",", "").strip() if adresse else ""
     kom_clean = kommune.replace(",", "").strip() if kommune else ""
 
-    queries = []
     if adr_clean and kom_clean:
-        queries.append(f"{adr_clean} {kom_clean}")
-    if adr_clean:
-        queries.append(adr_clean)
-    if gnr and bnr and kom_clean:
-        queries.append(f"{kom_clean} {gnr}/{bnr}")
-
-    for q in queries:
-        safe_query = urllib.parse.quote(q)
-        url = (
-            "https://ws.geonorge.no/adresser/v1/sok"
-            f"?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
-        )
+        query = f"{adr_clean} {kom_clean}"
+        safe_query = urllib.parse.quote(query)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
         try:
             resp = requests.get(url, timeout=6)
             if resp.status_code == 200 and resp.json().get("adresser"):
                 hit = resp.json()["adresser"][0]
                 nord = hit.get("representasjonspunkt", {}).get("nord")
                 ost = hit.get("representasjonspunkt", {}).get("øst")
-                break
         except Exception:
             pass
 
     if nord and ost:
-        min_x, max_x = float(ost) - 150, float(ost) + 150
-        min_y, max_y = float(nord) - 150, float(nord) + 150
+        min_x, max_x = float(ost) - 100, float(ost) + 100
+        min_y, max_y = float(nord) - 100, float(nord) + 100
         url_orto = (
             "https://wms.geonorge.no/skwms1/wms.nib"
             "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
@@ -299,26 +288,11 @@ def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str
         try:
             r1 = requests.get(url_orto, timeout=8)
             if r1.status_code == 200 and len(r1.content) > 5000:
-                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Adressesøk (Norge i Bilder)"
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Adressesøk"
         except Exception:
             pass
 
-    # 3. LAVESTE PRIORITET: Google Maps
-    if api_key and (adr_clean or kom_clean):
-        query = f"{adr_clean}, {kom_clean}, Norway"
-        safe_query = urllib.parse.quote(query)
-        url_gmaps = (
-            "https://maps.googleapis.com/maps/api/staticmap"
-            f"?center={safe_query}&zoom=19&size=700x700&maptype=satellite&key={api_key}"
-        )
-        try:
-            r2 = requests.get(url_gmaps, timeout=8)
-            if r2.status_code == 200 and len(r2.content) > 1000:
-                return Image.open(io.BytesIO(r2.content)).convert("RGB"), "Google Maps Satellite"
-        except Exception:
-            pass
-
-    return None, "Kunne ikke hente kart fra verken Kartverket eller Google."
+    return None, "Kunne ikke hente kart. Tips: Sørg for å trykke 'Søk opp og lagre tomt' i trinn 2B først, da vet systemet nøyaktig hvor det skal zoome!"
 
 
 def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Image]:
@@ -365,57 +339,85 @@ def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
     return []
 
 def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
-    """Henter nøyaktige eiendomsgrenser fra Kartverket WFS og slår dem sammen"""
+    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket."""
     knr = get_kommunenummer(kommune_input)
     if not knr:
-        return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Prøv å skrive f.eks. 'Oslo' eller '0301'."
+        return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Skriv f.eks. 'Oslo' eller '0301'."
         
     polygoner = []
     feil = []
     
     for gnr, bnr in gnr_bnr_liste:
-        url = "https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig"
         gnr_clean = str(gnr).strip()
         bnr_clean = str(bnr).strip()
         
-        params = {
-            "service": "WFS",
-            "version": "2.0.0",
-            "request": "GetFeature",
-            "typenames": "matrikkelen-teig:Teig",
-            "srsName": "EPSG:25833", # Henter i meter (UTM33N)
-            "outputFormat": "application/json",
-            "cql_filter": f"kommunenummer='{knr}' AND gardsnummer='{gnr_clean}' AND bruksnummer='{bnr_clean}'"
-        }
-        try:
-            resp = requests.get(url, params=params, timeout=12)
-            if resp.status_code == 200:
-                data = resp.json()
-                features = extract_geojson_features(data)
-                if features:
-                    for feature in features:
-                        geom = shape(feature["geometry"])
-                        poly = largest_polygon(geom)
-                        if poly:
-                            polygoner.append(poly)
+        # Kartverkets WFS servere (fallback innebygd)
+        services = [
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig")
+        ]
+        
+        # VIKTIG: Ingen fnutter (') rundt tallene i CQL! GeoServer krasjer hvis Gnr (int) har fnutter.
+        cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
+        
+        success_for_this_parcel = False
+        last_error = ""
+
+        for url, layer in services:
+            if success_for_this_parcel: break
+            
+            params = {
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typenames": layer,
+                "srsName": "EPSG:25833",
+                "outputFormat": "application/json",
+                "cql_filter": cql
+            }
+            
+            try:
+                resp = requests.get(url, params=params, timeout=12)
+                # Hvis application/json feiler, prøv bare "json"
+                if resp.status_code != 200:
+                    params["outputFormat"] = "json"
+                    resp = requests.get(url, params=params, timeout=12)
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        features = extract_geojson_features(data)
+                        if features:
+                            for feature in features:
+                                geom = shape(feature["geometry"])
+                                poly = largest_polygon(geom)
+                                if poly:
+                                    polygoner.append(poly)
+                            success_for_this_parcel = True
+                            break
+                        else:
+                            last_error = "Ingen polygon funnet på dette Gnr/Bnr i matrikkelen."
+                    except json.JSONDecodeError:
+                        last_error = "Server returnerte ikke gyldig JSON."
                 else:
-                    feil.append(f"{gnr}/{bnr} (Ingen treff)")
-            else:
-                feil.append(f"{gnr}/{bnr} (API-feil: {resp.status_code})")
-        except Exception as e:
-            feil.append(f"{gnr}/{bnr} (Nettverksfeil)")
+                    last_error = f"API-feil (Kode: {resp.status_code})"
+            except Exception as e:
+                last_error = f"Nettverksfeil: {str(e)[:30]}"
+                
+        if not success_for_this_parcel:
+            feil.append(f"{gnr}/{bnr} ({last_error})")
             
     if not polygoner:
-        return None, "Kunne ikke hente tomter. " + ", ".join(feil)
+        return None, "Feilet: " + " | ".join(feil)
         
     try:
         samlet = unary_union(polygoner)
-        msg = f"Hentet tomt ({knr}): " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
+        msg = f"Suksess! Hentet tomt i {knr}: " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
         if feil:
-            msg += f" | Mangler: {', '.join(feil)}"
+            msg += f" (Mangler: {', '.join(feil)})"
         return samlet, msg
     except Exception as e:
-        return None, f"Feil ved sammenslåing av polygoner: {e}"
+        return None, f"Feil ved sammenslåing: {e}"
 
 
 def largest_polygon(geom: Any) -> Optional[Polygon]:
@@ -506,7 +508,7 @@ def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Option
         }
         dst_crs = utm_crs_from_lonlat(float(centroid.x), float(centroid.y))
         if dst_crs is None:
-            info["warning"] = "pyproj mangler; lon/lat-GeoJSON kan ikke transformeres til meter i denne deployen. Bruk UTM/EPSG:25833 eller installer pyproj."
+            info["warning"] = "pyproj mangler; lon/lat-GeoJSON kan ikke transformeres til meter i denne deployen."
             return None, None, info
         info["crs"] = dst_crs.to_string()
         return transform_polygon(poly, CRS.from_epsg(4326), dst_crs), dst_crs, info
@@ -519,7 +521,7 @@ def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: A
     if auto_polygon is not None:
         poly_local, _, info = normalize_polygon_to_local(auto_polygon)
         crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
-        info["source"] = "Kartverket WFS (Auto)"
+        info["source"] = "Kartverket API (Eksakt polygon)"
         info["crs"] = "EPSG:25833"
         return poly_local, crs_obj, info
 
@@ -562,9 +564,7 @@ def coerce_height_from_properties(properties: Dict[str, Any], default_height_m: 
     if not properties:
         return default_height_m
     props = {str(k).lower(): v for k, v in properties.items()}
-    direct_keys = [
-        "height_m", "height", "hoyde", "building:height", "gesimshoyde", "max_height", "z", "elevation_m"
-    ]
+    direct_keys = ["height_m", "height", "hoyde", "building:height", "gesimshoyde", "max_height", "z", "elevation_m"]
     level_keys = ["building:levels", "levels", "etasjer", "floors", "stories"]
     for key in direct_keys:
         if key in props:
@@ -714,39 +714,6 @@ def terrain_points_from_csv_bytes(data: bytes, site_crs: Optional[CRS]) -> np.nd
     return np.column_stack([x, y, z])
 
 
-def terrain_points_from_raster_bytes(data: bytes, site_polygon: Optional[Polygon], site_crs: Optional[CRS]) -> np.ndarray:
-    if not HAS_RASTERIO or MemoryFile is None:
-        raise ValueError("RasterIO er ikke installert i deployen. Bruk CSV/TXT med x,y,z eller installer rasterio.")
-    if site_polygon is None or site_crs is None:
-        raise ValueError("Rasterterreng krever georeferert tomtepolygon.")
-    with MemoryFile(data) as memfile:
-        with memfile.open() as ds:
-            if ds.crs is None:
-                raise ValueError("Raster mangler CRS.")
-            to_raster = Transformer.from_crs(site_crs, ds.crs, always_xy=True)
-            to_site = Transformer.from_crs(ds.crs, site_crs, always_xy=True)
-            site_coords = [to_raster.transform(x, y) for x, y in list(site_polygon.buffer(50).exterior.coords)]
-            site_raster = Polygon(site_coords).buffer(0)
-            minx, miny, maxx, maxy = site_raster.bounds
-            xs = np.linspace(minx, maxx, 18)
-            ys = np.linspace(miny, maxy, 18)
-            pts: List[Tuple[float, float, float]] = []
-            for rx in xs:
-                for ry in ys:
-                    try:
-                        value = next(ds.sample([(float(rx), float(ry))]))[0]
-                    except Exception:
-                        continue
-                    if value is None or not np.isfinite(value):
-                        continue
-                    lx, ly = to_site.transform(float(rx), float(ry))
-                    if site_polygon.buffer(60).contains(Point(lx, ly)):
-                        pts.append((float(lx), float(ly), float(value)))
-            if len(pts) < 3:
-                raise ValueError("Kunne ikke hente nok terrengpunkter fra rasteret.")
-            return np.asarray(pts, dtype=float)
-
-
 def load_terrain_input(uploaded_terrain: Any, site_polygon: Optional[Polygon], site_crs: Optional[CRS]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     if uploaded_terrain is None:
         return None, {"source": "Ingen terrengfil"}
@@ -756,10 +723,8 @@ def load_terrain_input(uploaded_terrain: Any, site_polygon: Optional[Polygon], s
         suffix = Path(getattr(uploaded_terrain, "name", "terrain")).suffix.lower()
         if suffix in {".csv", ".txt"}:
             points = terrain_points_from_csv_bytes(raw, site_crs)
-        elif suffix in {".tif", ".tiff", ".asc"}:
-            points = terrain_points_from_raster_bytes(raw, site_polygon, site_crs)
         else:
-            raise ValueError("Stotter forelopig CSV/TXT eller GeoTIFF/ASC for terreng.")
+            raise ValueError("Stotter forelopig CSV/TXT for terreng.")
 
         x = points[:, 0]
         y = points[:, 1]
@@ -1511,11 +1476,6 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             notes.append("Terrenget er relativt bratt; sokkel, kjeller og adkomst bør testes videre mot kotegrunnlag.")
         elif terrain and terrain.get("slope_pct", 0.0) > 5.0:
             notes.append("Terrenget er merkbart skrånende og vil påvirke parkering, innganger og uteopphold.")
-
-        if parking_pressure_pct > 90:
-            notes.append("Parkering legger stort press på tilgjengelig uteareal dersom alt skal løses på terreng.")
-        elif parking_pressure_pct > 65:
-            notes.append("Parkering er håndterbar, men bør optimaliseres med kjeller eller mobilitetsgrep.")
 
         if typology == "Lamell":
             notes.append("Lamell er som regel sterkest på effektivitet, dagslys og repetérbar boliglogikk.")
