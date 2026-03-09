@@ -1,4 +1,3 @@
-
 import base64
 import io
 import json
@@ -110,7 +109,7 @@ def clean_pdf_text(text: Any) -> str:
         "‘": "'",
         "’": "'",
         "…": "...",
-        "•": "*",
+        "•": "-",
         "²": "2",
         "³": "3",
         "ø": "o",
@@ -189,7 +188,6 @@ def pick_model_name() -> Optional[str]:
             if fragment in candidate:
                 return candidate
     return valid_models[0] if valid_models else None
-
 
 
 def geo_runtime_notes() -> List[str]:
@@ -317,6 +315,68 @@ def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Ima
 # --- 4. GEOSPATIAL HJELPERE ---
 DEFAULT_FLOOR_HEIGHT_M = 3.2
 
+def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return []
+    gtype = obj.get("type")
+    if gtype == "FeatureCollection":
+        return [feature for feature in obj.get("features", []) if isinstance(feature, dict)]
+    if gtype == "Feature":
+        return [obj]
+    if gtype in {"Polygon", "MultiPolygon"}:
+        return [{"type": "Feature", "geometry": obj, "properties": {}}]
+    return []
+
+def hent_tomt_fra_geonorge(kommunenr: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
+    """Henter nøyaktige eiendomsgrenser fra Kartverket WFS og slår dem sammen"""
+    polygoner = []
+    feil = []
+    knr = str(kommunenr).strip().zfill(4)
+    
+    for gnr, bnr in gnr_bnr_liste:
+        url = "https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig"
+        gnr_clean = str(gnr).strip()
+        bnr_clean = str(bnr).strip()
+        
+        params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typenames": "matrikkelen-teig:Teig",
+            "srsName": "EPSG:25833", # Henter i meter (UTM33N)
+            "outputFormat": "application/json",
+            "cql_filter": f"kommunenummer='{knr}' AND gardsnummer='{gnr_clean}' AND bruksnummer='{bnr_clean}'"
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                features = extract_geojson_features(data)
+                if features:
+                    for feature in features:
+                        geom = shape(feature["geometry"])
+                        poly = largest_polygon(geom)
+                        if poly:
+                            polygoner.append(poly)
+                else:
+                    feil.append(f"{gnr}/{bnr} (Ingen treff)")
+            else:
+                feil.append(f"{gnr}/{bnr} (API-feil: {resp.status_code})")
+        except Exception as e:
+            feil.append(f"{gnr}/{bnr} (Nettverksfeil)")
+            
+    if not polygoner:
+        return None, "Kunne ikke hente tomter. " + ", ".join(feil)
+        
+    try:
+        samlet = unary_union(polygoner)
+        msg = "Hentet tomt: " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
+        if feil:
+            msg += f" | Mangler: {', '.join(feil)}"
+        return samlet, msg
+    except Exception as e:
+        return None, f"Feil ved sammenslåing av polygoner: {e}"
+
 
 def largest_polygon(geom: Any) -> Optional[Polygon]:
     if geom is None:
@@ -392,19 +452,6 @@ def parse_coordinate_text(text: str) -> Optional[Polygon]:
     return largest_polygon(poly)
 
 
-def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
-    if not isinstance(obj, dict):
-        return []
-    gtype = obj.get("type")
-    if gtype == "FeatureCollection":
-        return [feature for feature in obj.get("features", []) if isinstance(feature, dict)]
-    if gtype == "Feature":
-        return [obj]
-    if gtype in {"Polygon", "MultiPolygon"}:
-        return [{"type": "Feature", "geometry": obj, "properties": {}}]
-    return []
-
-
 def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
     poly = largest_polygon(poly)
     if poly is None:
@@ -426,7 +473,17 @@ def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Option
     return poly, None, info
 
 
-def load_site_polygon_input(uploaded_geojson: Any, coordinate_text: str) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
+def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: Any, coordinate_text: str) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
+    
+    # 1. Høyeste prioritet: Tomt hentet fra Kartverket
+    if auto_polygon is not None:
+        poly_local, _, info = normalize_polygon_to_local(auto_polygon)
+        crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
+        info["source"] = "Kartverket WFS (Auto)"
+        info["crs"] = "EPSG:25833"
+        return poly_local, crs_obj, info
+
+    # 2. Mellomprioritet: Opplastet GeoJSON
     if uploaded_geojson is not None:
         try:
             uploaded_geojson.seek(0)
@@ -451,6 +508,7 @@ def load_site_polygon_input(uploaded_geojson: Any, coordinate_text: str) -> Tupl
         except Exception as exc:
             return None, None, {"source": "GeoJSON", "error": str(exc)}
 
+    # 3. Laveste prioritet: Tekstkoordinater
     poly = parse_coordinate_text(coordinate_text)
     if poly is not None:
         poly_local, crs_obj, info = normalize_polygon_to_local(poly)
@@ -2152,7 +2210,48 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     max_height_m = r4.number_input("Maks hoyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
 with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
-    st.markdown("##### Tomtepolygon")
+    st.markdown("##### 🌍 1. Hent eiendom fra Kartverket automatisk (Anbefalt)")
+    st.info("Skriv inn kommunenummer og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4). Motoren slår dem automatisk sammen til ett byggeklart polygon.")
+    
+    c_k, c_g = st.columns(2)
+    kommune_nr_input = c_k.text_input("Kommunenummer (f.eks. 5001 for Trondheim)", value="")
+    
+    default_gnr_bnr = ""
+    if pd_state.get('gnr') and pd_state.get('bnr'):
+        default_gnr_bnr = f"{pd_state.get('gnr')}/{pd_state.get('bnr')}"
+        
+    gnr_bnr_input = c_g.text_input("Gnr/Bnr (Bruk komma for flere)", value=default_gnr_bnr)
+
+    if st.button("Søk opp og lagre tomt fra Kartverket", type="secondary"):
+        if not kommune_nr_input or not gnr_bnr_input:
+            st.warning("Fyll inn både kommunenummer og Gnr/Bnr.")
+        else:
+            with st.spinner("Kobler til GeoNorge WFS og genererer polygon..."):
+                pairs = []
+                for part in gnr_bnr_input.split(","):
+                    if "/" in part:
+                        g, b = part.split("/")
+                        pairs.append((g.strip(), b.strip()))
+                
+                if pairs:
+                    poly, msg = hent_tomt_fra_geonorge(kommune_nr_input, pairs)
+                    if poly:
+                        st.session_state.auto_site_polygon = poly
+                        st.session_state.auto_site_msg = msg
+                        st.rerun()
+                    else:
+                        st.error(f"❌ Feil: {msg}")
+                else:
+                    st.warning("Ugyldig format på Gnr/Bnr. Bruk formatet 15/2.")
+                    
+    if st.session_state.get("auto_site_polygon") is not None:
+        st.success(f"✅ **Klar til bruk!** {st.session_state.get('auto_site_msg')} (Nøyaktig areal via UTM33: ca {int(st.session_state.auto_site_polygon.area)} m²)")
+        if st.button("Tøm hentet tomt", size="small"):
+            st.session_state.auto_site_polygon = None
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("##### 📎 2. Eller bruk manuell opplasting")
     g1, g2 = st.columns(2)
     with g1:
         site_polygon_upload = st.file_uploader(
@@ -2167,6 +2266,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
             placeholder="597380,6643012\n597412,6643005\n597428,6643046\n...",
         )
 
+    st.markdown("---")
     st.markdown("##### Nabobebyggelse")
     n1, n2, n3 = st.columns([1.5, 1, 1])
     neighbor_mode = n1.radio(
@@ -2275,7 +2375,7 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
 with st.expander("5. Hva modulen faktisk gjor na", expanded=False):
     st.markdown(
         """
-- Leser **ekte tomtepolygon** via GeoJSON eller koordinatliste.
+- Leser **ekte tomtepolygon** via Kartverket WFS, GeoJSON eller koordinatliste.
 - Regner **3 volumalternativer** (lamell, punkthus, tun/U-form) innenfor faktisk byggefelt.
 - Leser **nabobebyggelse** via GeoJSON eller OSM og bruker hoyder i sol/skygge.
 - Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
@@ -2297,7 +2397,8 @@ if run_analysis:
 
     lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
 
-    site_polygon_input, site_crs, polygon_meta = load_site_polygon_input(site_polygon_upload, site_polygon_text)
+    auto_poly = st.session_state.get("auto_site_polygon")
+    site_polygon_input, site_crs, polygon_meta = load_site_polygon_input(auto_poly, site_polygon_upload, site_polygon_text)
     latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
     longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
 
@@ -2595,4 +2696,3 @@ if "analysis_results" in st.session_state:
         if find_page("Review"):
             if st.button("Ga til QA for godkjenning", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
-
