@@ -66,6 +66,7 @@ def ironclad_text_formatter(text):
     return text
 
 def pick_model_name() -> str:
+    """Finner beste tilgjengelige modell for å unngå 404 feil."""
     try:
         valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         for preferred in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash', 'models/gemini-pro']:
@@ -108,15 +109,13 @@ def is_bullet_line(line: str) -> bool:
 def strip_bullet(line: str) -> str:
     return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
 
-# --- INITIALISERER PROSJEKTDATA ---
+# --- INITIALISERER PROSJEKTDATA (SSOT) ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Bolig", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "source_documents" not in st.session_state:
     st.session_state.source_documents = []
 if "generated_fire_drawings" not in st.session_state:
     st.session_state.generated_fire_drawings = []
-if "generated_pdf" not in st.session_state:
-    st.session_state.generated_pdf = None
 
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
     st.session_state.project_data = json.loads(SSOT_FILE.read_text(encoding="utf-8"))
@@ -318,7 +317,11 @@ def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Imag
 # --- 6. UI ---
 st.markdown("""
 <style>
-    :root { --bg: #06111a; --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df; --accent: #e53935; --radius-lg: 16px; }
+    :root {
+        --bg: #06111a; --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18); --text: #f5f7fb; --muted: #9fb0c3; --soft: #c8d3df;
+        --accent: #e53935; --radius-lg: 16px; --radius-xl: 24px;
+    }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(229,57,53,0.15)); }
@@ -329,6 +332,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- HEADER ---
 top_l, top_r = st.columns([4, 1])
 with top_l:
     logo_uri = logo_data_uri()
@@ -341,6 +345,7 @@ st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem;'
 st.markdown("<h1>🔥 Brannkonsept (RIBr)</h1>", unsafe_allow_html=True)
 st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra SSOT.")
 
+# --- UI EKSPANDERE ---
 with st.expander("1. Branntekniske Forutsetninger", expanded=True):
     c1, c2 = st.columns(2)
     rkl = c1.selectbox("Risikoklasse (RKL)", ["RKL 1", "RKL 2", "RKL 4", "RKL 6"], index=2)
@@ -363,9 +368,15 @@ with st.expander("3. AI-Assistert Branntegning (Tegn på plan)", expanded=True):
         sel_doc_name = st.selectbox("Velg tegning for AI-skisse", [d['name'] for d in st.session_state.source_documents])
         sel_doc = next(d for d in st.session_state.source_documents if d['name'] == sel_doc_name)
         pg_cnt = len(sel_doc['pages'])
-        sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1) if pg_cnt > 1 else 1
+        
+        # FIKSER SLIDER-BUG: Bare vis slider hvis det er flere sider
+        sel_pg_idx = 1
+        if pg_cnt > 1:
+            sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1)
+        
         sel_pg = sel_doc['pages'][sel_pg_idx-1]
         st.image(sel_pg, use_container_width=True)
+        
         if st.button("🎨 Foreslå brann-overlay med AI", type="primary"):
             with st.spinner("AI studerer planen og tegner inn brannkrav..."):
                 model = genai.GenerativeModel(pick_model_name())
@@ -377,17 +388,20 @@ with st.expander("3. AI-Assistert Branntegning (Tegn på plan)", expanded=True):
                 st.image(rendered, width=600)
     else: st.info("Last opp tegninger i steg 2 først.")
 
+# --- GENERERING ---
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_container_width=True):
     with st.spinner("Analyserer underlag og skriver rapport..."):
         try:
             model = genai.GenerativeModel(pick_model_name())
             all_imgs = [p for d in st.session_state.get("source_documents", []) for p in d['pages']][:5]
+            
             prompt = f"""
             Du er en senior RIBr. Skriv et komplett Brannkonsept iht. TEK17 for {pd_state['p_name']}.
             Forutsetninger: {rkl}, {bkl}, Sprinkler: {spr_opt}, Alarm: {alarm_opt}.
-            START DIREKTE PÅ KAPITTEL 1. Ingen hilsen.
+            START DIREKTE PÅ KAPITTEL 1.
             I KAPITTEL 7: Skriv en KONKRET og operativ tiltaksplan (f.eks. hvilke skiller som skal være EI60).
+            Anta at alt datagrunnlag er 100% korrekt.
             Struktur:
             # 1. SAMMENDRAG
             # 2. PROSJEKTBESKRIVELSE
@@ -398,11 +412,21 @@ if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_c
             # 7. TILTAKSPLAN FOR DETALJPROSJEKT
             """
             res = model.generate_content([prompt] + all_imgs)
-            pdf_data = create_full_report_pdf(pd_state, {'rkl':rkl, 'bkl':bkl, 'sprinkler':spr_opt, 'alarm':alarm_opt}, res.text, st.session_state.get("generated_fire_drawings", []), all_imgs)
+            
+            # --- BYGG PDF ---
+            pdf_data = create_full_report_pdf(
+                pd_state, 
+                {'rkl':rkl, 'bkl':bkl, 'sprinkler':spr_opt, 'alarm':alarm_opt},
+                res.text,
+                st.session_state.get("generated_fire_drawings", []),
+                all_imgs
+            )
+            
             st.session_state.generated_pdf = pdf_data
             st.rerun()
-        except Exception as e: st.error(f"Feil: {e}")
+        except Exception as e:
+            st.error(f"Feil under generering: {e}")
 
 if st.session_state.get("generated_pdf"):
-    st.success("✅ Brannkonsept ferdigstilt!")
+    st.success("✅ Brannkonseptet er ferdigstilt!")
     st.download_button("📄 Last ned RIBr-rapport", st.session_state.generated_pdf, f"Builtly_RIBr_{pd_state['p_name']}.pdf", type="primary", use_container_width=True)
