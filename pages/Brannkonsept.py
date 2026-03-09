@@ -38,7 +38,7 @@ try:
 except ImportError:
     fitz = None
 
-# --- 2. HJELPEFUNKSJONER & DATA-HÅNDTERING ---
+# --- 2. HJELPEFUNKSJONER (PDF & AI) ---
 def logo_data_uri() -> str:
     for candidate in ["logo-white.png", "logo.png"]:
         p = Path(candidate)
@@ -109,13 +109,28 @@ def is_bullet_line(line: str) -> bool:
 def strip_bullet(line: str) -> str:
     return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
 
-# --- INITIALISERER PROSJEKTDATA (SSOT) ---
+def pdf_to_images(pdf_bytes: bytes, limit: int = 5, scale: float = 2.0) -> List[Image.Image]:
+    images = []
+    if fitz is None: return images
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page_idx in range(min(limit, len(doc))):
+            pix = doc.load_page(page_idx).get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+            images.append(image)
+        doc.close()
+    except Exception: pass
+    return images
+
+# --- INITIALISERER PROSJEKTDATA ---
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Bolig", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "source_documents" not in st.session_state:
     st.session_state.source_documents = []
 if "generated_fire_drawings" not in st.session_state:
     st.session_state.generated_fire_drawings = []
+if "generated_pdf" not in st.session_state:
+    st.session_state.generated_pdf = None
 
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
     st.session_state.project_data = json.loads(SSOT_FILE.read_text(encoding="utf-8"))
@@ -131,7 +146,7 @@ if pd_state.get("p_name") in ["", "Nytt Prosjekt"]:
         st.switch_page(target)
     st.stop()
 
-# --- 3. DATAKLASSER FOR BRANNTEGNINGER ---
+# --- 3. DATAKLASSER OG KART ---
 @dataclass
 class FireMarkupSpec:
     page_title: str = ""
@@ -144,18 +159,31 @@ STYLE_MAP = {
     "pink_fill": {"stroke": "#d16b8d", "fill": "#f6c0d0", "width": 2},
 }
 
-def pdf_to_images(pdf_bytes: bytes, limit: int = 5, scale: float = 2.0) -> List[Image.Image]:
-    images = []
-    if fitz is None: return images
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page_idx in range(min(limit, len(doc))):
-            pix = doc.load_page(page_idx).get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-            images.append(image)
-        doc.close()
-    except Exception: pass
-    return images
+def fetch_map_image(adresse, kommune, gnr, bnr, api_key):
+    adr_clean = adresse.replace(",", "").strip() if adresse else ""
+    kom_clean = kommune.replace(",", "").strip() if kommune else ""
+    queries = [f"{adr_clean} {kom_clean}", adr_clean, f"{kom_clean} {gnr}/{bnr}"]
+    nord, ost = None, None
+    for q in queries:
+        safe_query = urllib.parse.quote(q)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=4)
+            if resp.status_code == 200 and resp.json().get('adresser'):
+                hit = resp.json()['adresser'][0]
+                nord, ost = hit.get('representasjonspunkt', {}).get('nord'), hit.get('representasjonspunkt', {}).get('øst')
+                break
+        except: pass
+    if nord and ost:
+        min_x, max_x = float(ost) - 150, float(ost) + 150
+        min_y, max_y = float(nord) - 150, float(nord) + 150
+        url_orto = f"https://wms.geonorge.no/skwms1/wms.nib?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}&width=800&height=800&format=image/png"
+        try:
+            r1 = requests.get(url_orto, timeout=5)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert('RGB'), "Kartverket (Norge i Bilder)"
+        except: pass
+    return None, "Kunne ikke hente kart."
 
 # --- 4. PDF MOTOR (CORPORATE LAYOUT) ---
 class BuiltlyCorporatePDF(FPDF):
@@ -288,20 +316,14 @@ def draw_arrow(draw, p1, p2, fill, width):
     right = (int(p2[0]-ux*b+uy*w), int(p2[1]-uy*b-ux*w))
     draw.polygon([p2, left, right], fill=fill)
 
-def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
-    match = re.search(r"(\{.*\})", text.strip().replace("\n",""), re.S)
-    if match:
-        try: return json.loads(match.group(1))
-        except: return None
-    return None
-
 def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Image:
-    parsed = try_parse_json(spec_json)
-    if not parsed: return source_image
+    try:
+        data = json.loads(re.search(r"(\{.*\})", spec_json.strip().replace("\n",""), re.S).group(1))
+    except: return source_image
     canvas = source_image.convert("RGBA")
     overlay = Image.new("RGBA", canvas.size, (255,255,255,0))
     draw = ImageDraw.Draw(overlay)
-    for el in parsed.get("elements", []):
+    for el in data.get("elements", []):
         style = STYLE_MAP.get(el.get("style", "dashed_red"), STYLE_MAP["dashed_red"])
         stroke = ImageColor.getrgb(style.get("stroke"))
         width = int(style.get("width", 3))
@@ -314,7 +336,7 @@ def render_fire_overlay(source_image: Image.Image, spec_json: str) -> Image.Imag
             draw_arrow(draw, tuple(el["points"][0]), tuple(el["points"][1]), stroke, width)
     return Image.alpha_composite(canvas, overlay).convert("RGB")
 
-# --- 6. UI ---
+# --- 6. PREMIUM CSS & UI ---
 st.markdown("""
 <style>
     :root {
@@ -324,11 +346,31 @@ st.markdown("""
     }
     html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1280px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
+
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(229,57,53,0.15)); }
-    button[kind="primary"] { background: linear-gradient(135deg, #e53935, #ff5252) !important; color: white !important; font-weight: 750 !important; border-radius: 12px !important; }
-    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; background-color: #0c1520 !important; border-radius: 12px !important; }
-    div[data-baseweb="base-input"], div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
-    .stTextInput input, div[data-baseweb="select"] * { color: #ffffff !important; }
+
+    button[kind="primary"] { background: linear-gradient(135deg, #e53935, #ff5252) !important; color: white !important; font-weight: 750 !important; border-radius: 12px !important; padding: 12px 24px !important; border: none !important; }
+    button[kind="primary"]:hover { transform: translateY(-2px) !important; box-shadow: 0 12px 24px rgba(229,57,53,0.25) !important; }
+    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; font-weight: 650 !important; padding: 10px 24px !important; }
+
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; border-radius: 8px !important; }
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * { background-color: transparent !important; color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; border: none !important; box-shadow: none !important; }
+    
+    /* FIKSER HVITE LABELS SOM MANGLER KONTRAST */
+    label[data-testid="stWidgetLabel"], .stTextInput label, .stSelectbox label, .stRadio label, .stTextArea label, .stFileUploader label { 
+        color: #c8d3df !important; 
+        font-weight: 600 !important; 
+        font-size: 0.95rem !important; 
+        margin-bottom: 4px !important; 
+        -webkit-text-fill-color: #c8d3df !important;
+    }
+
+    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary, div[data-testid="stExpander"] { background-color: #0c1520 !important; color: #f5f7fb !important; border-radius: 12px !important; }
+    div[data-testid="stExpander"] { border: 1px solid rgba(120,145,170,0.2) !important; margin-bottom: 1rem !important; }
+    
+    [data-testid="stFileUploaderDropzone"] { background-color: #0d1824 !important; border: 1px dashed rgba(120, 145, 170, 0.6) !important; border-radius: 12px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -336,7 +378,7 @@ st.markdown("""
 top_l, top_r = st.columns([4, 1])
 with top_l:
     logo_uri = logo_data_uri()
-    if logo_uri: render_html(f"<div style='margin-bottom:2rem;'><img src='{logo_uri}' class='brand-logo'></div>")
+    if logo_uri: render_html(f"<img src='{logo_uri}' class='brand-logo'>")
     else: st.title("Builtly")
 with top_r:
     if st.button("← Tilbake til SSOT", type="secondary", use_container_width=True): st.switch_page(find_page("Project"))
@@ -399,7 +441,7 @@ if st.button("🚀 GENERER KOMPLETT BRANNKONSEPT (TEK17)", type="primary", use_c
             prompt = f"""
             Du er en senior RIBr. Skriv et komplett Brannkonsept iht. TEK17 for {pd_state['p_name']}.
             Forutsetninger: {rkl}, {bkl}, Sprinkler: {spr_opt}, Alarm: {alarm_opt}.
-            START DIREKTE PÅ KAPITTEL 1.
+            START DIREKTE PÅ KAPITTEL 1. Ingen hilsen.
             I KAPITTEL 7: Skriv en KONKRET og operativ tiltaksplan (f.eks. hvilke skiller som skal være EI60).
             Anta at alt datagrunnlag er 100% korrekt.
             Struktur:
