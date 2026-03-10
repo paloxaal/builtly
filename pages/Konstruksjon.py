@@ -10,10 +10,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from fpdf import FPDF
-from PIL import Image, ImageDraw, ImageFont, ImageColor
+from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
 
 try:
     import google.generativeai as genai
@@ -21,13 +28,12 @@ except Exception:
     genai = None
 
 try:
-    import fitz  # PyMuPDF
+    import fitz
 except Exception:
     fitz = None
 
-
 # ------------------------------------------------------------
-# 1. TEKNISK OPPSETT & GLOBALE STIER
+# 1. TEKNISK OPPSETT
 # ------------------------------------------------------------
 st.set_page_config(
     page_title="Konstruksjon (RIB) | Builtly",
@@ -42,15 +48,18 @@ DB_DIR.mkdir(exist_ok=True)
 IMG_DIR.mkdir(exist_ok=True)
 
 google_key = os.environ.get("GOOGLE_API_KEY")
+if genai is None:
+    st.error("Kritisk feil: Python-pakken 'google.generativeai' er ikke tilgjengelig.")
+    st.stop()
 if google_key:
     genai.configure(api_key=google_key)
 else:
-    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
+    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables'.")
     st.stop()
 
 
 # ------------------------------------------------------------
-# 2. HJELPEFUNKSJONER (PDF, TEKST & DESIGN)
+# 2. HJELPEFUNKSJONER & CSS
 # ------------------------------------------------------------
 def render_html(html_string: str) -> None:
     st.markdown(html_string.replace("\n", " "), unsafe_allow_html=True)
@@ -64,481 +73,791 @@ def logo_data_uri() -> str:
             return f"data:image/{suffix};base64,{encoded}"
     return ""
 
-def clean_pdf_text(text: Any) -> str:
-    if text is None: return ""
-    text = str(text)
-    replacements = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">="}
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text.encode("latin-1", "replace").decode("latin-1")
-
-def ironclad_text_formatter(text: Any) -> str:
-    text = clean_pdf_text(text)
-    text = text.replace("$", "").replace("*", "").replace("_", "")
-    text = re.sub(r"[-|=]{3,}", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-def pick_model_name() -> str:
-    try:
-        valid_models = [m.name for m in genai.list_models() if 'generateContent' in getattr(m, 'supported_generation_methods', [])]
-        for pref in ['models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if pref in valid_models: return pref
-        return valid_models[0]
-    except:
-        return "models/gemini-1.5-flash"
-
 def find_page(base_name: str) -> str:
     for name in [base_name, base_name.lower(), base_name.capitalize()]:
         p = Path(f"pages/{name}.py")
         if p.exists(): return str(p)
     return ""
 
-def split_ai_sections(content: str):
-    sections = []
-    current = None
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if line.startswith("#"):
-            if current: sections.append(current)
-            current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
-            continue
-        if current is None: continue
-        current["lines"].append(raw_line.rstrip())
-    if current: sections.append(current)
-    return sections
+def clean_pdf_text(text: Any) -> str:
+    if text is None: return ""
+    text = str(text)
+    rep = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">="}
+    for old, new in rep.items(): text = text.replace(old, new)
+    return text.encode("latin-1", "replace").decode("latin-1")
 
-def is_subheading_line(line: str) -> bool:
-    clean = line.strip()
-    if not clean: return False
-    if clean.startswith("##"): return True
-    if clean.endswith(":") and len(clean) < 80 and len(clean.split()) <= 7: return True
-    if clean == clean.upper() and any(ch.isalpha() for ch in clean) and len(clean) < 70: return True
-    return False
+def ironclad_text_formatter(text: Any) -> str:
+    text = clean_pdf_text(text)
+    text = text.replace("$", "").replace("*", "").replace("_", "")
+    text = re.sub(r"[-|=]{3,}", " ", text)
+    text = re.sub(r"([^\s]{40})", r"\1 ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-# ------------------------------------------------------------
-# 3. PREMIUM CSS (Builtly Corporate Theme - Matcher Geo)
-# ------------------------------------------------------------
+def get_font(size: int, bold: bool = False):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try: return ImageFont.truetype(path, size=size)
+            except Exception: pass
+    return ImageFont.load_default()
+
+def wrap_text_px(text: str, font, max_width: int) -> List[str]:
+    text = clean_pdf_text(text)
+    if not text: return [""]
+    words = text.split()
+    lines, current = [], words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if font.getbbox(candidate)[2] <= max_width: current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+def save_temp_image(img: Image.Image, suffix: str = ".png") -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    img.save(tmp.name)
+    tmp.close()
+    return tmp.name
+
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
-    :root { 
-        --bg: #06111a; 
-        --panel: #0c1520;
-        --stroke: rgba(120, 145, 170, 0.18); 
-        --text: #f5f7fb; 
-        --accent: #38bdf8; 
-        --radius: 12px; 
-    }
+    :root { --bg: #06111a; --panel: rgba(10, 22, 35, 0.78); --text: #f5f7fb; --accent: #38bdf8; }
+    html, body, [class*="css"] { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
     .stApp { background-color: var(--bg) !important; color: var(--text); }
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
+    .block-container { max-width: 1400px !important; padding-top: 1.5rem !important; padding-bottom: 4rem !important; }
     .brand-logo { height: 65px; filter: drop-shadow(0 0 18px rgba(120,220,225,0.08)); }
-    
-    button[kind="primary"] { 
-        background: linear-gradient(135deg, #0ea5e9, #38bdf8) !important; 
-        color: white !important; 
-        border-radius: 10px !important; 
-        font-weight: 700 !important; 
-        border: none !important;
-        padding: 0.6rem 1.5rem !important;
-    }
-    
-    button[kind="secondary"] { 
-        background-color: rgba(255,255,255,0.05) !important; 
-        color: #f8fafc !important; 
-        border-radius: 10px !important; 
-        border: 1px solid var(--stroke) !important; 
-    }
-
-    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div { 
-        background-color: #0d1824 !important; 
-        border: 1px solid var(--stroke) !important; 
-        border-radius: 8px !important; 
-    }
-    
-    .stTextInput input, .stTextArea textarea, div[data-baseweb="select"] * { color: white !important; }
-    
-    div[data-testid="stExpander"] { 
-        background-color: var(--panel) !important; 
-        border: 1px solid var(--stroke) !important; 
-        border-radius: 14px !important; 
-        margin-bottom: 1rem !important;
-    }
-    
-    label { 
-        color: #c8d3df !important; 
-        font-weight: 600 !important; 
-        font-size: 0.95rem !important; 
-        margin-bottom: 4px !important; 
-    }
-
-    .metric-card {
-        background: rgba(255,255,255,0.03);
-        padding: 1.25rem;
-        border-radius: 14px;
-        border: 1px solid var(--stroke);
-        text-align: center;
-    }
-    .metric-value { font-size: 1.8rem; font-weight: 800; color: var(--accent); }
-    .metric-label { font-size: 0.85rem; color: #9fb0c3; margin-top: 4px; }
+    button[kind="primary"] { background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important; color: #041018 !important; font-weight: 750 !important; border-radius: 12px !important; }
+    button[kind="secondary"] { background-color: rgba(255,255,255,0.05) !important; color: #f8fafc !important; border: 1px solid rgba(120,145,170,0.3) !important; border-radius: 12px !important; }
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div { background-color: #0d1824 !important; border: 1px solid rgba(120, 145, 170, 0.4) !important; }
+    .stTextInput input, .stNumberInput input, div[data-baseweb="select"] * { color: #ffffff !important; -webkit-text-fill-color: #ffffff !important; background-color: transparent !important; }
+    div[data-testid="stExpander"] details { background-color: #0c1520 !important; border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; }
+    [data-testid="stAlert"] { background-color: rgba(56, 194, 201, 0.05) !important; border: 1px solid rgba(56, 194, 201, 0.2) !important; border-radius: 12px !important; color: #f5f7fb !important; }
 </style>
 """, unsafe_allow_html=True)
 
+
 # ------------------------------------------------------------
-# 4. INITIALISERING & DATASYNC
+# 3. STATE & PROSJEKTDATA
 # ------------------------------------------------------------
 if "project_data" not in st.session_state:
-    st.session_state.project_data = {}
-if "source_docs" not in st.session_state:
-    st.session_state.source_docs = []
-if "rib_sketches" not in st.session_state:
-    st.session_state.rib_sketches = []
-if "current_ai_json" not in st.session_state:
-    st.session_state.current_ai_json = '{"elements": []}'
-
-if SSOT_FILE.exists() and not st.session_state.project_data.get("p_name"):
-    try:
-        with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            st.session_state.project_data = json.load(f)
-    except: pass
-
-if not st.session_state.project_data.get("p_name"):
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2>Builtly</h2>'
-    render_html(logo_html)
-    st.warning("⚠️ Ingen prosjektdata funnet. Gå til Project Setup først.")
-    if st.button("Gå til Setup", type="primary"): st.switch_page(find_page("Project"))
-    st.stop()
+    st.session_state.project_data = {"p_name": "", "b_type": "Næring", "etasjer": 1, "bta": 0}
+    if SSOT_FILE.exists():
+        try:
+            with open(SSOT_FILE, "r", encoding="utf-8") as f:
+                st.session_state.project_data = json.load(f)
+        except Exception: pass
 
 pd_state = st.session_state.project_data
+if not pd_state.get("p_name"):
+    st.warning("⚠️ Handling kreves: Du må sette opp prosjektdata i Project Setup.")
+    if find_page("Project") and st.button("⚙️ Gå til Project Setup", type="primary"): st.switch_page(find_page("Project"))
+    st.stop()
+
+if "rib_phase" not in st.session_state: st.session_state.rib_phase = "setup" 
+
+top_l, top_r = st.columns([4, 1])
+with top_l: render_html(f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>')
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"): st.switch_page(find_page("Project"))
+st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+
 
 # ------------------------------------------------------------
-# 5. DOKUMENTHÅNDTERING & AI SKISSE MOTOR
+# 4. ALTERNATIVSTUDIE BÆRESYSTEM
 # ------------------------------------------------------------
-def pdf_to_images(pdf_bytes: bytes, limit: int = 4, scale: float = 2.0) -> List[Image.Image]:
-    images = []
-    if fitz is None: return images
+def build_structural_candidates(mat: str, opt: str, fund: str) -> pd.DataFrame:
+    systems = [
+        {"System": "Plasstøpt betong med flatdekker", "Materiale": "Plasstøpt", "Spenn": "6-9 m", "Avstivning": "Kjerner/skiver", "Rasjonalitet": 60, "Robusthet": 80, "Vekt": "Høy"},
+        {"System": "Prefabrikkert betong/stål", "Materiale": "Prefab", "Spenn": "7-12 m", "Avstivning": "Kjerne/kryss", "Rasjonalitet": 75, "Robusthet": 70, "Vekt": "Høy"},
+        {"System": "Massivtre (CLT/limtre)", "Materiale": "Tre", "Spenn": "4-7 m", "Avstivning": "CLT-skiver", "Rasjonalitet": 65, "Robusthet": 60, "Vekt": "Lav"},
+        {"System": "Stålrammer m/ hulldekker", "Materiale": "Stål", "Spenn": "8-14 m", "Avstivning": "Kryss/Kjerne", "Rasjonalitet": 80, "Robusthet": 65, "Vekt": "Middels"},
+    ]
+    for s in systems:
+        if mat.lower() in s["Materiale"].lower(): s["Rasjonalitet"] += 15
+        if "Lav vekt" in opt and s["Vekt"] == "Lav": s["Rasjonalitet"] += 15
+        if "Rasjonalitet" in opt and s["Materiale"] in ["Prefab", "Stål"]: s["Rasjonalitet"] += 10
+        if "Robusthet" in opt and s["Materiale"] == "Plasstøpt": s["Robusthet"] += 15
+        if "Fjell" in fund and s["Vekt"] == "Høy": s["Robusthet"] += 5
+        s["Total"] = int(s["Rasjonalitet"] * 0.6 + s["Robusthet"] * 0.4)
+        
+    df = pd.DataFrame(systems).sort_values("Total", ascending=False).reset_index(drop=True)
+    df.insert(0, "Prioritet", range(1, len(df)+1))
+    df.insert(1, "Anbefalt", ["JA"] + [""] * (len(df)-1))
+    return df
+
+
+# ------------------------------------------------------------
+# 5. TEGNINGSPARSING & PLAN-KLASSIFISERING
+# ------------------------------------------------------------
+def classify_plan(name: str) -> Tuple[str, int]:
+    low = name.lower()
+    if any(k in low for k in ["kjeller", "u1", "u2", "parkering", "basement", "p-"]): return "Kjeller / Parkering", -1
+    if any(k in low for k in ["1. etg", "plan 1", "næring", "ground"]): return "1. Etasje / Næring", 0
+    if any(k in low for k in ["tak", "roof"]): return "Takplan", 99
+    nums = re.findall(r'\d+', low)
+    return "Boligplan", int(nums[0]) if nums else 1
+
+def load_drawings(files) -> List[Dict]:
+    drawings = []
+    if not files: return drawings
+    for f in files:
+        name = clean_pdf_text(f.name)
+        if name.lower().endswith(".pdf") and fitz:
+            doc = fitz.open(stream=f.read(), filetype="pdf")
+            for page_num in range(min(4, len(doc))):
+                pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                ptype, lvl = classify_plan(f"{name} (s.{page_num+1})")
+                drawings.append({"name": f"{name} (s.{page_num+1})", "image": img, "level": lvl, "type": ptype})
+        else:
+            try: 
+                ptype, lvl = classify_plan(name)
+                drawings.append({"name": name, "image": Image.open(f).convert("RGB"), "level": lvl, "type": ptype})
+            except: pass
+    
+    drawings.sort(key=lambda x: x["level"]) # Sorter bottom-up for vertikal kontinuitet
+    return drawings
+
+
+# ------------------------------------------------------------
+# 6. CV2 GEOMETRIMOTOR & RIB-LOGIKK
+# ------------------------------------------------------------
+def point_in_poly(x: float, y: float, poly: List[Tuple[float, float]]) -> bool:
+    if not poly or not HAS_CV2: return True
+    pts = np.array(poly, np.float32) * 1000
+    return cv2.pointPolygonTest(pts, (x*1000, y*1000), False) >= 0
+
+def process_drawing_geometry(drawings: List[Dict]):
+    master_cores = []
+    
+    for dwg in drawings:
+        img = dwg["image"]
+        ptype = dwg["type"]
+        poly, v_lines, h_lines = [], [], []
+        
+        if HAS_CV2:
+            gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+            h, w = gray.shape
+            
+            mask = np.ones((h, w), dtype=np.uint8) * 255
+            cv2.rectangle(mask, (int(w*0.8), int(h*0.8)), (w, h), 0, -1) # Tittelfelt
+            cv2.rectangle(mask, (0, 0), (w, int(h*0.05)), 0, -1) # Marger
+            cv2.rectangle(mask, (0, 0), (int(w*0.05), h), 0, -1)
+            
+            _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+            thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
+            
+            # 1. Bygningskontur
+            contours, _ = cv2.findContours(cv2.dilate(thresh, np.ones((10,10))), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                valid = [c for c in contours if cv2.contourArea(c) > (w*h*0.05)]
+                if valid:
+                    largest = max(valid, key=cv2.contourArea)
+                    epsilon = 0.02 * cv2.arcLength(largest, True)
+                    approx = cv2.approxPolyDP(largest, epsilon, True)
+                    poly = [(pt[0][0]/w, pt[0][1]/h) for pt in approx]
+                    
+            # 2. Akser (Hough Lines)
+            edges = cv2.Canny(gray, 50, 150)
+            lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=int(min(w,h)*0.1), maxLineGap=20)
+            if lines is not None:
+                for line in lines:
+                    x1, y1, x2, y2 = line[0]
+                    if abs(x1 - x2) < 5: v_lines.append((x1+x2)/2 / w)
+                    elif abs(y1 - y2) < 5: h_lines.append((y1+y2)/2 / h)
+            
+            def cluster(arr, tol=0.04):
+                if not arr: return []
+                arr.sort()
+                res, curr = [], [arr[0]]
+                for val in arr[1:]:
+                    if val - curr[-1] < tol: curr.append(val)
+                    else: 
+                        res.append(sum(curr)/len(curr))
+                        curr = [val]
+                res.append(sum(curr)/len(curr))
+                return res
+            
+            v_lines = cluster(v_lines)
+            h_lines = cluster(h_lines)
+            
+        # Fallback polygon
+        if not poly: poly = [(0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)]
+        poly_xs, poly_ys = [p[0] for p in poly], [p[1] for p in poly]
+        
+        if not v_lines: v_lines = list(np.linspace(min(poly_xs)+0.05, max(poly_xs)-0.05, 4))
+        if not h_lines: h_lines = list(np.linspace(min(poly_ys)+0.05, max(poly_ys)-0.05, 3))
+        
+        dwg["geometry"] = {"polygon": poly}
+        elements = []
+        
+        # --- VERTIKAL KONTINUITET (ARV FRA UNDERETASJE) ---
+        for mc in master_cores:
+            elements.append({"Behold": True, "Type": "Kjerne", "X": mc["X"], "Y": mc["Y"], "W": mc["W"], "H": mc["H"], "Label": mc["Label"], "Transfer": False})
+
+        # --- DETERMINISTISK PLASSERING ETTER PLANTYPE ---
+        if ptype in ["Kjeller / Parkering", "1. Etasje / Næring"]:
+            idx = 1
+            for vx in v_lines:
+                for hy in h_lines:
+                    if point_in_poly(vx, hy, poly):
+                        in_core = any((mc["X"]-0.05 < vx < mc["X"]+mc["W"]+0.05) and (mc["Y"]-0.05 < hy < mc["Y"]+mc["H"]+0.05) for mc in master_cores)
+                        if not in_core:
+                            elements.append({"Behold": True, "Type": "Søyle", "X": round(vx,3), "Y": round(hy,3), "W": 0.0, "H": 0.0, "Label": f"S{idx}", "Transfer": False})
+                            idx += 1
+                            
+            if not master_cores:
+                cx, cy = np.mean(v_lines), np.mean(h_lines)
+                core = {"Behold": True, "Type": "Kjerne", "X": round(cx-0.04,3), "Y": round(cy-0.06,3), "W": 0.08, "H": 0.12, "Label": "Trapp/Heis", "Transfer": False}
+                elements.append(core)
+                master_cores.append(core)
+                
+        elif ptype == "Boligplan":
+            wall_id = 1
+            for vx in v_lines[1:-1]:
+                if point_in_poly(vx, 0.5, poly):
+                    elements.append({"Behold": True, "Type": "Skive", "X": round(vx,3), "Y": min(poly_ys)+0.1, "W": 0.02, "H": 0.6, "Label": f"V{wall_id}", "Transfer": False})
+                    wall_id += 1
+                    
+            if not master_cores:
+                cx, cy = np.mean(v_lines), h_lines[0]
+                core = {"Behold": True, "Type": "Kjerne", "X": round(cx-0.04,3), "Y": round(cy,3), "W": 0.08, "H": 0.12, "Label": "Trapp", "Transfer": False}
+                elements.append(core)
+                master_cores.append(core)
+                
+        elif ptype == "Takplan":
+            elements.append({"Behold": True, "Type": "Spennpil", "X": min(poly_xs)+0.1, "Y": np.mean(poly_ys), "W": 0.6, "H": 0.0, "Label": "Hovedspenn", "Transfer": False})
+
+        dwg["elements_df"] = pd.DataFrame(elements)
+
+def apply_transfer_logic(drawings: List[Dict]):
+    """ Sjekker om vegger i bolig lander på søyler i kjeller. """
+    for i in range(1, len(drawings)):
+        lower, upper = drawings[i-1]["elements_df"], drawings[i]["elements_df"]
+        if upper.empty or lower.empty: continue
+        
+        for idx, u_row in upper.iterrows():
+            if u_row["Type"] in ["Søyle", "Skive"]:
+                supported = False
+                for _, l_row in lower.iterrows():
+                    if l_row["Type"] in ["Søyle", "Skive", "Kjerne"]:
+                        dist = math.hypot(u_row["X"] - l_row["X"], u_row["Y"] - l_row["Y"])
+                        if dist < 0.05:
+                            supported = True; break
+                drawings[i]["elements_df"].at[idx, "Transfer"] = not supported
+
+
+# ------------------------------------------------------------
+# 7. VISUELL RENDERER
+# ------------------------------------------------------------
+def render_overlay(img_pil: Image.Image, df: pd.DataFrame, geom: dict) -> Image.Image:
+    base = img_pil.copy().convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0,0,0,0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    w, h = base.size
+    font = get_font(max(14, int(min(w,h)*0.015)), bold=True)
+    
+    if geom.get("polygon"):
+        pts = [(int(x*w), int(y*h)) for x, y in geom["polygon"]]
+        if len(pts) > 2: draw.polygon(pts, outline=(56, 194, 201, 60), width=3)
+            
+    for _, row in df.iterrows():
+        if not row.get("Behold", True): continue
+        x, y = int(row["X"]*w), int(row["Y"]*h)
+        ew, eh = int(row.get("W", 0.0)*w), int(row.get("H", 0.0)*h)
+        lbl = str(row.get("Label", ""))
+        is_transfer = row.get("Transfer", False)
+        
+        if row["Type"] == "Søyle":
+            r = max(8, int(min(w,h)*0.01))
+            col = (255, 80, 80, 255) if is_transfer else (56, 194, 201, 255)
+            draw.ellipse((x-r, y-r, x+r, y+r), fill=col, outline=(255,255,255,255), width=2)
+            draw.text((x+r+4, y-r), lbl + (" (Transfer)" if is_transfer else ""), fill=(10,22,35,255), font=font)
+            
+        elif row["Type"] == "Kjerne":
+            ew, eh = ew if ew > 0 else int(0.08*w), eh if eh > 0 else int(0.12*h)
+            draw.rounded_rectangle((x, y, x+ew, y+eh), radius=6, fill=(255, 196, 64, 180), outline=(255, 196, 64, 255), width=3)
+            draw.text((x+4, y+4), lbl, fill=(30,30,30,255), font=font)
+            
+        elif row["Type"] == "Skive":
+            ew, eh = ew if ew > 0 else int(0.02*w), eh if eh > 0 else int(0.6*h)
+            col = (255, 80, 80, 255) if is_transfer else (255, 153, 153, 255)
+            draw.line((x, y, x, y+eh), fill=col, width=max(6, int(min(w,h)*0.008)))
+            draw.text((x+10, y+eh//2), lbl + (" (Transfer)" if is_transfer else ""), fill=(35,35,35,255), font=font)
+            
+        elif row["Type"] == "Spennpil":
+            ew = ew if ew > 0 else int(0.4*w)
+            draw.line((x, y, x+ew, y), fill=(196, 235, 176, 255), width=4)
+            draw.polygon([(x+ew, y), (x+ew-15, y-10), (x+ew-15, y+10)], fill=(196, 235, 176, 255))
+            draw.text((x+ew//2, y-20), lbl, fill=(30,30,30,255), font=font)
+
+    return Image.alpha_composite(base, overlay).convert("RGB")
+
+
+# ------------------------------------------------------------
+# 8. AI RAPPORT MOTOR
+# ------------------------------------------------------------
+def run_ai_report(model, pd_state, drawings, recommended_sys):
+    locked_geom = []
+    for d in drawings:
+        df = d["elements_df"]
+        active = df[df["Behold"] == True].to_dict(orient="records")
+        locked_geom.append({"Tegning": d["name"], "Type": d["type"], "Elementer": active})
+        
+    prompt = f"""
+    Du er Builtly RIB AI, en senior rådgivende ingeniør.
+    Brukeren har fagkontrollert og låst bæresystemet for {pd_state['p_name']}.
+    
+    LÅST GEOMETRI (ETASJE FOR ETASJE):
+    {json.dumps(locked_geom, ensure_ascii=False)}
+    
+    ANBEFALT SYSTEM FRA MATRISE: {recommended_sys}
+    
+    Skriv et konkret konseptnotat. Beskriv lastveiene NØYAKTIG ut fra den låste geometrien.
+    Kommenter spesifikt hvis elementer er flagget med "Transfer: true".
+    
+    Svar KUN med JSON:
+    {{
+      "grunnlag_status": "DELVIS",
+      "grunnlag_begrunnelse": "Maskinell tolkning og fagkontroll",
+      "risk_register": [ {{"topic": "risiko", "severity": "Middels", "mitigation": "tiltak"}} ],
+      "report_markdown": "# 1. SAMMENDRAG OG KONKLUSJON\\n...\\n# 2. VURDERING AV DATAGRUNNLAG\\n...\\n# 3. KONSEPT FOR BÆRESYSTEM OG STABILITET\\n...\\n# 4. VERTIKAL KONTINUITET OG TRANSFER\\n...\\n# 5. FUNDAMENTERING OG LASTER\\n...\\n# 6. RISIKO OG NESTE STEG"
+    }}
+    """
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page_idx in range(min(limit, len(doc))):
-            pix = doc.load_page(page_idx).get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-            images.append(Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB"))
-        doc.close()
-    except: pass
-    return images
+        resp = model.generate_content([prompt], generation_config={"temperature": 0.2})
+        cleaned = re.sub(r"^```json", "", resp.text.strip(), flags=re.I).strip()
+        cleaned = re.sub(r"^```", "", cleaned).strip()
+        return json.loads(cleaned[cleaned.find("{"):cleaned.rfind("}")+1])
+    except Exception:
+        return {"report_markdown": "# 1. Feil\nKunne ikke generere rapport.", "risk_register": []}
 
-def render_structural_overlay(source_image: Image.Image, spec_json: str) -> Image.Image:
-    """Tegner det konseptuelle bæresystemet basert på JSON-koordinater."""
-    try:
-        data = json.loads(spec_json)
-    except: 
-        # Prøv å pakke ut hvis AI inkluderte markdown fences
-        match = re.search(r"(\{.*\})", spec_json.strip().replace("\n",""), re.S)
-        if match:
-            try: data = json.loads(match.group(1))
-            except: return source_image
-        else: return source_image
-
-    canvas = source_image.convert("RGBA")
-    overlay = Image.new("RGBA", canvas.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay)
-    w, h = canvas.size
-
-    for el in data.get("elements", []):
-        etype = el.get("type", "").lower()
-        def to_px(coord: List[float]) -> Tuple[int, int]:
-            # AI koordinater (0-1000)
-            return (int(coord[0] * w / 1000), int(coord[1] * h / 1000))
-
-        if etype == "column" and "point" in el:
-            pos = to_px(el["point"])
-            r = 15
-            draw.ellipse([pos[0]-r, pos[1]-r, pos[0]+r, pos[1]+r], fill=(56, 189, 248, 210), outline=(255,255,255,255), width=2)
-            if "label" in el: draw.text((pos[0]+18, pos[1]-10), el["label"], fill=(56, 189, 248, 255))
-            
-        elif etype == "beam" and "points" in el:
-            pts = [to_px(p) for p in el["points"]]
-            draw.line(pts, fill=(56, 189, 248, 180), width=9)
-            
-        elif etype in ["core", "wall"]:
-            if "points" in el:
-                pts = [to_px(p) for p in el["points"]]
-                draw.line(pts, fill=(229, 57, 53, 160), width=14)
-            elif "rect" in el:
-                r = el["rect"] # [x, y, w, h]
-                px_rect = [int(r[0]*w/1000), int(r[1]*h/1000), int((r[0]+r[2])*w/1000), int((r[1]+r[3])*h/1000)]
-                draw.rectangle(px_rect, fill=(229, 57, 53, 70), outline=(229, 57, 53, 255), width=3)
-            
-    return Image.alpha_composite(canvas, overlay).convert("RGB")
 
 # ------------------------------------------------------------
-# 6. CORPORATE PDF MOTOR
+# 9. TABELLRENDERER FOR PDF (PREMIUM)
+# ------------------------------------------------------------
+def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_fill_column: str = None) -> Image.Image:
+    df = df.copy().fillna("")
+    title, subtitle = clean_pdf_text(title), clean_pdf_text(subtitle)
+    font_title, font_subtitle = get_font(34, bold=True), get_font(18, bold=False)
+    font_header, font_body = get_font(18, bold=True), get_font(16, bold=False)
+
+    side_pad, top_pad, cell_pad_x, cell_pad_y, table_width = 28, 24, 10, 9, 1540
+    width_weights = [0.85 if str(c) in {"Prioritet", "Anbefalt", "Total", "Alvorlighet"} else 2.2 if "tiltak" in str(c).lower() else 1.4 for c in df.columns]
+    col_widths = [max(90, int(table_width * w / sum(width_weights))) for w in width_weights]
+
+    header_height = 0
+    header_wrapped = {}
+    for col, width in zip(df.columns, col_widths):
+        wrapped = wrap_text_px(str(col), font_header, width - (cell_pad_x * 2))
+        header_wrapped[col] = wrapped
+        header_height = max(header_height, len(wrapped) * 24 + (cell_pad_y * 2))
+
+    row_heights, wrapped_cells = [], []
+    for ridx in range(len(df)):
+        row = df.iloc[ridx]
+        row_wrap, row_height = {}, 0
+        for col, width in zip(df.columns, col_widths):
+            wrapped = wrap_text_px(str(row[col]), font_body, width - (cell_pad_x * 2))
+            row_wrap[col] = wrapped
+            row_height = max(row_height, len(wrapped) * 22 + (cell_pad_y * 2))
+        row_heights.append(max(34, row_height))
+        wrapped_cells.append(row_wrap)
+
+    image_width, image_height = table_width + side_pad * 2, top_pad + 66 + 28 + 14 + header_height + sum(row_heights) + 28
+    img = Image.new("RGB", (image_width, image_height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    draw.rounded_rectangle((12, 12, image_width - 12, image_height - 12), radius=18, outline=(219, 225, 232), width=2, fill=(255, 255, 255))
+    draw.rounded_rectangle((18, 18, image_width - 18, 18 + 66 + 28 + 10), radius=16, fill=(236, 240, 245))
+    draw.text((side_pad, 28), title, font=font_title, fill=(29, 45, 68))
+    if subtitle: draw.text((side_pad, 28 + 40), subtitle, font=font_subtitle, fill=(96, 108, 122))
+
+    x, y = side_pad, top_pad + 66 + 28 + 10
+    for col, width in zip(df.columns, col_widths):
+        draw.rectangle((x, y, x + width, y + header_height), fill=(46, 62, 84))
+        yy = y + cell_pad_y
+        for line in header_wrapped[col]:
+            draw.text((x + cell_pad_x, yy), clean_pdf_text(line), font=font_header, fill=(255, 255, 255))
+            yy += 24
+        x += width
+
+    y += header_height
+    for ridx in range(len(df)):
+        row = df.iloc[ridx]
+        base_fill = (248, 250, 252) if ridx % 2 else (255, 255, 255)
+        if row_fill_column and row_fill_column in row:
+            val = str(row[row_fill_column]).strip()
+            if val == "JA": base_fill = (232, 246, 233)
+            elif val == "Høy": base_fill = (255, 204, 204)
+            elif val == "Middels": base_fill = (255, 242, 153)
+            
+        x, row_height = side_pad, row_heights[ridx]
+        for col, width in zip(df.columns, col_widths):
+            draw.rectangle((x, y, x + width, y + row_height), fill=base_fill, outline=(205, 212, 220), width=1)
+            yy = y + cell_pad_y
+            for line in wrapped_cells[ridx][col]:
+                draw.text((x + cell_pad_x, yy), clean_pdf_text(line), font=font_body, fill=(35, 38, 43))
+                yy += 22
+            x += width
+        y += row_height
+    return img
+
+
+# ------------------------------------------------------------
+# 10. PDF BYGGER (CORPORATE LAYOUT)
 # ------------------------------------------------------------
 class BuiltlyCorporatePDF(FPDF):
     def header(self):
         if self.page_no() == 1: return
-        self.set_y(11); self.set_text_color(88, 94, 102); self.set_font("Helvetica", "", 8)
-        self.cell(0, 4, clean_pdf_text(self.header_left), 0, 0, "L")
+        self.set_y(11)
+        self.set_text_color(88, 94, 102)
+        self.set_font("Helvetica", "", 8)
+        self.cell(0, 4, clean_pdf_text(getattr(self, "header_left", "Prosjekt")), 0, 0, "L")
         self.cell(0, 4, clean_pdf_text("Builtly | RIB"), 0, 1, "R")
-        self.set_draw_color(188, 192, 197); self.line(18, 18, 192, 18); self.set_y(24)
+        self.set_draw_color(188, 192, 197)
+        self.line(18, 18, 192, 18)
+        self.set_y(24)
 
     def footer(self):
-        self.set_y(-12); self.set_draw_color(210, 214, 220); self.line(18, 285, 192, 285)
-        self.set_font("Helvetica", "", 7); self.set_text_color(110, 114, 119)
-        self.cell(60, 5, "Builtly-RIB-001", 0, 0, "L")
-        self.cell(70, 5, "Konseptfase - krever faglig kontroll", 0, 0, "C")
-        self.cell(0, 5, f"Side {self.page_no()}", 0, 0, "R")
+        self.set_y(-12)
+        self.set_draw_color(210, 214, 220)
+        self.line(18, 285, 192, 285)
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(110, 114, 119)
+        self.cell(60, 5, clean_pdf_text("Builtly-RIB-001"), 0, 0, "L")
+        self.cell(70, 5, clean_pdf_text("Fagkontrollert konsept"), 0, 0, "C")
+        self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
-    def ensure_space(self, h):
-        if self.get_y() + h > 272: self.add_page()
+    def ensure_space(self, needed_height: float):
+        if self.get_y() + needed_height > 272: self.add_page()
 
     def section_title(self, title: str):
-        self.ensure_space(35); self.ln(2)
-        self.set_font("Helvetica", "B", 17); self.set_text_color(36, 50, 72)
-        self.set_x(20); self.multi_cell(170, 8, clean_pdf_text(title.upper()), 0, "L")
-        self.set_draw_color(204, 209, 216); self.line(20, self.get_y() + 1, 190, self.get_y() + 1); self.ln(5)
+        self.ensure_space(20)
+        self.ln(2)
+        title = ironclad_text_formatter(title)
+        num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
+        number = num_match.group(1).rstrip(".") if num_match and (num_match.group(1).endswith(".") or num_match.group(2)) else None
+        text = num_match.group(2).strip() if number else title
 
-    def body_paragraph(self, text, first=False):
-        text = ironclad_text_formatter(text)
-        if not text: return
-        self.set_x(20); self.set_font("Helvetica", "", 10.2 if not first else 10.6); self.set_text_color(35, 39, 43)
-        self.multi_cell(170, 5.5, text, align='L')
-        self.ln(1.6)
-
-    def subheading(self, text):
-        text = ironclad_text_formatter(text.replace("##", "").rstrip(":"))
-        self.ensure_space(14); self.ln(2)
-        self.set_x(20); self.set_font("Helvetica", "B", 10.8); self.set_text_color(56, 189, 248)
-        self.cell(0, 6, clean_pdf_text(text.upper()), 0, 1)
-        self.set_draw_color(225, 229, 234); self.line(20, self.get_y(), 190, self.get_y()); self.ln(2)
-
-    def stats_row(self, stats):
-        if not stats: return
-        self.ensure_space(26); box_w, gap, x0, y = 40, 3.3, 20, self.get_y()
-        for idx, (label, value) in enumerate(stats):
-            x = x0 + idx * (box_w + gap)
-            self.set_fill_color(236, 240, 245); self.set_draw_color(216, 220, 226); self.rect(x, y, box_w, 20, "DF")
-            self.set_xy(x, y + 3); self.set_font("Helvetica", "B", 13); self.set_text_color(33, 39, 45); self.cell(box_w, 7, clean_pdf_text(str(value)), 0, 1, "C")
-            self.set_x(x); self.set_font("Helvetica", "", 7.2); self.set_text_color(75, 80, 87); self.multi_cell(box_w, 4, clean_pdf_text(label), 0, "C")
-        self.set_y(y + 24)
-
-    def structural_table(self, df: pd.DataFrame, title: str):
-        self.ensure_space(len(df) * 10 + 25)
-        self.set_x(20); self.set_font("Helvetica", "B", 10); self.set_text_color(50, 50, 50)
-        self.cell(0, 8, clean_pdf_text(title), 0, 1)
-        self.set_font("Helvetica", "B", 8); self.set_fill_color(230, 235, 240)
-        col_w = 170 / len(df.columns)
-        for col in df.columns:
-            self.cell(col_w, 7, clean_pdf_text(col), 1, 0, "C", True)
-        self.ln(); self.set_font("Helvetica", "", 8)
-        for _, row in df.iterrows():
-            for val in row: self.cell(col_w, 7, clean_pdf_text(str(val)), 1, 0, "C")
-            self.ln()
+        self.set_font("Helvetica", "B", 17)
+        self.set_text_color(36, 50, 72)
+        start_y = self.get_y()
+        if number:
+            self.set_xy(20, start_y)
+            self.cell(12, 8, clean_pdf_text(number), 0, 0, "L")
+            self.set_xy(34, start_y)
+            self.multi_cell(156, 8, clean_pdf_text(text.upper()), 0, "L")
+        else:
+            self.set_xy(20, start_y)
+            self.multi_cell(170, 8, clean_pdf_text(text.upper()), 0, "L")
+        self.set_draw_color(204, 209, 216)
+        self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
         self.ln(5)
 
-def build_cover_page(pdf, pd_state, cover_img):
-    pdf.add_page()
-    if os.path.exists("logo.png"): pdf.image("logo.png", x=150, y=15, w=40)
-    pdf.set_xy(20, 45); pdf.set_font("Helvetica", "B", 11); pdf.set_text_color(100, 105, 110); pdf.cell(80, 6, "KONSEPTNOTAT", 0, 1)
-    pdf.set_x(20); pdf.set_font("Helvetica", "B", 34); pdf.set_text_color(20, 28, 38)
-    pdf.multi_cell(95, 12, clean_pdf_text(pd_state.get("p_name")), 0, 'L')
+    def body_paragraph(self, text: str, first: bool = False):
+        text = ironclad_text_formatter(text)
+        if not text: return
+        self.set_x(20)
+        self.set_font("Helvetica", "", 10.2 if not first else 10.6)
+        self.set_text_color(35, 39, 43)
+        self.multi_cell(170, 5.5 if not first else 5.7, clean_pdf_text(text))
+        self.ln(1.6)
+
+    def subheading(self, text: str):
+        text = ironclad_text_formatter(text.replace("##", "").rstrip(":"))
+        self.ensure_space(14)
+        self.ln(2)
+        self.set_x(20)
+        self.set_font("Helvetica", "B", 10.8)
+        self.set_text_color(48, 64, 86)
+        self.cell(0, 6, clean_pdf_text(text.upper()), 0, 1)
+        self.set_draw_color(225, 229, 234)
+        self.line(20, self.get_y(), 190, self.get_y())
+        self.ln(2)
+
+    def bullets(self, items: List[str]):
+        for idx, item in enumerate(items, start=1):
+            clean = ironclad_text_formatter(item)
+            if not clean: continue
+            self.ensure_space(10)
+            self.set_font("Helvetica", "", 10.1)
+            self.set_text_color(35, 39, 43)
+            start_y = self.get_y()
+            self.set_xy(22, start_y)
+            self.cell(6, 5.2, "-", 0, 0, "L")
+            self.set_xy(28, start_y)
+            self.multi_cell(162, 5.2, clean_pdf_text(clean))
+            self.ln(0.8)
+
+    def kv_card(self, items, x=None, width=80, title=None):
+        if x is None: x = self.get_x()
+        height = 10 + (len(items) * 6.3) + (7 if title else 0)
+        self.ensure_space(height + 3)
+        start_y = self.get_y()
+        self.set_fill_color(245, 247, 249)
+        self.set_draw_color(214, 219, 225)
+        try: self.rounded_rect(x, start_y, width, height, 4, "DF")
+        except: self.rect(x, start_y, width, height, "DF")
+        yy = start_y + 5
+        if title:
+            self.set_xy(x + 4, yy)
+            self.set_font("Helvetica", "B", 10)
+            self.set_text_color(48, 64, 86)
+            self.cell(width - 8, 5, clean_pdf_text(title.upper()), 0, 1)
+            yy += 7
+        for label, value in items:
+            self.set_xy(x + 4, yy)
+            self.set_font("Helvetica", "B", 8.6)
+            self.set_text_color(72, 79, 87)
+            self.cell(28, 5, clean_pdf_text(label), 0, 0)
+            self.set_font("Helvetica", "", 8.6)
+            self.set_text_color(35, 39, 43)
+            self.multi_cell(width - 34, 5, clean_pdf_text(value))
+            yy = self.get_y() + 1
+        self.set_y(max(self.get_y(), start_y + height))
+
+    def figure_image(self, image_path: str, width=170, caption=""):
+        img = Image.open(image_path)
+        height = width * (img.height / img.width)
+        self.ensure_space(height + 15)
+        x, y = 20, self.get_y()
+        self.image(image_path, x=x, y=y, w=width)
+        self.set_y(y + height + 2)
+        if caption:
+            self.set_x(x)
+            self.set_font("Helvetica", "I", 7.7)
+            self.set_text_color(104, 109, 116)
+            self.multi_cell(width, 4, clean_pdf_text(caption), 0, "C")
+        self.set_y(y + height + 10)
+
+def build_full_pdf(pd_state, report_json, cand_df, drawings):
+    pdf = BuiltlyCorporatePDF("P", "mm", "A4")
+    pdf.header_left = pd_state.get("p_name", "Prosjekt")
+    pdf.set_auto_page_break(True, margin=22)
+    pdf.set_margins(18, 18, 18)
     
-    pdf.ln(4); pdf.set_x(20); pdf.set_font("Helvetica", "B", 14); pdf.set_text_color(56, 189, 248)
-    pdf.multi_cell(95, 6.5, "Konstruksjon og bæresystem (RIB)\nKonseptvalg og stabilitetsprinsipp", 0, 'L')
+    # Forside
+    pdf.add_page()
+    pdf.set_xy(20, 45)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(100, 105, 110)
+    pdf.cell(80, 6, "KONSEPTNOTAT KONSTRUKSJON", 0, 1, "L")
+    pdf.set_font("Helvetica", "B", 34)
+    pdf.set_text_color(20, 28, 38)
+    pdf.multi_cell(120, 12, clean_pdf_text(pd_state.get("p_name", "Konstruksjon")), 0, "L")
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(64, 68, 74)
+    pdf.multi_cell(120, 6.5, "Bæresystem, stabilitet og verifiserte konseptskisser", 0, "L")
     
     pdf.set_xy(118, 45)
-    meta = [("Byggherre", pd_state.get("c_name", "-")), ("Byggtype", pd_state.get("b_type", "-")), ("BTA", f"{pd_state.get('bta', 0)} m2"), ("Dato", datetime.now().strftime("%d.%m.%Y"))]
-    h_card = 10 + (len(meta) * 6.3) + 7
-    pdf.set_fill_color(245, 247, 249); pdf.set_draw_color(214, 219, 225); pdf.rect(118, 45, 72, h_card, "DF")
-    yy = 50; pdf.set_xy(122, yy); pdf.set_font("Helvetica", "B", 10); pdf.set_text_color(48, 64, 86); pdf.cell(64, 5, "PROSJEKTFAKTA", 0, 1); yy += 7
-    for l, v in meta:
-        pdf.set_xy(122, yy); pdf.set_font("Helvetica", "B", 8.6); pdf.set_text_color(72, 79, 87); pdf.cell(32, 5, clean_pdf_text(l), 0, 0); pdf.set_font("Helvetica", "", 8.6); pdf.set_text_color(35, 39, 43); pdf.multi_cell(32, 5, clean_pdf_text(v)); yy = pdf.get_y() + 1
+    pdf.kv_card([
+        ("Oppdragsgiver", pd_state.get("c_name", "-")),
+        ("Emne", "RIB / Konstruksjon"),
+        ("Dato", datetime.now().strftime("%d.%m.%Y")),
+        ("Status", report_json.get("grunnlag_status", "-"))
+    ], x=118, width=72)
     
-    if cover_img:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            cover_img.convert("RGB").save(tmp.name, format="JPEG", quality=85)
-            w = 170; h = w * (cover_img.height/cover_img.width)
-            if h > 130: h = 130; w = h / (cover_img.height/cover_img.width)
-            pdf.image(tmp.name, x=20 + (170-w)/2, y=115, w=w)
+    if drawings:
+        img_path = save_temp_image(drawings[0]["final_img"], ".jpg")
+        pdf.set_xy(20, 115)
+        pdf.figure_image(img_path, width=170, caption="Forsidefigur: Fagkontrollert konseptskisse")
+
+    pdf.add_page()
+    pdf.ensure_space(60)
+    pdf.kv_card([
+        ("Prosjekt", pd_state.get("p_name", "-")),
+        ("Type", pd_state.get("b_type", "-")),
+        ("Etasjer", str(pd_state.get("etasjer", "-"))),
+        ("BTA", f"{pd_state.get('bta', 0)} m2")
+    ], x=20, width=82, title="Prosjektgrunnlag")
     
-    pdf.set_xy(20, 255); pdf.set_font("Helvetica", "", 8.8); pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(170, 4.5, "Rapporten er generert av Builtly RIB AI. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll før videre prosjektering.")
+    pdf.set_xy(108, pdf.get_y() - 41)
+    pdf.kv_card([
+        ("Status", report_json.get("grunnlag_status", "-")),
+        ("Tegninger", str(len(drawings))),
+        ("Regelverk", pd_state.get("land", "Norge"))
+    ], x=108, width=82, title="Datagrunnlag")
+    pdf.ln(8)
 
-# ------------------------------------------------------------
-# 7. UI: RIB — KONSTRUKSJON
-# ------------------------------------------------------------
-logo_uri = logo_data_uri()
-if logo_uri: render_html(f'<img src="{logo_uri}" class="brand-logo">')
-
-st.markdown(f"<h1>🏗️ RIB — Konstruksjon</h1>", unsafe_allow_html=True)
-st.success(f"✅ Prosjektdata for **{pd_state['p_name']}** er synkronisert fra SSOT.")
-
-# Metrics
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-col_m1.markdown(f'<div class="metric-card"><div class="metric-value">{pd_state.get("etasjer", 1)}</div><div class="metric-label">Etasjer</div></div>', unsafe_allow_html=True)
-col_m2.markdown(f'<div class="metric-card"><div class="metric-value">{pd_state.get("bta", 0)}</div><div class="metric-label">BTA m2</div></div>', unsafe_allow_html=True)
-col_m3.markdown(f'<div class="metric-card"><div class="metric-value">CC2</div><div class="metric-label">Pålitelighetsklasse</div></div>', unsafe_allow_html=True)
-col_m4.markdown(f'<div class="metric-card"><div class="metric-value">REI60</div><div class="metric-label">Brannkrav</div></div>', unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-with st.expander("1. Prosjektstrategi & Føringer", expanded=True):
-    col_a, col_b = st.columns(2)
-    mat_valg = col_a.selectbox("Hovedbæresystem", ["Stålrammer og hulldekker", "Massivtre (CLT/Limtre)", "Plasstøpt betong", "Hybrid"], index=0)
-    fund_valg = col_b.selectbox("Fundamentering", ["Direkte fundamentering", "Peling til fjell", "Kompensert fundamentering"], index=0)
+    # Innhold AI
+    sections, current = [], None
+    for raw_line in report_json.get("report_markdown", "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            if current: sections.append(current)
+            current = {"title": ironclad_text_formatter(line.lstrip("#").strip()), "lines": []}
+        elif current is not None:
+            current["lines"].append(raw_line.rstrip())
+    if current: sections.append(current)
     
-    st.markdown("##### ⚙️ Spesifikke føringer for bæresystem (Skjerp AI-en)")
-    structural_reqs = st.text_area("Hvilke arkitektoniske krav må AI-en ta hensyn til?", 
-                                 placeholder="F.eks: 'Ingen søyler i fasadelinje', 'Grid må følge 6.0m deling', 'Unngå søyler i midten av stue'...")
-    
-    alt_study = st.checkbox("Utfør full alternativstudie (Miljø vs. Kostnad)", value=True)
-
-with st.expander("2. Last opp Underlag", expanded=True):
-    st.info("AI-en leser tegningene for å finne logiske rutenett for søyler og vegger.")
-    u_files = st.file_uploader("Arkitektplaner (PDF/Bilder)", accept_multiple_files=True, type=['pdf','png','jpg','jpeg'])
-    if u_files and st.button("Klargjør underlag", type="secondary"):
-        st.session_state.source_docs = []
-        for f in u_files:
-            pages = pdf_to_images(f.read()) if f.name.lower().endswith(".pdf") else [Image.open(f).convert("RGB")]
-            st.session_state.source_docs.append({"name": f.name, "pages": pages})
-        st.success("Tegninger er klargjort for pinpointing.")
-
-with st.expander("3. AI-Pinpointing & Skisse-Editor", expanded=True):
-    if st.session_state.get("source_docs"):
-        sel_doc_name = st.selectbox("Velg tegning for teknisk markup", [d['name'] for d in st.session_state.source_docs])
-        doc_obj = next(d for d in st.session_state.source_docs if d['name'] == sel_doc_name)
-        pg_cnt = len(doc_obj['pages'])
+    for sec in sections:
+        pdf.section_title(sec["title"])
+        paragraph_buffer, bullet_buffer = [], []
         
-        # Fikser slider krasj for enkeltsidige dokumenter
-        sel_pg_idx = 1
-        if pg_cnt > 1:
-            sel_pg_idx = st.slider("Velg side", 1, pg_cnt, 1)
-            
-        sel_pg = doc_obj['pages'][sel_pg_idx-1]
-        
-        col_sk1, col_sk2 = st.columns([1.5, 1])
-        with col_sk1:
-            st.image(sel_pg, use_container_width=True)
-        
-        with col_sk2:
-            st.markdown("##### 📝 Markup Editor")
-            if st.button("🤖 AI: Foreslå bæresystem", type="primary", use_container_width=True):
-                with st.spinner("Beregner knutepunkter..."):
-                    model = genai.GenerativeModel(pick_model_name())
-                    prompt = f"""
-                    Du er en senior RIB. Analyser arkitekturen og foreslå et bæresystem.
-                    Føringer: {structural_reqs or 'Standard grid 5-8m'}. Materiale: {mat_valg}.
-                    Finn sjakter (cores) og plasser søyler i yttervegger og i grid.
-                    Returner KUN JSON med koordinater (0-1000):
-                    {{
-                      "elements": [
-                        {{"type": "column", "point": [200, 300], "label": "S1"}},
-                        {{"type": "core", "rect": [400, 450, 80, 120]}}
-                      ]
-                    }}
-                    """
-                    res = model.generate_content([prompt, sel_pg])
-                    st.session_state.current_ai_json = res.text
-            
-            edited_json = st.text_area("Rediger koordinater (JSON) her dersom AI-en bommer:", 
-                                      value=st.session_state.current_ai_json, 
-                                      height=250, 
-                                      help="Her kan du manuelt flytte søyler eller fjerne dem ved å endre tallene.")
-            
-            if edited_json:
-                try:
-                    rendered_sketch = render_structural_overlay(sel_pg, edited_json)
-                    st.image(rendered_sketch, caption="Oppdatert skisse (Klar for rapport)", use_container_width=True)
-                    if st.button("💾 Lagre skisse til vedlegg", type="secondary"):
-                        if "rib_sketches" not in st.session_state: st.session_state.rib_sketches = []
-                        st.session_state.rib_sketches.append((f"RIB-Konsept: {sel_doc_name} S{sel_pg_idx}", rendered_sketch))
-                        st.success("Skisse lagret!")
-                except: st.error("Feil i JSON-formatet.")
-    else:
-        st.info("Last opp arkitektplaner i steg 2 først.")
+        def flush_p():
+            if paragraph_buffer: pdf.body_paragraph(" ".join(paragraph_buffer))
+            paragraph_buffer.clear()
+        def flush_b():
+            if bullet_buffer: pdf.bullets([re.sub(r"^([-*•]|\d+\.)\s+", "", item.strip()) for item in bullet_buffer])
+            bullet_buffer.clear()
+
+        for raw_line in sec.get("lines", []):
+            line = raw_line.strip()
+            if not line:
+                flush_p(); flush_b(); continue
+            if line.startswith("##"):
+                flush_p(); flush_b(); pdf.subheading(line); continue
+            if bool(re.match(r"^([-*•]|\d+\.)\s+", line)):
+                flush_p(); bullet_buffer.append(line); continue
+            flush_b(); paragraph_buffer.append(line)
+        flush_p(); flush_b()
+
+    # Matriser og Tabeller
+    if not cand_df.empty:
+        pdf.add_page()
+        pdf.section_title("Vedlegg A: Alternativmatrise for bæresystem")
+        cand_img = render_table_image(cand_df, "Alternativmatrise", "Maskinelt vurdert og rangert", row_fill_column="Anbefalt")
+        pdf.figure_image(save_temp_image(cand_img), width=170, caption="Tabell A1: Vurdering av rasjonalitet og robusthet.")
+
+    risks = report_json.get("risk_register", [])
+    if risks:
+        pdf.add_page()
+        pdf.section_title("Vedlegg B: Risikoregister")
+        risk_df = pd.DataFrame([{"Risiko": r.get("topic"), "Alvorlighet": r.get("severity"), "Tiltak": r.get("mitigation")} for r in risks])
+        risk_img = render_table_image(risk_df, "Risikoregister", "Prosjektspesifikke faglige vurderinger", row_fill_column="Alvorlighet")
+        pdf.figure_image(save_temp_image(risk_img), width=170, caption="Tabell B1: Identifiserte risikoer og tiltak for konseptfasen.")
+
+    # Skisser
+    for idx, dwg in enumerate(drawings):
+        pdf.add_page()
+        pdf.section_title(f"Vedlegg C{idx+1}: Konseptskisse ({dwg['name']})")
+        pdf.figure_image(save_temp_image(dwg["final_img"], ".jpg"), width=170, caption=f"Fagkontrollert konseptskisse for {dwg['type']}.")
+
+    return pdf.output(dest="S").encode("latin-1")
+
 
 # ------------------------------------------------------------
-# 8. GENERERING AV RAPPORT
+# 11. STREAMLIT UI - HUMAN IN THE LOOP
 # ------------------------------------------------------------
-st.markdown("<br>", unsafe_allow_html=True)
-if st.button("🚀 GENERER KOMPLETT RIB-KONSEPTNOTAT", type="primary", use_container_width=True):
-    with st.spinner("Analyserer stabilitet og utfører alternativstudie..."):
-        try:
-            model = genai.GenerativeModel(pick_model_name())
-            all_imgs = [p for d in st.session_state.get("source_docs", []) for p in d['pages']][:5]
-            
-            prompt = f"""
-            Du er en senior RIB. Skriv et komplett fagnotat for bæresystem for {pd_state['p_name']}.
-            Grunnlag: {pd_state['b_type']}, {pd_state['etasjer']} etasjer, BTA {pd_state['bta']} m2.
-            Valgt: {mat_valg}, {fund_valg}. Føringer: {structural_reqs}.
-            
-            KRAV TIL INNHOLD:
-            - Start direkte på kapittel 1. Ingen hilsen.
-            - I kapittel 7: Skriv en OPERATIV tiltaksplan (f.eks. 'Etabler samvirkesøyler i fasade', 'Prosjekter fundamenter til fjell').
-            - Anta at alt grunnlag er 100% korrekt for prosjektet (ikke klag på datakvalitet).
-            
-            TABELLER DU MÅ GENERERE (i markdown format):
-            1. 'Alternativmatrise': Sammenlign {mat_valg} med to andre systemer på skala 1-10 (Miljø, Kost, Tid).
-            2. 'Risikomatrise': List 4 risikoer (f.eks setninger, vibrasjoner) med Sannsynlighet (1-5) og Konsekvens (1-5).
-            
-            Struktur:
-            # 1. SAMMENDRAG OG KONKLUSJON
-            # 2. PROSJEKTBESKRIVELSE OG LASTFORUTSETNINGER (Vurder snø/vindlast for {pd_state.get('adresse')})
-            # 3. VALGT BÆRESYSTEM OG MATERIALER (Dyp teknisk forklaring)
-            # 4. STABILITET OG AVSTIVNINGSPRINSIPP (Horisontale laster)
-            # 5. FUNDAMENTERING OG GRUNNFORHOLD
-            # 6. ALTERNATIVVURDERING OG MILJØPROFIL
-            # 7. TILTAKSPLAN OG DETALJPROSJEKTERING
-            """
-            res = model.generate_content([prompt] + all_imgs)
-            
-            # --- MOCK DATA FOR MATRISER (HVIS AI IKKE PARSER AUTOMATISK) ---
-            risk_df = pd.DataFrame({
-                "Risikomoment": ["Grunnforhold/Setninger", "Vibrasjoner i hulldekker", "Knutepunkt-detaljer", "Brannmotstand"],
-                "Sannsynlighet": [2, 3, 2, 1], "Konsekvens": [5, 2, 4, 5], "Tiltak": ["Grunnundersøkelser", "Dim. for komfort", "Tidlig detaljering", "Maling"]
-            })
-            alt_df = pd.DataFrame({
-                "Konsept": [mat_valg, "Betong Elementer", "Massivtre"],
-                "Miljø (CO2)": [8, 5, 10], "Kostnad": [7, 9, 6], "Byggbarhet": [9, 8, 7], "Score": [8.0, 7.3, 7.7]
-            })
+st.markdown("<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🏗️ RIB — Konstruksjon</h1>", unsafe_allow_html=True)
+st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>Deterministisk geometri, vertikal sporing og interaktiv fagkontroll før PDF-generering.</p>", unsafe_allow_html=True)
 
-            # --- PDF BYGGING ---
-            pdf = BuiltlyCorporatePDF("P", "mm", "A4")
-            pdf.set_auto_page_break(True, margin=22); pdf.set_margins(18, 18, 18)
-            pdf.header_left = clean_pdf_text(pd_state['p_name'])
-            build_cover_page(pdf, pd_state, all_imgs[0] if all_imgs else None)
+if st.session_state.rib_phase == "setup":
+    with st.expander("1. Strategi og Opplasting", expanded=True):
+        c1, c2 = st.columns(2)
+        mat = c1.selectbox("Materialpreferanse", ["Plasstøpt betong", "Prefabrikkert betong/stål", "Massivtre (CLT)", "Stålrammer m/ hulldekker"])
+        opt = c2.selectbox("Optimaliseringsmodus", ["Maks rasjonalitet / Repeterbarhet", "Lav egenvekt / Påbygg", "Maks robusthet"])
+        fund = st.selectbox("Fundamentering", ["Fjell (Direkte)", "Peling", "Såle / Kompensert"])
+        
+        files = st.file_uploader("Last opp plan- og snittegninger (PDF/Bilde)", accept_multiple_files=True, type=["pdf", "png", "jpg"])
+
+    if st.button("🚀 Kjør Geometrianalyse (Steg 1)", type="primary", use_container_width=True):
+        if not files:
+            st.error("Last opp minst én tegning først.")
+            st.stop()
+        with st.spinner("Computer Vision (CV2) kjører: Finner bygningskonturer, klassifiserer plan og genererer basisgeometri..."):
+            drawings = load_drawings(files)
+            process_drawing_geometry(drawings)
+            apply_transfer_logic(drawings)
             
-            sections = split_ai_sections(res.text)
-            pdf.add_page()
-            for idx, sec in enumerate(sections):
-                if idx > 0: pdf.ensure_space(35); pdf.ln(8)
-                pdf.section_title(sec['title'])
-                
-                if sec['title'].startswith("1."):
-                    pdf.stats_row([("Etasjer", pd_state['etasjer']), ("BTA", pd_state['bta']), ("Materiale", mat_valg[:12]), ("P-klasse", "CC2")])
-                
-                for line in sec['lines']:
-                    if is_subheading_line(line): pdf.subheading(line)
-                    else: pdf.body_paragraph(line)
-                
-                if sec['title'].startswith("3."):
-                    pdf.structural_table(alt_df, "Tabell 1. Vurdering av alternative bærekonstruksjoner.")
-                if sec['title'].startswith("7."):
-                    pdf.structural_table(risk_df, "Tabell 2. Teknisk risikomatrise.")
-
-            if st.session_state.rib_sketches:
-                for title, img in st.session_state.rib_sketches:
-                    pdf.add_page(); pdf.section_title(title)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                        img.convert("RGB").save(tmp.name, format="JPEG", quality=85)
-                        asp = img.height / img.width
-                        w_p = 174; h_p = 174 * asp
-                        if h_p > 230: h_p = 230; w_p = 230 / asp
-                        pdf.image(tmp.name, x=18 + (174-w_p)/2, y=pdf.get_y(), w=w_p)
-
-            st.session_state.generated_pdf_bytes = bytes(pdf.output(dest="S"))
+            st.session_state.rib_drawings = drawings
+            st.session_state.cand_df = build_structural_candidates(mat, opt, fund)
+            st.session_state.rib_phase = "review"
             st.rerun()
-        except Exception as e:
-            st.error(f"Kritisk feil: {e}")
 
-if st.session_state.get("generated_pdf_bytes"):
-    st.success("✅ RIB-konseptnotat er ferdigstilt!")
-    st.download_button("📄 Last ned RIB-notat (PDF)", st.session_state.generated_pdf_bytes, f"Builtly_RIB_{pd_state['p_name'].replace(' ', '_')}.pdf", type="primary", use_container_width=True)
+elif st.session_state.rib_phase == "review":
+    st.success("✅ Geometri er detektert. Du er nå i **Faglig Gjennomgang (Review)**.")
+    st.info("Fjern haken ved 'Behold' for å slette feilplasserte elementer, endre posisjoner eller legg til nye rader i tabellene. Skissene oppdateres live når du klikker utenfor cellen.")
+
+    drawings = st.session_state.rib_drawings
+    
+    for idx, dwg in enumerate(drawings):
+        st.markdown(f"#### 📄 {dwg['name']} - Detektert som: `{dwg['type'].upper()}`")
+        col_data, col_img = st.columns([1, 1.2])
+        
+        with col_data:
+            df = dwg["elements_df"]
+            edited_df = st.data_editor(
+                df, key=f"editor_{idx}", num_rows="dynamic", use_container_width=True,
+                column_config={
+                    "Behold": st.column_config.CheckboxColumn("Behold?", default=True),
+                    "Type": st.column_config.SelectboxColumn("Type", options=["Søyle", "Kjerne", "Skive", "Spennpil"]),
+                    "X": st.column_config.NumberColumn("X (0-1)", min_value=0.0, max_value=1.0, format="%.3f"),
+                    "Y": st.column_config.NumberColumn("Y (0-1)", min_value=0.0, max_value=1.0, format="%.3f"),
+                    "W": st.column_config.NumberColumn("Bredde", min_value=0.0, max_value=1.0, format="%.3f"),
+                    "H": st.column_config.NumberColumn("Høyde", min_value=0.0, max_value=1.0, format="%.3f"),
+                    "Transfer": st.column_config.CheckboxColumn("Transfer", disabled=True),
+                    "Status": st.column_config.TextColumn(disabled=True)
+                }
+            )
+            dwg["elements_df"] = edited_df
+
+        with col_img:
+            img_overlay = render_overlay(dwg["image"], edited_df, dwg["geometry"])
+            st.image(img_overlay, use_container_width=True)
+            dwg["final_img"] = img_overlay
+            
+        st.divider()
+
+    col_back, col_go = st.columns(2)
+    if col_back.button("← Avbryt og start på nytt", use_container_width=True):
+        st.session_state.rib_phase = "setup"
+        st.rerun()
+
+    if col_go.button("🔒 Lås Geometri og Skriv Fagrapport", type="primary", use_container_width=True):
+        with st.spinner("AI-analytiker vurderer den låste geometrien, lastveier og transfer-soner..."):
+            valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+            model_name = "models/gemini-1.5-pro" if "models/gemini-1.5-pro" in valid_models else valid_models[0]
+            model = genai.GenerativeModel(model_name)
+            
+            top_sys = st.session_state.cand_df.iloc[0]["System"]
+            report_json = run_ai_report(model, pd_state, st.session_state.rib_drawings, top_sys)
+            
+            with st.spinner("Bygger Builtly Corporate PDF..."):
+                pdf_bytes = build_full_pdf(pd_state, report_json, st.session_state.cand_df, st.session_state.rib_drawings)
+                
+                st.session_state.rib_report_json = report_json
+                st.session_state.rib_pdf_bytes = pdf_bytes
+                
+                if "pending_reviews" not in st.session_state: st.session_state.pending_reviews = {}
+                doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB001"
+                st.session_state.pending_reviews[doc_id] = {
+                    "title": pd_state["p_name"], "module": "RIB (Konstruksjon)", "drafter": "Builtly AI",
+                    "reviewer": "Senior Konstruktør", "status": "Pending Senior Review", "class": "badge-pending",
+                    "pdf_bytes": pdf_bytes
+                }
+                
+                st.session_state.rib_phase = "generated"
+                st.rerun()
+
+elif st.session_state.rib_phase == "generated":
+    st.success("✅ Rapport og konseptskisser er ferdig fagkontrollert, skrevet og låst!")
+    
+    with st.expander("Vis tekstlig rapportutkast", expanded=False):
+        st.markdown(st.session_state.rib_report_json.get("report_markdown", ""))
+        
+    c_dl, c_qa = st.columns(2)
+    with c_dl:
+        st.download_button(
+            "📄 Last ned RIB Konseptnotat (PDF)", 
+            st.session_state.rib_pdf_bytes, 
+            f"Builtly_RIB_{pd_state.get('p_name','Prosjekt').replace(' ','_')}.pdf", 
+            type="primary", use_container_width=True
+        )
+    with c_qa:
+        if find_page("Review"):
+            if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
+                st.switch_page(find_page("Review"))
+                
+    if st.button("↻ Start ny analyse", type="secondary"):
+        st.session_state.rib_phase = "setup"
+        st.rerun()
