@@ -277,7 +277,9 @@ def wrap_text_px(text: str, font: ImageFont.ImageFont, max_width: int) -> List[s
         return [""]
     words = text.split()
     if not words:
-        return [""]    lines: List[str] = []
+        return [""]
+
+    lines: List[str] = []
     current = words[0]
     for word in words[1:]:
         candidate = f"{current} {word}"
