@@ -278,7 +278,6 @@ def wrap_text_px(text: str, font: ImageFont.ImageFont, max_width: int) -> List[s
     words = text.split()
     if not words:
         return [""]
-
     lines: List[str] = []
     current = words[0]
     for word in words[1:]:
@@ -616,7 +615,10 @@ def build_source_register(pages: List[SourcePage]) -> pd.DataFrame:
         )
     if not rows:
         return pd.DataFrame(columns=["Dokument", "Side", "Tegningstype", "Tittel", "Teksttreff"])
-    return pd.DataFrame(rows)# -----------------------------------------------------------------------------
+    return pd.DataFrame(rows)
+
+
+# -----------------------------------------------------------------------------
 # 6. HEURISTIKK FOR BRANNMARKERING
 # -----------------------------------------------------------------------------
 def expand_norm_rect(rect: List[float], pad_x: float = 0.012, pad_y: float = 0.012) -> List[float]:
@@ -1042,7 +1044,10 @@ def analyze_page(page: SourcePage, brann_data: Dict[str, Any], manual_notes: str
         merged = merge_analysis(parsed, heuristic)
         return normalize_analysis_payload(merged, page.page_kind)
     except Exception:
-        return heuristic# -----------------------------------------------------------------------------
+        return heuristic
+
+
+# -----------------------------------------------------------------------------
 # 8. OVERLAY-RENDERING
 # -----------------------------------------------------------------------------
 def norm_pt_to_px(point: List[float], image_size: Tuple[int, int]) -> Tuple[int, int]:
@@ -1401,7 +1406,10 @@ def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "") -> Imag
             draw.text((x + 10, y + 12), cell[:80], font=body_font, fill=(33, 39, 45))
             x += width
         y += row_height
-    return img# -----------------------------------------------------------------------------
+    return img
+
+
+# -----------------------------------------------------------------------------
 # 10. PDF-MOTOR (BASERT PAA GEO-UTTRYKK)
 # -----------------------------------------------------------------------------
 class BuiltlyCorporatePDF(FPDF):
@@ -1648,6 +1656,7 @@ class BuiltlyCorporatePDF(FPDF):
         self.ln(6)
 
 
+
 def build_cover_page(pdf: BuiltlyCorporatePDF, project_data: Dict[str, Any], brann_data: Dict[str, Any], cover_img: Optional[Image.Image]) -> None:
     pdf.add_page()
     if os.path.exists("logo.png"):
@@ -1705,7 +1714,10 @@ def build_cover_page(pdf: BuiltlyCorporatePDF, project_data: Dict[str, Any], bra
     pdf.set_xy(20, 255)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(170, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIBr AI pa bakgrunn av prosjektdata, opplastede tegninger og automatisert tegningsanalyse. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll for bruk i prosjektering, byggesak og myndighetsdialog."))def build_toc_page(pdf: BuiltlyCorporatePDF, include_appendices: bool = True) -> None:
+    pdf.multi_cell(170, 4.5, clean_pdf_text("Rapporten er generert av Builtly RIBr AI pa bakgrunn av prosjektdata, opplastede tegninger og automatisert tegningsanalyse. Dokumentet er et arbeidsutkast og skal underlegges faglig kontroll for bruk i prosjektering, byggesak og myndighetsdialog."))
+
+
+def build_toc_page(pdf: BuiltlyCorporatePDF, include_appendices: bool = True) -> None:
     pdf.add_page()
     pdf.section_title("INNHOLDSFORTEGNELSE")
     items = [
@@ -1915,7 +1927,10 @@ def create_full_report_pdf(project_data: Dict[str, Any], brann_data: Dict[str, A
             if assumptions:
                 pdf.highlight_box("Forutsetninger / ma avklares", assumptions[:4], fill=(255, 249, 235), accent=(245, 158, 11))
 
-    return as_pdf_bytes(pdf)# -----------------------------------------------------------------------------
+    return as_pdf_bytes(pdf)
+
+
+# -----------------------------------------------------------------------------
 # 11. RAPPORTPROMPT
 # -----------------------------------------------------------------------------
 def build_analysis_digest(analyses: List[Dict[str, Any]]) -> str:
@@ -2049,7 +2064,10 @@ Underlaget gir et godt grunnlag for et mer profesjonelt og operativt brannkonsep
     model = genai.GenerativeModel(pick_model_name())
     response = model.generate_content(build_report_prompt(project_data, brann_data, analyses, manual_notes))
     text = sanitize_report_text(extract_response_text(response).strip())
-    return text# -----------------------------------------------------------------------------
+    return text
+
+
+# -----------------------------------------------------------------------------
 # 12. UI-STYLING (BASERT PAA GEO)
 # -----------------------------------------------------------------------------
 st.markdown(
@@ -2249,7 +2267,10 @@ def render_analysis_editor(item: Dict[str, Any]) -> None:
                 analysis["elements"].pop(idx)
                 item["analysis"] = analysis
                 refresh_analysis_item(item)
-                request_rerun()# -----------------------------------------------------------------------------
+                request_rerun()
+
+
+# -----------------------------------------------------------------------------
 # 13. HEADER / TOPP
 # -----------------------------------------------------------------------------
 top_l, top_r = st.columns([4, 1])
