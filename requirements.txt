@@ -11,3 +11,4 @@ openpyxl
 shapely
 pyproj
 rasterio
+pymupdf
