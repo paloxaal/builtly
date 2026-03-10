@@ -2462,88 +2462,3155 @@ with st.expander("4. Hva modulen gjør i denne versjonen", expanded=False):
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-if st.button("🚀 GENERER RIB-KONSEPT MED SKISSER", type="primary", use_container_width=True):
+
+# ------------------------------------------------------------
+# 13A. GEOMETRIFORANKRET SKISSEMOTOR OG REDIGERING FØR LÅSING
+# ------------------------------------------------------------
+def optional_cv_stack():
+    try:
+        import cv2
+        import numpy as np
+        return cv2, np
+    except Exception:
+        return None, None
+
+
+def optional_plotly_go():
+    try:
+        import plotly.graph_objects as go
+        return go
+    except Exception:
+        return None
+
+
+def deep_copy_jsonable(data: Any) -> Any:
+    try:
+        return json.loads(json.dumps(data))
+    except Exception:
+        return data
+
+
+def editor_image_data_uri(img: Image.Image) -> str:
+    return f"data:image/png;base64,{base64.b64encode(png_bytes_from_image(copy_rgb(img))).decode('utf-8')}"
+
+
+def sketch_uid(sketch: Dict[str, Any]) -> str:
+    return f"page_{int(sketch.get('page_index', 0))}_region_{int(sketch.get('region_index', 0))}"
+
+
+def bbox_area(bbox: Tuple[int, int, int, int]) -> int:
+    return max(0, int(bbox[2])) * max(0, int(bbox[3]))
+
+
+def bbox_center(bbox: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    return float(bbox[0] + bbox[2] / 2.0), float(bbox[1] + bbox[3] / 2.0)
+
+
+def bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    union = bbox_area(a) + bbox_area(b) - inter
+    return (inter / union) if union else 0.0
+
+
+def bbox_contains(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int], min_cover: float = 0.9) -> bool:
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + aw, ay1 + ah
+    bx2, by2 = bx1 + bw, by1 + bh
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    return inter >= bbox_area(b) * min_cover if bbox_area(b) else False
+
+
+def px_bbox_to_norm(bbox: Tuple[int, int, int, int], width: int, height: int) -> Dict[str, float]:
+    x, y, w, h = bbox
+    return {
+        "x": round(clamp(x / max(width, 1), 0.0, 1.0), 6),
+        "y": round(clamp(y / max(height, 1), 0.0, 1.0), 6),
+        "w": round(clamp(w / max(width, 1), 0.0, 1.0), 6),
+        "h": round(clamp(h / max(height, 1), 0.0, 1.0), 6),
+    }
+
+
+def norm_bbox_to_px(norm_bbox: Optional[Dict[str, Any]], width: int, height: int) -> Tuple[int, int, int, int]:
+    if not isinstance(norm_bbox, dict):
+        return (0, 0, width, height)
+    x = int(clamp(float(norm_bbox.get("x", 0.0)), 0.0, 1.0) * width)
+    y = int(clamp(float(norm_bbox.get("y", 0.0)), 0.0, 1.0) * height)
+    w = int(clamp(float(norm_bbox.get("w", 1.0)), 0.02, 1.0) * width)
+    h = int(clamp(float(norm_bbox.get("h", 1.0)), 0.02, 1.0) * height)
+    return (x, y, w, h)
+
+
+def local_point_to_page_norm(
+    region_bbox_px: Tuple[int, int, int, int],
+    local_x: float,
+    local_y: float,
+    image_w: int,
+    image_h: int,
+) -> Tuple[float, float]:
+    rx, ry, rw, rh = region_bbox_px
+    px = rx + clamp(local_x, 0, max(rw - 1, 1))
+    py = ry + clamp(local_y, 0, max(rh - 1, 1))
+    return (
+        round(clamp(px / max(image_w, 1), 0.02, 0.98), 6),
+        round(clamp(py / max(image_h, 1), 0.02, 0.98), 6),
+    )
+
+
+def page_norm_to_px(x_norm: float, y_norm: float, image_w: int, image_h: int) -> Tuple[float, float]:
+    return float(x_norm) * image_w, float(y_norm) * image_h
+
+
+def alpha_grid_label(index: int) -> str:
+    index = max(1, int(index))
+    result = ""
+    current = index
+    while current > 0:
+        current -= 1
+        result = chr(65 + (current % 26)) + result
+        current //= 26
+    return result or "A"
+
+
+def integral_rect_sum(ii, x: int, y: int, w: int, h: int) -> int:
+    x1 = max(0, int(x))
+    y1 = max(0, int(y))
+    x2 = max(x1, int(x + max(w, 1) - 1))
+    y2 = max(y1, int(y + max(h, 1) - 1))
+    x2 = min(x2, ii.shape[1] - 2)
+    y2 = min(y2, ii.shape[0] - 2)
+    return int(ii[y2 + 1, x2 + 1] - ii[y1, x2 + 1] - ii[y2 + 1, x1] + ii[y1, x1])
+
+
+def collect_bbox_candidates_from_mask(
+    mask,
+    origin: Tuple[int, int] = (0, 0),
+    min_area_ratio: float = 0.02,
+    max_area_ratio: float = 0.9,
+    kernel_px: int = 21,
+) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    height, width = mask.shape[:2]
+    kernel_px = max(5, int(kernel_px))
+    closed = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_px, kernel_px)),
+    )
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+    out: List[Dict[str, Any]] = []
+    ox, oy = origin
+    total_area = float(max(width * height, 1))
+    for idx in range(1, num_labels):
+        x, y, w, h, area = stats[idx]
+        area_ratio = float(area) / total_area
+        aspect = float(w) / float(max(h, 1))
+        if area_ratio < min_area_ratio or area_ratio > max_area_ratio:
+            continue
+        if w < width * 0.12 or h < height * 0.12:
+            continue
+        if aspect < 0.35 or aspect > 2.6:
+            continue
+        density = float(mask[y:y + h, x:x + w].mean()) / 255.0
+        if density < 0.015:
+            continue
+        bbox = (int(ox + x), int(oy + y), int(w), int(h))
+        out.append(
+            {
+                "bbox_px": bbox,
+                "area": int(area),
+                "density": density,
+            }
+        )
+    return out
+
+
+def dedupe_region_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ranked = sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True)
+    keep: List[Dict[str, Any]] = []
+    for candidate in ranked:
+        bbox = candidate["bbox_px"]
+        area = bbox_area(bbox)
+        skip = False
+        for existing in keep:
+            existing_bbox = existing["bbox_px"]
+            existing_area = bbox_area(existing_bbox)
+            if bbox_iou(bbox, existing_bbox) > 0.65:
+                skip = True
+                break
+            if bbox_contains(existing_bbox, bbox, 0.92) and existing_area <= area * 1.4:
+                skip = True
+                break
+            if bbox_contains(bbox, existing_bbox, 0.96) and area >= existing_area * 1.8:
+                skip = True
+                break
+        if not skip:
+            keep.append(candidate)
+    final_keep: List[Dict[str, Any]] = []
+    for candidate in keep:
+        bbox = candidate["bbox_px"]
+        area = bbox_area(bbox)
+        if any(
+            other is not candidate
+            and bbox_contains(bbox, other["bbox_px"], 0.96)
+            and area >= bbox_area(other["bbox_px"]) * 2.0
+            for other in keep
+        ):
+            continue
+        final_keep.append(candidate)
+    return final_keep
+
+
+def detect_plan_regions_grounded(image: Image.Image) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    arr = np.array(copy_rgb(image))
+    height, width = arr.shape[:2]
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    base_mask = ((gray < 245).astype(np.uint8)) * 255
+
+    base_candidates = collect_bbox_candidates_from_mask(
+        base_mask,
+        origin=(0, 0),
+        min_area_ratio=0.02,
+        max_area_ratio=0.9,
+        kernel_px=max(11, int(min(width, height) * 0.018)),
+    )
+
+    nested_candidates: List[Dict[str, Any]] = []
+    for candidate in base_candidates:
+        x, y, w, h = candidate["bbox_px"]
+        area_ratio = float(w * h) / float(max(width * height, 1))
+        if area_ratio < 0.24 and not (w > width * 0.65 and h > height * 0.34):
+            continue
+        crop_mask = base_mask[y:y + h, x:x + w]
+        nested_candidates.extend(
+            collect_bbox_candidates_from_mask(
+                crop_mask,
+                origin=(x, y),
+                min_area_ratio=0.03,
+                max_area_ratio=0.55,
+                kernel_px=max(9, int(min(w, h) * 0.025)),
+            )
+        )
+
+    candidates = base_candidates + nested_candidates
+    enriched: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        bbox = candidate["bbox_px"]
+        x, y, w, h = bbox
+        cx, cy = bbox_center(bbox)
+        centrality = max(
+            0.15,
+            1.0 - abs((cx / max(width, 1)) - 0.5) * 0.8 - abs((cy / max(height, 1)) - 0.45) * 1.0,
+        )
+        titleblock_penalty = 0.55 if (x > width * 0.72 and y > height * 0.50) else 1.0
+        bottom_penalty = 0.60 if y > height * 0.78 else 1.0
+        huge_penalty = 0.45 if (w > width * 0.88 and h > height * 0.72) else 1.0
+        candidate["score"] = float(w * h) * candidate.get("density", 0.1) * centrality * titleblock_penalty * bottom_penalty * huge_penalty
+        candidate["bbox_norm"] = px_bbox_to_norm(bbox, width, height)
+        enriched.append(candidate)
+
+    deduped = dedupe_region_candidates(enriched)
+    deduped.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+
+    if not deduped and width > 0 and height > 0:
+        fallback_bbox = (
+            int(width * 0.10),
+            int(height * 0.14),
+            int(width * 0.80),
+            int(height * 0.68),
+        )
+        return [{"bbox_px": fallback_bbox, "bbox_norm": px_bbox_to_norm(fallback_bbox, width, height), "score": 1.0}]
+
+    return deduped[:3]
+
+
+def build_plan_footprint_from_binary(bw) -> Any:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return bw
+    height, width = bw.shape[:2]
+    closed = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+    )
+    dilated = cv2.dilate(
+        closed,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        iterations=1,
+    )
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dilated, 8)
+    footprint = np.zeros_like(dilated)
+    area_threshold = max(80, int(width * height * 0.004))
+    for idx in range(1, num_labels):
+        x, y, w, h, area = stats[idx]
+        if int(area) >= area_threshold:
+            footprint[labels == idx] = 255
+    footprint = cv2.morphologyEx(
+        footprint,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)),
+    )
+    return footprint
+
+
+def extract_linear_segments(mask, orientation: str, min_len: int) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    segments: List[Dict[str, Any]] = []
+    for idx in range(1, num_labels):
+        x, y, w, h, area = stats[idx]
+        if orientation == "vertical":
+            length = int(h)
+            thickness = int(w)
+            center = float(x + w / 2.0)
+            if length < min_len or thickness > max(18, int(mask.shape[1] * 0.18)):
+                continue
+        else:
+            length = int(w)
+            thickness = int(h)
+            center = float(y + h / 2.0)
+            if length < min_len or thickness > max(18, int(mask.shape[0] * 0.18)):
+                continue
+        segments.append(
+            {
+                "kind": orientation,
+                "x": int(x),
+                "y": int(y),
+                "w": int(w),
+                "h": int(h),
+                "length": int(length),
+                "thickness": int(thickness),
+                "center": center,
+            }
+        )
+    return segments
+
+
+def cluster_weighted_positions(points: List[Tuple[float, float]], tolerance: float) -> List[Dict[str, Any]]:
+    if not points:
+        return []
+    ordered = sorted((float(pos), float(weight)) for pos, weight in points)
+    clusters: List[Dict[str, Any]] = []
+    for pos, weight in ordered:
+        if not clusters or abs(pos - clusters[-1]["pos"]) > tolerance:
+            clusters.append(
+                {
+                    "pos": pos,
+                    "sum": pos * weight,
+                    "weight": max(weight, 1.0),
+                    "count": 1,
+                }
+            )
+        else:
+            cluster = clusters[-1]
+            cluster["sum"] += pos * weight
+            cluster["weight"] += max(weight, 1.0)
+            cluster["count"] += 1
+            cluster["pos"] = cluster["sum"] / max(cluster["weight"], 1e-6)
+    for cluster in clusters:
+        cluster["pos"] = float(cluster["pos"])
+    return clusters
+
+
+def choose_grid_lines_from_junctions(
+    junctions: List[Dict[str, Any]],
+    axis: str,
+    extent: int,
+    target: int,
+) -> List[Dict[str, Any]]:
+    if not junctions:
+        return []
+    points = [(float(item.get(axis, 0.0)), float(item.get("score", 1.0))) for item in junctions]
+    clusters = cluster_weighted_positions(points, tolerance=max(10, int(extent * 0.05)))
+    clusters.sort(key=lambda item: (item.get("count", 0), item.get("weight", 0.0)), reverse=True)
+    selected: List[Dict[str, Any]] = []
+    min_spacing = max(22, int(extent * 0.14))
+    for cluster in clusters:
+        if all(abs(cluster["pos"] - other["pos"]) >= min_spacing for other in selected):
+            selected.append(cluster)
+        if len(selected) >= target:
+            break
+    if len(selected) < 2:
+        selected = sorted(clusters, key=lambda item: item["pos"])[: max(2, target)]
+    return sorted(selected, key=lambda item: item["pos"])
+
+
+def point_inside_local_box(x: float, y: float, bbox: Tuple[int, int, int, int], margin: int = 0) -> bool:
+    bx, by, bw, bh = bbox
+    return (bx - margin) <= x <= (bx + bw + margin) and (by - margin) <= y <= (by + bh + margin)
+
+
+def build_junction_candidates(
+    vertical_segments: List[Dict[str, Any]],
+    horizontal_segments: List[Dict[str, Any]],
+    footprint_mask,
+    core_bbox: Tuple[int, int, int, int],
+) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    footprint = (footprint_mask > 0).astype(np.uint8)
+    if footprint.max() <= 0:
+        return []
+    distance = cv2.distanceTransform(footprint, cv2.DIST_L2, 3)
+    candidates: List[Dict[str, Any]] = []
+    height, width = footprint.shape[:2]
+    for vseg in vertical_segments:
+        vx = int(round(vseg["center"]))
+        for hseg in horizontal_segments:
+            hy = int(round(hseg["center"]))
+            if not (hseg["x"] - 3 <= vx <= hseg["x"] + hseg["w"] + 3):
+                continue
+            if not (vseg["y"] - 3 <= hy <= vseg["y"] + vseg["h"] + 3):
+                continue
+            if not (0 <= vx < width and 0 <= hy < height):
+                continue
+            if footprint[hy, vx] <= 0:
+                continue
+            if point_inside_local_box(vx, hy, core_bbox, margin=8):
+                continue
+            score = float(vseg["length"] + hseg["length"] + distance[hy, vx] * 0.75)
+            candidates.append({"x": float(vx), "y": float(hy), "score": score})
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    pruned: List[Dict[str, Any]] = []
+    min_dist = max(18, int(min(height, width) * 0.10))
+    for candidate in candidates:
+        if all(
+            ((candidate["x"] - kept["x"]) ** 2 + (candidate["y"] - kept["y"]) ** 2) > (min_dist ** 2)
+            for kept in pruned
+        ):
+            pruned.append(candidate)
+        if len(pruned) >= 48:
+            break
+    return pruned
+
+
+def snap_edge_to_lines(value: float, lines: List[Dict[str, Any]], max_dist: int) -> float:
+    if not lines:
+        return value
+    nearest = min(lines, key=lambda item: abs(float(item.get("center", item.get("pos", value))) - value))
+    nearest_value = float(nearest.get("center", nearest.get("pos", value)))
+    return nearest_value if abs(nearest_value - value) <= max_dist else value
+
+
+def detect_core_bbox_from_geometry(
+    width: int,
+    height: int,
+    line_mask,
+    footprint_mask,
+    vertical_segments: List[Dict[str, Any]],
+    horizontal_segments: List[Dict[str, Any]],
+) -> Tuple[int, int, int, int]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return (int(width * 0.40), int(height * 0.35), int(width * 0.18), int(height * 0.22))
+    footprint = (footprint_mask > 0).astype(np.uint8)
+    line_binary = (line_mask > 0).astype(np.uint8)
+    if footprint.max() <= 0 or line_binary.max() <= 0:
+        return (int(width * 0.40), int(height * 0.35), int(width * 0.18), int(height * 0.22))
+
+    ii_lines = cv2.integral(line_binary)
+    ii_foot = cv2.integral(footprint)
+    box_w = int(clamp(width * 0.22, max(40, width * 0.15), max(60, width * 0.34)))
+    box_h = int(clamp(height * 0.24, max(44, height * 0.16), max(70, height * 0.36)))
+    step = max(4, int(min(width, height) * 0.03))
+    best: Optional[Tuple[float, int, int]] = None
+    center_x = width / 2.0
+    center_y = height / 2.0
+
+    max_x = max(2, width - box_w - 2)
+    max_y = max(2, height - box_h - 2)
+    for x in range(max(2, int(width * 0.10)), max_x + 1, step):
+        for y in range(max(2, int(height * 0.10)), max_y + 1, step):
+            footprint_cover = integral_rect_sum(ii_foot, x, y, box_w, box_h) / float(max(box_w * box_h, 1))
+            if footprint_cover < 0.20:
+                continue
+            line_score = integral_rect_sum(ii_lines, x, y, box_w, box_h)
+            dist = math.hypot((x + box_w / 2.0) - center_x, (y + box_h / 2.0) - center_y)
+            score = line_score + footprint_cover * 400.0 - dist * 2.5
+            if best is None or score > best[0]:
+                best = (score, x, y)
+
+    if best is None:
+        x = int(width * 0.40)
+        y = int(height * 0.35)
+    else:
+        _, x, y = best
+
+    x0 = int(x)
+    y0 = int(y)
+    x1 = int(x0 + box_w)
+    y1 = int(y0 + box_h)
+    max_snap_x = max(12, int(width * 0.06))
+    max_snap_y = max(12, int(height * 0.06))
+    x0 = int(snap_edge_to_lines(x0, vertical_segments, max_snap_x))
+    x1 = int(snap_edge_to_lines(x1, vertical_segments, max_snap_x))
+    y0 = int(snap_edge_to_lines(y0, horizontal_segments, max_snap_y))
+    y1 = int(snap_edge_to_lines(y1, horizontal_segments, max_snap_y))
+
+    if x1 <= x0 + 18:
+        x0 = int(clamp(x0, 0, width - box_w - 1))
+        x1 = x0 + box_w
+    if y1 <= y0 + 18:
+        y0 = int(clamp(y0, 0, height - box_h - 1))
+        y1 = y0 + box_h
+
+    x0 = int(clamp(x0, 2, max(2, width - 24)))
+    y0 = int(clamp(y0, 2, max(2, height - 24)))
+    x1 = int(clamp(x1, x0 + 18, width - 2))
+    y1 = int(clamp(y1, y0 + 18, height - 2))
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+def build_plan_geometry_grounded(
+    image: Image.Image,
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Dict[str, Any]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return {}
+    arr = np.array(copy_rgb(image))
+    rx, ry, rw, rh = region_bbox_px
+    crop = arr[ry:ry + rh, rx:rx + rw]
+    if crop.size == 0:
+        return {}
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    bw = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        5,
+    )
+    footprint_mask = build_plan_footprint_from_binary(bw)
+    vertical_mask = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(21, int(rh * 0.06)))),
+    )
+    horizontal_mask = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (max(21, int(rw * 0.06)), 1)),
+    )
+    vertical_segments = extract_linear_segments(vertical_mask, "vertical", max(28, int(rh * 0.10)))
+    horizontal_segments = extract_linear_segments(horizontal_mask, "horizontal", max(28, int(rw * 0.10)))
+    line_mask = cv2.bitwise_or(vertical_mask, horizontal_mask)
+    core_bbox = detect_core_bbox_from_geometry(
+        rw,
+        rh,
+        line_mask,
+        footprint_mask,
+        vertical_segments,
+        horizontal_segments,
+    )
+    junctions = build_junction_candidates(vertical_segments, horizontal_segments, footprint_mask, core_bbox)
+    grid_x = choose_grid_lines_from_junctions(junctions, "x", rw, target=4 if rw >= rh * 0.85 else 3)
+    grid_y = choose_grid_lines_from_junctions(junctions, "y", rh, target=4 if rh > rw * 0.95 else 3)
+    return {
+        "bbox_px": region_bbox_px,
+        "crop_size": (rw, rh),
+        "footprint_mask": footprint_mask,
+        "vertical_segments": vertical_segments,
+        "horizontal_segments": horizontal_segments,
+        "junctions": junctions,
+        "grid_x": grid_x,
+        "grid_y": grid_y,
+        "core_bbox": core_bbox,
+    }
+
+
+def structural_mode_from_analysis(analysis_result: Dict[str, Any], material_preference: str) -> str:
+    txt = " ".join(
+        [
+            clean_pdf_text(material_preference),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("system_name", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("material", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("vertical_system", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("stability_system", "")),
+        ]
+    ).lower()
+    if any(word in txt for word in ["clt", "massivtre", "bærende vegg", "veggsystem", "leilighetsskille"]):
+        return "wall_core"
+    if any(word in txt for word in ["stål", "hulldekke", "søyle", "søyle-bjelke", "flatdekke", "prefabrikkert betong"]):
+        return "column_core"
+    if "hybrid" in txt and "betongkjerne" in txt and "tre" in txt:
+        return "wall_core"
+    if "hybrid" in txt:
+        return "column_core"
+    return "column_core"
+
+
+def nearest_junction_to_point(
+    x: float,
+    y: float,
+    junctions: List[Dict[str, Any]],
+    max_dist: float,
+) -> Optional[Dict[str, Any]]:
+    if not junctions:
+        return None
+    best = min(junctions, key=lambda item: (item["x"] - x) ** 2 + (item["y"] - y) ** 2)
+    dist = math.hypot(best["x"] - x, best["y"] - y)
+    return best if dist <= max_dist else None
+
+
+def next_column_label(elements: List[Dict[str, Any]]) -> str:
+    used = []
+    for element in elements:
+        if clean_pdf_text(element.get("type", "")).lower() != "column":
+            continue
+        match = re.search(r"(\d+)", clean_pdf_text(element.get("label", "")))
+        if match:
+            used.append(int(match.group(1)))
+    next_id = max(used, default=0) + 1
+    return f"C{next_id}"
+
+
+def select_spaced_segments(
+    segments: List[Dict[str, Any]],
+    region_size: Tuple[int, int],
+    axis: str,
+    max_items: int,
+    core_bbox: Tuple[int, int, int, int],
+) -> List[Dict[str, Any]]:
+    rw, rh = region_size
+    mid_x = rw / 2.0
+    mid_y = rh / 2.0
+    min_spacing = max(18, int((rw if axis == "vertical" else rh) * 0.12))
+    scored: List[Dict[str, Any]] = []
+    for segment in segments:
+        center = float(segment.get("center", 0.0))
+        if axis == "vertical":
+            if point_inside_local_box(center, segment["y"] + segment["h"] / 2.0, core_bbox, margin=8):
+                continue
+            edge_bias = min(center, rw - center)
+            score = float(segment["length"]) + edge_bias * 0.10 - abs(center - mid_x) * 0.12
+        else:
+            if point_inside_local_box(segment["x"] + segment["w"] / 2.0, center, core_bbox, margin=8):
+                continue
+            edge_bias = min(center, rh - center)
+            score = float(segment["length"]) + edge_bias * 0.10 - abs(center - mid_y) * 0.12
+        scored.append({"score": score, "segment": segment})
+    scored.sort(key=lambda item: item["score"], reverse=True)
+
+    chosen: List[Dict[str, Any]] = []
+    for item in scored:
+        segment = item["segment"]
+        center = float(segment.get("center", 0.0))
+        if all(abs(center - float(prev.get("center", 0.0))) >= min_spacing for prev in chosen):
+            chosen.append(segment)
+        if len(chosen) >= max_items:
+            break
+    return chosen
+
+
+def generate_column_core_elements_grounded(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return [], []
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry["crop_size"]
+    footprint = geometry["footprint_mask"]
+    core_bbox = geometry["core_bbox"]
+    junctions = geometry["junctions"]
+
+    x_lines = choose_grid_lines_from_junctions(junctions, "x", rw, target=4 if rw >= rh * 0.80 else 3)
+    y_lines = choose_grid_lines_from_junctions(junctions, "y", rh, target=4 if rh >= rw * 0.95 else 3)
+
+    elements: List[Dict[str, Any]] = []
+    for idx, x_line in enumerate(x_lines, start=1):
+        x_norm, _ = local_point_to_page_norm(region_bbox_px, x_line["pos"], 0, image_w, image_h)
+        elements.append({"type": "grid", "orientation": "vertical", "x": x_norm, "label": alpha_grid_label(idx)})
+    for idx, y_line in enumerate(y_lines, start=1):
+        _, y_norm = local_point_to_page_norm(region_bbox_px, 0, y_line["pos"], image_w, image_h)
+        elements.append({"type": "grid", "orientation": "horizontal", "y": y_norm, "label": str(idx)})
+
+    core_x, core_y, core_w, core_h = core_bbox
+    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+    elements.append(
+        {
+            "type": "core",
+            "x": core_x_norm,
+            "y": core_y_norm,
+            "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
+            "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
+            "label": "Kjerne",
+        }
+    )
+
+    candidate_columns: List[Dict[str, Any]] = []
+    snap_dist = max(18, int(min(rw, rh) * 0.09))
+    for x_line in x_lines:
+        for y_line in y_lines:
+            snapped = nearest_junction_to_point(x_line["pos"], y_line["pos"], junctions, max_dist=snap_dist)
+            if snapped is None:
+                px = float(x_line["pos"])
+                py = float(y_line["pos"])
+            else:
+                px = float(snapped["x"])
+                py = float(snapped["y"])
+            if int(clamp(py, 0, rh - 1)) >= footprint.shape[0] or int(clamp(px, 0, rw - 1)) >= footprint.shape[1]:
+                continue
+            if footprint[int(py), int(px)] <= 0:
+                continue
+            if point_inside_local_box(px, py, core_bbox, margin=10):
+                continue
+            x_norm, y_norm = local_point_to_page_norm(region_bbox_px, px, py, image_w, image_h)
+            candidate_columns.append({"type": "column", "x": x_norm, "y": y_norm, "label": ""})
+
+    pruned_columns: List[Dict[str, Any]] = []
+    min_px_spacing = max(22, int(min(rw, rh) * 0.14))
+    for column in candidate_columns:
+        cx, cy = page_norm_to_px(column["x"], column["y"], image_w, image_h)
+        if all((cx - px) ** 2 + (cy - py) ** 2 > (min_px_spacing ** 2) for px, py in [
+            page_norm_to_px(existing["x"], existing["y"], image_w, image_h) for existing in pruned_columns
+        ]):
+            pruned_columns.append(column)
+        if len(pruned_columns) >= 14:
+            break
+
+    pruned_columns.sort(key=lambda item: (item["y"], item["x"]))
+    for idx, column in enumerate(pruned_columns, start=1):
+        column["label"] = f"C{idx}"
+    elements.extend(pruned_columns)
+
+    x_positions = [line["pos"] for line in x_lines]
+    y_positions = [line["pos"] for line in y_lines]
+    if len(x_positions) >= 2:
+        span_y = min(rh - 16, int(core_y + core_h + max(18, rh * 0.08)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, x_positions[0], span_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, x_positions[min(1, len(x_positions) - 1)], span_y, image_w, image_h)
+        elements.append(
+            {
+                "type": "span_arrow",
+                "x1": x1_norm,
+                "y1": y1_norm,
+                "x2": x2_norm,
+                "y2": y2_norm,
+                "label": "Typisk modul",
+            }
+        )
+
+    if len(x_positions) >= 2 and y_positions:
+        beam_y = y_positions[min(len(y_positions) // 2, len(y_positions) - 1)]
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, x_positions[0], beam_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, x_positions[-1], beam_y, image_w, image_h)
+        elements.append(
+            {
+                "type": "beam",
+                "x1": x1_norm,
+                "y1": y1_norm,
+                "x2": x2_norm,
+                "y2": y2_norm,
+                "label": "Primærretning",
+            }
+        )
+
+    notes = [
+        "Søyler er snappet til kryss mellom detekterte linjeføringer i plan.",
+        "Kjerne er plassert i tett, sentral geometri for korte lastveier og tydelig avstivning.",
+        "Skissen er geometri-forankret og mindre avhengig av frie AI-koordinater.",
+    ]
+    return elements, notes
+
+
+def generate_wall_core_elements_grounded(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry["crop_size"]
+    core_bbox = geometry["core_bbox"]
+
+    elements: List[Dict[str, Any]] = []
+    core_x, core_y, core_w, core_h = core_bbox
+    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+    elements.append(
+        {
+            "type": "core",
+            "x": core_x_norm,
+            "y": core_y_norm,
+            "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
+            "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
+            "label": "Betongkjerne",
+        }
+    )
+
+    chosen_vertical = select_spaced_segments(
+        geometry.get("vertical_segments", []),
+        geometry["crop_size"],
+        axis="vertical",
+        max_items=4,
+        core_bbox=core_bbox,
+    )
+    chosen_horizontal = select_spaced_segments(
+        geometry.get("horizontal_segments", []),
+        geometry["crop_size"],
+        axis="horizontal",
+        max_items=4,
+        core_bbox=core_bbox,
+    )
+
+    wall_count = 1
+    for segment in chosen_vertical + chosen_horizontal:
+        if segment["kind"] == "vertical":
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"] + segment["h"], image_w, image_h)
+        else:
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["x"], segment["center"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["x"] + segment["w"], segment["center"], image_w, image_h)
+        elements.append(
+            {
+                "type": "wall",
+                "x1": x1_norm,
+                "y1": y1_norm,
+                "x2": x2_norm,
+                "y2": y2_norm,
+                "label": f"Vegg {wall_count}",
+            }
+        )
+        wall_count += 1
+
+    if geometry.get("junctions"):
+        edge_dist = max(22, int(min(rw, rh) * 0.16))
+        support_points: List[Dict[str, Any]] = []
+        for junction in geometry["junctions"]:
+            if point_inside_local_box(junction["x"], junction["y"], core_bbox, margin=10):
+                continue
+            if all(
+                (junction["x"] - other["x"]) ** 2 + (junction["y"] - other["y"]) ** 2 > (edge_dist ** 2)
+                for other in support_points
+            ):
+                support_points.append(junction)
+            if len(support_points) >= 4:
+                break
+        for idx, point in enumerate(sorted(support_points, key=lambda item: (item["y"], item["x"])), start=1):
+            x_norm, y_norm = local_point_to_page_norm(region_bbox_px, point["x"], point["y"], image_w, image_h)
+            elements.append({"type": "column", "x": x_norm, "y": y_norm, "label": f"P{idx}"})
+
+    span_candidates = [seg for seg in chosen_vertical if seg["length"] >= max(40, int(rh * 0.20))]
+    if len(span_candidates) >= 2:
+        left = min(span_candidates, key=lambda seg: seg["center"])
+        right = max(span_candidates, key=lambda seg: seg["center"])
+        arrow_y = min(rh - 16, int(core_y + core_h + max(18, rh * 0.08)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, left["center"], arrow_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, right["center"], arrow_y, image_w, image_h)
+        elements.append({"type": "span_arrow", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Veggretning / spenn"})
+
+    notes = [
+        "Tolkningen er vegg-/kjernebåret, derfor er søyler bevisst nedtonet til støttepunkter.",
+        "Bærende vegger er snappet til lange, detekterte linjeføringer i planen.",
+        "Kjerne brukes som hovedavstivning og vertikal lastvei.",
+    ]
+    return elements, notes
+
+
+def generate_grounded_sketches(
+    drawings: List[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    max_sketches: int = 3,
+) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    strategy = structural_mode_from_analysis(analysis_result, material_preference)
+    concept_name = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"))
+    sketches: List[Dict[str, Any]] = []
+
+    for record in drawings:
+        if record.get("hint") != "plan":
+            continue
+        regions = detect_plan_regions_grounded(record["image"])
+        if not regions:
+            width, height = record["image"].size
+            full_bbox = (int(width * 0.08), int(height * 0.14), int(width * 0.84), int(height * 0.68))
+            regions = [{"bbox_px": full_bbox, "bbox_norm": px_bbox_to_norm(full_bbox, width, height), "score": 1.0}]
+        ordered_regions = sorted(regions[:2], key=lambda item: (item["bbox_px"][1], item["bbox_px"][0]))
+        for region_index, region in enumerate(ordered_regions):
+            geometry = build_plan_geometry_grounded(record["image"], region["bbox_px"])
+            if not geometry:
+                continue
+            if strategy == "wall_core":
+                elements, notes = generate_wall_core_elements_grounded(geometry, record["image"].size)
+            else:
+                elements, notes = generate_column_core_elements_grounded(geometry, record["image"].size)
+            if not elements:
+                continue
+            page_label = clean_pdf_text(record["label"])
+            if len(ordered_regions) > 1:
+                page_label = f"{page_label} - delplan {region_index + 1}"
+            notes = [
+                f"Konsept: {concept_name}.",
+                "Elementer er geometri-snappet før visning og PDF.",
+            ] + notes[:3]
+            sketches.append(
+                {
+                    "page_index": record["page_index"],
+                    "region_index": region_index,
+                    "page_label": page_label,
+                    "plan_bbox": region["bbox_norm"],
+                    "notes": [clean_pdf_text(item) for item in notes if clean_pdf_text(item)],
+                    "elements": elements,
+                    "grounded_engine": True,
+                }
+            )
+            if len(sketches) >= max_sketches:
+                return sketches
+
+    return sketches[:max_sketches]
+
+
+def replace_analysis_sketches_with_grounded(
+    analysis_result: Dict[str, Any],
+    drawings: List[Dict[str, Any]],
+    material_preference: str,
+) -> Dict[str, Any]:
+    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    if grounded_sketches:
+        analysis_result["sketches"] = grounded_sketches
+        observations = analysis_result.get("observasjoner", [])
+        note = "Konseptskissene er geometri-snappet til detektert planstruktur før presentasjon og PDF."
+        if note not in observations:
+            analysis_result["observasjoner"] = [note] + observations
+    return analysis_result
+
+
+def clear_generated_rib_session() -> None:
+    for key in [
+        "generated_rib_pdf",
+        "generated_rib_filename",
+        "generated_rib_analysis",
+        "generated_rib_report_text",
+        "generated_rib_candidate_df",
+        "generated_rib_overlay_package",
+    ]:
+        st.session_state.pop(key, None)
+
+
+def persist_rib_draft_to_session(
+    analysis_result: Dict[str, Any],
+    report_text: str,
+    candidate_df: pd.DataFrame,
+    candidates: List[Dict[str, Any]],
+    drawings: List[Dict[str, Any]],
+    material_preference: str,
+    foundation_preference: str,
+    optimization_mode: str,
+    safety_mode: str,
+) -> None:
+    st.session_state.rib_draft_analysis = deep_copy_jsonable(analysis_result)
+    st.session_state.rib_draft_sketches = deep_copy_jsonable(analysis_result.get("sketches", []))
+    st.session_state.rib_draft_original_sketches = deep_copy_jsonable(analysis_result.get("sketches", []))
+    st.session_state.rib_draft_report_text = report_text
+    st.session_state.rib_draft_candidate_df = candidate_df.copy()
+    st.session_state.rib_draft_candidates = deep_copy_jsonable(candidates)
+    st.session_state.rib_draft_drawings = drawings
+    st.session_state.rib_draft_material = material_preference
+    st.session_state.rib_draft_foundation = foundation_preference
+    st.session_state.rib_draft_optimization = optimization_mode
+    st.session_state.rib_draft_safety_mode = safety_mode
+    st.session_state.rib_draft_last_click_sig = ""
+    st.session_state.rib_draft_selected_sketch = sketch_uid(analysis_result.get("sketches", [{}])[0]) if analysis_result.get("sketches") else ""
+    st.session_state.rib_draft_move_target = None
+    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+
+
+def draft_sketch_bundle_exists() -> bool:
+    return "rib_draft_analysis" in st.session_state and "rib_draft_sketches" in st.session_state
+
+
+def get_draft_sketch_by_uid(sketch_uid_value: str) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    sketches = st.session_state.get("rib_draft_sketches", [])
+    for idx, sketch in enumerate(sketches):
+        if sketch_uid(sketch) == sketch_uid_value:
+            return idx, sketch
+    return None, None
+
+
+def get_geometry_for_sketch(drawing_record: Dict[str, Any], sketch: Dict[str, Any]) -> Dict[str, Any]:
+    image_w, image_h = drawing_record["image"].size
+    region_bbox_px = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+    return build_plan_geometry_grounded(drawing_record["image"], region_bbox_px)
+
+
+def snap_local_point_to_geometry(local_x: float, local_y: float, geometry: Dict[str, Any], prefer: str = "column") -> Tuple[float, float]:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    local_x = float(clamp(local_x, 0, max(rw - 1, 1)))
+    local_y = float(clamp(local_y, 0, max(rh - 1, 1)))
+    junctions = geometry.get("junctions", [])
+    max_dist = max(18, int(min(rw, rh) * 0.12)) if rw and rh else 24
+    snapped = nearest_junction_to_point(local_x, local_y, junctions, max_dist=max_dist)
+    if snapped is not None:
+        return float(snapped["x"]), float(snapped["y"])
+    if geometry.get("grid_x"):
+        local_x = float(min(geometry["grid_x"], key=lambda item: abs(float(item["pos"]) - local_x))["pos"])
+    if geometry.get("grid_y"):
+        local_y = float(min(geometry["grid_y"], key=lambda item: abs(float(item["pos"]) - local_y))["pos"])
+    return local_x, local_y
+
+
+def find_nearest_element_index(
+    elements: List[Dict[str, Any]],
+    image_size: Tuple[int, int],
+    click_x_norm: float,
+    click_y_norm: float,
+    element_type: str,
+) -> Optional[int]:
+    image_w, image_h = image_size
+    cx, cy = page_norm_to_px(click_x_norm, click_y_norm, image_w, image_h)
+    best_idx = None
+    best_dist = None
+    for idx, element in enumerate(elements):
+        if clean_pdf_text(element.get("type", "")).lower() != element_type:
+            continue
+        ex = ey = None
+        if element_type == "column":
+            ex, ey = page_norm_to_px(float(element.get("x", 0.0)), float(element.get("y", 0.0)), image_w, image_h)
+        elif element_type == "core":
+            x = float(element.get("x", 0.0))
+            y = float(element.get("y", 0.0))
+            w = float(element.get("w", 0.0))
+            h = float(element.get("h", 0.0))
+            ex, ey = page_norm_to_px(x + w / 2.0, y + h / 2.0, image_w, image_h)
+        if ex is None or ey is None:
+            continue
+        dist = math.hypot(ex - cx, ey - cy)
+        if best_dist is None or dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    return best_idx
+
+
+def apply_click_edit_to_sketch(
+    sketch: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    tool: str,
+    click_x_px: float,
+    click_y_px: float,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    sketch = deep_copy_jsonable(sketch)
+    geometry = get_geometry_for_sketch(drawing_record, sketch)
+    if not geometry:
+        return False, "Fant ikke brukbar geometri for valgt skisse.", sketch
+    image_w, image_h = drawing_record["image"].size
+    region_bbox_px = geometry["bbox_px"]
+    rx, ry, rw, rh = region_bbox_px
+    local_x = click_x_px - rx
+    local_y = click_y_px - ry
+    local_x = float(clamp(local_x, 0, max(rw - 1, 1)))
+    local_y = float(clamp(local_y, 0, max(rh - 1, 1)))
+    snapped_x, snapped_y = snap_local_point_to_geometry(local_x, local_y, geometry, prefer="column")
+    x_norm, y_norm = local_point_to_page_norm(region_bbox_px, snapped_x, snapped_y, image_w, image_h)
+
+    if tool == "add_column":
+        sketch.setdefault("elements", []).append({"type": "column", "x": x_norm, "y": y_norm, "label": next_column_label(sketch.get("elements", []))})
+        return True, "Søylepunkt lagt til og snappet til nærmeste geometri.", sketch
+
+    if tool == "delete_column":
+        idx = find_nearest_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm, y_norm, "column")
+        if idx is None:
+            return False, "Fant ingen søyle å slette i valgt skisse.", sketch
+        sketch["elements"].pop(idx)
+        return True, "Nærmeste søyle er slettet.", sketch
+
+    if tool == "move_column":
+        state_key = f"rib_move_target_{sketch_uid(sketch)}"
+        target = st.session_state.get(state_key)
+        if target is None:
+            idx = find_nearest_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm, y_norm, "column")
+            if idx is None:
+                return False, "Klikk nærmere en eksisterende søyle for å velge flytting.", sketch
+            st.session_state[state_key] = idx
+            return False, "Søyle valgt. Klikk nå på nytt sted for å flytte den.", sketch
+        if 0 <= int(target) < len(sketch.get("elements", [])):
+            sketch["elements"][int(target)]["x"] = x_norm
+            sketch["elements"][int(target)]["y"] = y_norm
+            st.session_state.pop(state_key, None)
+            return True, "Søyle flyttet og snappet til ny posisjon.", sketch
+        st.session_state.pop(state_key, None)
+        return False, "Flyttestatus ble nullstilt. Prøv på nytt.", sketch
+
+    if tool == "move_core":
+        idx = find_nearest_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm, y_norm, "core")
+        if idx is None:
+            idx = next((i for i, element in enumerate(sketch.get("elements", [])) if clean_pdf_text(element.get("type", "")).lower() == "core"), None)
+        if idx is None:
+            return False, "Fant ingen kjerne å flytte.", sketch
+        core = sketch["elements"][int(idx)]
+        core_w_px = float(core.get("w", 0.12)) * image_w
+        core_h_px = float(core.get("h", 0.16)) * image_h
+        local_left = clamp(snapped_x - (core_w_px / 2.0), 0, max(rw - core_w_px, 1))
+        local_top = clamp(snapped_y - (core_h_px / 2.0), 0, max(rh - core_h_px, 1))
+        core["x"], core["y"] = local_point_to_page_norm(region_bbox_px, local_left, local_top, image_w, image_h)
+        return True, "Kjernen er flyttet og beholdt sin størrelse.", sketch
+
+    return False, "Ingen endring utført.", sketch
+
+
+def sketch_elements_to_editor_df(sketch: Dict[str, Any]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for element in sketch.get("elements", []):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        rows.append(
+            {
+                "type": e_type,
+                "label": clean_pdf_text(element.get("label", "")),
+                "orientation": clean_pdf_text(element.get("orientation", "")),
+                "x_pct": round(float(element.get("x", element.get("x1", 0.0))) * 100.0, 2) if "x" in element or "x1" in element else None,
+                "y_pct": round(float(element.get("y", element.get("y1", 0.0))) * 100.0, 2) if "y" in element or "y1" in element else None,
+                "x2_pct": round(float(element.get("x2", 0.0)) * 100.0, 2) if "x2" in element else None,
+                "y2_pct": round(float(element.get("y2", 0.0)) * 100.0, 2) if "y2" in element else None,
+                "w_pct": round(float(element.get("w", 0.0)) * 100.0, 2) if "w" in element else None,
+                "h_pct": round(float(element.get("h", 0.0)) * 100.0, 2) if "h" in element else None,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def editor_df_to_sketch_elements(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    elements: List[Dict[str, Any]] = []
+    if df is None or df.empty:
+        return elements
+
+    def pct_to_norm(value: Any, default: Optional[float] = None) -> Optional[float]:
+        if value in ("", None):
+            return default
+        try:
+            return round(clamp(float(value) / 100.0, 0.0, 1.0), 6)
+        except Exception:
+            return default
+
+    for _, row in df.iterrows():
+        e_type = clean_pdf_text(row.get("type", "")).lower()
+        label = clean_pdf_text(row.get("label", ""))
+        orientation = clean_pdf_text(row.get("orientation", ""))
+        if not e_type:
+            continue
+
+        if e_type == "column":
+            x = pct_to_norm(row.get("x_pct"))
+            y = pct_to_norm(row.get("y_pct"))
+            if x is None or y is None:
+                continue
+            elements.append({"type": "column", "x": x, "y": y, "label": label or "C"})
+        elif e_type == "core":
+            x = pct_to_norm(row.get("x_pct"))
+            y = pct_to_norm(row.get("y_pct"))
+            w = pct_to_norm(row.get("w_pct"), 0.10)
+            h = pct_to_norm(row.get("h_pct"), 0.12)
+            if x is None or y is None:
+                continue
+            elements.append({"type": "core", "x": x, "y": y, "w": max(w or 0.08, 0.03), "h": max(h or 0.08, 0.03), "label": label or "Kjerne"})
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1 = pct_to_norm(row.get("x_pct"))
+            y1 = pct_to_norm(row.get("y_pct"))
+            x2 = pct_to_norm(row.get("x2_pct"))
+            y2 = pct_to_norm(row.get("y2_pct"))
+            if None in {x1, y1, x2, y2}:
+                continue
+            elements.append({"type": e_type, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "label": label})
+        elif e_type == "grid":
+            if orientation.lower().startswith("v"):
+                x = pct_to_norm(row.get("x_pct"))
+                if x is None:
+                    continue
+                elements.append({"type": "grid", "orientation": "vertical", "x": x, "label": label or "A"})
+            else:
+                y = pct_to_norm(row.get("y_pct"))
+                if y is None:
+                    continue
+                elements.append({"type": "grid", "orientation": "horizontal", "y": y, "label": label or "1"})
+    return elements
+
+
+def extract_plotly_click(event_state: Any) -> Optional[Dict[str, float]]:
+    if event_state is None:
+        return None
+    selection = getattr(event_state, "selection", None)
+    if selection is None and isinstance(event_state, dict):
+        selection = event_state.get("selection", event_state)
+    if selection is None:
+        return None
+    points = getattr(selection, "points", None)
+    if points is None and isinstance(selection, dict):
+        points = selection.get("points", [])
+    if not points:
+        return None
+    point = points[-1]
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return {"x": float(point.x), "y": float(point.y)}
+    if isinstance(point, dict) and "x" in point and "y" in point:
+        return {"x": float(point["x"]), "y": float(point["y"])}
+    return None
+
+
+def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
+    go = optional_plotly_go()
+    if go is None:
+        st.info("Plotly er ikke tilgjengelig i miljøet. Bruk tabellredigeringen under som fallback.")
+        return None
+
+    image = copy_rgb(drawing_record["image"])
+    image_w, image_h = image.size
+    region_bbox = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+    rx, ry, rw, rh = region_bbox
+    step = max(14, int(min(rw, rh) * 0.06))
+    grid_x = []
+    grid_y = []
+    for yy in range(ry, ry + rh + 1, step):
+        for xx in range(rx, rx + rw + 1, step):
+            grid_x.append(xx)
+            grid_y.append(yy)
+
+    fig = go.Figure()
+    fig.add_layout_image(
+        dict(
+            source=editor_image_data_uri(image),
+            xref="x",
+            yref="y",
+            x=0,
+            y=0,
+            sizex=image_w,
+            sizey=image_h,
+            yanchor="top",
+            sizing="stretch",
+            layer="below",
+        )
+    )
+
+    fig.add_shape(
+        type="rect",
+        x0=rx,
+        y0=ry,
+        x1=rx + rw,
+        y1=ry + rh,
+        line=dict(color="rgba(56,194,201,0.75)", width=2, dash="dot"),
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=grid_x,
+            y=grid_y,
+            mode="markers",
+            marker=dict(size=max(8, int(step * 0.70)), color="rgba(0,0,0,0.003)"),
+            hoverinfo="skip",
+            name="Klikkflate",
+            showlegend=False,
+        )
+    )
+
+    column_x = []
+    column_y = []
+    column_text = []
+    for element in sketch.get("elements", []):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type == "column":
+            px, py = page_norm_to_px(float(element.get("x", 0.0)), float(element.get("y", 0.0)), image_w, image_h)
+            column_x.append(px)
+            column_y.append(py)
+            column_text.append(clean_pdf_text(element.get("label", "")))
+        elif e_type == "core":
+            x = float(element.get("x", 0.0)) * image_w
+            y = float(element.get("y", 0.0)) * image_h
+            w = float(element.get("w", 0.0)) * image_w
+            h = float(element.get("h", 0.0)) * image_h
+            fig.add_shape(type="rect", x0=x, y0=y, x1=x + w, y1=y + h, line=dict(color="rgba(255,196,64,0.95)", width=3), fillcolor="rgba(255,196,64,0.18)")
+            fig.add_trace(go.Scatter(x=[x + w / 2.0], y=[y + h / 2.0], mode="text", text=[clean_pdf_text(element.get("label", "Kjerne"))], textposition="middle center", showlegend=False))
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1 = float(element.get("x1", 0.0)) * image_w
+            y1 = float(element.get("y1", 0.0)) * image_h
+            x2 = float(element.get("x2", 0.0)) * image_w
+            y2 = float(element.get("y2", 0.0)) * image_h
+            dash = "solid" if e_type != "span_arrow" else "dot"
+            width = 6 if e_type == "wall" else 4
+            color = "rgba(255,153,153,0.95)" if e_type == "wall" else ("rgba(120,220,225,0.95)" if e_type == "beam" else "rgba(196,235,176,0.95)")
+            fig.add_shape(type="line", x0=x1, y0=y1, x1=x2, y1=y2, line=dict(color=color, width=width, dash=dash))
+        elif e_type == "grid":
+            orientation = clean_pdf_text(element.get("orientation", "")).lower()
+            if orientation.startswith("v"):
+                x = float(element.get("x", 0.0)) * image_w
+                fig.add_shape(type="line", x0=x, y0=ry, x1=x, y1=ry + rh, line=dict(color="rgba(125,140,160,0.75)", width=2, dash="dot"))
+            else:
+                y = float(element.get("y", 0.0)) * image_h
+                fig.add_shape(type="line", x0=rx, y0=y, x1=rx + rw, y1=y, line=dict(color="rgba(125,140,160,0.75)", width=2, dash="dot"))
+
+    if column_x:
+        fig.add_trace(
+            go.Scatter(
+                x=column_x,
+                y=column_y,
+                mode="markers+text",
+                marker=dict(size=14, color="rgba(56,194,201,0.98)", line=dict(color="white", width=1.5)),
+                text=column_text,
+                textposition="top center",
+                showlegend=False,
+                name="Søyler",
+            )
+        )
+
+    fig.update_xaxes(visible=False, range=[0, image_w])
+    fig.update_yaxes(visible=False, range=[0, image_h], autorange="reversed", scaleanchor="x", scaleratio=1)
+    fig.update_layout(
+        height=int(min(950, max(460, image_h / max(image_w, 1) * 950))),
+        margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        dragmode="select",
+        clickmode="event+select",
+        showlegend=False,
+    )
+
+    try:
+        event_state = st.plotly_chart(
+            fig,
+            key=editor_key,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        return extract_plotly_click(event_state)
+    except TypeError:
+        st.plotly_chart(fig, key=editor_key, use_container_width=True)
+        st.caption("Klikk-redigering krever nyere Streamlit. Bruk tabellen under som fallback.")
+        return None
+
+
+def finalize_rib_draft_to_pdf() -> bool:
+    if not draft_sketch_bundle_exists():
+        return False
+
+    analysis_result = deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {}))
+    draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
+    original_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+    candidate_df = st.session_state.get("rib_draft_candidate_df", pd.DataFrame())
+    candidates = deep_copy_jsonable(st.session_state.get("rib_draft_candidates", []))
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    report_text = st.session_state.get("rib_draft_report_text", "")
+    manual_changed = json.dumps(draft_sketches, sort_keys=True) != json.dumps(original_sketches, sort_keys=True)
+
+    analysis_result["sketches"] = draft_sketches
+    if manual_changed:
+        observations = analysis_result.get("observasjoner", [])
+        edit_note = "Konseptskissene ble manuelt kalibrert i klikk-editor før rapportlåsing."
+        if edit_note not in observations:
+            analysis_result["observasjoner"] = [edit_note] + observations
+
+    valid_models = list_available_models()
+    valgt_modell = pick_model(valid_models)
+    if valgt_modell:
+        try:
+            model = genai.GenerativeModel(valgt_modell)
+            report_text = run_report_writer(
+                model=model,
+                analysis_result=analysis_result,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=st.session_state.get("rib_draft_material", material_valg),
+                foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+            )
+        except Exception:
+            pass
+
+    overlay_package = build_overlay_package(drawings, analysis_result, max_sketches=6)
+    pdf_data = create_full_report_pdf(
+        name=pd_state["p_name"],
+        client=pd_state.get("c_name", ""),
+        content=report_text,
+        analysis_result=analysis_result,
+        candidate_df=candidate_df,
+        overlay_package=overlay_package,
+        source_drawings=drawings,
+        project_data=pd_state,
+    )
+
+    if "pending_reviews" not in st.session_state:
+        st.session_state.pending_reviews = {}
+    if "review_counter" not in st.session_state:
+        st.session_state.review_counter = 1
+
+    doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB{st.session_state.review_counter:03d}"
+    st.session_state.review_counter += 1
+
+    status, badge = qa_status_from_analysis(analysis_result)
+    st.session_state.pending_reviews[doc_id] = {
+        "title": pd_state["p_name"],
+        "module": "RIB (Konstruksjon)",
+        "drafter": "Builtly AI",
+        "reviewer": "Senior Konstruktør",
+        "status": status,
+        "class": badge,
+        "pdf_bytes": pdf_data,
+    }
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", clean_pdf_text(pd_state["p_name"]).strip()) or "prosjekt"
+    persist_generation_to_session(
+        pdf_data=pdf_data,
+        filename=f"Builtly_RIB_{safe_name}.pdf",
+        analysis_result=analysis_result,
+        report_text=report_text,
+        candidate_df=candidate_df,
+        overlay_package=overlay_package,
+    )
+    return True
+
+
+def render_rib_draft_editor_ui() -> None:
+    if not draft_sketch_bundle_exists():
+        return
+
+    analysis_result = st.session_state.get("rib_draft_analysis", {})
+    draft_sketches = st.session_state.get("rib_draft_sketches", [])
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    if not isinstance(draft_sketches, list):
+        return
+
+    st.markdown("### Utkast før rapportlåsing")
+    st.info(
+        "Skissene under er geometri-forankret og kan justeres før PDF låses. "
+        "Du kan klikke direkte i planen for å legge til, slette eller flytte søyler, "
+        "eller finjustere alle elementer i tabellen."
+    )
+
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric("Skisser i utkast", str(len(draft_sketches)))
+    top2.metric("Datagrunnlag", clean_pdf_text(analysis_result.get("grunnlag_status", "-")))
+    top3.metric("Anbefalt konsept", short_text(analysis_result.get("recommended_system", {}).get("system_name", "-"), 24))
+    top4.metric("Klikk-redigering", "Aktiv")
+
+    if not draft_sketches:
+        st.warning("Det finnes ingen skisser i utkastet. Du kan likevel låse rapporten direkte.")
+        lock_only = st.button("🔒 Lås rapport og generer PDF", type="primary", use_container_width=True, key="rib_lock_without_sketch")
+        if lock_only:
+            with st.spinner("Låser rapport og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
+            st.rerun()
+        return
+
+    sketch_options = [sketch_uid(sketch) for sketch in draft_sketches]
+    default_option = st.session_state.get("rib_draft_selected_sketch", sketch_options[0])
+    if default_option not in sketch_options:
+        default_option = sketch_options[0]
+    selected_sketch_uid = st.selectbox(
+        "Velg skisse som skal justeres",
+        sketch_options,
+        index=sketch_options.index(default_option),
+        format_func=lambda value: next(
+            (
+                f"Tegning {sketch.get('page_index', 0) + 1} - {clean_pdf_text(sketch.get('page_label', 'Konseptskisse'))}"
+                for sketch in draft_sketches
+                if sketch_uid(sketch) == value
+            ),
+            value,
+        ),
+        key="rib_draft_sketch_selector",
+    )
+    st.session_state.rib_draft_selected_sketch = selected_sketch_uid
+
+    sketch_idx, selected_sketch = get_draft_sketch_by_uid(selected_sketch_uid)
+    if selected_sketch is None or sketch_idx is None:
+        return
+
+    drawing_record = lookup_record_by_page(drawings, int(selected_sketch.get("page_index", -1)))
+    if drawing_record is None:
+        st.warning("Fant ikke tegningen som hører til skissen.")
+        return
+
+    left_col, right_col = st.columns([1.5, 1.0])
+    with left_col:
+        tool = st.radio(
+            "Klikkverktøy",
+            options=[
+                ("add_column", "Legg til søyle"),
+                ("delete_column", "Slett nærmeste søyle"),
+                ("move_column", "Flytt søyle (to klikk)"),
+                ("move_core", "Flytt kjerne"),
+                ("none", "Ingen endring"),
+            ],
+            format_func=lambda item: item[1],
+            horizontal=False,
+            key="rib_editor_tool_choice",
+        )[0]
+        st.caption("Flytt søyle: klikk først nær søylen, deretter på ny posisjon.")
+        click = render_plotly_sketch_editor(
+            drawing_record,
+            selected_sketch,
+            editor_key=f"rib_plotly_editor_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+        )
+        if click and tool != "none":
+            click_sig = f"{selected_sketch_uid}|{tool}|{round(click['x'], 1)}|{round(click['y'], 1)}"
+            if st.session_state.get("rib_draft_last_click_sig") != click_sig:
+                changed, message, updated_sketch = apply_click_edit_to_sketch(
+                    selected_sketch,
+                    drawing_record,
+                    tool,
+                    click["x"],
+                    click["y"],
+                )
+                st.session_state.rib_draft_last_click_sig = click_sig
+                if changed:
+                    draft_sketches[sketch_idx] = updated_sketch
+                    st.session_state.rib_draft_sketches = draft_sketches
+                    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.info(message)
+
+        preview_img = render_overlay_image(
+            drawing_record,
+            selected_sketch,
+            analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"),
+            analysis_result.get("grunnlag_status", "-"),
+        )
+        st.image(preview_img, caption="Rapportpreview av valgt skisse", use_container_width=True)
+
+    with right_col:
+        st.markdown("##### Tabellredigering")
+        edited_df = st.data_editor(
+            sketch_elements_to_editor_df(selected_sketch),
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key=f"rib_elements_table_{selected_sketch_uid}",
+        )
+        apply_table = st.button("Bruk tabellendringer", use_container_width=True, key=f"rib_apply_table_{selected_sketch_uid}")
+        reset_this = st.button("Nullstill valgt skisse", use_container_width=True, key=f"rib_reset_one_{selected_sketch_uid}")
+        if apply_table:
+            draft_sketches[sketch_idx]["elements"] = editor_df_to_sketch_elements(edited_df)
+            st.session_state.rib_draft_sketches = draft_sketches
+            st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+            st.success("Tabellendringer er lagret i utkastet.")
+            st.rerun()
+
+        if reset_this:
+            original_sketches = st.session_state.get("rib_draft_original_sketches", [])
+            for original in original_sketches:
+                if sketch_uid(original) == selected_sketch_uid:
+                    draft_sketches[sketch_idx] = deep_copy_jsonable(original)
+                    st.session_state.rib_draft_sketches = draft_sketches
+                    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+                    st.success("Valgt skisse er nullstilt til auto-generert versjon.")
+                    st.rerun()
+                    break
+
+        st.markdown("##### Notater for valgt skisse")
+        note_lines = selected_sketch.get("notes", [])
+        if note_lines:
+            for line in note_lines:
+                st.write(f"- {clean_pdf_text(line)}")
+        else:
+            st.caption("Ingen notater registrert.")
+
+    bottom_left, bottom_mid, bottom_right = st.columns([1, 1, 2])
+    with bottom_left:
+        if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all"):
+            st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+            st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+            st.success("Alle skisser er nullstilt.")
+            st.rerun()
+    with bottom_mid:
+        if st.button("🔄 Oppdater kun rapporttekst", use_container_width=True, key="rib_refresh_report"):
+            valid_models = list_available_models()
+            valgt_modell = pick_model(valid_models)
+            if valgt_modell:
+                analysis_copy = deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {}))
+                analysis_copy["sketches"] = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
+                try:
+                    model = genai.GenerativeModel(valgt_modell)
+                    st.session_state.rib_draft_report_text = run_report_writer(
+                        model=model,
+                        analysis_result=analysis_copy,
+                        candidates=deep_copy_jsonable(st.session_state.get("rib_draft_candidates", [])),
+                        project_data=pd_state,
+                        material_preference=st.session_state.get("rib_draft_material", material_valg),
+                        foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                        optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+                    )
+                    st.success("Rapportteksten er oppdatert mot siste skisseutkast.")
+                except Exception:
+                    st.warning("Rapportteksten kunne ikke oppdateres nå. Eksisterende utkast beholdes.")
+            else:
+                st.warning("Fant ingen tilgjengelig modell for å oppdatere rapporttekst.")
+    with bottom_right:
+        if st.button("🔒 Lås skisser og generer rapport", type="primary", use_container_width=True, key="rib_lock_report"):
+            with st.spinner("Låser skisser, oppdaterer rapporttekst og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
+            st.rerun()
+
+
+
+# ------------------------------------------------------------
+# V3 OVERRIDES - zoomed pointer editor + AI reanalysis
+# ------------------------------------------------------------
+def count_elements_by_type(sketch: Dict[str, Any]) -> Dict[str, int]:
+    counts = {"column": 0, "wall": 0, "beam": 0, "core": 0, "span_arrow": 0, "grid": 0}
+    for element in sketch.get("elements", []) if isinstance(sketch, dict) else []:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type in counts:
+            counts[e_type] += 1
+    return counts
+
+
+def next_element_label(elements: List[Dict[str, Any]], element_type: str) -> str:
+    prefix_map = {
+        "column": "C",
+        "wall": "V",
+        "beam": "B",
+        "core": "K",
+        "span_arrow": "Spenn",
+    }
+    prefix = prefix_map.get(element_type, "E")
+    used = []
+    for element in elements:
+        if clean_pdf_text(element.get("type", "")).lower() != element_type:
+            continue
+        label = clean_pdf_text(element.get("label", ""))
+        match = re.search(r"(\d+)", label)
+        if match:
+            used.append(int(match.group(1)))
+    next_id = max(used, default=0) + 1
+    if element_type == "span_arrow":
+        return f"Spenn {next_id}"
+    return f"{prefix}{next_id}"
+
+
+def point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+    if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / float(dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+    proj_x = x1 + t * dx
+    proj_y = y1 + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def page_norm_to_local_crop(
+    x_norm: float,
+    y_norm: float,
+    image_size: Tuple[int, int],
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Tuple[float, float]:
+    image_w, image_h = image_size
+    page_x, page_y = page_norm_to_px(x_norm, y_norm, image_w, image_h)
+    rx, ry, _, _ = region_bbox_px
+    return float(page_x - rx), float(page_y - ry)
+
+
+def find_nearest_pointlike_element_index(
+    elements: List[Dict[str, Any]],
+    image_size: Tuple[int, int],
+    click_x_norm: float,
+    click_y_norm: float,
+    element_types: List[str],
+) -> Tuple[Optional[int], Optional[float]]:
+    image_w, image_h = image_size
+    cx, cy = page_norm_to_px(click_x_norm, click_y_norm, image_w, image_h)
+    best_idx = None
+    best_dist = None
+    for idx, element in enumerate(elements):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type not in element_types:
+            continue
+        if e_type == "column":
+            ex, ey = page_norm_to_px(float(element.get("x", 0.0)), float(element.get("y", 0.0)), image_w, image_h)
+        elif e_type == "core":
+            ex, ey = page_norm_to_px(
+                float(element.get("x", 0.0)) + float(element.get("w", 0.0)) / 2.0,
+                float(element.get("y", 0.0)) + float(element.get("h", 0.0)) / 2.0,
+                image_w,
+                image_h,
+            )
+        else:
+            continue
+        dist = math.hypot(ex - cx, ey - cy)
+        if best_dist is None or dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    return best_idx, best_dist
+
+
+def find_nearest_linear_element_index(
+    elements: List[Dict[str, Any]],
+    image_size: Tuple[int, int],
+    click_x_norm: float,
+    click_y_norm: float,
+    element_types: List[str],
+    max_dist_px: float,
+) -> Optional[int]:
+    image_w, image_h = image_size
+    cx, cy = page_norm_to_px(click_x_norm, click_y_norm, image_w, image_h)
+    best_idx = None
+    best_dist = None
+    for idx, element in enumerate(elements):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type not in element_types:
+            continue
+        x1 = float(element.get("x1", 0.0)) * image_w
+        y1 = float(element.get("y1", 0.0)) * image_h
+        x2 = float(element.get("x2", 0.0)) * image_w
+        y2 = float(element.get("y2", 0.0)) * image_h
+        dist = point_to_segment_distance(cx, cy, x1, y1, x2, y2)
+        if best_dist is None or dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    if best_dist is None or best_dist > max_dist_px:
+        return None
+    return best_idx
+
+
+def pointer_state_key(sketch_uid_value: str) -> str:
+    return f"rib_pointer_state_{sketch_uid_value}"
+
+
+def get_pointer_state(sketch_uid_value: str) -> Dict[str, Any]:
+    state = st.session_state.get(pointer_state_key(sketch_uid_value), {})
+    return state if isinstance(state, dict) else {}
+
+
+def clear_pointer_state(sketch_uid_value: str) -> None:
+    st.session_state.pop(pointer_state_key(sketch_uid_value), None)
+
+
+def push_draft_history() -> None:
+    current = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
+    history = deep_copy_jsonable(st.session_state.get("rib_draft_history", []))
+    if not history or json.dumps(history[-1], sort_keys=True) != json.dumps(current, sort_keys=True):
+        history.append(current)
+    st.session_state.rib_draft_history = history[-30:]
+
+
+def undo_draft_history() -> bool:
+    history = deep_copy_jsonable(st.session_state.get("rib_draft_history", []))
+    if not history:
+        return False
+    previous = history.pop()
+    st.session_state.rib_draft_history = history
+    st.session_state.rib_draft_sketches = previous
+    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+    return True
+
+
+def mark_draft_changed() -> None:
+    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+
+
+def mark_ai_reanalysis_synced() -> None:
+    st.session_state.rib_draft_ai_sync_token = st.session_state.get("rib_draft_updated_at", "")
+
+
+def draft_ai_reanalysis_needed() -> bool:
+    return st.session_state.get("rib_draft_updated_at", "") != st.session_state.get("rib_draft_ai_sync_token", "")
+
+
+def snap_local_point_to_axis(
+    local_x: float,
+    local_y: float,
+    geometry: Dict[str, Any],
+    axis: str,
+) -> Tuple[float, float, Optional[Dict[str, Any]]]:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    local_x = float(clamp(local_x, 0, max(rw - 1, 1)))
+    local_y = float(clamp(local_y, 0, max(rh - 1, 1)))
+    threshold = max(20, int(min(rw, rh) * 0.11))
+
+    if axis == "vertical":
+        segments = [seg for seg in geometry.get("vertical_segments", []) if float(seg.get("length", 0.0)) >= max(26, int(rh * 0.16))]
+        if segments:
+            def score(seg: Dict[str, Any]) -> float:
+                center = float(seg.get("center", local_x))
+                y0 = float(seg.get("y", 0.0))
+                y1 = y0 + float(seg.get("h", 0.0))
+                off_axis = abs(center - local_x)
+                outside = 0.0 if (y0 - 12) <= local_y <= (y1 + 12) else min(abs(local_y - y0), abs(local_y - y1))
+                return off_axis + outside * 0.35
+            candidate = min(segments, key=score)
+            if score(candidate) <= threshold:
+                return (
+                    float(candidate["center"]),
+                    float(clamp(local_y, candidate["y"], candidate["y"] + candidate["h"])),
+                    candidate,
+                )
+        if geometry.get("grid_x"):
+            local_x = float(min(geometry["grid_x"], key=lambda item: abs(float(item["pos"]) - local_x))["pos"])
+        return local_x, local_y, None
+
+    segments = [seg for seg in geometry.get("horizontal_segments", []) if float(seg.get("length", 0.0)) >= max(26, int(rw * 0.16))]
+    if segments:
+        def score(seg: Dict[str, Any]) -> float:
+            center = float(seg.get("center", local_y))
+            x0 = float(seg.get("x", 0.0))
+            x1 = x0 + float(seg.get("w", 0.0))
+            off_axis = abs(center - local_y)
+            outside = 0.0 if (x0 - 12) <= local_x <= (x1 + 12) else min(abs(local_x - x0), abs(local_x - x1))
+            return off_axis + outside * 0.35
+        candidate = min(segments, key=score)
+        if score(candidate) <= threshold:
+            return (
+                float(clamp(local_x, candidate["x"], candidate["x"] + candidate["w"])),
+                float(candidate["center"]),
+                candidate,
+            )
+    if geometry.get("grid_y"):
+        local_y = float(min(geometry["grid_y"], key=lambda item: abs(float(item["pos"]) - local_y))["pos"])
+    return local_x, local_y, None
+
+
+def build_snapped_linear_element(
+    tool: str,
+    start_local: Tuple[float, float],
+    end_local: Tuple[float, float],
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+    existing_elements: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    start_x, start_y = start_local
+    end_x, end_y = end_local
+    axis = "vertical" if abs(end_y - start_y) > abs(end_x - start_x) else "horizontal"
+    sx, sy, start_seg = snap_local_point_to_axis(start_x, start_y, geometry, axis)
+    ex, ey, end_seg = snap_local_point_to_axis(end_x, end_y, geometry, axis)
+    ref_seg = start_seg or end_seg
+    rw, rh = geometry.get("crop_size", (0, 0))
+    min_len = max(24, int(min(rw, rh) * 0.10))
+
+    if axis == "vertical":
+        x_ref = float(ref_seg["center"]) if ref_seg is not None else float((sx + ex) / 2.0)
+        if ref_seg is not None:
+            y0 = max(min(sy, ey), float(ref_seg["y"]))
+            y1 = min(max(sy, ey), float(ref_seg["y"] + ref_seg["h"]))
+            if (y1 - y0) < min_len:
+                y0 = float(ref_seg["y"])
+                y1 = float(ref_seg["y"] + ref_seg["h"])
+        else:
+            y0, y1 = sorted([sy, ey])
+        x_ref = float(clamp(x_ref, 0, max(rw - 1, 1)))
+        y0 = float(clamp(y0, 0, max(rh - 1, 1)))
+        y1 = float(clamp(y1, y0 + 2, max(rh - 1, 1)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, x_ref, y0, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, x_ref, y1, image_w, image_h)
+    else:
+        y_ref = float(ref_seg["center"]) if ref_seg is not None else float((sy + ey) / 2.0)
+        if ref_seg is not None:
+            x0 = max(min(sx, ex), float(ref_seg["x"]))
+            x1 = min(max(sx, ex), float(ref_seg["x"] + ref_seg["w"]))
+            if (x1 - x0) < min_len:
+                x0 = float(ref_seg["x"])
+                x1 = float(ref_seg["x"] + ref_seg["w"])
+        else:
+            x0, x1 = sorted([sx, ex])
+        y_ref = float(clamp(y_ref, 0, max(rh - 1, 1)))
+        x0 = float(clamp(x0, 0, max(rw - 1, 1)))
+        x1 = float(clamp(x1, x0 + 2, max(rw - 1, 1)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, x0, y_ref, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, x1, y_ref, image_w, image_h)
+
+    type_map = {
+        "add_wall": "wall",
+        "add_beam": "beam",
+        "add_span": "span_arrow",
+    }
+    element_type = type_map.get(tool, "beam")
+    label_map = {
+        "wall": next_element_label(existing_elements, "wall"),
+        "beam": next_element_label(existing_elements, "beam"),
+        "span_arrow": "Spennretning",
+    }
+    return {
+        "type": element_type,
+        "x1": x1_norm,
+        "y1": y1_norm,
+        "x2": x2_norm,
+        "y2": y2_norm,
+        "label": label_map[element_type],
+    }
+
+
+def build_resized_core_from_clicks(
+    sketch: Dict[str, Any],
+    anchor_local: Tuple[float, float],
+    end_local: Tuple[float, float],
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[bool, str, Dict[str, Any]]:
+    sketch = deep_copy_jsonable(sketch)
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    x0, y0 = anchor_local
+    x1, y1 = end_local
+    left = float(min(x0, x1))
+    right = float(max(x0, x1))
+    top = float(min(y0, y1))
+    bottom = float(max(y0, y1))
+    max_snap_x = max(12, int(geometry["crop_size"][0] * 0.06))
+    max_snap_y = max(12, int(geometry["crop_size"][1] * 0.06))
+    left = float(snap_edge_to_lines(left, geometry.get("vertical_segments", []), max_snap_x))
+    right = float(snap_edge_to_lines(right, geometry.get("vertical_segments", []), max_snap_x))
+    top = float(snap_edge_to_lines(top, geometry.get("horizontal_segments", []), max_snap_y))
+    bottom = float(snap_edge_to_lines(bottom, geometry.get("horizontal_segments", []), max_snap_y))
+
+    if (right - left) < 18 or (bottom - top) < 18:
+        return False, "Kjernen ble for liten. Klikk to hjørner med litt større avstand.", sketch
+
+    core_idx = next(
+        (idx for idx, element in enumerate(sketch.get("elements", [])) if clean_pdf_text(element.get("type", "")).lower() == "core"),
+        None,
+    )
+    if core_idx is None:
+        sketch.setdefault("elements", []).append({"type": "core", "x": 0.0, "y": 0.0, "w": 0.12, "h": 0.16, "label": "Kjerne"})
+        core_idx = len(sketch["elements"]) - 1
+
+    core = sketch["elements"][int(core_idx)]
+    core["x"], core["y"] = local_point_to_page_norm(region_bbox_px, left, top, image_w, image_h)
+    core["w"] = round(clamp((right - left) / max(image_w, 1), 0.03, 0.35), 6)
+    core["h"] = round(clamp((bottom - top) / max(image_h, 1), 0.03, 0.35), 6)
+    core["label"] = clean_pdf_text(core.get("label", "")) or "Kjerne"
+    return True, "Kjerne oppdatert fra to klikk og snappet til planlinjer.", sketch
+
+
+def apply_pointer_click_to_sketch(
+    sketch: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    tool: str,
+    click_x_local: float,
+    click_y_local: float,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    sketch = deep_copy_jsonable(sketch)
+    geometry = get_geometry_for_sketch(drawing_record, sketch)
+    if not geometry:
+        return False, "Fant ikke brukbar geometri for valgt skisse.", sketch
+
+    image_w, image_h = drawing_record["image"].size
+    region_bbox_px = geometry["bbox_px"]
+    _, _, rw, rh = region_bbox_px
+    local_x = float(clamp(click_x_local, 0, max(rw - 1, 1)))
+    local_y = float(clamp(click_y_local, 0, max(rh - 1, 1)))
+    sketch_key = sketch_uid(sketch)
+    state_key = pointer_state_key(sketch_key)
+    state = get_pointer_state(sketch_key)
+    if state.get("tool") and state.get("tool") != tool:
+        clear_pointer_state(sketch_key)
+        state = {}
+
+    point_max_dist = max(28, int(min(rw, rh) * 0.08))
+    line_max_dist = max(24, int(min(rw, rh) * 0.07))
+    x_norm_raw, y_norm_raw = local_point_to_page_norm(region_bbox_px, local_x, local_y, image_w, image_h)
+    snapped_x, snapped_y = snap_local_point_to_geometry(local_x, local_y, geometry, prefer="column")
+    x_norm, y_norm = local_point_to_page_norm(region_bbox_px, snapped_x, snapped_y, image_w, image_h)
+
+    if tool == "add_column":
+        sketch.setdefault("elements", []).append(
+            {"type": "column", "x": x_norm, "y": y_norm, "label": next_element_label(sketch.get("elements", []), "column")}
+        )
+        clear_pointer_state(sketch_key)
+        return True, "Søylepunkt lagt til og snappet til nærmeste knutepunkt.", sketch
+
+    if tool == "delete_column":
+        idx, dist = find_nearest_pointlike_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm_raw, y_norm_raw, ["column"])
+        if idx is None or (dist is not None and dist > point_max_dist):
+            return False, "Fant ingen søyle nær klikket.", sketch
+        sketch["elements"].pop(idx)
+        clear_pointer_state(sketch_key)
+        return True, "Nærmeste søyle er slettet.", sketch
+
+    if tool == "move_column":
+        if "target_idx" not in state:
+            idx, dist = find_nearest_pointlike_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm_raw, y_norm_raw, ["column"])
+            if idx is None or (dist is not None and dist > point_max_dist):
+                return False, "Klikk nærmere en eksisterende søyle for å velge den.", sketch
+            st.session_state[state_key] = {"tool": tool, "target_idx": int(idx)}
+            return False, "Søyle valgt. Klikk nå på ny plassering.", sketch
+        idx = int(state["target_idx"])
+        if 0 <= idx < len(sketch.get("elements", [])):
+            sketch["elements"][idx]["x"] = x_norm
+            sketch["elements"][idx]["y"] = y_norm
+            clear_pointer_state(sketch_key)
+            return True, "Søyle flyttet og snappet til ny posisjon.", sketch
+        clear_pointer_state(sketch_key)
+        return False, "Flyttevalg ble nullstilt. Prøv på nytt.", sketch
+
+    if tool == "move_core":
+        idx, dist = find_nearest_pointlike_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm_raw, y_norm_raw, ["core"])
+        if idx is None:
+            idx = next((i for i, element in enumerate(sketch.get("elements", [])) if clean_pdf_text(element.get("type", "")).lower() == "core"), None)
+        if idx is None:
+            return False, "Fant ingen kjerne å flytte.", sketch
+        core = sketch["elements"][int(idx)]
+        core_w_px = float(core.get("w", 0.12)) * image_w
+        core_h_px = float(core.get("h", 0.16)) * image_h
+        local_left = clamp(snapped_x - (core_w_px / 2.0), 0, max(rw - core_w_px, 1))
+        local_top = clamp(snapped_y - (core_h_px / 2.0), 0, max(rh - core_h_px, 1))
+        core["x"], core["y"] = local_point_to_page_norm(region_bbox_px, local_left, local_top, image_w, image_h)
+        clear_pointer_state(sketch_key)
+        return True, "Kjernen er flyttet og beholdt sin størrelse.", sketch
+
+    if tool == "resize_core":
+        anchor = state.get("anchor")
+        if anchor is None:
+            st.session_state[state_key] = {"tool": tool, "anchor": {"x": local_x, "y": local_y}}
+            return False, "Første hjørne for kjerne valgt. Klikk motsatt hjørne.", sketch
+        clear_pointer_state(sketch_key)
+        return build_resized_core_from_clicks(
+            sketch,
+            (float(anchor["x"]), float(anchor["y"])),
+            (local_x, local_y),
+            geometry,
+            drawing_record["image"].size,
+        )
+
+    if tool in {"add_wall", "add_beam", "add_span"}:
+        anchor = state.get("anchor")
+        if anchor is None:
+            st.session_state[state_key] = {"tool": tool, "anchor": {"x": local_x, "y": local_y}}
+            label_lookup = {
+                "add_wall": "bærende vegg",
+                "add_beam": "bjelke",
+                "add_span": "spennpil",
+            }
+            return False, f"Startpunkt for {label_lookup[tool]} valgt. Klikk sluttpunkt.", sketch
+        element = build_snapped_linear_element(
+            tool=tool,
+            start_local=(float(anchor["x"]), float(anchor["y"])),
+            end_local=(local_x, local_y),
+            geometry=geometry,
+            image_size=drawing_record["image"].size,
+            existing_elements=sketch.get("elements", []),
+        )
+        sketch.setdefault("elements", []).append(element)
+        clear_pointer_state(sketch_key)
+        label_lookup = {
+            "add_wall": "Bærende vegg lagt til og ortogonalt snappet til planlinjene.",
+            "add_beam": "Bjelke lagt til og snappet til planlinjene.",
+            "add_span": "Spennpil lagt til.",
+        }
+        return True, label_lookup[tool], sketch
+
+    if tool == "delete_wall":
+        idx = find_nearest_linear_element_index(
+            sketch.get("elements", []),
+            drawing_record["image"].size,
+            x_norm_raw,
+            y_norm_raw,
+            ["wall"],
+            max_dist_px=line_max_dist,
+        )
+        if idx is None:
+            return False, "Fant ingen bærende vegg nær klikket.", sketch
+        sketch["elements"].pop(idx)
+        clear_pointer_state(sketch_key)
+        return True, "Nærmeste bærende vegg er slettet.", sketch
+
+    if tool == "delete_beam":
+        idx = find_nearest_linear_element_index(
+            sketch.get("elements", []),
+            drawing_record["image"].size,
+            x_norm_raw,
+            y_norm_raw,
+            ["beam"],
+            max_dist_px=line_max_dist,
+        )
+        if idx is None:
+            return False, "Fant ingen bjelke nær klikket.", sketch
+        sketch["elements"].pop(idx)
+        clear_pointer_state(sketch_key)
+        return True, "Nærmeste bjelke er slettet.", sketch
+
+    if tool == "delete_span":
+        idx = find_nearest_linear_element_index(
+            sketch.get("elements", []),
+            drawing_record["image"].size,
+            x_norm_raw,
+            y_norm_raw,
+            ["span_arrow"],
+            max_dist_px=line_max_dist,
+        )
+        if idx is None:
+            return False, "Fant ingen spennpil nær klikket.", sketch
+        sketch["elements"].pop(idx)
+        clear_pointer_state(sketch_key)
+        return True, "Nærmeste spennpil er slettet.", sketch
+
+    clear_pointer_state(sketch_key)
+    return False, "Ingen endring utført.", sketch
+
+
+def summarize_manual_sketches(sketches: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for sketch in sketches:
+        counts = count_elements_by_type(sketch)
+        lines.append(
+            f"- page_index {sketch.get('page_index')}: {clean_pdf_text(sketch.get('page_label', 'Skisse'))} | "
+            f"columns={counts['column']}, walls={counts['wall']}, beams={counts['beam']}, "
+            f"core={counts['core']}, span_arrows={counts['span_arrow']}"
+        )
+    return "\n".join(lines) if lines else "- Ingen korrigerte skisser tilgjengelig."
+
+
+def build_ai_review_images(
+    drawings: List[Dict[str, Any]],
+    sketches: List[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+) -> List[Image.Image]:
+    images: List[Image.Image] = []
+    used_pages: List[int] = []
+    for sketch in sketches:
+        page_index = int(sketch.get("page_index", -1))
+        if page_index in used_pages:
+            continue
+        used_pages.append(page_index)
+        record = lookup_record_by_page(drawings, page_index)
+        if record is not None:
+            images.append(add_analysis_badge(record["image"], page_index, f"{record['label']} (grunnlag)"))
+
+    concept_name = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"))
+    data_status = clean_pdf_text(analysis_result.get("grunnlag_status", "-"))
+    for sketch in sketches[:3]:
+        record = lookup_record_by_page(drawings, int(sketch.get("page_index", -1)))
+        if record is None:
+            continue
+        overlay = render_overlay_image(record, sketch, concept_name, data_status)
+        image_w, image_h = record["image"].size
+        rx, ry, rw, rh = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+        pad = max(12, int(min(rw, rh) * 0.08))
+        crop = overlay.crop(
+            (
+                max(0, rx - pad),
+                max(0, ry - pad),
+                min(overlay.size[0], rx + rw + pad),
+                min(overlay.size[1], ry + rh + pad),
+            )
+        )
+        images.append(crop)
+    return images
+
+
+def run_ai_reanalysis_from_corrected_sketches(
+    model,
+    analysis_result: Dict[str, Any],
+    drawings: List[Dict[str, Any]],
+    corrected_sketches: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    project_data: Dict[str, Any],
+    material_preference: str,
+    foundation_preference: str,
+    optimization_mode: str,
+    user_note: str = "",
+) -> Dict[str, Any]:
+    if model is None:
+        return deep_copy_jsonable(analysis_result)
+
+    review_images = build_ai_review_images(drawings, corrected_sketches, analysis_result)
+    sketch_json = json.dumps(corrected_sketches, ensure_ascii=False)
+    prompt = f"""
+Du er Builtly RIB AI og skal REKALIBRERE en tidligere analyse.
+
+Du får:
+1. opprinnelige planbilder,
+2. manuelt korrigerte skissebilder med overlagt bæresystem,
+3. JSON for de korrigerte skissene.
+
+De korrigerte skissene er autoritative og skal ha høyere prioritet enn tidligere autoanalyse.
+Bruk dem til å korrigere vurderingen av søyler, bærende vegger, bjelker, kjerne, spennretning, lastvei og risiko.
+
+PROSJEKT:
+- Navn: {clean_pdf_text(project_data.get('p_name'))}
+- Type: {clean_pdf_text(project_data.get('b_type'))}
+- BTA: {nb_value(project_data.get('bta'))} m2
+- Etasjer: {nb_value(project_data.get('etasjer'))}
+- Sted: {clean_pdf_text(project_data.get('adresse'))}, {clean_pdf_text(project_data.get('kommune'))}
+- Foretrukket materiale: {clean_pdf_text(material_preference)}
+- Fundamentering: {clean_pdf_text(foundation_preference)}
+- Optimaliser for: {clean_pdf_text(optimization_mode)}
+
+TIDLIGERE ANBEFALING:
+{json.dumps(analysis_result.get('recommended_system', {}), ensure_ascii=False)}
+
+KORRIGERTE SKISSER - KORT OPPSUMMERING:
+{summarize_manual_sketches(corrected_sketches)}
+
+KORRIGERTE SKISSER - JSON:
+{sketch_json}
+
+BRUKERENS EGEN FAGKOMMENTAR:
+{clean_pdf_text(user_note) if clean_pdf_text(user_note) else "-"}
+
+VIKTIGE REGLER:
+1. Ikke generer nye tilfeldige søyler, bærelinjer eller kjerner som strider mot de korrigerte skissene.
+2. Hvis de korrigerte skissene viser vegg-/kjernebæring, skal det komme tydelig frem.
+3. Hvis de korrigerte skissene viser søyle-/bjelkesystem, skal det komme tydelig frem.
+4. Vær ærlig om usikkerhet i grunnlaget.
+5. Oppdater observasjoner, mangler, anbefalt system, stabilitetsprinsipp, lastvei, risiko og neste steg.
+6. "sketches" skal returneres som tom liste [], fordi manuell skisse beholdes uendret i appen.
+7. Returner KUN gyldig JSON.
+
+JSON-SKJEMA:
+{{
+  "grunnlag_status": "FULLSTENDIG | DELVIS | FOR_SVAKT",
+  "grunnlag_begrunnelse": "kort tekst",
+  "observasjoner": ["..."],
+  "mangler": ["..."],
+  "drawings": [],
+  "recommended_system": {{
+    "system_name": "navn på anbefalt system",
+    "material": "materiale",
+    "deck_type": "dekke/hovedspenn-prinsipp",
+    "vertical_system": "søyle/vegg/bjelke-prinsipp",
+    "stability_system": "kjerne/skive/avstivningsprinsipp",
+    "foundation_strategy": "overordnet strategi",
+    "typical_span_m": "tekstlig spennvurdering",
+    "rationality_reason": "hvorfor dette er mest rasjonelt",
+    "safety_reason": "hvorfor dette er robust og sikkert",
+    "buildability_notes": ["..."],
+    "load_path": ["..."]
+  }},
+  "alternatives": [],
+  "sketches": [],
+  "risk_register": [
+    {{"topic": "kort risiko", "severity": "Lav | Middels | Høy", "mitigation": "tiltak"}}
+  ],
+  "load_assumptions": ["..."],
+  "foundation_assumptions": ["..."],
+  "next_steps": ["..."]
+}}
+""".strip()
+
+    raw_text = generate_text(model, [prompt] + review_images, temperature=0.10)
+    parsed = safe_json_loads(raw_text)
+    updated = normalize_analysis_result(parsed, candidates, drawings)
+    updated["sketches"] = deep_copy_jsonable(corrected_sketches)
+    obs = updated.get("observasjoner", [])
+    marker = "AI reanalyse er kalibrert mot manuelt korrigerte skisser før rapportgenerering."
+    if marker not in obs:
+        updated["observasjoner"] = [marker] + obs
+    if clean_pdf_text(user_note):
+        note_line = f"Brukerkommentar før reanalyse: {clean_pdf_text(user_note)}"
+        if note_line not in updated["observasjoner"]:
+            updated["observasjoner"] = [note_line] + updated["observasjoner"]
+    return updated
+
+
+def persist_rib_draft_to_session(
+    analysis_result: Dict[str, Any],
+    report_text: str,
+    candidate_df: pd.DataFrame,
+    candidates: List[Dict[str, Any]],
+    drawings: List[Dict[str, Any]],
+    material_preference: str,
+    foundation_preference: str,
+    optimization_mode: str,
+    safety_mode: str,
+) -> None:
+    st.session_state.rib_draft_analysis = deep_copy_jsonable(analysis_result)
+    st.session_state.rib_draft_sketches = deep_copy_jsonable(analysis_result.get("sketches", []))
+    st.session_state.rib_draft_original_sketches = deep_copy_jsonable(analysis_result.get("sketches", []))
+    st.session_state.rib_draft_report_text = report_text
+    st.session_state.rib_draft_candidate_df = candidate_df.copy()
+    st.session_state.rib_draft_candidates = deep_copy_jsonable(candidates)
+    st.session_state.rib_draft_drawings = drawings
+    st.session_state.rib_draft_material = material_preference
+    st.session_state.rib_draft_foundation = foundation_preference
+    st.session_state.rib_draft_optimization = optimization_mode
+    st.session_state.rib_draft_safety_mode = safety_mode
+    st.session_state.rib_draft_last_click_sig = ""
+    st.session_state.rib_draft_selected_sketch = sketch_uid(analysis_result.get("sketches", [{}])[0]) if analysis_result.get("sketches") else ""
+    st.session_state.rib_draft_move_target = None
+    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+    st.session_state.rib_draft_ai_sync_token = st.session_state.rib_draft_updated_at
+    st.session_state.rib_draft_ai_user_note = ""
+    st.session_state.rib_draft_history = []
+    if analysis_result.get("sketches"):
+        for sketch in analysis_result["sketches"]:
+            clear_pointer_state(sketch_uid(sketch))
+
+
+def structural_mode_from_analysis(analysis_result: Dict[str, Any], material_preference: str) -> str:
+    txt = " ".join(
+        [
+            clean_pdf_text(material_preference),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("system_name", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("material", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("vertical_system", "")),
+            clean_pdf_text((analysis_result or {}).get("recommended_system", {}).get("stability_system", "")),
+        ]
+    ).lower()
+    wall_markers = ["clt", "massivtre", "bærende vegg", "veggsystem", "skive", "leilighetsskille", "hybrid massivtre"]
+    column_markers = ["søyle", "søyle-bjelke", "flatdekke", "hulldekke", "stålramme", "prefabrikkert betong", "ramme"]
+    wall_hits = sum(1 for word in wall_markers if word in txt)
+    column_hits = sum(1 for word in column_markers if word in txt)
+    if wall_hits >= column_hits and wall_hits > 0:
+        return "wall_core"
+    if column_hits > wall_hits and column_hits > 0:
+        return "column_core"
+    if "hybrid" in txt and ("tre" in txt or "massivtre" in txt or "clt" in txt):
+        return "wall_core"
+    return "column_core"
+
+
+def generate_column_core_elements_grounded(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry["crop_size"]
+    footprint = geometry.get("footprint_mask")
+    core_bbox = geometry["core_bbox"]
+    junctions = geometry.get("junctions", [])
+
+    x_lines = choose_grid_lines_from_junctions(junctions, "x", rw, target=4 if rw >= rh * 0.80 else 3)
+    y_lines = choose_grid_lines_from_junctions(junctions, "y", rh, target=4 if rh >= rw * 0.95 else 3)
+
+    elements: List[Dict[str, Any]] = []
+    for idx, x_line in enumerate(x_lines, start=1):
+        x_norm, _ = local_point_to_page_norm(region_bbox_px, x_line["pos"], 0, image_w, image_h)
+        elements.append({"type": "grid", "orientation": "vertical", "x": x_norm, "label": alpha_grid_label(idx)})
+    for idx, y_line in enumerate(y_lines, start=1):
+        _, y_norm = local_point_to_page_norm(region_bbox_px, 0, y_line["pos"], image_w, image_h)
+        elements.append({"type": "grid", "orientation": "horizontal", "y": y_norm, "label": str(idx)})
+
+    core_x, core_y, core_w, core_h = core_bbox
+    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+    elements.append(
+        {
+            "type": "core",
+            "x": core_x_norm,
+            "y": core_y_norm,
+            "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
+            "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
+            "label": "Kjerne",
+        }
+    )
+
+    tol_x = max(10, int(rw * 0.04))
+    tol_y = max(10, int(rh * 0.04))
+    candidates: List[Dict[str, Any]] = []
+    for junction in junctions:
+        jx = float(junction["x"])
+        jy = float(junction["y"])
+        if point_inside_local_box(jx, jy, core_bbox, margin=10):
+            continue
+        if footprint is not None:
+            iy = int(clamp(jy, 0, footprint.shape[0] - 1))
+            ix = int(clamp(jx, 0, footprint.shape[1] - 1))
+            if footprint[iy, ix] <= 0:
+                continue
+        if x_lines and min(abs(jx - float(line["pos"])) for line in x_lines) > tol_x:
+            continue
+        if y_lines and min(abs(jy - float(line["pos"])) for line in y_lines) > tol_y:
+            continue
+        center_penalty = math.hypot(jx - (rw / 2.0), jy - (rh / 2.0)) * 0.10
+        edge_bonus = min(jx, rw - jx, jy, rh - jy) * 0.18
+        score = float(junction.get("score", 0.0)) + edge_bonus - center_penalty
+        candidates.append({"x": jx, "y": jy, "score": score})
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    min_spacing = max(26, int(min(rw, rh) * 0.16))
+    chosen: List[Dict[str, Any]] = []
+    max_columns = 10 if (rw * rh) >= 90000 else 8
+    for candidate in candidates:
+        if all(
+            ((candidate["x"] - kept["x"]) ** 2 + (candidate["y"] - kept["y"]) ** 2) > (min_spacing ** 2)
+            for kept in chosen
+        ):
+            chosen.append(candidate)
+        if len(chosen) >= max_columns:
+            break
+
+    if len(chosen) < 4:
+        for junction in sorted(junctions, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+            if point_inside_local_box(float(junction["x"]), float(junction["y"]), core_bbox, margin=10):
+                continue
+            if all(
+                ((float(junction["x"]) - kept["x"]) ** 2 + (float(junction["y"]) - kept["y"]) ** 2) > (min_spacing ** 2)
+                for kept in chosen
+            ):
+                chosen.append({"x": float(junction["x"]), "y": float(junction["y"]), "score": float(junction.get("score", 0.0))})
+            if len(chosen) >= 6:
+                break
+
+    chosen.sort(key=lambda item: (item["y"], item["x"]))
+    for idx, column in enumerate(chosen, start=1):
+        x_norm, y_norm = local_point_to_page_norm(region_bbox_px, column["x"], column["y"], image_w, image_h)
+        elements.append({"type": "column", "x": x_norm, "y": y_norm, "label": f"C{idx}"})
+
+    if len(x_lines) >= 2 and y_lines:
+        y_ref = float(y_lines[min(len(y_lines) // 2, len(y_lines) - 1)]["pos"])
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, float(x_lines[0]["pos"]), y_ref, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, float(x_lines[-1]["pos"]), y_ref, image_w, image_h)
+        elements.append({"type": "beam", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Primærretning"})
+
+    if len(x_lines) >= 2 and y_lines:
+        arrow_y = float(min(rh - 16, core_y + core_h + max(18, rh * 0.08)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, float(x_lines[0]["pos"]), arrow_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, float(x_lines[min(1, len(x_lines) - 1)]["pos"]), arrow_y, image_w, image_h)
+        elements.append({"type": "span_arrow", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Typisk modul"})
+
+    notes = [
+        "Søyler er valgt fra høy-konfidens knutepunkter i planen, ikke fra frie rutenettkryss.",
+        "Kjerne er holdt sentral for tydelig avstivning og korte lastveier.",
+        "Kolonneplasseringene er mer konservative og mindre tilfeldige enn i forrige versjon.",
+    ]
+    return elements, notes
+
+
+def generate_wall_core_elements_grounded(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry["crop_size"]
+    core_bbox = geometry["core_bbox"]
+
+    elements: List[Dict[str, Any]] = []
+    core_x, core_y, core_w, core_h = core_bbox
+    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+    elements.append(
+        {
+            "type": "core",
+            "x": core_x_norm,
+            "y": core_y_norm,
+            "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
+            "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
+            "label": "Betongkjerne",
+        }
+    )
+
+    chosen_vertical = [
+        seg for seg in select_spaced_segments(
+            geometry.get("vertical_segments", []),
+            geometry["crop_size"],
+            axis="vertical",
+            max_items=4,
+            core_bbox=core_bbox,
+        )
+        if float(seg.get("length", 0.0)) >= max(34, int(rh * 0.18))
+    ]
+    chosen_horizontal = [
+        seg for seg in select_spaced_segments(
+            geometry.get("horizontal_segments", []),
+            geometry["crop_size"],
+            axis="horizontal",
+            max_items=3,
+            core_bbox=core_bbox,
+        )
+        if float(seg.get("length", 0.0)) >= max(34, int(rw * 0.18))
+    ]
+
+    wall_count = 1
+    for segment in chosen_vertical + chosen_horizontal:
+        if segment["kind"] == "vertical":
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"] + segment["h"], image_w, image_h)
+        else:
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["x"], segment["center"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["x"] + segment["w"], segment["center"], image_w, image_h)
+        elements.append(
+            {
+                "type": "wall",
+                "x1": x1_norm,
+                "y1": y1_norm,
+                "x2": x2_norm,
+                "y2": y2_norm,
+                "label": f"Vegg {wall_count}",
+            }
+        )
+        wall_count += 1
+
+    if len(chosen_vertical) >= 2:
+        left = min(chosen_vertical, key=lambda seg: float(seg["center"]))
+        right = max(chosen_vertical, key=lambda seg: float(seg["center"]))
+        arrow_y = float(min(rh - 16, core_y + core_h + max(18, rh * 0.08)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, left["center"], arrow_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, right["center"], arrow_y, image_w, image_h)
+        elements.append({"type": "span_arrow", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Spennretning"})
+    elif len(chosen_horizontal) >= 2:
+        top = min(chosen_horizontal, key=lambda seg: float(seg["center"]))
+        bottom = max(chosen_horizontal, key=lambda seg: float(seg["center"]))
+        arrow_x = float(min(rw - 16, core_x + core_w + max(18, rw * 0.08)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, arrow_x, top["center"], image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, arrow_x, bottom["center"], image_w, image_h)
+        elements.append({"type": "span_arrow", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Spennretning"})
+
+    notes = [
+        "Vegg-/kjernebæring prioriteres og tilfeldige støttepunkter er bevisst fjernet i auto-skissen.",
+        "Bærende vegger er snappet til lange, tydelige linjeføringer i planen.",
+        "Kjerne brukes som hovedavstivning og tydelig vertikal lastvei.",
+    ]
+    return elements, notes
+
+
+def replace_analysis_sketches_with_grounded(
+    analysis_result: Dict[str, Any],
+    drawings: List[Dict[str, Any]],
+    material_preference: str,
+) -> Dict[str, Any]:
+    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    if grounded_sketches:
+        analysis_result["sketches"] = grounded_sketches
+        observations = analysis_result.get("observasjoner", [])
+        note = "Konseptskissene er geometri-snappet og klargjort for musepeker-redigering før rapport."
+        if note not in observations:
+            analysis_result["observasjoner"] = [note] + observations
+    return analysis_result
+
+
+def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
+    go = optional_plotly_go()
+    if go is None:
+        st.info("Plotly er ikke tilgjengelig i miljøet. Bruk tabellredigeringen under som fallback.")
+        return None
+
+    geometry = get_geometry_for_sketch(drawing_record, sketch)
+    image_w, image_h = drawing_record["image"].size
+    if geometry:
+        rx, ry, rw, rh = geometry["bbox_px"]
+    else:
+        rx, ry, rw, rh = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+    crop = copy_rgb(drawing_record["image"]).crop((rx, ry, rx + rw, ry + rh))
+
+    fig = go.Figure()
+    fig.add_layout_image(
+        dict(
+            source=editor_image_data_uri(crop),
+            xref="x",
+            yref="y",
+            x=0,
+            y=0,
+            sizex=rw,
+            sizey=rh,
+            yanchor="top",
+            sizing="stretch",
+            layer="below",
+        )
+    )
+
+    show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
+    if show_guides and geometry:
+        for seg in geometry.get("vertical_segments", []):
+            if float(seg.get("length", 0.0)) < max(20, int(rh * 0.08)):
+                continue
+            fig.add_shape(
+                type="line",
+                x0=float(seg["center"]),
+                y0=float(seg["y"]),
+                x1=float(seg["center"]),
+                y1=float(seg["y"] + seg["h"]),
+                line=dict(color="rgba(88,120,180,0.26)", width=2, dash="dot"),
+            )
+        for seg in geometry.get("horizontal_segments", []):
+            if float(seg.get("length", 0.0)) < max(20, int(rw * 0.08)):
+                continue
+            fig.add_shape(
+                type="line",
+                x0=float(seg["x"]),
+                y0=float(seg["center"]),
+                x1=float(seg["x"] + seg["w"]),
+                y1=float(seg["center"]),
+                line=dict(color="rgba(60,170,110,0.24)", width=2, dash="dot"),
+            )
+        core_x, core_y, core_w, core_h = geometry.get("core_bbox", (0, 0, 0, 0))
+        if core_w > 0 and core_h > 0:
+            fig.add_shape(
+                type="rect",
+                x0=core_x,
+                y0=core_y,
+                x1=core_x + core_w,
+                y1=core_y + core_h,
+                line=dict(color="rgba(255,196,64,0.55)", width=2, dash="dot"),
+                fillcolor="rgba(255,196,64,0.08)",
+            )
+        junctions = geometry.get("junctions", [])[:48]
+        if junctions:
+            fig.add_trace(
+                go.Scatter(
+                    x=[float(item["x"]) for item in junctions],
+                    y=[float(item["y"]) for item in junctions],
+                    mode="markers",
+                    marker=dict(size=7, color="rgba(56,194,201,0.35)"),
+                    hoverinfo="skip",
+                    showlegend=False,
+                    name="Snappunkt",
+                )
+            )
+
+    step = max(6, int(min(rw, rh) * 0.018))
+    grid_x: List[int] = []
+    grid_y: List[int] = []
+    for yy in range(0, rh + 1, step):
+        for xx in range(0, rw + 1, step):
+            grid_x.append(xx)
+            grid_y.append(yy)
+    fig.add_trace(
+        go.Scatter(
+            x=grid_x,
+            y=grid_y,
+            mode="markers",
+            marker=dict(size=max(10, int(step * 1.15)), color="rgba(0,0,0,0.003)"),
+            hoverinfo="skip",
+            name="Klikkflate",
+            showlegend=False,
+        )
+    )
+
+    column_x: List[float] = []
+    column_y: List[float] = []
+    column_text: List[str] = []
+
+    for element in sketch.get("elements", []):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type == "column":
+            px, py = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, (rx, ry, rw, rh))
+            column_x.append(px)
+            column_y.append(py)
+            column_text.append(clean_pdf_text(element.get("label", "")))
+        elif e_type == "core":
+            x_local, y_local = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, (rx, ry, rw, rh))
+            w_local = float(element.get("w", 0.0)) * image_w
+            h_local = float(element.get("h", 0.0)) * image_h
+            fig.add_shape(
+                type="rect",
+                x0=x_local,
+                y0=y_local,
+                x1=x_local + w_local,
+                y1=y_local + h_local,
+                line=dict(color="rgba(255,196,64,0.95)", width=3),
+                fillcolor="rgba(255,196,64,0.18)",
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=[x_local + w_local / 2.0],
+                    y=[y_local + h_local / 2.0],
+                    mode="text",
+                    text=[clean_pdf_text(element.get("label", "Kjerne"))],
+                    textposition="middle center",
+                    showlegend=False,
+                )
+            )
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1_local, y1_local = page_norm_to_local_crop(float(element.get("x1", 0.0)), float(element.get("y1", 0.0)), drawing_record["image"].size, (rx, ry, rw, rh))
+            x2_local, y2_local = page_norm_to_local_crop(float(element.get("x2", 0.0)), float(element.get("y2", 0.0)), drawing_record["image"].size, (rx, ry, rw, rh))
+            dash = "solid" if e_type != "span_arrow" else "dot"
+            width = 6 if e_type == "wall" else 4
+            color = "rgba(255,153,153,0.95)" if e_type == "wall" else ("rgba(120,220,225,0.95)" if e_type == "beam" else "rgba(196,235,176,0.95)")
+            fig.add_shape(type="line", x0=x1_local, y0=y1_local, x1=x2_local, y1=y2_local, line=dict(color=color, width=width, dash=dash))
+        elif e_type == "grid":
+            orientation = clean_pdf_text(element.get("orientation", "")).lower()
+            if orientation.startswith("v"):
+                x_local, _ = page_norm_to_local_crop(float(element.get("x", 0.0)), 0.0, drawing_record["image"].size, (rx, ry, rw, rh))
+                fig.add_shape(type="line", x0=x_local, y0=0, x1=x_local, y1=rh, line=dict(color="rgba(125,140,160,0.65)", width=2, dash="dot"))
+            else:
+                _, y_local = page_norm_to_local_crop(0.0, float(element.get("y", 0.0)), drawing_record["image"].size, (rx, ry, rw, rh))
+                fig.add_shape(type="line", x0=0, y0=y_local, x1=rw, y1=y_local, line=dict(color="rgba(125,140,160,0.65)", width=2, dash="dot"))
+
+    if column_x:
+        fig.add_trace(
+            go.Scatter(
+                x=column_x,
+                y=column_y,
+                mode="markers+text",
+                marker=dict(size=15, color="rgba(56,194,201,0.98)", line=dict(color="white", width=1.5)),
+                text=column_text,
+                textposition="top center",
+                showlegend=False,
+                name="Søyler",
+            )
+        )
+
+    fig.update_xaxes(visible=False, range=[0, rw], fixedrange=True)
+    fig.update_yaxes(visible=False, range=[0, rh], autorange="reversed", scaleanchor="x", scaleratio=1, fixedrange=True)
+    fig.update_layout(
+        height=int(min(980, max(520, rh / max(rw, 1) * 1180))),
+        margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        dragmode="select",
+        clickmode="event+select",
+        showlegend=False,
+    )
+
+    try:
+        event_state = st.plotly_chart(
+            fig,
+            key=editor_key,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode=("points",),
+        )
+        return extract_plotly_click(event_state)
+    except TypeError:
+        st.plotly_chart(fig, key=editor_key, use_container_width=True)
+        st.caption("Klikk-redigering krever nyere Streamlit. Bruk tabellen under som fallback.")
+        return None
+
+
+def finalize_rib_draft_to_pdf() -> bool:
+    if not draft_sketch_bundle_exists():
+        return False
+
+    analysis_result = deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {}))
+    draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
+    original_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+    candidate_df = st.session_state.get("rib_draft_candidate_df", pd.DataFrame())
+    candidates = deep_copy_jsonable(st.session_state.get("rib_draft_candidates", []))
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    report_text = st.session_state.get("rib_draft_report_text", "")
+    manual_changed = json.dumps(draft_sketches, sort_keys=True) != json.dumps(original_sketches, sort_keys=True)
+
+    analysis_result["sketches"] = draft_sketches
+    if manual_changed:
+        observations = analysis_result.get("observasjoner", [])
+        edit_note = "Konseptskissene ble manuelt kalibrert i zoomet musepeker-editor før rapportlåsing."
+        if edit_note not in observations:
+            analysis_result["observasjoner"] = [edit_note] + observations
+
+    valid_models = list_available_models()
+    valgt_modell = pick_model(valid_models)
+    if valgt_modell:
+        try:
+            model = genai.GenerativeModel(valgt_modell)
+            if draft_ai_reanalysis_needed():
+                analysis_result = run_ai_reanalysis_from_corrected_sketches(
+                    model=model,
+                    analysis_result=analysis_result,
+                    drawings=drawings,
+                    corrected_sketches=draft_sketches,
+                    candidates=candidates,
+                    project_data=pd_state,
+                    material_preference=st.session_state.get("rib_draft_material", material_valg),
+                    foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                    optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+                    user_note=st.session_state.get("rib_draft_ai_user_note", ""),
+                )
+                st.session_state.rib_draft_analysis = deep_copy_jsonable(analysis_result)
+                mark_ai_reanalysis_synced()
+
+            report_text = run_report_writer(
+                model=model,
+                analysis_result=analysis_result,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=st.session_state.get("rib_draft_material", material_valg),
+                foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+            )
+            st.session_state.rib_draft_report_text = report_text
+        except Exception:
+            pass
+
+    overlay_package = build_overlay_package(drawings, analysis_result, max_sketches=6)
+    pdf_data = create_full_report_pdf(
+        name=pd_state["p_name"],
+        client=pd_state.get("c_name", ""),
+        content=report_text,
+        analysis_result=analysis_result,
+        candidate_df=candidate_df,
+        overlay_package=overlay_package,
+        source_drawings=drawings,
+        project_data=pd_state,
+    )
+
+    if "pending_reviews" not in st.session_state:
+        st.session_state.pending_reviews = {}
+    if "review_counter" not in st.session_state:
+        st.session_state.review_counter = 1
+
+    doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB{st.session_state.review_counter:03d}"
+    st.session_state.review_counter += 1
+
+    status, badge = qa_status_from_analysis(analysis_result)
+    st.session_state.pending_reviews[doc_id] = {
+        "title": pd_state["p_name"],
+        "module": "RIB (Konstruksjon)",
+        "drafter": "Builtly AI",
+        "reviewer": "Senior Konstruktør",
+        "status": status,
+        "class": badge,
+        "pdf_bytes": pdf_data,
+    }
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", clean_pdf_text(pd_state["p_name"]).strip()) or "prosjekt"
+    persist_generation_to_session(
+        pdf_data=pdf_data,
+        filename=f"Builtly_RIB_{safe_name}.pdf",
+        analysis_result=analysis_result,
+        report_text=report_text,
+        candidate_df=candidate_df,
+        overlay_package=overlay_package,
+    )
+    return True
+
+
+def render_rib_draft_editor_ui() -> None:
+    if not draft_sketch_bundle_exists():
+        return
+
+    analysis_result = st.session_state.get("rib_draft_analysis", {})
+    draft_sketches = st.session_state.get("rib_draft_sketches", [])
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    if not isinstance(draft_sketches, list):
+        return
+
+    st.markdown("### Utkast før rapportlåsing")
+    st.info(
+        "Denne versjonen bruker et zoomet planutsnitt for musepeker-redigering. "
+        "Du kan korrigere søyler, bærende vegger, bjelker, kjerne og spenn direkte med klikk i planen, "
+        "deretter kjøre ny AI-analyse før rapporten låses."
+    )
+
+    ai_status = "Må reanalyseres" if draft_ai_reanalysis_needed() else "Synkronisert"
+    top1, top2, top3, top4 = st.columns(4)
+    top1.metric("Skisser i utkast", str(len(draft_sketches)))
+    top2.metric("Datagrunnlag", clean_pdf_text(analysis_result.get("grunnlag_status", "-")))
+    top3.metric("Anbefalt konsept", short_text(analysis_result.get("recommended_system", {}).get("system_name", "-"), 24))
+    top4.metric("AI-status", ai_status)
+
+    if not draft_sketches:
+        st.warning("Det finnes ingen skisser i utkastet. Du kan likevel låse rapporten direkte.")
+        if st.button("🔒 Lås rapport og generer PDF", type="primary", use_container_width=True, key="rib_lock_without_sketch"):
+            with st.spinner("Låser rapport og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
+            st.rerun()
+        return
+
+    sketch_options = [sketch_uid(sketch) for sketch in draft_sketches]
+    default_option = st.session_state.get("rib_draft_selected_sketch", sketch_options[0])
+    if default_option not in sketch_options:
+        default_option = sketch_options[0]
+
+    toolbar_left, toolbar_mid, toolbar_right = st.columns([1.4, 1.0, 1.6])
+    with toolbar_left:
+        selected_sketch_uid = st.selectbox(
+            "Velg skisse som skal justeres",
+            sketch_options,
+            index=sketch_options.index(default_option),
+            format_func=lambda value: next(
+                (
+                    f"Tegning {sketch.get('page_index', 0) + 1} - {clean_pdf_text(sketch.get('page_label', 'Konseptskisse'))}"
+                    for sketch in draft_sketches
+                    if sketch_uid(sketch) == value
+                ),
+                value,
+            ),
+            key="rib_draft_sketch_selector_v3",
+        )
+        st.session_state.rib_draft_selected_sketch = selected_sketch_uid
+    with toolbar_mid:
+        st.toggle("Vis snappinghjelp", value=True, key="rib_editor_show_guides")
+    with toolbar_right:
+        st.text_area(
+            "Faglig kommentar til AI før ny analyse",
+            key="rib_draft_ai_user_note",
+            height=90,
+            placeholder="Eks.: Søylelinje skal ut, bæring tas i stedet i leilighetsskille mot kjerne.",
+        )
+
+    sketch_idx, selected_sketch = get_draft_sketch_by_uid(selected_sketch_uid)
+    if selected_sketch is None or sketch_idx is None:
+        return
+
+    drawing_record = lookup_record_by_page(drawings, int(selected_sketch.get("page_index", -1)))
+    if drawing_record is None:
+        st.warning("Fant ikke tegningen som hører til skissen.")
+        return
+
+    tool_options = [
+        ("none", "Ingen endring"),
+        ("add_column", "Legg til søyle"),
+        ("move_column", "Flytt søyle"),
+        ("delete_column", "Slett søyle"),
+        ("add_wall", "Legg til bærende vegg"),
+        ("delete_wall", "Slett bærende vegg"),
+        ("add_beam", "Legg til bjelke"),
+        ("delete_beam", "Slett bjelke"),
+        ("move_core", "Flytt kjerne"),
+        ("resize_core", "Endre kjerne (to klikk)"),
+        ("add_span", "Sett spennpil"),
+        ("delete_span", "Slett spennpil"),
+    ]
+
+    info_left, info_mid, info_right = st.columns([1.5, 1.0, 1.0])
+    with info_left:
+        tool = st.selectbox(
+            "Musepeker-verktøy",
+            options=tool_options,
+            format_func=lambda item: item[1],
+            key="rib_editor_tool_choice_v3",
+        )[0]
+        current_state = get_pointer_state(selected_sketch_uid)
+        if current_state.get("tool") and current_state.get("tool") != tool:
+            clear_pointer_state(selected_sketch_uid)
+            current_state = {}
+        pending_msg = ""
+        if current_state.get("anchor"):
+            pending_msg = "Ventende handling: andre klikk mangler."
+        elif "target_idx" in current_state:
+            pending_msg = "Ventende handling: klikk ny plassering."
+        if pending_msg:
+            st.warning(pending_msg)
+        else:
+            st.caption(
+                "Søyler/kjerner snappes til geometri. Vegger, bjelker og spennpiler opprettes med to klikk og låses ortogonalt."
+            )
+    with info_mid:
+        counts = count_elements_by_type(selected_sketch)
+        st.metric("Søyler / vegger", f"{counts['column']} / {counts['wall']}")
+    with info_right:
+        st.metric("Bjelker / kjerne", f"{counts['beam']} / {counts['core']}")
+
+    left_col, right_col = st.columns([1.6, 1.0])
+    with left_col:
+        st.markdown("##### Zoomet planutsnitt for klikk-redigering")
+        click = render_plotly_sketch_editor(
+            drawing_record,
+            selected_sketch,
+            editor_key=f"rib_plotly_editor_v3_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+        )
+        action_row = st.columns([1, 1, 1])
+        with action_row[0]:
+            if st.button("↩ Angre siste endring", use_container_width=True, key=f"rib_undo_{selected_sketch_uid}"):
+                if undo_draft_history():
+                    clear_pointer_state(selected_sketch_uid)
+                    st.success("Siste skisseendring er angret.")
+                    st.rerun()
+                else:
+                    st.info("Det finnes ingen endring å angre.")
+        with action_row[1]:
+            if st.button("Avbryt ventende verktøy", use_container_width=True, key=f"rib_cancel_pending_{selected_sketch_uid}"):
+                clear_pointer_state(selected_sketch_uid)
+                st.info("Ventende klikksekvens er nullstilt.")
+                st.rerun()
+        with action_row[2]:
+            if st.button("Nullstill valgt skisse", use_container_width=True, key=f"rib_reset_one_v3_{selected_sketch_uid}"):
+                original_sketches = st.session_state.get("rib_draft_original_sketches", [])
+                for original in original_sketches:
+                    if sketch_uid(original) == selected_sketch_uid:
+                        push_draft_history()
+                        draft_sketches[sketch_idx] = deep_copy_jsonable(original)
+                        st.session_state.rib_draft_sketches = draft_sketches
+                        clear_pointer_state(selected_sketch_uid)
+                        mark_draft_changed()
+                        st.success("Valgt skisse er nullstilt til auto-generert versjon.")
+                        st.rerun()
+                        break
+
+        if click and tool != "none":
+            click_sig = f"{selected_sketch_uid}|{tool}|{round(click['x'], 1)}|{round(click['y'], 1)}"
+            if st.session_state.get("rib_draft_last_click_sig") != click_sig:
+                changed, message, updated_sketch = apply_pointer_click_to_sketch(
+                    selected_sketch,
+                    drawing_record,
+                    tool,
+                    click["x"],
+                    click["y"],
+                )
+                st.session_state.rib_draft_last_click_sig = click_sig
+                if changed:
+                    push_draft_history()
+                    draft_sketches[sketch_idx] = updated_sketch
+                    st.session_state.rib_draft_sketches = draft_sketches
+                    mark_draft_changed()
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.info(message)
+
+    with right_col:
+        st.markdown("##### Helside-preview")
+        preview_img = render_overlay_image(
+            drawing_record,
+            selected_sketch,
+            analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"),
+            analysis_result.get("grunnlag_status", "-"),
+        )
+        st.image(preview_img, caption="Preview slik skissen vil se ut i rapporten", use_container_width=True)
+
+        st.markdown("##### Notater for valgt skisse")
+        note_lines = selected_sketch.get("notes", [])
+        if note_lines:
+            for line in note_lines:
+                st.write(f"- {clean_pdf_text(line)}")
+        else:
+            st.caption("Ingen notater registrert.")
+
+        with st.expander("Avansert tabellredigering / fallback", expanded=False):
+            edited_df = st.data_editor(
+                sketch_elements_to_editor_df(selected_sketch),
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key=f"rib_elements_table_v3_{selected_sketch_uid}",
+            )
+            if st.button("Bruk tabellendringer", use_container_width=True, key=f"rib_apply_table_v3_{selected_sketch_uid}"):
+                push_draft_history()
+                draft_sketches[sketch_idx]["elements"] = editor_df_to_sketch_elements(edited_df)
+                st.session_state.rib_draft_sketches = draft_sketches
+                mark_draft_changed()
+                st.success("Tabellendringer er lagret i utkastet.")
+                st.rerun()
+
+    bottom_left, bottom_mid, bottom_right = st.columns([1.0, 1.2, 1.4])
+    with bottom_left:
+        if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all_v3"):
+            push_draft_history()
+            st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+            mark_draft_changed()
+            st.success("Alle skisser er nullstilt.")
+            st.rerun()
+
+    with bottom_mid:
+        if st.button("🤖 Re-analyser bæresystem med AI", use_container_width=True, key="rib_reanalyze_ai_v3"):
+            valid_models = list_available_models()
+            valgt_modell = pick_model(valid_models)
+            if valgt_modell:
+                try:
+                    with st.spinner("AI reanalyserer korrigerte skisser og oppdaterer lastvei, bæring og risiko..."):
+                        model = genai.GenerativeModel(valgt_modell)
+                        analysis_copy = run_ai_reanalysis_from_corrected_sketches(
+                            model=model,
+                            analysis_result=deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {})),
+                            drawings=drawings,
+                            corrected_sketches=deep_copy_jsonable(st.session_state.get("rib_draft_sketches", [])),
+                            candidates=deep_copy_jsonable(st.session_state.get("rib_draft_candidates", [])),
+                            project_data=pd_state,
+                            material_preference=st.session_state.get("rib_draft_material", material_valg),
+                            foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                            optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+                            user_note=st.session_state.get("rib_draft_ai_user_note", ""),
+                        )
+                        st.session_state.rib_draft_analysis = analysis_copy
+                        st.session_state.rib_draft_report_text = run_report_writer(
+                            model=model,
+                            analysis_result=analysis_copy,
+                            candidates=deep_copy_jsonable(st.session_state.get("rib_draft_candidates", [])),
+                            project_data=pd_state,
+                            material_preference=st.session_state.get("rib_draft_material", material_valg),
+                            foundation_preference=st.session_state.get("rib_draft_foundation", fundamentering),
+                            optimization_mode=st.session_state.get("rib_draft_optimization", optimaliser_for),
+                        )
+                        mark_ai_reanalysis_synced()
+                    st.success("AI-analysen og rapportutkastet er oppdatert mot siste korrigerte skisser.")
+                    st.rerun()
+                except Exception:
+                    st.warning("AI-reanalysen feilet akkurat nå. Eksisterende utkast beholdes.")
+            else:
+                st.warning("Fant ingen tilgjengelig modell for AI-reanalyse.")
+
+    with bottom_right:
+        if st.button("🔒 Lås skisser, AI-oppdater og generer rapport", type="primary", use_container_width=True, key="rib_lock_report_v3"):
+            with st.spinner("Låser skisser, oppdaterer AI-vurdering og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
+            st.rerun()
+
+
+action_col1, action_col2 = st.columns(2)
+analyze_clicked = action_col1.button(
+    "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
+    type="primary",
+    use_container_width=True,
+)
+direct_pdf_clicked = action_col2.button(
+    "⚡ DIREKTE PDF UTEN MANUELL REDIGERING",
+    type="secondary",
+    use_container_width=True,
+)
+
+if analyze_clicked or direct_pdf_clicked:
     uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=4) if files else []
     all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
 
-    st.info(f"Klar! Sender totalt {len(all_drawings)} tegninger/bilder til RIB-agenten for vurdering.")
+    if not all_drawings:
+        st.error("Fant ingen tegninger å analysere. Last opp minst én plan eller hent tegninger fra Project Setup.")
+    else:
+        clear_generated_rib_session()
+        st.info(f"Klar! Sender totalt {len(all_drawings)} tegninger/bilder til RIB-agenten for vurdering.")
 
-    with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger maskinelle konseptskisser..."):
-        valid_models = list_available_models()
-        valgt_modell = pick_model(valid_models)
-        if not valgt_modell:
-            st.error("Kunne ikke finne en tilgjengelig Gemini-modell i miljøet.")
-            st.stop()
+        with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
+            valid_models = list_available_models()
+            valgt_modell = pick_model(valid_models)
+            if not valgt_modell:
+                st.error("Kunne ikke finne en tilgjengelig Gemini-modell i miljøet.")
+                st.stop()
 
-        model = genai.GenerativeModel(valgt_modell)
-        candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
-        candidate_df = build_candidate_dataframe(candidates)
+            model = genai.GenerativeModel(valgt_modell)
+            candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
+            candidate_df = build_candidate_dataframe(candidates)
 
-        analysis_result = run_structured_drawing_analysis(
-            model=model,
-            drawings=all_drawings,
-            candidates=candidates,
-            project_data=pd_state,
-            material_preference=material_valg,
-            foundation_preference=fundamentering,
-            optimization_mode=optimaliser_for,
-            safety_mode=safety_mode,
-        )
-
-        report_text = run_report_writer(
-            model=model,
-            analysis_result=analysis_result,
-            candidates=candidates,
-            project_data=pd_state,
-            material_preference=material_valg,
-            foundation_preference=fundamentering,
-            optimization_mode=optimaliser_for,
-        )
-
-        overlay_package = build_overlay_package(all_drawings, analysis_result, max_sketches=3)
-
-        with st.spinner("Kompilerer PDF med konseptskisser og vedlegg..."):
-            pdf_data = create_full_report_pdf(
-                name=pd_state["p_name"],
-                client=pd_state.get("c_name", ""),
-                content=report_text,
-                analysis_result=analysis_result,
-                candidate_df=candidate_df,
-                overlay_package=overlay_package,
-                source_drawings=all_drawings,
+            analysis_result = run_structured_drawing_analysis(
+                model=model,
+                drawings=all_drawings,
+                candidates=candidates,
                 project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
+            )
+            analysis_result = replace_analysis_sketches_with_grounded(
+                analysis_result=analysis_result,
+                drawings=all_drawings,
+                material_preference=material_valg,
             )
 
-            if "pending_reviews" not in st.session_state:
-                st.session_state.pending_reviews = {}
-            if "review_counter" not in st.session_state:
-                st.session_state.review_counter = 1
+            report_text = run_report_writer(
+                model=model,
+                analysis_result=analysis_result,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+            )
 
-            doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIB{st.session_state.review_counter:03d}"
-            st.session_state.review_counter += 1
-
-            status, badge = qa_status_from_analysis(analysis_result)
-            st.session_state.pending_reviews[doc_id] = {
-                "title": pd_state["p_name"],
-                "module": "RIB (Konstruksjon)",
-                "drafter": "Builtly AI",
-                "reviewer": "Senior Konstruktør",
-                "status": status,
-                "class": badge,
-                "pdf_bytes": pdf_data,
-            }
-
-            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", clean_pdf_text(pd_state["p_name"]).strip()) or "prosjekt"
-            persist_generation_to_session(
-                pdf_data=pdf_data,
-                filename=f"Builtly_RIB_{safe_name}.pdf",
+            persist_rib_draft_to_session(
                 analysis_result=analysis_result,
                 report_text=report_text,
                 candidate_df=candidate_df,
-                overlay_package=overlay_package,
+                candidates=candidates,
+                drawings=all_drawings,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
             )
 
+        if direct_pdf_clicked:
+            with st.spinner("Låser auto-skissene og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
         st.rerun()
+
+
+
+if draft_sketch_bundle_exists():
+    render_rib_draft_editor_ui()
 
 
 # ------------------------------------------------------------
