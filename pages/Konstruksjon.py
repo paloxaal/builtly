@@ -195,11 +195,11 @@ def build_structural_candidates(mat: str, opt: str, fund: str) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------
-# 5. TEGNINGSPARSING & PLAN-KLASSIFISERING
+# 5. TEGNINGSPARSING
 # ------------------------------------------------------------
 def classify_plan(name: str) -> Tuple[str, int]:
     low = name.lower()
-    if any(k in low for k in ["kjeller", "u1", "u2", "parkering", "basement", "p-"]): return "Kjeller / Parkering", -1
+    if any(k in low for k in ["kjeller", "u1", "u2", "parkering", "basement", "p-", "underetasje"]): return "Kjeller / Parkering", -1
     if any(k in low for k in ["1. etg", "plan 1", "næring", "ground"]): return "1. Etasje / Næring", 0
     if any(k in low for k in ["tak", "roof"]): return "Takplan", 99
     nums = re.findall(r'\d+', low)
@@ -228,146 +228,74 @@ def load_drawings(files) -> List[Dict]:
 
 
 # ------------------------------------------------------------
-# 6. CV2 GEOMETRIMOTOR & RIB-LOGIKK
+# 6. AI GEOMETRIMOTOR & TRANSFER LOGIKK
 # ------------------------------------------------------------
-def point_in_poly(x: float, y: float, poly: List[Tuple[float, float]]) -> bool:
-    if not poly or not HAS_CV2: return True
-    pts = np.array(poly, np.float32) * 1000
-    return cv2.pointPolygonTest(pts, (x*1000, y*1000), False) >= 0
-
-def process_drawing_geometry(drawings: List[Dict]):
-    master_cores = []
+def extract_structural_geometry_ai(model, img: Image.Image, ptype: str) -> List[Dict]:
+    prompt = f"""
+    Du er en senior RIB (Rådgivende Ingeniør Bygg) AI.
+    Analyser denne arkitekttegningen (plantype: {ptype}) for å foreslå et rasjonelt bæresystem.
     
-    for dwg in drawings:
-        img = dwg["image"]
-        ptype = dwg["type"]
-        poly, v_lines, h_lines = [], [], []
+    VIKTIGE REGLER FOR BÆRESYSTEMET:
+    1. Orto-grid: Søyler og vegger MÅ ligge på linje. Gjenbruk de samme X- og Y-koordinatene for å danne et rutenett (f.eks. X-akser på 0.20, 0.50, 0.80 og Y-akser på 0.30, 0.60).
+    2. Kjeller / Parkering: Plasser "Søyle" i grid-kryssene. Unngå søyler midt i kjørebaner.
+    3. Boligplan: Bruk bærende "Skive" i leilighetsskiller (typisk på tvers). Unngå søyler midt i soverom/stuer.
+    4. Kjerner: Finn trappe-/heissjakter og plasser en "Kjerne".
+    5. Koordinater (X, Y) er normaliserte fra 0.05 til 0.95 (0,0 er øverst til venstre). Hold deg unna tittelfeltet (X>0.8, Y>0.8).
+    
+    Svar KUN med et gyldig JSON-array. Ikke skriv markdown, kun selve dataene.
+    Format:
+    [
+      {{"Type": "Søyle", "X": 0.25, "Y": 0.30, "W": 0.0, "H": 0.0, "Label": "S1"}},
+      {{"Type": "Kjerne", "X": 0.45, "Y": 0.45, "W": 0.08, "H": 0.12, "Label": "Trapp"}},
+      {{"Type": "Skive", "X": 0.60, "Y": 0.30, "W": 0.02, "H": 0.25, "Label": "V1"}}
+    ]
+    """
+    try:
+        # Sender høyoppløselig bilde for at AI skal kunne lese romtyper
+        img_copy = img.copy()
+        img_copy.thumbnail((2048, 2048)) 
+        resp = model.generate_content([prompt, img_copy], generation_config={"temperature": 0.1})
         
-        if HAS_CV2:
-            gray = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
-            h, w = gray.shape
-            
-            mask = np.ones((h, w), dtype=np.uint8) * 255
-            cv2.rectangle(mask, (int(w*0.8), int(h*0.8)), (w, h), 0, -1) # Tittelfelt
-            cv2.rectangle(mask, (0, 0), (w, int(h*0.05)), 0, -1) # Marger
-            cv2.rectangle(mask, (0, 0), (int(w*0.05), h), 0, -1)
-            
-            _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-            thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
-            
-            # 1. Bygningskontur
-            contours, _ = cv2.findContours(cv2.dilate(thresh, np.ones((10,10))), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if contours:
-                valid = [c for c in contours if cv2.contourArea(c) > (w*h*0.05)]
-                if valid:
-                    largest = max(valid, key=cv2.contourArea)
-                    epsilon = 0.02 * cv2.arcLength(largest, True)
-                    approx = cv2.approxPolyDP(largest, epsilon, True)
-                    poly = [(pt[0][0]/w, pt[0][1]/h) for pt in approx]
-                    
-            # 2. Akser (Hough Lines)
-            edges = cv2.Canny(gray, 50, 150)
-            lines = cv2.HoughLinesP(edges, 1, np.pi/180, 100, minLineLength=int(min(w,h)*0.1), maxLineGap=20)
-            if lines is not None:
-                for line in lines:
-                    x1, y1, x2, y2 = line[0]
-                    if abs(x1 - x2) < 5: v_lines.append((x1+x2)/2 / w)
-                    elif abs(y1 - y2) < 5: h_lines.append((y1+y2)/2 / h)
-            
-            def cluster(arr, tol=0.04):
-                if not arr: return []
-                arr.sort()
-                res, curr = [], [arr[0]]
-                for val in arr[1:]:
-                    if val - curr[-1] < tol: curr.append(val)
-                    else: 
-                        res.append(sum(curr)/len(curr))
-                        curr = [val]
-                res.append(sum(curr)/len(curr))
-                return res
-            
-            v_lines = cluster(v_lines)
-            h_lines = cluster(h_lines)
-            
-        # Fallback polygon
-        if not poly: poly = [(0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)]
-        poly_xs, poly_ys = [p[0] for p in poly], [p[1] for p in poly]
+        txt = resp.text.strip()
+        txt = re.sub(r"^```(?:json)?", "", txt, flags=re.IGNORECASE).strip()
+        txt = re.sub(r"```$", "", txt).strip()
         
-        if not v_lines: v_lines = list(np.linspace(min(poly_xs)+0.05, max(poly_xs)-0.05, 4))
-        if not h_lines: h_lines = list(np.linspace(min(poly_ys)+0.05, max(poly_ys)-0.05, 3))
-        
-        dwg["geometry"] = {"polygon": poly}
-        elements = []
-        
-        # --- VERTIKAL KONTINUITET (ARV FRA UNDERETASJE) ---
-        for mc in master_cores:
-            elements.append({"Behold": True, "Type": "Kjerne", "X": mc["X"], "Y": mc["Y"], "W": mc["W"], "H": mc["H"], "Label": mc["Label"], "Transfer": False})
-
-        # --- DETERMINISTISK PLASSERING ETTER PLANTYPE ---
-        if ptype in ["Kjeller / Parkering", "1. Etasje / Næring"]:
-            idx = 1
-            for vx in v_lines:
-                for hy in h_lines:
-                    if point_in_poly(vx, hy, poly):
-                        in_core = any((mc["X"]-0.05 < vx < mc["X"]+mc["W"]+0.05) and (mc["Y"]-0.05 < hy < mc["Y"]+mc["H"]+0.05) for mc in master_cores)
-                        if not in_core:
-                            elements.append({"Behold": True, "Type": "Søyle", "X": round(vx,3), "Y": round(hy,3), "W": 0.0, "H": 0.0, "Label": f"S{idx}", "Transfer": False})
-                            idx += 1
-                            
-            if not master_cores:
-                cx, cy = np.mean(v_lines), np.mean(h_lines)
-                core = {"Behold": True, "Type": "Kjerne", "X": round(cx-0.04,3), "Y": round(cy-0.06,3), "W": 0.08, "H": 0.12, "Label": "Trapp/Heis", "Transfer": False}
-                elements.append(core)
-                master_cores.append(core)
-                
-        elif ptype == "Boligplan":
-            wall_id = 1
-            for vx in v_lines[1:-1]:
-                if point_in_poly(vx, 0.5, poly):
-                    elements.append({"Behold": True, "Type": "Skive", "X": round(vx,3), "Y": min(poly_ys)+0.1, "W": 0.02, "H": 0.6, "Label": f"V{wall_id}", "Transfer": False})
-                    wall_id += 1
-                    
-            if not master_cores:
-                cx, cy = np.mean(v_lines), h_lines[0]
-                core = {"Behold": True, "Type": "Kjerne", "X": round(cx-0.04,3), "Y": round(cy,3), "W": 0.08, "H": 0.12, "Label": "Trapp", "Transfer": False}
-                elements.append(core)
-                master_cores.append(core)
-                
-        elif ptype == "Takplan":
-            elements.append({"Behold": True, "Type": "Spennpil", "X": min(poly_xs)+0.1, "Y": np.mean(poly_ys), "W": 0.6, "H": 0.0, "Label": "Hovedspenn", "Transfer": False})
-
-        dwg["elements_df"] = pd.DataFrame(elements)
+        start = txt.find("[")
+        end = txt.rfind("]")
+        if start != -1 and end != -1:
+            return json.loads(txt[start:end+1])
+        return []
+    except Exception as e:
+        print(f"AI Geometriforslag feilet: {e}")
+        return []
 
 def apply_transfer_logic(drawings: List[Dict]):
-    """ Sjekker om vegger i bolig lander på søyler i kjeller. """
+    """ Sjekker om bæring i etasjen over lander utenfor bæring i etasjen under (F.eks over P-kjeller). """
     for i in range(1, len(drawings)):
         lower, upper = drawings[i-1]["elements_df"], drawings[i]["elements_df"]
         if upper.empty or lower.empty: continue
         
         for idx, u_row in upper.iterrows():
-            if u_row["Type"] in ["Søyle", "Skive"]:
+            if u_row["Type"] in ["Søyle", "Skive", "Kjerne"]:
                 supported = False
                 for _, l_row in lower.iterrows():
                     if l_row["Type"] in ["Søyle", "Skive", "Kjerne"]:
                         dist = math.hypot(u_row["X"] - l_row["X"], u_row["Y"] - l_row["Y"])
-                        if dist < 0.05:
-                            supported = True; break
+                        if dist < 0.08: # Toleranse på 8%
+                            supported = True
+                            break
                 drawings[i]["elements_df"].at[idx, "Transfer"] = not supported
 
 
 # ------------------------------------------------------------
-# 7. VISUELL RENDERER
+# 7. VISUELL RENDERER (OVERLAY PÅ TEGNING)
 # ------------------------------------------------------------
-def render_overlay(img_pil: Image.Image, df: pd.DataFrame, geom: dict) -> Image.Image:
+def render_overlay(img_pil: Image.Image, df: pd.DataFrame) -> Image.Image:
     base = img_pil.copy().convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0,0,0,0))
     draw = ImageDraw.Draw(overlay, "RGBA")
     w, h = base.size
     font = get_font(max(14, int(min(w,h)*0.015)), bold=True)
-    
-    if geom.get("polygon"):
-        pts = [(int(x*w), int(y*h)) for x, y in geom["polygon"]]
-        if len(pts) > 2: draw.polygon(pts, outline=(56, 194, 201, 60), width=3)
             
     for _, row in df.iterrows():
         if not row.get("Behold", True): continue
@@ -377,10 +305,10 @@ def render_overlay(img_pil: Image.Image, df: pd.DataFrame, geom: dict) -> Image.
         is_transfer = row.get("Transfer", False)
         
         if row["Type"] == "Søyle":
-            r = max(8, int(min(w,h)*0.01))
+            r = max(8, int(min(w,h)*0.012))
             col = (255, 80, 80, 255) if is_transfer else (56, 194, 201, 255)
             draw.ellipse((x-r, y-r, x+r, y+r), fill=col, outline=(255,255,255,255), width=2)
-            draw.text((x+r+4, y-r), lbl + (" (Transfer)" if is_transfer else ""), fill=(10,22,35,255), font=font)
+            draw.text((x+r+4, y-r), lbl + (" (Transfer!)" if is_transfer else ""), fill=(10,22,35,255), font=font)
             
         elif row["Type"] == "Kjerne":
             ew, eh = ew if ew > 0 else int(0.08*w), eh if eh > 0 else int(0.12*h)
@@ -388,13 +316,13 @@ def render_overlay(img_pil: Image.Image, df: pd.DataFrame, geom: dict) -> Image.
             draw.text((x+4, y+4), lbl, fill=(30,30,30,255), font=font)
             
         elif row["Type"] == "Skive":
-            ew, eh = ew if ew > 0 else int(0.02*w), eh if eh > 0 else int(0.6*h)
+            ew, eh = ew if ew > 0 else int(0.02*w), eh if eh > 0 else int(0.3*h)
             col = (255, 80, 80, 255) if is_transfer else (255, 153, 153, 255)
             draw.line((x, y, x, y+eh), fill=col, width=max(6, int(min(w,h)*0.008)))
-            draw.text((x+10, y+eh//2), lbl + (" (Transfer)" if is_transfer else ""), fill=(35,35,35,255), font=font)
+            draw.text((x+10, y+eh//2), lbl + (" (Transfer!)" if is_transfer else ""), fill=(35,35,35,255), font=font)
             
         elif row["Type"] == "Spennpil":
-            ew = ew if ew > 0 else int(0.4*w)
+            ew = ew if ew > 0 else int(0.3*w)
             draw.line((x, y, x+ew, y), fill=(196, 235, 176, 255), width=4)
             draw.polygon([(x+ew, y), (x+ew-15, y-10), (x+ew-15, y+10)], fill=(196, 235, 176, 255))
             draw.text((x+ew//2, y-20), lbl, fill=(30,30,30,255), font=font)
@@ -403,7 +331,7 @@ def render_overlay(img_pil: Image.Image, df: pd.DataFrame, geom: dict) -> Image.
 
 
 # ------------------------------------------------------------
-# 8. AI RAPPORT MOTOR
+# 8. AI RAPPORT MOTOR (Skriver ut fra godkjent geometri)
 # ------------------------------------------------------------
 def run_ai_report(model, pd_state, drawings, recommended_sys):
     locked_geom = []
@@ -421,13 +349,12 @@ def run_ai_report(model, pd_state, drawings, recommended_sys):
     
     ANBEFALT SYSTEM FRA MATRISE: {recommended_sys}
     
-    Skriv et konkret konseptnotat. Beskriv lastveiene NØYAKTIG ut fra den låste geometrien.
-    Kommenter spesifikt hvis elementer er flagget med "Transfer: true".
+    Skriv et konkret konseptnotat. Beskriv lastveiene NØYAKTIG ut fra den låste geometrien over.
+    Dersom du ser elementer som har "Transfer: true", SKAL du kommentere at dette krever forsterkninger, drager eller tykkere dekke, da lasten ikke føres direkte ned til fundament.
     
-    Svar KUN med JSON:
+    Svar KUN med JSON (Uten markdown formatting):
     {{
       "grunnlag_status": "DELVIS",
-      "grunnlag_begrunnelse": "Maskinell tolkning og fagkontroll",
       "risk_register": [ {{"topic": "risiko", "severity": "Middels", "mitigation": "tiltak"}} ],
       "report_markdown": "# 1. SAMMENDRAG OG KONKLUSJON\\n...\\n# 2. VURDERING AV DATAGRUNNLAG\\n...\\n# 3. KONSEPT FOR BÆRESYSTEM OG STABILITET\\n...\\n# 4. VERTIKAL KONTINUITET OG TRANSFER\\n...\\n# 5. FUNDAMENTERING OG LASTER\\n...\\n# 6. RISIKO OG NESTE STEG"
     }}
@@ -436,13 +363,13 @@ def run_ai_report(model, pd_state, drawings, recommended_sys):
         resp = model.generate_content([prompt], generation_config={"temperature": 0.2})
         cleaned = re.sub(r"^```json", "", resp.text.strip(), flags=re.I).strip()
         cleaned = re.sub(r"^```", "", cleaned).strip()
-        return json.loads(cleaned[cleaned.find("{"):cleaned.rfind("}")+1])
+        return json.loads(cleaned)
     except Exception:
-        return {"report_markdown": "# 1. Feil\nKunne ikke generere rapport.", "risk_register": []}
+        return {"report_markdown": "# 1. Feil\nKunne ikke generere rapport pga AI timeout.", "risk_register": []}
 
 
 # ------------------------------------------------------------
-# 9. TABELLRENDERER FOR PDF (PREMIUM)
+# 9. TABELLRENDERER FOR PDF
 # ------------------------------------------------------------
 def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_fill_column: str = None) -> Image.Image:
     df = df.copy().fillna("")
@@ -513,7 +440,7 @@ def render_table_image(df: pd.DataFrame, title: str, subtitle: str = "", row_fil
 
 
 # ------------------------------------------------------------
-# 10. PDF BYGGER (CORPORATE LAYOUT)
+# 10. PDF BYGGER (MED FIX FOR BYTEARRAY ERROR)
 # ------------------------------------------------------------
 class BuiltlyCorporatePDF(FPDF):
     def header(self):
@@ -639,7 +566,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.multi_cell(width, 4, clean_pdf_text(caption), 0, "C")
         self.set_y(y + height + 10)
 
-def build_full_pdf(pd_state, report_json, cand_df, drawings):
+def build_full_pdf(pd_state, report_json, cand_df, drawings) -> bytes:
     pdf = BuiltlyCorporatePDF("P", "mm", "A4")
     pdf.header_left = pd_state.get("p_name", "Prosjekt")
     pdf.set_auto_page_break(True, margin=22)
@@ -742,14 +669,22 @@ def build_full_pdf(pd_state, report_json, cand_df, drawings):
         pdf.section_title(f"Vedlegg C{idx+1}: Konseptskisse ({dwg['name']})")
         pdf.figure_image(save_temp_image(dwg["final_img"], ".jpg"), width=170, caption=f"Fagkontrollert konseptskisse for {dwg['type']}.")
 
-    return pdf.output(dest="S").encode("latin-1")
+    # --- SIKKER PDF OUTPUT HÅNDTERING (Fikser Feilmeldingen) ---
+    out = pdf.output(dest="S")
+    if isinstance(out, bytearray):
+        return bytes(out)
+    elif isinstance(out, bytes):
+        return out
+    elif isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    return bytes(out)
 
 
 # ------------------------------------------------------------
 # 11. STREAMLIT UI - HUMAN IN THE LOOP
 # ------------------------------------------------------------
 st.markdown("<h1 style='font-size: 2.5rem; margin-bottom: 0;'>🏗️ RIB — Konstruksjon</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>Deterministisk geometri, vertikal sporing og interaktiv fagkontroll før PDF-generering.</p>", unsafe_allow_html=True)
+st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI Geometri-deteksjon, vertikal sporing og interaktiv fagkontroll før PDF-generering.</p>", unsafe_allow_html=True)
 
 if st.session_state.rib_phase == "setup":
     with st.expander("1. Strategi og Opplasting", expanded=True):
@@ -760,13 +695,43 @@ if st.session_state.rib_phase == "setup":
         
         files = st.file_uploader("Last opp plan- og snittegninger (PDF/Bilde)", accept_multiple_files=True, type=["pdf", "png", "jpg"])
 
-    if st.button("🚀 Kjør Geometrianalyse (Steg 1)", type="primary", use_container_width=True):
+    if st.button("🚀 Kjør AI Geometrianalyse (Steg 1)", type="primary", use_container_width=True):
         if not files:
             st.error("Last opp minst én tegning først.")
             st.stop()
-        with st.spinner("Computer Vision (CV2) kjører: Finner bygningskonturer, klassifiserer plan og genererer basisgeometri..."):
+        with st.spinner("AI Vision analyserer planene for logiske bæringspunkter og bygningskonturer..."):
+            valid_models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+            model_name = "models/gemini-1.5-pro" if "models/gemini-1.5-pro" in valid_models else valid_models[0]
+            model = genai.GenerativeModel(model_name)
+            
             drawings = load_drawings(files)
-            process_drawing_geometry(drawings)
+            for dwg in drawings:
+                # 2. AI foreslår elementer semantisk
+                elements = extract_structural_geometry_ai(model, dwg["image"], dwg["type"])
+                
+                valid_elements = []
+                for e in elements:
+                    valid_elements.append({
+                        "Behold": True,
+                        "Type": e.get("Type", "Søyle"),
+                        "X": float(e.get("X", 0.5)),
+                        "Y": float(e.get("Y", 0.5)),
+                        "W": float(e.get("W", 0.0)),
+                        "H": float(e.get("H", 0.0)),
+                        "Label": str(e.get("Label", "")),
+                        "Transfer": False
+                    })
+                    
+                # Sikkerhetsnett hvis AI feiler totalt
+                if not valid_elements:
+                    valid_elements = [
+                        {"Behold": True, "Type": "Kjerne", "X": 0.45, "Y": 0.45, "W": 0.1, "H": 0.12, "Label": "Trapp", "Transfer": False},
+                        {"Behold": True, "Type": "Søyle", "X": 0.20, "Y": 0.20, "W": 0.0, "H": 0.0, "Label": "S1", "Transfer": False},
+                        {"Behold": True, "Type": "Søyle", "X": 0.80, "Y": 0.20, "W": 0.0, "H": 0.0, "Label": "S2", "Transfer": False}
+                    ]
+                    
+                dwg["elements_df"] = pd.DataFrame(valid_elements)
+                
             apply_transfer_logic(drawings)
             
             st.session_state.rib_drawings = drawings
@@ -775,13 +740,13 @@ if st.session_state.rib_phase == "setup":
             st.rerun()
 
 elif st.session_state.rib_phase == "review":
-    st.success("✅ Geometri er detektert. Du er nå i **Faglig Gjennomgang (Review)**.")
-    st.info("Fjern haken ved 'Behold' for å slette feilplasserte elementer, endre posisjoner eller legg til nye rader i tabellene. Skissene oppdateres live når du klikker utenfor cellen.")
+    st.success("✅ AI-forslag er klart. Du er nå i **Faglig Gjennomgang (Review)**.")
+    st.info("Fjern haken ved 'Behold' for å slette feilplasserte elementer. For å legge til nye, skriv i den tomme raden nederst i tabellen. Skissene oppdateres live når du klikker utenfor tabellen.")
 
     drawings = st.session_state.rib_drawings
     
     for idx, dwg in enumerate(drawings):
-        st.markdown(f"#### 📄 {dwg['name']} - Detektert som: `{dwg['type'].upper()}`")
+        st.markdown(f"#### 📄 {dwg['name']} - Tolket som: `{dwg['type'].upper()}`")
         col_data, col_img = st.columns([1, 1.2])
         
         with col_data:
@@ -791,18 +756,28 @@ elif st.session_state.rib_phase == "review":
                 column_config={
                     "Behold": st.column_config.CheckboxColumn("Behold?", default=True),
                     "Type": st.column_config.SelectboxColumn("Type", options=["Søyle", "Kjerne", "Skive", "Spennpil"]),
-                    "X": st.column_config.NumberColumn("X (0-1)", min_value=0.0, max_value=1.0, format="%.3f"),
-                    "Y": st.column_config.NumberColumn("Y (0-1)", min_value=0.0, max_value=1.0, format="%.3f"),
+                    "X": st.column_config.NumberColumn("X (0-1)", min_value=0.0, max_value=1.0, format="%.3f", step=0.01),
+                    "Y": st.column_config.NumberColumn("Y (0-1)", min_value=0.0, max_value=1.0, format="%.3f", step=0.01),
                     "W": st.column_config.NumberColumn("Bredde", min_value=0.0, max_value=1.0, format="%.3f"),
                     "H": st.column_config.NumberColumn("Høyde", min_value=0.0, max_value=1.0, format="%.3f"),
-                    "Transfer": st.column_config.CheckboxColumn("Transfer", disabled=True),
-                    "Status": st.column_config.TextColumn(disabled=True)
+                    "Transfer": st.column_config.CheckboxColumn("Transfer", disabled=True)
                 }
             )
+            # Vasker tabellen slik at nye manuelt tillagte rader får trygge data (Hindre NaN krasj)
+            edited_df["Behold"] = edited_df["Behold"].fillna(True).astype(bool)
+            edited_df["Transfer"] = edited_df["Transfer"].fillna(False).astype(bool)
+            if "Type" in edited_df.columns:
+                edited_df["Type"] = edited_df["Type"].fillna("Søyle").astype(str)
+            if "Label" in edited_df.columns:
+                edited_df["Label"] = edited_df["Label"].fillna("Ny").astype(str)
+            for col in ["X", "Y", "W", "H"]:
+                if col in edited_df.columns:
+                    edited_df[col] = pd.to_numeric(edited_df[col], errors="coerce").fillna(0.0)
+                    
             dwg["elements_df"] = edited_df
 
         with col_img:
-            img_overlay = render_overlay(dwg["image"], edited_df, dwg["geometry"])
+            img_overlay = render_overlay(dwg["image"], edited_df)
             st.image(img_overlay, use_container_width=True)
             dwg["final_img"] = img_overlay
             
