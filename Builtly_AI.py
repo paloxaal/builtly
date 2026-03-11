@@ -58,6 +58,9 @@ if "assistant_input" not in st.session_state:
 if "assistant_discipline_codes" not in st.session_state:
     st.session_state.assistant_discipline_codes = ['geo', 'rib', 'fire', 'sha', 'breeam']
 
+if "assistant_dialog_open" not in st.session_state:
+    st.session_state.assistant_dialog_open = False
+
 # -------------------------------------------------
 # 3) LANGUAGE TEXTS & REGULATORY PROFILES
 # -------------------------------------------------
@@ -1325,8 +1328,233 @@ def gemini_ready() -> bool:
     return bool(gemini_api_key())
 
 
+LANGUAGE_REFERENCE_SLUGS = {
+    "🇬🇧 English (UK)": "uk",
+    "🇺🇸 English (US)": "us",
+    "🇳🇴 Norsk": "no",
+    "🇸🇪 Svenska": "se",
+    "🇩🇰 Dansk": "dk",
+    "🇫🇮 Suomi": "fi",
+    "🇩🇪 Deutsch": "de",
+}
+
+COUNTRY_GUIDANCE_PACKS = {
+    "🇬🇧 English (UK)": [
+        "Use the Building Regulations and the Approved Documents as the default baseline for England.",
+        "Explicitly flag when Scotland, Wales or Northern Ireland may differ.",
+        "Call out Building Control interpretation, planning conditions and project-specific fire strategy where relevant.",
+    ],
+    "🇺🇸 English (US)": [
+        "Use IBC or IRC as the model-code baseline and always flag state, county and city adoption differences.",
+        "Separate permit-path questions, zoning questions and technical-code questions when they are mixed together.",
+        "When the answer depends on AHJ interpretation, say so clearly.",
+    ],
+    "🇳🇴 Norsk": [
+        "Bruk plan- og bygningsloven og TEK17 som hovedrammeverk.",
+        "Flagg når svaret også avhenger av regulering, kommuneplan, kommunal praksis eller byggesaksprosess.",
+        "Skill tydelig mellom forskriftskrav, vanlig prosjekteringspraksis og forhold som må avklares i prosjektet.",
+    ],
+    "🇸🇪 Svenska": [
+        "Utgå från Boverkets regler och förklara när övergången mellan äldre BBR/EKS och de nya reglerna från 1 juli 2025 påverkar svaret.",
+        "Påminn om att ett projekt normalt måste hålla sig till ett av regelverken under övergången.",
+        "Flagga kommunal tillämpning, detaljplan och bygglovsprocess när det är relevant.",
+    ],
+    "🇩🇰 Dansk": [
+        "Brug BR18 som udgangspunkt og fremhæv konstruktionsklasse, brandklasse og nationale annekser når de styrer svaret.",
+        "Skeln mellem krav i bygningsreglementet, almindelig rådgiverpraksis og emner der skal afklares med myndigheden.",
+        "Flag kommunal sagsbehandling og lokale forhold hvor det kan ændre vurderingen.",
+    ],
+    "🇫🇮 Suomi": [
+        "Use Finland's Construction Act and the National Building Code as the baseline.",
+        "Call out municipality-specific permit practice when it can materially affect the answer.",
+        "Separate mandatory compliance points from recommended early-phase risk reduction.",
+    ],
+    "🇩🇪 Deutsch": [
+        "Nutze Landesbauordnung, MBO und MVV TB nur als Ausgangspunkt und sage ausdrücklich, dass die zuständige Landesbauordnung und örtliche Praxis bestätigt werden müssen.",
+        "Trenne zwingende Anforderungen, übliche Fachpraxis und projektspezifische Annahmen klar voneinander.",
+        "Weise auf Genehmigungsbehörde, Brandschutzkonzept und Nachweisführung hin, wenn diese den Inhalt steuern.",
+    ],
+}
+
+DISCIPLINE_GUIDANCE_PACKS = {
+    "geo": [
+        "Focus on ground conditions, contamination, groundwater, excavation support, reuse or disposal routes, and impacts on neighbouring structures.",
+        "When useful, distinguish investigation stage, concept stage, permit stage and construction stage.",
+    ],
+    "rib": [
+        "Focus on load paths, spans, robustness, foundation strategy, temporary conditions and interfaces with architecture and geotechnics.",
+        "State clearly when conceptual guidance is not enough and project-specific calculations or code checks are needed.",
+    ],
+    "demolition": [
+        "Cover demolition sequencing, hazardous materials, waste streams, reuse potential, temporary stability and third-party impacts.",
+        "Flag permit, notification or environmental follow-up items when they are likely to matter.",
+    ],
+    "acoustics": [
+        "Address external noise, internal sound insulation, facade requirements, glazing, ventilation trade-offs and vibration where relevant.",
+        "Separate early-phase screening from final façade or room-acoustics documentation.",
+    ],
+    "fire": [
+        "Address use class, risk class, fire strategy, compartmentation, escape, fire resistance, smoke control and fire service access where relevant.",
+        "Make it explicit when the final answer depends on a coordinated fire concept rather than a single clause.",
+    ],
+    "environment": [
+        "Cover contamination, waste, mass handling, emissions, circularity, material choices, biodiversity and environmental follow-up where relevant.",
+        "Highlight where the project needs documented assumptions, measurements or material declarations.",
+    ],
+    "sha": [
+        "Address construction-phase risk, site logistics, interfaces between trades, high-risk work and responsibilities in the SHA or H&S setup.",
+        "Differentiate client duties, designer duties and contractor duties when the jurisdiction makes that distinction.",
+    ],
+    "breeam": [
+        "Treat the answer as early advisory guidance on certification strategy, credits, evidence planning and design consequences.",
+        "Flag where the scheme version, assessor input or evidence requirements can materially change the recommendation.",
+    ],
+    "property": [
+        "Focus on feasibility, permitting exposure, development risk, land-use constraints, phasing, value drivers and decision gates.",
+        "Separate commercial assumptions from technical constraints when both are present.",
+    ],
+    "traffic": [
+        "Cover access, servicing, traffic generation, parking, active mobility, road safety and local mobility requirements where relevant.",
+        "Flag when transport modelling, junction analysis or municipality-specific parking policy is needed.",
+    ],
+}
+
+ASSISTANT_CLOSE_LABELS = {
+    "🇬🇧 English (UK)": "Close assistant",
+    "🇺🇸 English (US)": "Close assistant",
+    "🇳🇴 Norsk": "Lukk spørrevindu",
+    "🇸🇪 Svenska": "Stäng frågefönstret",
+    "🇩🇰 Dansk": "Luk spørgevindu",
+    "🇫🇮 Suomi": "Sulje kysymysikkuna",
+    "🇩🇪 Deutsch": "Fragefenster schließen",
+}
+
+
+def assistant_close_label(lang_key: str) -> str:
+    return ASSISTANT_CLOSE_LABELS.get(lang_key, ASSISTANT_CLOSE_LABELS["🇬🇧 English (UK)"])
+
+
+def get_query_params_dict() -> Dict[str, str]:
+    if hasattr(st, "query_params"):
+        try:
+            return dict(st.query_params.to_dict())
+        except Exception:
+            try:
+                return dict(st.query_params)
+            except Exception:
+                return {}
+
+    if hasattr(st, "experimental_get_query_params"):
+        raw = st.experimental_get_query_params()
+        cleaned = {}
+        for key, values in raw.items():
+            if isinstance(values, list):
+                cleaned[key] = values[-1] if values else ""
+            else:
+                cleaned[key] = str(values)
+        return cleaned
+
+    return {}
+
+
+def set_query_params_dict(params: Dict[str, str]) -> None:
+    if hasattr(st, "query_params"):
+        try:
+            st.query_params.clear()
+            if params:
+                st.query_params.from_dict(params)
+            return
+        except Exception:
+            pass
+
+    if hasattr(st, "experimental_set_query_params"):
+        st.experimental_set_query_params(**params)
+
+
+def assistant_query_requested() -> bool:
+    value = str(get_query_params_dict().get("assistant", "")).strip().lower()
+    return value in {"1", "true", "open", "yes"}
+
+
+def clear_assistant_query_param() -> None:
+    params = get_query_params_dict()
+    if "assistant" in params:
+        params.pop("assistant", None)
+        set_query_params_dict(params)
+
+
+def open_assistant() -> None:
+    st.session_state.assistant_dialog_open = True
+
+
+def close_assistant() -> None:
+    st.session_state.assistant_dialog_open = False
+    clear_assistant_query_param()
+
+
+def reference_base_dir() -> Path:
+    return Path(os.getenv("BUILTLY_REFERENCE_DIR") or "knowledge_base")
+
+
+def reference_file_candidates(lang_key: str, selected_codes: List[str]) -> List[Path]:
+    base_dir = reference_base_dir()
+    locale_slug = LANGUAGE_REFERENCE_SLUGS.get(lang_key, "global")
+    candidates = [
+        base_dir / "global" / "shared.md",
+        base_dir / locale_slug / "shared.md",
+    ]
+
+    for code in selected_codes or []:
+        candidates.append(base_dir / "global" / f"{code}.md")
+        candidates.append(base_dir / locale_slug / f"{code}.md")
+
+    unique_paths: List[Path] = []
+    seen = set()
+    for path in candidates:
+        path_key = path.as_posix()
+        if path_key not in seen:
+            seen.add(path_key)
+            unique_paths.append(path)
+    return unique_paths
+
+
+def load_reference_snippets(lang_key: str, selected_codes: List[str], char_limit: int = 2800) -> str:
+    snippets: List[str] = []
+    used = 0
+
+    for path in reference_file_candidates(lang_key, selected_codes):
+        if not path.exists() or not path.is_file():
+            continue
+
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not text:
+            continue
+
+        remaining = char_limit - used
+        if remaining <= 0:
+            break
+
+        excerpt = text[:remaining].strip()
+        if not excerpt:
+            continue
+
+        snippets.append(f"[{path.as_posix()}]\n{excerpt}")
+        used += len(excerpt)
+
+    return "\n\n".join(snippets).strip()
+
+
+def loaded_reference_pack_names(lang_key: str, selected_codes: List[str]) -> List[str]:
+    names: List[str] = []
+    for path in reference_file_candidates(lang_key, selected_codes):
+        if path.exists() and path.is_file():
+            names.append(path.as_posix())
+    return names
+
+
 def build_builtly_prompt(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
     profile = get_locale_profile(lang_key)
+    selected_codes = selected_codes or list(DEFAULT_DISCIPLINES)
     selected_labels = ", ".join(discipline_labels(selected_codes, lang_key)) or get_text_bundle(lang_key)["assistant_scope_value"]
 
     history_block = ""
@@ -1336,6 +1564,25 @@ def build_builtly_prompt(question: str, selected_codes: List[str], lang_key: str
             snippets.append(f"User: {item['question']}\nBuiltly: {item['answer']}")
         history_block = "\n\nRecent conversation:\n" + "\n\n".join(snippets)
 
+    country_guidance = COUNTRY_GUIDANCE_PACKS.get(lang_key, COUNTRY_GUIDANCE_PACKS["🇬🇧 English (UK)"])
+    country_guidance_block = "\n".join([f"- {line}" for line in country_guidance])
+
+    discipline_lines: List[str] = []
+    for code in selected_codes:
+        guidance_lines = DISCIPLINE_GUIDANCE_PACKS.get(code, [])
+        label = discipline_label(code, lang_key)
+        for line in guidance_lines:
+            discipline_lines.append(f"- {label}: {line}")
+    discipline_guidance_block = "\n".join(discipline_lines) or "- Use the user's question to infer the most relevant technical focus."
+
+    reference_snippets = load_reference_snippets(lang_key, selected_codes)
+    reference_block = ""
+    if reference_snippets:
+        reference_block = (
+            "\n\nLocal reference pack excerpts (prioritise these when they are more specific than generic guidance):\n"
+            + reference_snippets
+        )
+
     return f"""
 You are Builtly, the front-page engineering and property assistant for builtly.ai.
 
@@ -1344,6 +1591,12 @@ Primary country context: {profile['country']}.
 Primary regulatory baseline: {profile['rule_set']}.
 Jurisdiction note: {profile['variation_note']}.
 Active disciplines: {selected_labels}.
+
+Country guidance pack:
+{country_guidance_block}
+
+Discipline guidance pack:
+{discipline_guidance_block}
 
 You can help with:
 - geotechnics and ground conditions
@@ -1357,19 +1610,21 @@ You can help with:
 - traffic and mobility in early phase
 - property, feasibility and development
 
-Answer style:
+How to answer:
 - Start with a direct practical answer.
 - Separate mandatory requirements, common practice, and assumptions when useful.
-- Flag when municipal, state, local-authority or permitting practice can change the answer.
+- Be explicit about what depends on municipality, state, county, local authority or local permitting practice.
+- Prefer a practical structure when relevant: Direct answer, What governs, Main risks/open points, Next to clarify.
+- For early-phase questions, highlight the missing project facts that materially change the answer.
+- If several disciplines are involved, organise the answer by discipline or by decision topic.
 - For Sweden, explain when the 2025–2026 transition between older BBR rules and newer Boverket regulations matters.
 - For Germany, state clearly that the applicable Landesbauordnung and local authority practice must be confirmed.
 - For the United States, explain that state and local code adoption can differ from model codes.
 - For the United Kingdom, default to England and flag if Scotland, Wales or Northern Ireland may differ.
-- Do not pretend to certify or formally sign off.
-- End with a short "Next to clarify" section when more project data would materially improve the answer.
+- Do not pretend to certify, legally approve, or formally sign off.
 - If the question is outside scope, politely say that Builtly focuses on building technology, development and property.
 
-{history_block}
+{history_block}{reference_block}
 
 User question:
 {question.strip()}
@@ -1445,6 +1700,155 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
         raise RuntimeError(f"Gemini HTTP {exc.code}: {details}") from exc
     except urlerror.URLError as exc:
         raise RuntimeError(f"Gemini connection error: {exc}") from exc
+
+
+def handle_assistant_submission(question: str, selected_codes: List[str], lang_key: str) -> None:
+    lang = get_text_bundle(lang_key)
+
+    try:
+        with st.spinner(lang["assistant_loading"]):
+            answer = request_builtly_answer(
+                question=question,
+                selected_codes=selected_codes,
+                lang_key=lang_key,
+                history=st.session_state.assistant_history,
+            )
+
+        st.session_state.assistant_history.append(
+            {
+                "question": question.strip(),
+                "answer": answer,
+                "disciplines": discipline_labels(selected_codes, lang_key),
+                "lang": lang_key,
+            }
+        )
+        st.session_state.assistant_history = st.session_state.assistant_history[-8:]
+    except Exception as exc:
+        st.session_state.assistant_history.append(
+            {
+                "question": question.strip(),
+                "answer": f"**{lang['assistant_error_prefix']}:** {exc}",
+                "disciplines": discipline_labels(selected_codes, lang_key),
+                "lang": lang_key,
+            }
+        )
+        st.session_state.assistant_history = st.session_state.assistant_history[-8:]
+
+
+def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None:
+    lang = get_text_bundle(lang_key)
+    locale_profile = get_locale_profile(lang_key)
+    selected_codes = st.session_state.get("assistant_discipline_codes", list(DEFAULT_DISCIPLINES))
+    status_class = "live" if gemini_ready() else "ready"
+    status_text = lang["assistant_status_live"] if gemini_ready() else lang["assistant_status_setup"]
+    loaded_packs = loaded_reference_pack_names(lang_key, selected_codes)
+
+    render_html(
+        f"""
+        <div class="assistant-dialog-hero">
+            <div class="assistant-kicker">{lang['assistant_kicker']}</div>
+            <div class="assistant-title">{lang['assistant_title']}</div>
+            <div class="assistant-subtitle">{lang['assistant_subtitle']}</div>
+            <div class="context-chips">
+                <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
+                <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
+                <div class="context-chip {status_class}"><span>{lang['assistant_label_status']}:</span> {status_text}</div>
+            </div>
+            <div class="assistant-dialog-note">{locale_profile['variation_note']}</div>
+        </div>
+        """
+    )
+
+    render_html(
+        f"""
+        <div class="example-label">{lang['assistant_examples_label']}</div>
+        <div class="example-chip-wrap">
+            {''.join([f'<div class="example-chip">{html.escape(example)}</div>' for example in lang['assistant_examples']])}
+        </div>
+        """
+    )
+
+    with st.form(f"builtly_frontpage_assistant_{surface_key}"):
+        selected_codes = st.multiselect(
+            lang["assistant_disciplines_label"],
+            options=[item["code"] for item in DISCIPLINE_CATALOG],
+            format_func=lambda code: discipline_label(code, lang_key),
+            key="assistant_discipline_codes",
+        )
+        question = st.text_area(
+            lang["assistant_question_label"],
+            key="assistant_input",
+            placeholder=lang["assistant_placeholder"],
+            height=170,
+        )
+        submitted = st.form_submit_button(lang["assistant_btn"], use_container_width=True)
+
+    if submitted and question.strip():
+        handle_assistant_submission(question, selected_codes, lang_key)
+
+    action_left, action_right = st.columns([0.35, 0.65], gap="small")
+    with action_left:
+        clear_clicked = st.button(lang["assistant_clear"], key=f"assistant_clear_{surface_key}", use_container_width=True)
+    with action_right:
+        st.caption(lang["assistant_disclaimer"])
+
+    if clear_clicked:
+        st.session_state.assistant_history = []
+        st.session_state.assistant_input = ""
+        st.rerun()
+
+    if st.session_state.assistant_history:
+        latest = st.session_state.assistant_history[-1]
+        with st.container(border=True):
+            st.markdown(f"**{lang['assistant_latest_answer']}**")
+            if latest.get("disciplines"):
+                st.caption(" · ".join(latest["disciplines"]))
+            st.markdown(latest["answer"])
+
+        with st.expander(lang["assistant_history_label"], expanded=False):
+            for item in reversed(st.session_state.assistant_history[-8:]):
+                st.markdown(f"**Q:** {item['question']}")
+                if item.get("disciplines"):
+                    st.caption(" · ".join(item["disciplines"]))
+                st.markdown(item["answer"])
+                st.markdown("---")
+    else:
+        render_html(
+            f"""
+            <div class="assistant-note">
+                <strong>{lang['assistant_empty_title']}</strong>
+                {lang['assistant_empty_body']}
+            </div>
+            """
+        )
+
+
+def maybe_render_assistant_dialog(lang_key: str) -> None:
+    if not st.session_state.get("assistant_dialog_open"):
+        return
+
+    if hasattr(st, "dialog"):
+        title = get_text_bundle(lang_key)["assistant_kicker"]
+
+        @st.dialog(
+            title,
+            width="large",
+            dismissible=True,
+            icon=":material/auto_awesome:",
+            on_dismiss=close_assistant,
+        )
+        def _assistant_dialog() -> None:
+            render_assistant_surface(lang_key, surface_key="dialog")
+
+        _assistant_dialog()
+        return
+
+    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        render_assistant_surface(lang_key, surface_key="inline")
+        if st.button(assistant_close_label(lang_key), key="assistant_inline_close", use_container_width=True):
+            close_assistant()
+            st.rerun()
 
 
 # -------------------------------------------------
@@ -1675,13 +2079,63 @@ st.markdown(
         font-size: 0.82rem;
     }
 
-    .assistant-intro {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
+    .hero-panel {
+        background: rgba(20, 35, 50, 0.4);
         border: 1px solid var(--stroke);
+        border-radius: var(--radius-xl);
+        padding: 1.35rem;
+        height: 560px;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .panel-title {
+        font-size: 0.86rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin-bottom: 0.1rem;
+    }
+
+    .mini-stat-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.85rem;
+    }
+
+    .mini-stat {
+        background: rgba(255,255,255,0.02);
+        border: 1px solid var(--stroke);
+        border-radius: 18px;
+        padding: 1rem 1.05rem;
+        min-height: 132px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+
+    .mini-stat-value {
+        font-size: 1.35rem;
+        font-weight: 760;
+        color: var(--text);
+        line-height: 1.1;
+    }
+
+    .mini-stat-label {
+        margin-top: 0.28rem;
+        color: var(--muted);
+        font-size: 0.88rem;
+        line-height: 1.5;
+    }
+
+    .assistant-teaser {
+        margin-top: auto;
+        background: linear-gradient(135deg, rgba(56,194,201,0.08), rgba(17,44,63,0.78));
+        border: 1px solid rgba(56,194,201,0.22);
         border-radius: 22px;
-        padding: 1.25rem;
-        margin-bottom: 0.95rem;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
+        padding: 1rem;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
     }
 
     .assistant-kicker {
@@ -1707,6 +2161,22 @@ st.markdown(
         line-height: 1.72;
         font-size: 0.96rem;
         margin-bottom: 0.9rem;
+    }
+
+    .assistant-teaser .assistant-title {
+        font-size: 1.08rem;
+        margin-bottom: 0.45rem;
+    }
+
+    .assistant-teaser .assistant-subtitle {
+        font-size: 0.88rem;
+        line-height: 1.6;
+        color: var(--muted);
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        margin-bottom: 0.75rem;
     }
 
     .assistant-scope {
@@ -1750,6 +2220,42 @@ st.markdown(
         color: #f6ddb0;
     }
 
+    .assistant-teaser-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0.75rem 1rem;
+        border-radius: 12px;
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
+        border: 1px solid rgba(120,220,225,0.45);
+        color: #041018 !important;
+        text-decoration: none !important;
+        font-weight: 700;
+        margin-top: 0.85rem;
+        transition: transform 0.2s ease;
+    }
+
+    .assistant-teaser-link:hover {
+        transform: translateY(-1px);
+    }
+
+    .assistant-dialog-hero {
+        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
+        border: 1px solid var(--stroke);
+        border-radius: 22px;
+        padding: 1.25rem 1.2rem 1rem 1.2rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
+    }
+
+    .assistant-dialog-note {
+        color: var(--muted);
+        line-height: 1.62;
+        font-size: 0.86rem;
+        margin-top: 0.75rem;
+    }
+
     .example-label {
         color: var(--muted);
         font-size: 0.82rem;
@@ -1776,6 +2282,39 @@ st.markdown(
         color: var(--soft);
         font-size: 0.82rem;
         line-height: 1.4;
+    }
+
+    .assistant-rail {
+        position: fixed;
+        right: -48px;
+        top: 48%;
+        transform: translateY(-50%) rotate(-90deg);
+        z-index: 999;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.72rem 1rem;
+        border-radius: 16px 16px 0 0;
+        background: linear-gradient(135deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96));
+        border: 1px solid rgba(56,194,201,0.26);
+        box-shadow: 0 18px 42px rgba(0,0,0,0.32);
+        color: #f5f7fb !important;
+        text-decoration: none !important;
+        font-weight: 650;
+        letter-spacing: 0.01em;
+        backdrop-filter: blur(14px);
+    }
+
+    .assistant-rail:hover {
+        transform: translateY(-50%) rotate(-90deg) translateX(4px);
+    }
+
+    .assistant-rail-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--accent-2);
+        box-shadow: 0 0 0 6px rgba(56,194,201,0.12);
     }
 
     div[data-testid="stForm"] {
@@ -2181,6 +2720,7 @@ st.markdown(
             flex-direction: column;
             align-items: flex-start;
         }
+        .mini-stat-grid,
         .stats-row,
         .trust-grid,
         .loop-grid,
@@ -2201,15 +2741,27 @@ st.markdown(
         }
     }
 
+    @media (max-width: 900px) {
+        .assistant-rail {
+            display: none;
+        }
+        .hero-panel {
+            height: auto;
+        }
+    }
+
     @media (max-width: 760px) {
+        .mini-stat-grid,
         .stats-row,
         .trust-grid,
         .loop-grid,
         .module-grid {
             grid-template-columns: 1fr;
         }
-        .hero {
+        .hero,
+        .hero-panel {
             min-height: auto;
+            height: auto;
         }
         .brand-logo {
             height: 60px;
@@ -2251,9 +2803,24 @@ locale_profile = get_locale_profile(st.session_state.app_lang)
 st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 
 # -------------------------------------------------
-# 8) HERO + INTEGRATED BUILTLY ASSISTANT
+# 8) HERO + ASSISTANT ENTRYPOINT
 # -------------------------------------------------
-left, right = st.columns([1.12, 0.88], gap="large")
+if assistant_query_requested():
+    open_assistant()
+    clear_assistant_query_param()
+
+status_class = "live" if gemini_ready() else "ready"
+status_text = lang["assistant_status_live"] if gemini_ready() else lang["assistant_status_setup"]
+
+render_html(
+    f"""
+    <a href="?assistant=open" target="_self" class="assistant-rail">
+        <span class="assistant-rail-dot"></span>{lang['assistant_btn']}
+    </a>
+    """
+)
+
+left, right = st.columns([1.2, 0.8], gap="large")
 
 with left:
     render_html(
@@ -2267,146 +2834,51 @@ with left:
                 {hero_action('review', lang['btn_qa'], 'secondary')}
             </div>
             <div class="proof-strip">
-                {"".join([f'<div class="proof-chip">{proof}</div>' for proof in lang['proofs']])}
+                {''.join([f'<div class="proof-chip">{proof}</div>' for proof in lang['proofs']])}
             </div>
         </div>
         """
     )
 
 with right:
-    status_class = "live" if gemini_ready() else "ready"
-    status_text = lang["assistant_status_live"] if gemini_ready() else lang["assistant_status_setup"]
-
     render_html(
         f"""
-        <div class="assistant-intro">
-            <div class="assistant-kicker">{lang['assistant_kicker']}</div>
-            <div class="assistant-title">{lang['assistant_title']}</div>
-            <div class="assistant-subtitle">{lang['assistant_subtitle']}</div>
-            <div class="context-chips">
-                <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
-                <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
-                <div class="context-chip {status_class}"><span>{lang['assistant_label_status']}:</span> {status_text}</div>
+        <div class="hero-panel">
+            <div class="panel-title">{lang['why_kicker']}</div>
+            <div class="mini-stat-grid">
+                <div class="mini-stat">
+                    <div class="mini-stat-value">{lang['stat1_v']}</div>
+                    <div class="mini-stat-label"><b>{lang['stat1_t']}</b><br>{lang['stat1_d']}</div>
+                </div>
+                <div class="mini-stat">
+                    <div class="mini-stat-value">{lang['stat2_v']}</div>
+                    <div class="mini-stat-label"><b>{lang['stat2_t']}</b><br>{lang['stat2_d']}</div>
+                </div>
+                <div class="mini-stat">
+                    <div class="mini-stat-value">{lang['stat3_v']}</div>
+                    <div class="mini-stat-label"><b>{lang['stat3_t']}</b><br>{lang['stat3_d']}</div>
+                </div>
+                <div class="mini-stat">
+                    <div class="mini-stat-value">{lang['stat4_v']}</div>
+                    <div class="mini-stat-label"><b>{lang['stat4_t']}</b><br>{lang['stat4_d']}</div>
+                </div>
             </div>
-            <div class="assistant-scope">{lang['assistant_scope_value']}</div>
+            <div class="assistant-teaser">
+                <div class="assistant-kicker">{lang['assistant_kicker']}</div>
+                <div class="assistant-title">{lang['assistant_title']}</div>
+                <div class="assistant-subtitle">{lang['assistant_subtitle']}</div>
+                <div class="context-chips">
+                    <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
+                    <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
+                    <div class="context-chip {status_class}"><span>{lang['assistant_label_status']}:</span> {status_text}</div>
+                </div>
+                <a href="?assistant=open" target="_self" class="assistant-teaser-link">{lang['assistant_btn']}</a>
+            </div>
         </div>
         """
     )
 
-    render_html(
-        f"""
-        <div class="example-label">{lang['assistant_examples_label']}</div>
-        <div class="example-chip-wrap">
-            {"".join([f'<div class="example-chip">{html.escape(example)}</div>' for example in lang["assistant_examples"]])}
-        </div>
-        """
-    )
-
-    with st.form("builtly_frontpage_assistant"):
-        selected_codes = st.multiselect(
-            lang["assistant_disciplines_label"],
-            options=[item["code"] for item in DISCIPLINE_CATALOG],
-            format_func=lambda code: discipline_label(code, st.session_state.app_lang),
-            key="assistant_discipline_codes",
-        )
-        question = st.text_area(
-            lang["assistant_question_label"],
-            key="assistant_input",
-            placeholder=lang["assistant_placeholder"],
-            height=145,
-        )
-        submitted = st.form_submit_button(lang["assistant_btn"], use_container_width=True)
-
-    if submitted and question.strip():
-        try:
-            with st.spinner(lang["assistant_loading"]):
-                answer = request_builtly_answer(
-                    question=question,
-                    selected_codes=selected_codes,
-                    lang_key=st.session_state.app_lang,
-                    history=st.session_state.assistant_history,
-                )
-            st.session_state.assistant_history.append(
-                {
-                    "question": question.strip(),
-                    "answer": answer,
-                    "disciplines": discipline_labels(selected_codes, st.session_state.app_lang),
-                    "lang": st.session_state.app_lang,
-                }
-            )
-            st.session_state.assistant_history = st.session_state.assistant_history[-6:]
-        except Exception as exc:
-            st.session_state.assistant_history.append(
-                {
-                    "question": question.strip(),
-                    "answer": f"**{lang['assistant_error_prefix']}:** {exc}",
-                    "disciplines": discipline_labels(selected_codes, st.session_state.app_lang),
-                    "lang": st.session_state.app_lang,
-                }
-            )
-
-    clear_clicked = st.button(lang["assistant_clear"], use_container_width=True)
-    if clear_clicked:
-        st.session_state.assistant_history = []
-        st.session_state.assistant_input = ""
-        st.rerun()
-
-    if st.session_state.assistant_history:
-        latest = st.session_state.assistant_history[-1]
-        with st.container(border=True):
-            st.markdown(f"**{lang['assistant_latest_answer']}**")
-            if latest.get("disciplines"):
-                st.caption(" · ".join(latest["disciplines"]))
-            st.markdown(latest["answer"])
-        with st.expander(lang["assistant_history_label"], expanded=False):
-            for item in reversed(st.session_state.assistant_history[-6:]):
-                st.markdown(f"**Q:** {item['question']}")
-                if item.get("disciplines"):
-                    st.caption(" · ".join(item["disciplines"]))
-                st.markdown(item["answer"])
-                st.markdown("---")
-    else:
-        render_html(
-            f"""
-            <div class="assistant-note">
-                <strong>{lang['assistant_empty_title']}</strong>
-                {lang['assistant_empty_body']}
-            </div>
-            """
-        )
-
-# -------------------------------------------------
-# 9) WHY BUILTLY STATS STRIP
-# -------------------------------------------------
-render_html(
-    f"""
-    <div class="section-head" style="margin-top: 1.5rem; margin-bottom: 0.5rem;">
-        <div class="section-kicker">{lang['why_kicker']}</div>
-    </div>
-    <div class="stats-row">
-        <div class="stat-card">
-            <div class="stat-value">{lang['stat1_v']}</div>
-            <div class="stat-title">{lang['stat1_t']}</div>
-            <div class="stat-desc">{lang['stat1_d']}</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value">{lang['stat2_v']}</div>
-            <div class="stat-title">{lang['stat2_t']}</div>
-            <div class="stat-desc">{lang['stat2_d']}</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value">{lang['stat3_v']}</div>
-            <div class="stat-title">{lang['stat3_t']}</div>
-            <div class="stat-desc">{lang['stat3_d']}</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-value">{lang['stat4_v']}</div>
-            <div class="stat-title">{lang['stat4_t']}</div>
-            <div class="stat-desc">{lang['stat4_d']}</div>
-        </div>
-    </div>
-    """
-)
+maybe_render_assistant_dialog(st.session_state.app_lang)
 
 # -------------------------------------------------
 # 10) CORE VALUE PROPOSITION & WORKFLOW
