@@ -908,7 +908,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'assistant_empty_body': 'Vierailijat voivat kysyä rakennustekniikasta ja kiinteistökehityksestä suoraan etusivulla. '
                                       'Vastaukset ohjautuvat alan, kielen ja kansallisten määräysten mukaan.',
               'assistant_latest_answer': 'Viimeisin vastaus',
-              'assistant_status_live': 'Gemini yhdistetty',
+              'assistant_status_live': 'AI valmis',
               'assistant_status_setup': 'Käyttöliittymä valmis',
               'assistant_error_prefix': 'Vastauksen luonti epäonnistui',
               'assistant_note_prefix': 'Huomio',
@@ -1054,7 +1054,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                 'assistant_empty_body': 'Besucher können direkt auf der Startseite Fragen zu Gebäudetechnik und Immobilien stellen. Die '
                                         'Antworten folgen Fachgebiet, Sprache und nationalem Regelwerk.',
                 'assistant_latest_answer': 'Letzte Antwort',
-                'assistant_status_live': 'Gemini verbunden',
+                'assistant_status_live': 'KI bereit',
                 'assistant_status_setup': 'UI bereit',
                 'assistant_error_prefix': 'Antwort konnte nicht erzeugt werden',
                 'assistant_note_prefix': 'Hinweis',
@@ -1490,6 +1490,48 @@ def open_assistant() -> None:
 def close_assistant() -> None:
     st.session_state.assistant_dialog_open = False
     clear_assistant_query_param()
+
+
+LANGUAGE_QUERY_SLUGS = {
+    "🇬🇧 English (UK)": "en-gb",
+    "🇺🇸 English (US)": "en-us",
+    "🇳🇴 Norsk": "no",
+    "🇸🇪 Svenska": "sv",
+    "🇩🇰 Dansk": "da",
+    "🇫🇮 Suomi": "fi",
+    "🇩🇪 Deutsch": "de",
+}
+QUERY_LANGUAGE_SLUGS = {value: key for key, value in LANGUAGE_QUERY_SLUGS.items()}
+
+
+def language_slug(lang_key: str) -> str:
+    return LANGUAGE_QUERY_SLUGS.get(lang_key, LANGUAGE_QUERY_SLUGS["🇳🇴 Norsk"])
+
+
+def language_from_query_param() -> Optional[str]:
+    raw = str(get_query_params_dict().get("lang", "")).strip().lower()
+    return QUERY_LANGUAGE_SLUGS.get(raw)
+
+
+def apply_language_from_query() -> None:
+    requested_language = language_from_query_param()
+    if requested_language and requested_language != st.session_state.get("app_lang"):
+        st.session_state.app_lang = requested_language
+        st.session_state.project_data["land"] = get_locale_profile(requested_language)["project_land_label"]
+
+
+def assistant_href(lang_key: str) -> str:
+    return "?" + urlparse.urlencode({"assistant": "open", "lang": language_slug(lang_key)})
+
+
+def sync_language_query_param(lang_key: str, keep_assistant: bool = False) -> None:
+    params = get_query_params_dict()
+    params["lang"] = language_slug(lang_key)
+    if keep_assistant or st.session_state.get("assistant_dialog_open"):
+        params["assistant"] = "open"
+    else:
+        params.pop("assistant", None)
+    set_query_params_dict(params)
 
 
 def reference_base_dir() -> Path:
@@ -1985,19 +2027,33 @@ st.markdown(
         display: none !important;
     }
 
-    [data-testid="stSelectbox"] > div > div {
-        background-color: rgba(255,255,255,0.05) !important;
-        color: #f5f7fb !important;
-        border: 1px solid rgba(120,145,170,0.3) !important;
-        border-radius: 12px !important;
-        min-height: 42px !important;
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)) !important;
+        color: var(--text) !important;
+        border: 1px solid rgba(120,145,170,0.28) !important;
+        border-radius: 16px !important;
+        min-height: 44px !important;
         padding-left: 10px !important;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
         cursor: pointer;
     }
 
-    [data-testid="stSelectbox"] > div > div:hover {
-        border-color: var(--accent) !important;
-        background-color: rgba(255,255,255,0.08) !important;
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {
+        border-color: rgba(120,220,225,0.42) !important;
+        background: linear-gradient(180deg, rgba(14,28,43,0.98), rgba(9,19,30,0.98)) !important;
+    }
+
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] span,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] input,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] div {
+        color: var(--text) !important;
+        -webkit-text-fill-color: var(--text) !important;
+    }
+
+    div[data-testid="stSelectbox"] svg {
+        color: var(--muted) !important;
+        fill: var(--muted) !important;
     }
 
     .hero-action.disabled,
@@ -2127,6 +2183,7 @@ st.markdown(
         height: 560px;
         display: flex;
         flex-direction: column;
+        justify-content: flex-start;
         gap: 1rem;
     }
 
@@ -2141,15 +2198,19 @@ st.markdown(
     .mini-stat-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
         gap: 0.85rem;
+        flex: 1 1 auto;
+        align-items: stretch;
     }
 
     .mini-stat {
         background: rgba(255,255,255,0.02);
         border: 1px solid var(--stroke);
         border-radius: 18px;
-        padding: 1rem 1.05rem;
-        min-height: 132px;
+        padding: 1.08rem 1.08rem;
+        min-height: 0;
+        height: 100%;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -2961,6 +3022,17 @@ st.markdown(
         color: var(--muted) !important;
     }
 
+    div[data-testid="stDialog"] div[data-baseweb="select"] > div,
+    div[data-testid="stDialog"] div[data-baseweb="base-input"] > div,
+    div[data-testid="stDialog"] div[data-baseweb="textarea"] {
+        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)) !important;
+        border-radius: 14px !important;
+    }
+
+    div[data-testid="stDialog"] div[data-baseweb="textarea"] textarea {
+        background: transparent !important;
+    }
+
     div[data-testid="stDialog"] div[data-baseweb="tag"] {
         background: rgba(56,194,201,0.12) !important;
         border: 1px solid rgba(56,194,201,0.2) !important;
@@ -2986,10 +3058,24 @@ st.markdown(
 
     div[data-baseweb="popover"],
     div[data-baseweb="menu"] {
-        background: linear-gradient(180deg, rgba(10,22,35,0.98), rgba(7,16,24,0.98)) !important;
-        border: 1px solid rgba(120,145,170,0.18) !important;
+        background: transparent !important;
+        border: 0 !important;
         color: var(--text) !important;
-        box-shadow: 0 20px 40px rgba(0,0,0,0.32) !important;
+        box-shadow: none !important;
+    }
+
+    div[data-baseweb="popover"] > div,
+    div[data-baseweb="menu"] > div,
+    div[data-baseweb="popover"] ul,
+    div[data-baseweb="menu"] ul,
+    div[data-baseweb="popover"] [role="listbox"],
+    div[data-baseweb="menu"] [role="listbox"] {
+        background: linear-gradient(180deg, rgba(10,22,35,0.99), rgba(7,16,24,0.99)) !important;
+        border: 1px solid rgba(120,145,170,0.2) !important;
+        color: var(--text) !important;
+        border-radius: 18px !important;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.34) !important;
+        overflow: hidden !important;
     }
 
     div[data-baseweb="popover"] *,
@@ -2997,15 +3083,30 @@ st.markdown(
     ul[role="listbox"] *,
     li[role="option"] * {
         color: var(--text) !important;
+        -webkit-text-fill-color: var(--text) !important;
     }
 
+    div[data-baseweb="popover"] li,
+    div[data-baseweb="menu"] li,
     li[role="option"] {
+        background: transparent !important;
+        border-radius: 12px !important;
+        margin: 0.15rem 0 !important;
+    }
+
+    div[data-baseweb="popover"] li > div,
+    div[data-baseweb="menu"] li > div,
+    li[role="option"] > div {
         background: transparent !important;
     }
 
+    div[data-baseweb="popover"] li[aria-selected="true"],
+    div[data-baseweb="popover"] li:hover,
+    div[data-baseweb="menu"] li[aria-selected="true"],
+    div[data-baseweb="menu"] li:hover,
     li[role="option"][aria-selected="true"],
     li[role="option"]:hover {
-        background: rgba(56,194,201,0.12) !important;
+        background: rgba(56,194,201,0.14) !important;
     }
 
     @media (max-width: 1100px) {
@@ -3027,6 +3128,8 @@ st.markdown(
 # -------------------------------------------------
 # 7) TOP BAR
 # -------------------------------------------------
+apply_language_from_query()
+
 top_l, top_r = st.columns([5, 1])
 
 with top_l:
@@ -3047,6 +3150,7 @@ with top_r:
         st.session_state.assistant_history = []
         st.session_state.assistant_input = ""
         st.session_state.assistant_discipline_codes = list(DEFAULT_DISCIPLINES)
+        sync_language_query_param(chosen_language)
         st.rerun()
 
 lang = get_text_bundle(st.session_state.app_lang)
@@ -3063,7 +3167,7 @@ if assistant_query_requested():
 
 render_html(
     f"""
-    <a href="?assistant=open" target="_self" class="assistant-rail">
+    <a href="{assistant_href(st.session_state.app_lang)}" target="_self" class="assistant-rail">
         <span class="assistant-rail-dot"></span>{lang['assistant_btn']}
     </a>
     """
@@ -3111,17 +3215,6 @@ with right:
                     <div class="mini-stat-value">{lang['stat4_v']}</div>
                     <div class="mini-stat-label"><b>{lang['stat4_t']}</b><br>{lang['stat4_d']}</div>
                 </div>
-            </div>
-            <div class="assistant-teaser">
-                <div class="assistant-teaser-row">
-                    <div class="assistant-teaser-copy">
-                        <div class="assistant-kicker">{lang['assistant_kicker']}</div>
-                        <div class="assistant-title">{assistant_teaser_title(st.session_state.app_lang)}</div>
-                        <div class="assistant-subtitle">{assistant_teaser_subtitle(st.session_state.app_lang)}</div>
-                    </div>
-                    <a href="?assistant=open" target="_self" class="assistant-teaser-link compact">{lang['assistant_btn']}</a>
-                </div>
-                <div class="assistant-teaser-foot">{assistant_teaser_foot(st.session_state.app_lang)}</div>
             </div>
         </div>
         """
