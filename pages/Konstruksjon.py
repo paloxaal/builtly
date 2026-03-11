@@ -1,11 +1,13 @@
 
 # -*- coding: utf-8 -*-
 import base64
+import importlib.util
 import io
 import json
 import math
 import os
 import re
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -2725,10 +2727,10 @@ def build_editor_crop_overlay_image(
 def ensure_inline_click_canvas_component_dir() -> Optional[Path]:
     if components is None:
         return None
-    component_dir = DB_DIR / "_inline_components" / "rib_click_canvas_v4"
+    component_dir = DB_DIR / "_inline_components" / "rib_click_canvas_v5"
     component_dir.mkdir(parents=True, exist_ok=True)
     index_path = component_dir / "index.html"
-    version_marker = "Builtly RIB click canvas v4"
+    version_marker = "Builtly RIB click canvas v5"
     html = """<!DOCTYPE html>
 <html lang="no">
 <head>
@@ -2942,19 +2944,72 @@ def ensure_inline_click_canvas_component_dir() -> Optional[Path]:
     return component_dir
 
 
+def ensure_inline_component_bridge_module() -> Optional[Path]:
+    if components is None:
+        return None
+    bridge_dir = DB_DIR / "_inline_components"
+    bridge_dir.mkdir(parents=True, exist_ok=True)
+    bridge_path = bridge_dir / "_rib_component_bridge_v5.py"
+    bridge_marker = "Builtly RIB component bridge v5"
+    bridge_code = """# Builtly RIB component bridge v5
+from pathlib import Path
+
+import streamlit.components.v1 as components
+
+_COMPONENT_CACHE = {}
+
+
+def get_declared_component(name: str, path: str):
+    resolved_path = str(Path(path).resolve())
+    cache_key = (name, resolved_path)
+    if cache_key not in _COMPONENT_CACHE:
+        _COMPONENT_CACHE[cache_key] = components.declare_component(name, path=resolved_path)
+    return _COMPONENT_CACHE[cache_key]
+"""
+    if (not bridge_path.exists()) or (bridge_marker not in bridge_path.read_text(encoding="utf-8", errors="ignore")):
+        bridge_path.write_text(bridge_code, encoding="utf-8")
+    return bridge_path
+
+
+def load_inline_component_bridge_module() -> Any:
+    bridge_path = ensure_inline_component_bridge_module()
+    if bridge_path is None:
+        return None
+    module_name = "_builtly_rib_component_bridge_v5"
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(module_name, bridge_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def get_inline_click_canvas_component():
     if components is None:
         return None
     component_dir = ensure_inline_click_canvas_component_dir()
     if component_dir is None:
         return None
+    bridge_module = load_inline_component_bridge_module()
+    if bridge_module is None:
+        st.session_state["rib_click_canvas_error"] = "Kunne ikke laste bro-modul for Streamlit-komponenten."
+        return None
     cache_key = str(component_dir.resolve())
     if cache_key not in _EDITOR_COMPONENT_CACHE:
-        _EDITOR_COMPONENT_CACHE[cache_key] = components.declare_component(
-            "rib_click_canvas_v4",
-            path=str(component_dir),
-        )
-    return _EDITOR_COMPONENT_CACHE[cache_key]
+        try:
+            _EDITOR_COMPONENT_CACHE[cache_key] = bridge_module.get_declared_component(
+                "rib_click_canvas_v5",
+                str(component_dir.resolve()),
+            )
+            st.session_state.pop("rib_click_canvas_error", None)
+        except Exception as exc:
+            st.session_state["rib_click_canvas_error"] = short_text(f"{type(exc).__name__}: {exc}", 240)
+            _EDITOR_COMPONENT_CACHE[cache_key] = None
+    return _EDITOR_COMPONENT_CACHE.get(cache_key)
 
 
 def render_inline_click_canvas_editor(
@@ -2964,6 +3019,10 @@ def render_inline_click_canvas_editor(
 ) -> Optional[Dict[str, float]]:
     component = get_inline_click_canvas_component()
     if component is None:
+        st.info("Klikk-editoren kunne ikke startes i dette miljøet. Bruk tabellredigeringen under som fallback.")
+        error_text = safe_session_state_get("rib_click_canvas_error", "")
+        if error_text:
+            st.caption(f"Teknisk info: {error_text}")
         return None
 
     show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
@@ -2977,17 +3036,24 @@ def render_inline_click_canvas_editor(
     status_text = (
         "Innebygd canvas-editor er aktiv. Klikk direkte i planutsnittet for å legge inn korrigeringer."
     )
-    value = component(
-        image_data=editor_image_data_uri(editor_img),
-        natural_width=rw,
-        natural_height=rh,
-        desired_height=int(min(980, max(420, rh / max(rw, 1) * 920))),
-        status_text=status_text,
-        version_marker=f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}",
-        last_click=last_click,
-        key=f"{editor_key}_canvas",
-        default=None,
-    )
+    try:
+        value = component(
+            image_data=editor_image_data_uri(editor_img),
+            natural_width=rw,
+            natural_height=rh,
+            desired_height=int(min(980, max(420, rh / max(rw, 1) * 920))),
+            status_text=status_text,
+            version_marker=f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}",
+            last_click=last_click,
+            key=f"{editor_key}_canvas",
+            default=None,
+        )
+    except Exception as exc:
+        st.session_state["rib_click_canvas_error"] = short_text(f"{type(exc).__name__}: {exc}", 240)
+        st.info("Klikk-editoren kunne ikke rendres. Bruk tabellredigeringen under som fallback.")
+        st.caption(f"Teknisk info: {st.session_state['rib_click_canvas_error']}")
+        return None
+
     st.caption("Innebygd canvas-editor er aktiv i stedet for Plotly. Klikk direkte i planutsnittet.")
 
     if isinstance(value, dict) and "x" in value and "y" in value:
