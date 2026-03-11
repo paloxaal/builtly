@@ -28,6 +28,11 @@ except Exception:
     genai = None
 
 try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+try:
     import fitz
 except Exception:
     fitz = None
@@ -48,15 +53,25 @@ SSOT_FILE = DB_DIR / "ssot.json"
 DB_DIR.mkdir(exist_ok=True)
 IMG_DIR.mkdir(exist_ok=True)
 
-google_key = os.environ.get("GOOGLE_API_KEY")
-if genai is None:
-    st.error("Kritisk feil: Python-pakken 'google.generativeai' er ikke tilgjengelig i miljøet.")
-    st.stop()
+google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
 
-if google_key:
-    genai.configure(api_key=google_key)
-else:
-    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
+HAS_GEMINI_BACKEND = bool(google_key and genai is not None)
+HAS_OPENAI_BACKEND = bool(openai_key and OpenAI is not None)
+
+if HAS_GEMINI_BACKEND:
+    try:
+        genai.configure(api_key=google_key)
+    except Exception:
+        HAS_GEMINI_BACKEND = False
+
+if not HAS_GEMINI_BACKEND and not HAS_OPENAI_BACKEND:
+    if google_key and genai is None:
+        st.error("Kritisk feil: GOOGLE_API_KEY er satt, men pakken 'google.generativeai' er ikke tilgjengelig i miljøet.")
+    elif openai_key and OpenAI is None:
+        st.error("Kritisk feil: OPENAI_API_KEY er satt, men pakken 'openai' er ikke tilgjengelig i miljøet.")
+    else:
+        st.error("Kritisk feil: Fant verken en brukbar Gemini-backend eller en brukbar OpenAI-backend. Sjekk Environment Variables i Render.")
     st.stop()
 
 
@@ -871,21 +886,152 @@ def candidate_matrix_text(candidates: List[Dict[str, Any]], limit: int = 5) -> s
 # ------------------------------------------------------------
 # 8. AI-MOTOR: STRUKTURERT ANALYSE OG RAPPORT
 # ------------------------------------------------------------
-def list_available_models() -> List[str]:
+_RUNTIME_OPENAI_CLIENT: Any = None
+
+
+def optional_openai_client() -> Any:
+    global _RUNTIME_OPENAI_CLIENT
+    if not HAS_OPENAI_BACKEND or OpenAI is None:
+        return None
+    if _RUNTIME_OPENAI_CLIENT is None:
+        try:
+            _RUNTIME_OPENAI_CLIENT = OpenAI(api_key=openai_key)
+        except Exception:
+            _RUNTIME_OPENAI_CLIENT = None
+    return _RUNTIME_OPENAI_CLIENT
+
+
+def list_gemini_models() -> List[str]:
+    if not HAS_GEMINI_BACKEND or genai is None:
+        return []
     try:
-        return [m.name for m in genai.list_models() if "generateContent" in getattr(m, "supported_generation_methods", [])]
+        return [
+            m.name
+            for m in genai.list_models()
+            if "generateContent" in getattr(m, "supported_generation_methods", [])
+        ]
     except Exception:
         return []
 
 
+def list_available_models() -> List[str]:
+    models: List[str] = []
+    if HAS_OPENAI_BACKEND:
+        preferred_openai = clean_pdf_text(
+            os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
+        ).strip()
+        if preferred_openai:
+            models.append(f"openai:{preferred_openai}")
+        for candidate in ["gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
+            tagged = f"openai:{candidate}"
+            if tagged not in models:
+                models.append(tagged)
+    for gemini_name in list_gemini_models():
+        if gemini_name not in models:
+            models.append(gemini_name)
+    return models
+
+
 def pick_model(valid_models: List[str]) -> Optional[str]:
-    for fav in ["models/gemini-1.5-pro", "models/gemini-1.5-flash", "models/gemini-pro-vision"]:
+    preferred: List[str] = []
+    preferred_openai = clean_pdf_text(
+        os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
+    ).strip()
+    if preferred_openai:
+        preferred.append(f"openai:{preferred_openai}")
+    preferred.extend([
+        "openai:gpt-4.1",
+        "openai:gpt-4o",
+        "openai:gpt-4.1-mini",
+        "models/gemini-1.5-pro",
+        "models/gemini-1.5-flash",
+        "models/gemini-pro-vision",
+    ])
+    for fav in preferred:
         if fav in valid_models:
             return fav
     return valid_models[0] if valid_models else None
 
 
+def build_runtime_ai_model(model_name: str) -> Any:
+    if isinstance(model_name, dict):
+        return model_name
+    selected = clean_pdf_text(model_name or "").strip()
+    if selected.startswith("openai:"):
+        client = optional_openai_client()
+        return {"provider": "openai", "client": client, "model_name": selected.split(":", 1)[1]}
+    if genai is None:
+        raise RuntimeError("Ingen Gemini-backend er tilgjengelig i miljøet.")
+    return genai.GenerativeModel(selected)
+
+
+def pil_image_to_data_uri_for_ai(img: Image.Image) -> str:
+    encoded = base64.b64encode(png_bytes_from_image(copy_rgb(img))).decode("utf-8")
+    return f"data:image/png;base64,{encoded}"
+
+
 def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
+    if isinstance(model, dict) and model.get("provider") == "openai":
+        client = model.get("client") or optional_openai_client()
+        if client is None:
+            raise RuntimeError("OpenAI-backend er valgt, men klienten kunne ikke initialiseres.")
+
+        model_name = clean_pdf_text(model.get("model_name") or "gpt-4.1").strip() or "gpt-4.1"
+        content: List[Dict[str, Any]] = []
+        text_parts: List[str] = []
+        for part in parts:
+            if isinstance(part, Image.Image):
+                content.append(
+                    {
+                        "type": "input_image",
+                        "image_url": pil_image_to_data_uri_for_ai(part),
+                        "detail": "high",
+                    }
+                )
+            else:
+                txt = clean_pdf_text(part)
+                if txt:
+                    text_parts.append(txt)
+                    content.append({"type": "input_text", "text": txt})
+
+        wants_json = any("JSON" in item.upper() for item in text_parts)
+        request: Dict[str, Any] = {
+            "model": model_name,
+            "input": [{"role": "user", "content": content}],
+        }
+        if wants_json:
+            request["text"] = {"format": {"type": "json_object"}}
+        if temperature is not None:
+            request["temperature"] = float(temperature)
+
+        try:
+            response = client.responses.create(**request)
+        except Exception as exc:
+            if HAS_GEMINI_BACKEND and genai is not None:
+                fallback_name = next((name for name in list_gemini_models() if name), None)
+                if fallback_name:
+                    st.session_state["rib_ai_backend_warning"] = short_text(
+                        f"OpenAI-feil, falt tilbake til Gemini: {type(exc).__name__}: {exc}",
+                        240,
+                    )
+                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+            raise
+
+        output_text = clean_pdf_text(getattr(response, "output_text", "")).strip()
+        if output_text:
+            return output_text
+
+        try:
+            chunks: List[str] = []
+            for item in getattr(response, "output", []) or []:
+                for piece in getattr(item, "content", []) or []:
+                    piece_text = getattr(piece, "text", None)
+                    if piece_text:
+                        chunks.append(clean_pdf_text(piece_text))
+            return "\n".join(chunk for chunk in chunks if chunk).strip()
+        except Exception:
+            return ""
+
     try:
         response = model.generate_content(parts, generation_config={"temperature": temperature})
     except Exception:
@@ -984,6 +1130,20 @@ def normalize_analysis_result(
     candidates: List[Dict[str, Any]],
     drawings: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    def normalize_plan_bbox(plan_bbox: Any) -> Optional[Dict[str, float]]:
+        if not isinstance(plan_bbox, dict):
+            return None
+        try:
+            x = normalize_relative_value(plan_bbox.get("x"), 0.10)
+            y = normalize_relative_value(plan_bbox.get("y"), 0.10)
+            w = normalize_relative_value(plan_bbox.get("w"), 0.60)
+            h = normalize_relative_value(plan_bbox.get("h"), 0.60)
+        except Exception:
+            return None
+        w = clamp(w, 0.04, max(0.04, 0.98 - x))
+        h = clamp(h, 0.04, max(0.04, 0.98 - y))
+        return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
+
     if not isinstance(analysis, dict):
         analysis = default_analysis_result(candidates, drawings)
 
@@ -1030,14 +1190,22 @@ def normalize_analysis_result(
         notes = sketch.get("notes", [])
         if not isinstance(notes, list):
             notes = []
-        normalized_sketches.append(
-            {
-                "page_index": page_index,
-                "page_label": clean_pdf_text(sketch.get("page_label") or f"Tegning {page_index}"),
-                "notes": [clean_pdf_text(x) for x in notes if clean_pdf_text(x)],
-                "elements": [e for e in elements if isinstance(e, dict)],
-            }
-        )
+
+        normalized_entry: Dict[str, Any] = {
+            "page_index": page_index,
+            "page_label": clean_pdf_text(sketch.get("page_label") or f"Tegning {page_index}"),
+            "notes": [clean_pdf_text(x) for x in notes if clean_pdf_text(x)],
+            "elements": [e for e in elements if isinstance(e, dict)],
+        }
+        plan_bbox = normalize_plan_bbox(sketch.get("plan_bbox"))
+        if plan_bbox is not None:
+            normalized_entry["plan_bbox"] = plan_bbox
+        try:
+            confidence_value = float(sketch.get("confidence"))
+            normalized_entry["confidence"] = float(clamp(confidence_value, 0.0, 1.0))
+        except Exception:
+            pass
+        normalized_sketches.append(normalized_entry)
     merged["sketches"] = normalized_sketches
 
     risks = merged.get("risk_register", [])
@@ -1107,17 +1275,17 @@ MASKINELL ALTERNATIVMATRISEN SOM STARTPUNKT:
 TEGNINGSMANIFEST I SAMME REKKEFØLGE SOM BILDENE SENDES:
 {manifest}
 
-VIKTIGE REGLER:
-1. Prioriter rasjonelle og repeterbare systemer med korte lastveier.
-2. Ikke finn på eksakte kapasitetstall, dimensjoner eller grunnforhold.
-3. Skisser bare der tegningen faktisk gjør det mulig.
-4. Hvis grunnlaget er for svakt, skal sketches være tom liste.
-5. Når du skisserer på plan, bruk punkter for søyler og tydelige kjerner/skiver.
-6. Koordinater skal være normaliserte mellom 0 og 1.
-7. Maks 3 sketch-sider.
-8. Hvis sikkerhetsmodus er konservativ, velg heller mer robust og tydelig avstivning enn aggressiv optimalisering.
-9. Du skal tydelig vurdere både rasjonalitet og sikkerhet.
-10. Du må være ærlig om mangler og usikkerhet.
+EKSTRA FAGRUTINER SOM MÅ FØLGES:
+1. Skill tydelig mellom papirramme / titleblock / naboplan / situasjonsinnstikk og selve byggets plan. Papirkanter, tegningsrammer, tittelfelt, utsnittsbokser, terrasseomriss, nabobygg og cropkanter er IKKE bæresystem.
+2. Hvis én tegningsside inneholder flere planvarianter side om side, skal du identifisere riktig planområde og returnere plan_bbox for hver skisse. plan_bbox skal avgrense selve planutsnittet, ikke hele siden.
+3. Yttervegg er ikke automatisk bærende. Ikke marker hele byggets perimeter som bærevegger med mindre tegningen tydelig viser en kontinuerlig massiv yttervegg som faktisk er del av primær bærestruktur.
+4. For boligplaner i overetasjer skal du prioritere kjerner, korridorvegger og leilighetsskillevegger før du eventuelt tar med perimetervegger.
+5. For P-kjeller / transfer-nivå skal søyler bare brukes der det er sannsynlig lastnedføring fra overliggende vegger eller kjerner. Unngå generiske rutenett som ikke er begrunnet i planen.
+6. Når du er usikker, skal du returnere færre elementer, ikke flere. Det er bedre å utelate enn å finne på.
+7. Aldri tegn et fullstendig rektangel rundt hele planområdet som "bærevegger" bare fordi konturen er tydelig.
+8. Koordinater skal være normaliserte mellom 0 og 1 relativt til HELE siden.
+9. Maks 3 sketch-sider. Maks 1 plan_bbox per skisse.
+10. Vær eksplisitt om usikkerhet i observasjoner og mangler.
 
 JSON-SKJEMA:
 {{
@@ -1160,14 +1328,14 @@ JSON-SKJEMA:
     {{
       "page_index": 0,
       "page_label": "1. etg plan",
+      "plan_bbox": {{"x": 0.10, "y": 0.12, "w": 0.55, "h": 0.68}},
+      "confidence": 0.0,
       "notes": ["kort note om valg av system, lastvei eller risiko"],
       "elements": [
         {{"type": "column", "x": 0.1, "y": 0.2, "label": "C1"}},
         {{"type": "core", "x": 0.45, "y": 0.35, "w": 0.14, "h": 0.18, "label": "K1"}},
         {{"type": "wall", "x1": 0.2, "y1": 0.2, "x2": 0.2, "y2": 0.7, "label": "Skive"}},
         {{"type": "beam", "x1": 0.1, "y1": 0.2, "x2": 0.75, "y2": 0.2, "label": "Primærdrager"}},
-        {{"type": "grid", "orientation": "vertical", "x": 0.1, "label": "A"}},
-        {{"type": "grid", "orientation": "horizontal", "y": 0.2, "label": "1"}},
         {{"type": "span_arrow", "x1": 0.1, "y1": 0.78, "x2": 0.4, "y2": 0.78, "label": "ca 7,2 m"}}
       ]
     }}
@@ -1183,9 +1351,10 @@ JSON-SKJEMA:
 Returner kun JSON.
 """.strip()
 
-    raw_text = generate_text(model, [prompt] + ai_images, temperature=0.15)
+    raw_text = generate_text(model, [prompt] + ai_images, temperature=0.08)
     parsed = safe_json_loads(raw_text)
-    return normalize_analysis_result(parsed, candidates, drawings)
+    normalized = normalize_analysis_result(parsed, candidates, drawings)
+    return normalized
 
 
 def build_fallback_report(analysis_result: Dict[str, Any], project_data: Dict[str, Any]) -> str:
@@ -4421,7 +4590,7 @@ def finalize_rib_draft_to_pdf() -> bool:
     valgt_modell = pick_model(valid_models)
     if valgt_modell:
         try:
-            model = genai.GenerativeModel(valgt_modell)
+            model = build_runtime_ai_model(valgt_modell)
             report_text = run_report_writer(
                 model=model,
                 analysis_result=analysis_result,
@@ -4639,7 +4808,7 @@ def render_rib_draft_editor_ui() -> None:
                 analysis_copy = deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {}))
                 analysis_copy["sketches"] = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
                 try:
-                    model = genai.GenerativeModel(valgt_modell)
+                    model = build_runtime_ai_model(valgt_modell)
                     st.session_state.rib_draft_report_text = run_report_writer(
                         model=model,
                         analysis_result=analysis_copy,
@@ -5794,7 +5963,7 @@ def finalize_rib_draft_to_pdf() -> bool:
     valgt_modell = pick_model(valid_models)
     if valgt_modell:
         try:
-            model = genai.GenerativeModel(valgt_modell)
+            model = build_runtime_ai_model(valgt_modell)
             if draft_ai_reanalysis_needed():
                 analysis_result = run_ai_reanalysis_from_corrected_sketches(
                     model=model,
@@ -6091,7 +6260,7 @@ def render_rib_draft_editor_ui() -> None:
             if valgt_modell:
                 try:
                     with st.spinner("AI reanalyserer korrigerte skisser og oppdaterer lastvei, bæring og risiko..."):
-                        model = genai.GenerativeModel(valgt_modell)
+                        model = build_runtime_ai_model(valgt_modell)
                         analysis_copy = run_ai_reanalysis_from_corrected_sketches(
                             model=model,
                             analysis_result=deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {})),
@@ -7116,6 +7285,1006 @@ def replace_analysis_sketches_with_grounded(
     return analysis_result
 
 
+
+
+# ------------------------------------------------------------
+# 13C. V9 OPENAI VISION + KONSERVATIV GEOMETRIFORANKRING
+# ------------------------------------------------------------
+_RUN_STRUCTURED_DRAWING_ANALYSIS_V8_BASE = run_structured_drawing_analysis
+_BUILD_PLAN_GEOMETRY_GROUNDED_V8_BASE = build_plan_geometry_grounded
+_GENERATE_WALL_CORE_ELEMENTS_GROUNDED_V8_BASE = generate_wall_core_elements_grounded
+_REFINE_SKETCH_WITH_GEOMETRY_V8_BASE = refine_sketch_with_geometry_v6
+
+
+def _norm01_v9(value: Any, default: float = 0.0) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        return float(clamp(default, 0.0, 1.0))
+    if abs(v) > 100:
+        v = v / 1000.0
+    elif abs(v) > 1.5:
+        v = v / 100.0
+    return float(clamp(v, 0.0, 1.0))
+
+
+def _normalize_bbox_v9(bbox: Any) -> Optional[Dict[str, float]]:
+    if not isinstance(bbox, dict):
+        return None
+    x = _norm01_v9(bbox.get("x"), 0.0)
+    y = _norm01_v9(bbox.get("y"), 0.0)
+    w = _norm01_v9(bbox.get("w"), 0.0)
+    h = _norm01_v9(bbox.get("h"), 0.0)
+    if w <= 0.01 or h <= 0.01:
+        return None
+    w = float(clamp(w, 0.02, max(0.02, 1.0 - x)))
+    h = float(clamp(h, 0.02, max(0.02, 1.0 - y)))
+    return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
+
+
+def _normalize_line_candidate_v9(candidate: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    x1 = _norm01_v9(candidate.get("x1"), 0.0)
+    y1 = _norm01_v9(candidate.get("y1"), 0.0)
+    x2 = _norm01_v9(candidate.get("x2"), 0.0)
+    y2 = _norm01_v9(candidate.get("y2"), 0.0)
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length < 0.02:
+        return None
+    orientation = "vertical" if abs(x2 - x1) <= abs(y2 - y1) else "horizontal"
+    return {
+        "x1": round(x1, 6),
+        "y1": round(y1, 6),
+        "x2": round(x2, 6),
+        "y2": round(y2, 6),
+        "confidence": float(clamp(float(candidate.get("confidence", 0.65) or 0.65), 0.0, 1.0)),
+        "reason": clean_pdf_text(candidate.get("reason", "")),
+        "orientation": orientation,
+    }
+
+
+def _normalize_point_candidate_v9(candidate: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    x = _norm01_v9(candidate.get("x"), 0.0)
+    y = _norm01_v9(candidate.get("y"), 0.0)
+    return {
+        "x": round(x, 6),
+        "y": round(y, 6),
+        "confidence": float(clamp(float(candidate.get("confidence", 0.55) or 0.55), 0.0, 1.0)),
+        "reason": clean_pdf_text(candidate.get("reason", "")),
+    }
+
+
+def _normalize_page_cue_v9(cue: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    page_index = int(record.get("page_index", 0))
+    hint = clean_pdf_text(record.get("hint", "unknown")).lower() or "unknown"
+    if not isinstance(cue, dict):
+        cue = {}
+    role = clean_pdf_text(cue.get("drawing_role", hint)).lower()
+    if role not in {"plan", "section", "facade", "detail", "unknown"}:
+        role = "plan" if hint == "plan" else "unknown"
+    level_type = clean_pdf_text(cue.get("level_type", "unknown")).lower()
+    if level_type not in {"upper_floor", "ground_floor", "basement", "parking", "roof", "unknown"}:
+        level_type = "unknown"
+    plan_bbox = _normalize_bbox_v9(cue.get("plan_bbox"))
+    envelope_bbox = _normalize_bbox_v9(cue.get("exterior_envelope_bbox"))
+    try:
+        plan_confidence = float(cue.get("plan_confidence", 0.0))
+    except Exception:
+        plan_confidence = 0.0
+    plan_confidence = float(clamp(plan_confidence, 0.0, 1.0))
+    if role != "plan" and plan_confidence < 0.30:
+        plan_bbox = None
+
+    core_candidates = []
+    for item in cue.get("core_candidates", []) if isinstance(cue.get("core_candidates"), list) else []:
+        bbox = _normalize_bbox_v9(item)
+        if bbox is None:
+            continue
+        try:
+            conf = float(item.get("confidence", 0.65))
+        except Exception:
+            conf = 0.65
+        bbox["confidence"] = float(clamp(conf, 0.0, 1.0))
+        core_candidates.append(bbox)
+    core_candidates = core_candidates[:2]
+
+    wall_candidates = []
+    for item in cue.get("bearing_wall_candidates", []) if isinstance(cue.get("bearing_wall_candidates"), list) else []:
+        norm = _normalize_line_candidate_v9(item)
+        if norm is not None:
+            wall_candidates.append(norm)
+    wall_candidates = wall_candidates[:5]
+
+    column_candidates = []
+    for item in cue.get("column_candidates", []) if isinstance(cue.get("column_candidates"), list) else []:
+        norm = _normalize_point_candidate_v9(item)
+        if norm is not None:
+            column_candidates.append(norm)
+    column_candidates = column_candidates[:10]
+
+    notes = []
+    for note in cue.get("notes", []) if isinstance(cue.get("notes"), list) else []:
+        cleaned = clean_pdf_text(note)
+        if cleaned and cleaned not in notes:
+            notes.append(cleaned)
+
+    return {
+        "page_index": page_index,
+        "drawing_role": role,
+        "plan_confidence": plan_confidence,
+        "multi_plan": bool(cue.get("multi_plan", False)),
+        "level_type": level_type,
+        "plan_bbox": plan_bbox,
+        "exterior_envelope_bbox": envelope_bbox,
+        "core_candidates": core_candidates,
+        "bearing_wall_candidates": wall_candidates,
+        "column_candidates": column_candidates,
+        "notes": notes[:5],
+    }
+
+
+def _page_cue_prompt_v9(record: Dict[str, Any]) -> str:
+    return f"""
+Du analyserer EN arkitekt-/plantegningsside for tidligfase RIB-konsept.
+
+Returner KUN gyldig JSON. Ingen markdown. Ingen tekst utenfor JSON.
+
+SIDE:
+- page_index: {int(record.get('page_index', 0))}
+- filnavn: {clean_pdf_text(record.get('name', ''))}
+- etikett: {clean_pdf_text(record.get('label', ''))}
+- hint_fra_filnavn: {clean_pdf_text(record.get('hint', 'unknown'))}
+
+FAGRUTINER:
+1. Skille alltid mellom tegningsramme, titleblock, målsetting, situasjonsinnstikk, terrasse-/landskapskontur, naboplan og selve byggets plan.
+2. plan_bbox skal avgrense det relevante planutsnittet av bygget, ikke hele arket.
+3. Yttervegg er IKKE automatisk bærende. Ikke marker full perimeter som bærevegg.
+4. For bolig-/typiske etasjeplan skal leilighetsskiller, korridorvegger og kjerner prioriteres foran fasadelinjer.
+5. For kjeller/parkering/transfer skal søyler bare foreslås der lastnedføring fra overliggende vegger/kjerner virker sannsynlig.
+6. Når du er usikker: returner færre elementer, ikke flere.
+7. Koordinater skal være normaliserte 0-1 relativt til HELE siden.
+
+RETURNER DETTE JSON-OBJEKTET:
+{{
+  "page_index": {int(record.get('page_index', 0))},
+  "drawing_role": "plan | section | facade | detail | unknown",
+  "plan_confidence": 0.0,
+  "multi_plan": false,
+  "level_type": "upper_floor | ground_floor | basement | parking | roof | unknown",
+  "plan_bbox": {{"x": 0.10, "y": 0.10, "w": 0.60, "h": 0.70}},
+  "exterior_envelope_bbox": {{"x": 0.10, "y": 0.10, "w": 0.55, "h": 0.65}},
+  "core_candidates": [
+    {{"x": 0.45, "y": 0.35, "w": 0.10, "h": 0.16, "confidence": 0.0}}
+  ],
+  "bearing_wall_candidates": [
+    {{"x1": 0.20, "y1": 0.22, "x2": 0.20, "y2": 0.72, "confidence": 0.0, "reason": "kort grunn"}}
+  ],
+  "column_candidates": [
+    {{"x": 0.32, "y": 0.48, "confidence": 0.0, "reason": "kort grunn"}}
+  ],
+  "notes": ["kort observasjon"]
+}}
+
+Regler for innhold:
+- Maks 2 core_candidates.
+- Maks 5 bearing_wall_candidates.
+- Maks 10 column_candidates.
+- Hvis siden ikke er planlik: lav plan_confidence, tomme kandidatlister.
+- Ikke bruk bearing_wall_candidates til å tegne en stor rektangulær boks rundt hele bygget.
+""".strip()
+
+
+def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not (isinstance(model, dict) and model.get("provider") == "openai"):
+        return []
+    cues: List[Dict[str, Any]] = []
+    for record in drawings[: min(len(drawings), 6)]:
+        try:
+            prompt = _page_cue_prompt_v9(record)
+            raw = generate_text(model, [prompt, add_analysis_badge(record["image"], int(record.get("page_index", 0)), clean_pdf_text(record.get("label", "Tegning")))], temperature=0.02)
+            cue = _normalize_page_cue_v9(safe_json_loads(raw), record)
+        except Exception as exc:
+            st.session_state["rib_ai_backend_warning"] = short_text(
+                f"OpenAI sideanalyse delvis feilet: {type(exc).__name__}: {exc}",
+                220,
+            )
+            cue = _normalize_page_cue_v9({}, record)
+        cues.append(cue)
+    return cues
+
+
+def _expand_norm_bbox_v9(bbox: Optional[Dict[str, float]], margin: float = 0.03) -> Optional[Dict[str, float]]:
+    if not isinstance(bbox, dict):
+        return None
+    x = float(clamp(float(bbox.get("x", 0.0)) - margin, 0.0, 1.0))
+    y = float(clamp(float(bbox.get("y", 0.0)) - margin, 0.0, 1.0))
+    w = float(bbox.get("w", 0.0)) + (margin * 2.0)
+    h = float(bbox.get("h", 0.0)) + (margin * 2.0)
+    w = float(clamp(w, 0.02, max(0.02, 1.0 - x)))
+    h = float(clamp(h, 0.02, max(0.02, 1.0 - y)))
+    return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
+
+
+def _crop_image_from_norm_bbox_v9(image: Image.Image, bbox: Optional[Dict[str, float]]) -> Image.Image:
+    if not isinstance(bbox, dict):
+        return copy_rgb(image)
+    x, y, w, h = norm_bbox_to_px(bbox, image.size[0], image.size[1])
+    x0 = int(clamp(x, 0, max(image.size[0] - 2, 0)))
+    y0 = int(clamp(y, 0, max(image.size[1] - 2, 0)))
+    x1 = int(clamp(x + w, x0 + 2, image.size[0]))
+    y1 = int(clamp(y + h, y0 + 2, image.size[1]))
+    return copy_rgb(image).crop((x0, y0, x1, y1))
+
+
+def _prepare_focus_images_from_page_cues_v9(drawings: List[Dict[str, Any]], page_cues: List[Dict[str, Any]]) -> List[Image.Image]:
+    focus_images: List[Image.Image] = []
+    for cue in sorted(page_cues, key=lambda item: float(item.get("plan_confidence", 0.0)), reverse=True):
+        if clean_pdf_text(cue.get("drawing_role", "")).lower() != "plan":
+            continue
+        record = lookup_record_by_page(drawings, int(cue.get("page_index", -1)))
+        if record is None:
+            continue
+        focus_bbox = _expand_norm_bbox_v9(cue.get("plan_bbox"), margin=0.04)
+        cropped = _crop_image_from_norm_bbox_v9(record["image"], focus_bbox)
+        focus_images.append(add_analysis_badge(cropped, int(record.get("page_index", 0)), f"Fokus - {clean_pdf_text(record.get('label', 'Tegning'))}"))
+        if len(focus_images) >= 4:
+            break
+    if not focus_images:
+        for record in drawings[: min(len(drawings), 3)]:
+            focus_images.append(add_analysis_badge(record["image"], int(record.get("page_index", 0)), clean_pdf_text(record.get("label", "Tegning"))))
+    return focus_images
+
+
+def _build_seed_sketch_from_page_cue_v9(cue: Optional[Dict[str, Any]], record: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    if not isinstance(cue, dict):
+        return None
+    page_index = int(cue.get("page_index", record.get("page_index", 0) if isinstance(record, dict) else 0))
+    page_label = clean_pdf_text(record.get("label", "")) if isinstance(record, dict) else f"Tegning {page_index + 1}"
+    elements: List[Dict[str, Any]] = []
+
+    for idx, core in enumerate(cue.get("core_candidates", [])[:2], start=1):
+        bbox = _normalize_bbox_v9(core)
+        if bbox is None:
+            continue
+        elements.append({
+            "type": "core",
+            "x": bbox["x"],
+            "y": bbox["y"],
+            "w": bbox["w"],
+            "h": bbox["h"],
+            "label": f"Kjerne {idx}",
+        })
+
+    for idx, wall in enumerate(cue.get("bearing_wall_candidates", [])[:5], start=1):
+        line = _normalize_line_candidate_v9(wall)
+        if line is None:
+            continue
+        elements.append({
+            "type": "wall",
+            "x1": line["x1"],
+            "y1": line["y1"],
+            "x2": line["x2"],
+            "y2": line["y2"],
+            "label": f"Bærevegg {idx}",
+        })
+
+    level_type = clean_pdf_text(cue.get("level_type", "unknown")).lower()
+    if level_type in {"basement", "parking"}:
+        for idx, point in enumerate(cue.get("column_candidates", [])[:8], start=1):
+            norm = _normalize_point_candidate_v9(point)
+            if norm is None:
+                continue
+            elements.append({
+                "type": "column",
+                "x": norm["x"],
+                "y": norm["y"],
+                "label": f"C{idx}",
+            })
+
+    notes = []
+    for item in cue.get("notes", [])[:4]:
+        cleaned = clean_pdf_text(item)
+        if cleaned and cleaned not in notes:
+            notes.append(cleaned)
+    if cue.get("plan_confidence", 0.0) > 0.0:
+        notes.insert(0, f"OpenAI fokuserte planutvalg: confidens ca {round(float(cue.get('plan_confidence', 0.0)), 2)}.")
+
+    return {
+        "page_index": page_index,
+        "page_label": page_label,
+        "plan_bbox": cue.get("plan_bbox"),
+        "confidence": float(cue.get("plan_confidence", 0.0) or 0.0),
+        "notes": notes[:5],
+        "elements": elements,
+    }
+
+
+def _merge_sketch_with_page_cue_v9(sketch: Optional[Dict[str, Any]], cue: Optional[Dict[str, Any]], record: Dict[str, Any]) -> Dict[str, Any]:
+    base = deep_copy_jsonable(sketch if isinstance(sketch, dict) else {})
+    seed = _build_seed_sketch_from_page_cue_v9(cue, record)
+    if not seed:
+        return base
+    original_elements = [item for item in base.get("elements", []) if isinstance(item, dict)]
+    seed_elements = [item for item in seed.get("elements", []) if isinstance(item, dict)]
+
+    merged_elements: List[Dict[str, Any]] = []
+    seed_types = {clean_pdf_text(item.get("type", "")).lower() for item in seed_elements}
+    merged_elements.extend(seed_elements)
+    for element in original_elements:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type in {"beam", "span_arrow", "grid"}:
+            merged_elements.append(element)
+        elif e_type not in seed_types:
+            merged_elements.append(element)
+
+    base["elements"] = merged_elements
+    if seed.get("plan_bbox") and (not isinstance(base.get("plan_bbox"), dict)):
+        base["plan_bbox"] = seed.get("plan_bbox")
+    elif seed.get("plan_bbox") and isinstance(base.get("plan_bbox"), dict):
+        page_area = float(record["image"].size[0] * record["image"].size[1])
+        old_bbox = norm_bbox_to_px(base.get("plan_bbox"), record["image"].size[0], record["image"].size[1])
+        old_area = float(max(old_bbox[2] * old_bbox[3], 1))
+        if old_area > page_area * 0.72:
+            base["plan_bbox"] = seed.get("plan_bbox")
+    notes: List[str] = []
+    for source in [seed.get("notes", []), base.get("notes", [])]:
+        for item in source:
+            cleaned = clean_pdf_text(item)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+    base["notes"] = notes[:6]
+    if seed.get("confidence") is not None:
+        try:
+            base["confidence"] = max(float(base.get("confidence", 0.0) or 0.0), float(seed.get("confidence", 0.0) or 0.0))
+        except Exception:
+            base["confidence"] = float(seed.get("confidence", 0.0) or 0.0)
+    return base
+
+
+def _merge_page_cues_into_analysis_v9(
+    analysis_result: Dict[str, Any],
+    page_cues: List[Dict[str, Any]],
+    drawings: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    analysis_result = deep_copy_jsonable(analysis_result)
+    analysis_result["page_cues"] = deep_copy_jsonable(page_cues)
+
+    cue_map = {int(cue.get("page_index", -1)): cue for cue in page_cues if isinstance(cue, dict)}
+    for record in drawings:
+        cue = cue_map.get(int(record.get("page_index", -1)))
+        if not cue:
+            continue
+        record["ai_page_cue_v9"] = deep_copy_jsonable(cue)
+        role = clean_pdf_text(cue.get("drawing_role", "")).lower()
+        if role in {"plan", "section", "facade", "detail"}:
+            record["hint"] = role
+
+    drawing_entries = []
+    existing_drawings = analysis_result.get("drawings", []) if isinstance(analysis_result.get("drawings"), list) else []
+    existing_map = {int(entry.get("page_index", -1)): deep_copy_jsonable(entry) for entry in existing_drawings if isinstance(entry, dict)}
+    for record in drawings:
+        idx = int(record.get("page_index", -1))
+        entry = existing_map.get(idx, {
+            "page_index": idx,
+            "page_label": clean_pdf_text(record.get("label", f"Tegning {idx + 1}")),
+            "drawing_role": clean_pdf_text(record.get("hint", "unknown")),
+            "usable_for_overlay": clean_pdf_text(record.get("hint", "")).lower() == "plan",
+            "observations": [],
+        })
+        cue = cue_map.get(idx)
+        if cue:
+            role = clean_pdf_text(cue.get("drawing_role", entry.get("drawing_role", "unknown"))).lower()
+            entry["drawing_role"] = role if role in {"plan", "section", "facade", "detail", "unknown"} else entry.get("drawing_role", "unknown")
+            entry["usable_for_overlay"] = bool(entry["drawing_role"] == "plan" and float(cue.get("plan_confidence", 0.0)) >= 0.30)
+            observations = []
+            for item in entry.get("observations", []):
+                cleaned = clean_pdf_text(item)
+                if cleaned and cleaned not in observations:
+                    observations.append(cleaned)
+            for item in cue.get("notes", [])[:3]:
+                cleaned = clean_pdf_text(item)
+                if cleaned and cleaned not in observations:
+                    observations.append(cleaned)
+            entry["observations"] = observations[:5]
+        drawing_entries.append(entry)
+    analysis_result["drawings"] = drawing_entries
+
+    sketches = analysis_result.get("sketches", []) if isinstance(analysis_result.get("sketches"), list) else []
+    normalized_sketches: List[Dict[str, Any]] = []
+    seen_keys = set()
+    for sketch in sketches:
+        if not isinstance(sketch, dict):
+            continue
+        page_index = int(sketch.get("page_index", -1))
+        record = lookup_record_by_page(drawings, page_index)
+        cue = cue_map.get(page_index)
+        merged = _merge_sketch_with_page_cue_v9(sketch, cue, record or {"image": Image.new("RGB", (1000, 1000)), "label": f"Tegning {page_index + 1}"})
+        key = (page_index, clean_pdf_text(merged.get("page_label", "")))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        normalized_sketches.append(merged)
+
+    if not normalized_sketches:
+        for cue in sorted(page_cues, key=lambda item: float(item.get("plan_confidence", 0.0)), reverse=True):
+            if clean_pdf_text(cue.get("drawing_role", "")).lower() != "plan":
+                continue
+            record = lookup_record_by_page(drawings, int(cue.get("page_index", -1)))
+            seed = _build_seed_sketch_from_page_cue_v9(cue, record)
+            if seed is None:
+                continue
+            normalized_sketches.append(seed)
+            if len(normalized_sketches) >= 3:
+                break
+
+    if normalized_sketches:
+        analysis_result["sketches"] = normalized_sketches[:3]
+
+    observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+    note = "OpenAI side-for-side planfokusering brukes for å avgrense riktig planutsnitt og redusere feil fra papirramme/perimeter før geometri-snapping."
+    if note not in observations:
+        observations = [note] + observations
+    analysis_result["observasjoner"] = observations[:10]
+    return analysis_result
+
+
+def _largest_component_bbox_v9(mask) -> Optional[Tuple[int, int, int, int]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None or mask is None:
+        return None
+    binary = ((mask > 0).astype(np.uint8) * 255)
+    if binary.size == 0 or binary.max() <= 0:
+        return None
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    if num_labels <= 1:
+        return None
+    best = None
+    for idx in range(1, num_labels):
+        x, y, w, h, area = stats[idx]
+        if best is None or int(area) > best[4]:
+            best = (int(x), int(y), int(w), int(h), int(area))
+    if best is None:
+        return None
+    return (best[0], best[1], best[2], best[3])
+
+
+def _segment_overlap_ratio_v9(segment: Dict[str, Any], footprint_bbox: Tuple[int, int, int, int], axis: str) -> float:
+    fx, fy, fw, fh = footprint_bbox
+    if axis == "vertical":
+        overlap = max(0.0, min(float(segment["y"] + segment["h"]), float(fy + fh)) - max(float(segment["y"]), float(fy)))
+        return overlap / max(float(segment["h"]), 1.0)
+    overlap = max(0.0, min(float(segment["x"] + segment["w"]), float(fx + fw)) - max(float(segment["x"]), float(fx)))
+    return overlap / max(float(segment["w"]), 1.0)
+
+
+def _choose_spaced_segments_v9(items: List[Dict[str, Any]], value_key: str, limit: int, min_spacing: float) -> List[Dict[str, Any]]:
+    chosen: List[Dict[str, Any]] = []
+    for item in sorted(items, key=lambda entry: float(entry.get("score", 0.0)), reverse=True):
+        value = float(item.get(value_key, 0.0))
+        if all(abs(value - float(prev.get(value_key, 0.0))) >= min_spacing for prev in chosen):
+            chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def _select_support_segments_v9(geometry: Dict[str, Any], axis: str) -> List[Dict[str, Any]]:
+    segments = geometry.get("vertical_segments", []) if axis == "vertical" else geometry.get("horizontal_segments", [])
+    rw, rh = geometry.get("crop_size", (0, 0))
+    if not segments or rw <= 0 or rh <= 0:
+        return segments
+    footprint_bbox = geometry.get("footprint_bbox_local", (0, 0, rw, rh))
+    core_bbox = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+    core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
+    core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
+
+    scored: List[Dict[str, Any]] = []
+    for seg in segments:
+        center = float(seg.get("center", 0.0))
+        length = float(seg.get("length", 0.0))
+        thickness = float(seg.get("thickness", 1.0))
+        overlap_ratio = _segment_overlap_ratio_v9(seg, footprint_bbox, axis)
+        if overlap_ratio < 0.35:
+            continue
+
+        if axis == "vertical":
+            edge_gap = min(abs(center - footprint_bbox[0]), abs((footprint_bbox[0] + footprint_bbox[2]) - center))
+            if length < max(42.0, rh * 0.18):
+                continue
+            if edge_gap < max(12.0, rw * 0.08) and length > rh * 0.52:
+                continue
+            score = (
+                length * 1.0
+                + overlap_ratio * 90.0
+                + min(edge_gap, rw * 0.25) * 0.65
+                - abs(center - core_cx) * 0.22
+                + min(thickness, 12.0) * 2.5
+            )
+            if 0.22 <= (center / max(rw, 1.0)) <= 0.78:
+                score += 14.0
+            scored.append({**seg, "score": score, "axis_pos": center})
+        else:
+            edge_gap = min(abs(center - footprint_bbox[1]), abs((footprint_bbox[1] + footprint_bbox[3]) - center))
+            if length < max(36.0, rw * 0.14):
+                continue
+            if edge_gap < max(12.0, rh * 0.10) and length > rw * 0.58:
+                continue
+            score = (
+                length * 0.85
+                + overlap_ratio * 80.0
+                + min(edge_gap, rh * 0.24) * 0.50
+                - abs(center - core_cy) * 0.14
+                + min(thickness, 12.0) * 2.2
+            )
+            if 0.20 <= (center / max(rh, 1.0)) <= 0.80:
+                score += 8.0
+            scored.append({**seg, "score": score, "axis_pos": center})
+
+    if not scored:
+        return segments
+    min_spacing = max(26.0, (rw if axis == "vertical" else rh) * 0.15)
+    limited = _choose_spaced_segments_v9(scored, "axis_pos", 3 if axis == "vertical" else 2, min_spacing)
+    return limited or segments
+
+
+def build_plan_geometry_grounded(
+    image: Image.Image,
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Dict[str, Any]:
+    geometry = _BUILD_PLAN_GEOMETRY_GROUNDED_V8_BASE(image, region_bbox_px)
+    if not geometry:
+        return geometry
+    rw, rh = geometry.get("crop_size", (0, 0))
+    footprint_bbox = _largest_component_bbox_v9(geometry.get("footprint_mask"))
+    if footprint_bbox is None:
+        footprint_bbox = (0, 0, rw, rh)
+    geometry["footprint_bbox_local"] = footprint_bbox
+    geometry["vertical_segments_all_v9"] = deep_copy_jsonable(geometry.get("vertical_segments", []))
+    geometry["horizontal_segments_all_v9"] = deep_copy_jsonable(geometry.get("horizontal_segments", []))
+    geometry["support_vertical_v9"] = _select_support_segments_v9(geometry, "vertical")
+    geometry["support_horizontal_v9"] = _select_support_segments_v9(geometry, "horizontal")
+    if geometry.get("support_vertical_v9"):
+        geometry["vertical_segments"] = deep_copy_jsonable(geometry.get("support_vertical_v9", []))
+    if geometry.get("support_horizontal_v9"):
+        geometry["horizontal_segments"] = deep_copy_jsonable(geometry.get("support_horizontal_v9", []))
+    return geometry
+
+
+def generate_wall_core_elements_grounded(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    image_w, image_h = image_size
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry["crop_size"]
+    core_bbox = geometry["core_bbox"]
+    core_x, core_y, core_w, core_h = core_bbox
+    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+
+    elements: List[Dict[str, Any]] = [{
+        "type": "core",
+        "x": core_x_norm,
+        "y": core_y_norm,
+        "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
+        "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
+        "label": "Betongkjerne",
+    }]
+
+    chosen_vertical = geometry.get("support_vertical_v9", [])[:2]
+    chosen_horizontal = geometry.get("support_horizontal_v9", [])[:1]
+
+    wall_count = 1
+    for segment in chosen_vertical + chosen_horizontal:
+        if clean_pdf_text(segment.get("kind", "")).lower() == "vertical":
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["center"], segment["y"] + segment["h"], image_w, image_h)
+        else:
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, segment["x"], segment["center"], image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, segment["x"] + segment["w"], segment["center"], image_w, image_h)
+        elements.append({
+            "type": "wall",
+            "x1": x1_norm,
+            "y1": y1_norm,
+            "x2": x2_norm,
+            "y2": y2_norm,
+            "label": f"Bærevegg {wall_count}",
+        })
+        wall_count += 1
+
+    if len(chosen_vertical) >= 2:
+        left = min(chosen_vertical, key=lambda seg: float(seg.get("center", 0.0)))
+        right = max(chosen_vertical, key=lambda seg: float(seg.get("center", 0.0)))
+        arrow_y = min(rh - 16, int(core_y + core_h + max(16, rh * 0.07)))
+        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, left["center"], arrow_y, image_w, image_h)
+        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, right["center"], arrow_y, image_w, image_h)
+        elements.append({
+            "type": "span_arrow",
+            "x1": x1_norm,
+            "y1": y1_norm,
+            "x2": x2_norm,
+            "y2": y2_norm,
+            "label": "Typisk spenn",
+        })
+
+    notes = [
+        "Vegg-/kjerneforslaget er filtrert hardere mot indre, sannsynlige bæresoner i stedet for full perimeter.",
+        "Perimeterlinjer og tegningsramme nedprioriteres før veggskisse genereres.",
+        "Overetasjer holdes konservative: færre, men mer sannsynlige bærevegger.",
+    ]
+    return elements, notes
+
+
+def _get_page_cue_for_record_v9(analysis_result: Dict[str, Any], record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cues = analysis_result.get("page_cues", []) if isinstance(analysis_result.get("page_cues"), list) else []
+    page_index = int(record.get("page_index", -1))
+    for cue in cues:
+        if isinstance(cue, dict) and int(cue.get("page_index", -999)) == page_index:
+            return cue
+    cached = record.get("ai_page_cue_v9")
+    return cached if isinstance(cached, dict) else None
+
+
+def _cue_wall_locals_v9(cue: Optional[Dict[str, Any]], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int]) -> List[Dict[str, float]]:
+    out: List[Dict[str, float]] = []
+    if not isinstance(cue, dict):
+        return out
+    for item in cue.get("bearing_wall_candidates", [])[:6]:
+        line = _normalize_line_candidate_v9(item)
+        if line is None:
+            continue
+        x1, y1 = page_norm_to_local_crop(line["x1"], line["y1"], record["image"].size, region_bbox_px)
+        x2, y2 = page_norm_to_local_crop(line["x2"], line["y2"], record["image"].size, region_bbox_px)
+        out.append({
+            "x_mid": float((x1 + x2) / 2.0),
+            "y_mid": float((y1 + y2) / 2.0),
+            "vertical": 1.0 if abs(x2 - x1) <= abs(y2 - y1) else 0.0,
+        })
+    return out
+
+
+def _cue_core_centers_local_v9(cue: Optional[Dict[str, Any]], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int]) -> List[Tuple[float, float]]:
+    centers: List[Tuple[float, float]] = []
+    if not isinstance(cue, dict):
+        return centers
+    for item in cue.get("core_candidates", [])[:3]:
+        bbox = _normalize_bbox_v9(item)
+        if bbox is None:
+            continue
+        cx_norm = float(bbox["x"]) + float(bbox["w"]) / 2.0
+        cy_norm = float(bbox["y"]) + float(bbox["h"]) / 2.0
+        cx, cy = page_norm_to_local_crop(cx_norm, cy_norm, record["image"].size, region_bbox_px)
+        centers.append((float(cx), float(cy)))
+    return centers
+
+
+def _wall_score_v9(
+    metrics: Dict[str, float],
+    geometry: Dict[str, Any],
+    cue_walls: List[Dict[str, float]],
+    cue_cores: List[Tuple[float, float]],
+) -> float:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    fx, fy, fw, fh = geometry.get("footprint_bbox_local", (0, 0, rw, rh))
+    core_bbox = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+    core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
+    core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
+
+    if metrics["vertical"]:
+        edge_gap = min(abs(metrics["x_mid"] - fx), abs((fx + fw) - metrics["x_mid"]))
+        if metrics["length"] > fh * 0.72 and edge_gap < max(12.0, fw * 0.09):
+            return -1e9
+        overlap = max(0.0, min(metrics["y2"], fy + fh) - max(metrics["y1"], fy)) / max(metrics["length"], 1.0)
+        score = metrics["length"] + overlap * 32.0 + min(edge_gap, fw * 0.24) * 0.55 - abs(metrics["x_mid"] - core_cx) * 0.16
+    else:
+        edge_gap = min(abs(metrics["y_mid"] - fy), abs((fy + fh) - metrics["y_mid"]))
+        if metrics["length"] > fw * 0.64 and edge_gap < max(12.0, fh * 0.12):
+            return -1e9
+        overlap = max(0.0, min(metrics["x2"], fx + fw) - max(metrics["x1"], fx)) / max(metrics["length"], 1.0)
+        score = metrics["length"] * 0.80 + overlap * 26.0 + min(edge_gap, fh * 0.22) * 0.40 - abs(metrics["y_mid"] - core_cy) * 0.10
+        if metrics["length"] > fw * 0.55:
+            score -= 18.0
+
+    if cue_walls:
+        compatible = [item for item in cue_walls if bool(round(item["vertical"])) == bool(metrics["vertical"])]
+        if compatible:
+            best = min(math.hypot(metrics["x_mid"] - item["x_mid"], metrics["y_mid"] - item["y_mid"]) for item in compatible)
+            score += max(0.0, 70.0 - best * 1.5)
+
+    if cue_cores:
+        best_core = min(math.hypot(metrics["x_mid"] - cx, metrics["y_mid"] - cy) for cx, cy in cue_cores)
+        score += max(0.0, 20.0 - best_core * 0.25)
+
+    return score
+
+
+def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[str, Any], analysis_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    sketch = deep_copy_jsonable(sketch)
+    geometry = get_geometry_for_sketch(record, sketch)
+    if not geometry:
+        return sketch
+
+    cue = _get_page_cue_for_record_v9(analysis_result or {}, record) if isinstance(analysis_result, dict) else (record.get("ai_page_cue_v9") if isinstance(record.get("ai_page_cue_v9"), dict) else None)
+    region_bbox_px = geometry["bbox_px"]
+    cue_walls = _cue_wall_locals_v9(cue, record, region_bbox_px)
+    cue_cores = _cue_core_centers_local_v9(cue, record, region_bbox_px)
+
+    kept_cores = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "core"][:2]
+    spans = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "span_arrow"][:1]
+    beams = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "beam"][:1]
+
+    vertical_candidates: List[Dict[str, Any]] = []
+    horizontal_candidates: List[Dict[str, Any]] = []
+    for element in sketch.get("elements", []):
+        if clean_pdf_text(element.get("type", "")).lower() != "wall":
+            continue
+        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        score = _wall_score_v9(metrics, geometry, cue_walls, cue_cores)
+        if score <= -1e8:
+            continue
+        item = {"element": element, "score": score, "x_mid": metrics["x_mid"], "y_mid": metrics["y_mid"]}
+        if metrics["vertical"]:
+            vertical_candidates.append(item)
+        else:
+            horizontal_candidates.append(item)
+
+    rw, rh = geometry.get("crop_size", (0, 0))
+    chosen_vertical = _choose_spaced_segments_v9(vertical_candidates, "x_mid", 2, max(28.0, rw * 0.16))
+    chosen_horizontal = _choose_spaced_segments_v9(horizontal_candidates, "y_mid", 1, max(24.0, rh * 0.14))
+    kept_walls = [item["element"] for item in chosen_vertical + chosen_horizontal]
+
+    notes = [clean_pdf_text(item) for item in sketch.get("notes", []) if clean_pdf_text(item)]
+    note = "Vegger i overetasjer er etterfiltrert mot indre bæresoner og cue-støtte for å redusere feil på yttervegger/perimeter."
+    if note not in notes:
+        notes = [note] + notes
+
+    sketch["elements"] = kept_cores + kept_walls[:3] + spans + beams
+    sketch["notes"] = notes[:6]
+    return sketch
+
+
+def _filter_transfer_basement_elements_v9_impl(sketch: Dict[str, Any], record: Dict[str, Any], analysis_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    sketch = deep_copy_jsonable(sketch)
+    cue = _get_page_cue_for_record_v9(analysis_result or {}, record) if isinstance(analysis_result, dict) else (record.get("ai_page_cue_v9") if isinstance(record.get("ai_page_cue_v9"), dict) else None)
+    if not isinstance(cue, dict):
+        return sketch
+    geometry = get_geometry_for_sketch(record, sketch)
+    if not geometry:
+        return sketch
+
+    region_bbox_px = geometry["bbox_px"]
+    cue_columns_local: List[Tuple[float, float]] = []
+    for item in cue.get("column_candidates", [])[:10]:
+        point = _normalize_point_candidate_v9(item)
+        if point is None:
+            continue
+        px, py = page_norm_to_local_crop(point["x"], point["y"], record["image"].size, region_bbox_px)
+        cue_columns_local.append((float(px), float(py)))
+
+    kept_cores = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "core"][:2]
+    walls = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "wall"]
+    beams = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "beam"][:1]
+    spans = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "span_arrow"][:1]
+
+    ranked_columns: List[Dict[str, Any]] = []
+    for element in sketch.get("elements", []):
+        if clean_pdf_text(element.get("type", "")).lower() != "column":
+            continue
+        cx, cy = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), record["image"].size, region_bbox_px)
+        if cue_columns_local:
+            best = min(math.hypot(cx - px, cy - py) for px, py in cue_columns_local)
+            score = max(0.0, 80.0 - best * 1.4)
+        else:
+            score = 0.0
+        ranked_columns.append({"element": element, "score": score, "x": float(cx), "y": float(cy)})
+    ranked_columns = _choose_spaced_segments_v9(ranked_columns, "x", min(8, max(4, len(cue_columns_local) or 6)), max(22.0, geometry.get("crop_size", (0, 0))[0] * 0.08))
+    kept_columns = [item["element"] for item in sorted(ranked_columns, key=lambda item: (item["y"], item["x"]))]
+
+    sketch["elements"] = kept_cores + walls[:3] + kept_columns[:8] + spans + beams
+    notes = [clean_pdf_text(item) for item in sketch.get("notes", []) if clean_pdf_text(item)]
+    note = "Kjeller/transfer er filtrert mot sannsynlig lastnedføring og OpenAI-kolonnepunkter før rapport."
+    if note not in notes:
+        notes = [note] + notes
+    sketch["notes"] = notes[:6]
+    return sketch
+
+
+def _refine_sketch_with_geometry_v9_impl(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    transfer_hints: Optional[Dict[str, Any]] = None,
+    forced_region: Optional[Dict[str, Any]] = None,
+    forced_region_index: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    cue = _get_page_cue_for_record_v9(analysis_result, record)
+    working_sketch = _merge_sketch_with_page_cue_v9(sketch, cue, record)
+    refined = _REFINE_SKETCH_WITH_GEOMETRY_V8_BASE(
+        record,
+        working_sketch,
+        analysis_result,
+        material_preference,
+        transfer_hints,
+        forced_region,
+        forced_region_index,
+    )
+    if refined is None:
+        return None
+    if isinstance(cue, dict) and isinstance(cue.get("plan_bbox"), dict):
+        refined["plan_bbox"] = cue.get("plan_bbox")
+    mode = clean_pdf_text(refined.get("grounded_mode", "")).lower()
+    if mode == "wall_core" and not is_basement_like_record_v6(record, refined):
+        refined = _filter_upper_floor_elements_v9_impl(refined, record, analysis_result)
+    elif mode == "transfer_basement":
+        refined = _filter_transfer_basement_elements_v9_impl(refined, record, analysis_result)
+    notes = [clean_pdf_text(item) for item in refined.get("notes", []) if clean_pdf_text(item)]
+    if cue and cue.get("notes"):
+        for item in cue.get("notes", [])[:2]:
+            cleaned = clean_pdf_text(item)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+    refined["notes"] = notes[:6]
+    return refined
+
+
+def run_structured_drawing_analysis(
+    model,
+    drawings: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
+    project_data: Dict[str, Any],
+    material_preference: str,
+    foundation_preference: str,
+    optimization_mode: str,
+    safety_mode: str,
+) -> Dict[str, Any]:
+    page_cues = _detect_page_cues_with_openai_v9(model, drawings)
+    if not page_cues:
+        return _RUN_STRUCTURED_DRAWING_ANALYSIS_V8_BASE(
+            model=model,
+            drawings=drawings,
+            candidates=candidates,
+            project_data=project_data,
+            material_preference=material_preference,
+            foundation_preference=foundation_preference,
+            optimization_mode=optimization_mode,
+            safety_mode=safety_mode,
+        )
+
+    focus_images = _prepare_focus_images_from_page_cues_v9(drawings, page_cues)
+    matrix_txt = candidate_matrix_text(candidates)
+    manifest = drawing_manifest_text(drawings)
+    page_cues_json = json.dumps(page_cues, ensure_ascii=False)
+
+    prompt = f"""
+Du er Builtly RIB AI. Du skal lage en strukturert konseptanalyse for bæresystem.
+
+Du får:
+1. fokusbilder av planområder,
+2. en side-for-side OpenAI-vision persepsjon som allerede har forsøkt å isolere riktig plan_bbox,
+3. maskinell alternativmatrise.
+
+VIKTIG:
+- Bruk page_cues som primær persepsjon for hva som faktisk er planområde, kjerne, sannsynlige bærevegger og eventuelle søylepunkter.
+- Ikke tegn papirramme, titleblock, målsetting, sitasjonsinnstikk eller full perimeter som bærevegger.
+- For bolig-/typiske overetasjer: prioriter kjerne + indre bærevegger / leilighetsskiller / korridorvegger.
+- For kjeller/parkering/transfer: bruk søyler bare der page_cues eller planen tilsier lastnedføring fra overliggende vegger/kjerner.
+- Når du er usikker: færre elementer.
+- Koordinater i sketches skal være normaliserte 0-1 relativt til HELE siden.
+
+PROSJEKT:
+- Navn: {clean_pdf_text(project_data.get('p_name'))}
+- Type: {clean_pdf_text(project_data.get('b_type'))}
+- BTA: {nb_value(project_data.get('bta'))} m2
+- Etasjer: {nb_value(project_data.get('etasjer'))}
+- Sted: {clean_pdf_text(project_data.get('adresse'))}, {clean_pdf_text(project_data.get('kommune'))}
+- Foretrukket materiale: {clean_pdf_text(material_preference)}
+- Fundamentering: {clean_pdf_text(foundation_preference)}
+- Optimaliser for: {clean_pdf_text(optimization_mode)}
+- Sikkerhetsmodus: {clean_pdf_text(safety_mode)}
+
+MASKINELL ALTERNATIVMATRISEN:
+{matrix_txt}
+
+TEGNINGSMANIFEST:
+{manifest}
+
+PAGE_CUES JSON:
+{page_cues_json}
+
+JSON-SKJEMA:
+{{
+  "grunnlag_status": "FULLSTENDIG | DELVIS | FOR_SVAKT",
+  "grunnlag_begrunnelse": "kort tekst",
+  "observasjoner": ["..."],
+  "mangler": ["..."],
+  "drawings": [
+    {{
+      "page_index": 0,
+      "page_label": "kort navn",
+      "drawing_role": "plan | section | facade | detail | unknown",
+      "usable_for_overlay": true,
+      "observations": ["..."]
+    }}
+  ],
+  "recommended_system": {{
+    "system_name": "navn på anbefalt system",
+    "material": "materiale",
+    "deck_type": "dekke/hovedspenn-prinsipp",
+    "vertical_system": "søyle/vegg/bjelke-prinsipp",
+    "stability_system": "kjerne/skive/avstivningsprinsipp",
+    "foundation_strategy": "overordnet strategi",
+    "typical_span_m": "tekstlig spennvurdering",
+    "rationality_reason": "hvorfor dette er mest rasjonelt",
+    "safety_reason": "hvorfor dette er robust og sikkert",
+    "buildability_notes": ["..."],
+    "load_path": ["..."]
+  }},
+  "alternatives": [
+    {{
+      "system_name": "alternativ",
+      "why": "hvorfor alternativet kan fungere",
+      "when_better": "når alternativet er bedre",
+      "rationality_score": 0,
+      "safety_score": 0
+    }}
+  ],
+  "sketches": [
+    {{
+      "page_index": 0,
+      "page_label": "kort navn",
+      "plan_bbox": {{"x": 0.10, "y": 0.12, "w": 0.55, "h": 0.68}},
+      "confidence": 0.0,
+      "notes": ["kort note"],
+      "elements": [
+        {{"type": "column", "x": 0.1, "y": 0.2, "label": "C1"}},
+        {{"type": "core", "x": 0.45, "y": 0.35, "w": 0.14, "h": 0.18, "label": "K1"}},
+        {{"type": "wall", "x1": 0.2, "y1": 0.2, "x2": 0.2, "y2": 0.7, "label": "Skive"}},
+        {{"type": "beam", "x1": 0.1, "y1": 0.2, "x2": 0.75, "y2": 0.2, "label": "Primærdrager"}},
+        {{"type": "span_arrow", "x1": 0.1, "y1": 0.78, "x2": 0.4, "y2": 0.78, "label": "ca 7,2 m"}}
+      ]
+    }}
+  ],
+  "risk_register": [
+    {{"topic": "kort risiko", "severity": "Lav | Middels | Høy", "mitigation": "tiltak"}}
+  ],
+  "load_assumptions": ["..."],
+  "foundation_assumptions": ["..."],
+  "next_steps": ["..."]
+}}
+
+Viktige grenser:
+- Maks 3 sketches.
+- Skissene skal følge page_cues og være konservative.
+- Ikke bruk store perimeter- eller rektangelskissser som bærevegger.
+- Returner kun JSON.
+""".strip()
+
+    raw_text = generate_text(model, [prompt] + focus_images, temperature=0.04)
+    parsed = safe_json_loads(raw_text)
+    if not isinstance(parsed, dict):
+        parsed = _RUN_STRUCTURED_DRAWING_ANALYSIS_V8_BASE(
+            model=model,
+            drawings=drawings,
+            candidates=candidates,
+            project_data=project_data,
+            material_preference=material_preference,
+            foundation_preference=foundation_preference,
+            optimization_mode=optimization_mode,
+            safety_mode=safety_mode,
+        )
+    normalized = normalize_analysis_result(parsed, candidates, drawings)
+    normalized = _merge_page_cues_into_analysis_v9(normalized, page_cues, drawings)
+    return normalized
+
+
+refine_sketch_with_geometry_v6 = _refine_sketch_with_geometry_v9_impl
+filter_upper_floor_elements_v7 = _filter_upper_floor_elements_v9_impl
+
+
+
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
     "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
@@ -7137,15 +8306,18 @@ if analyze_clicked or direct_pdf_clicked:
     else:
         clear_generated_rib_session()
         st.info(f"Klar! Sender totalt {len(all_drawings)} tegninger/bilder til RIB-agenten for vurdering.")
+        backend_warning = st.session_state.pop("rib_ai_backend_warning", None)
+        if backend_warning:
+            st.caption(f"AI-backend: {backend_warning}")
 
         with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
             valid_models = list_available_models()
             valgt_modell = pick_model(valid_models)
             if not valgt_modell:
-                st.error("Kunne ikke finne en tilgjengelig Gemini-modell i miljøet.")
+                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
                 st.stop()
 
-            model = genai.GenerativeModel(valgt_modell)
+            model = build_runtime_ai_model(valgt_modell)
             candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
             candidate_df = build_candidate_dataframe(candidates)
 
@@ -7603,6 +8775,9 @@ def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any
 
     region_bbox_px = geometry['bbox_px']
     rw, rh = geometry.get('crop_size', (0, 0))
+    if rw <= 0 or rh <= 0:
+        return sketch
+
     core_centers_local: List[Tuple[float, float]] = []
     for element in sketch.get('elements', []):
         if clean_pdf_text(element.get('type', '')).lower() != 'core':
@@ -7625,51 +8800,66 @@ def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any
         if clean_pdf_text(element.get('type', '')).lower() != 'wall':
             continue
         metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
+        edge_frac_y = min(metrics['y_mid'] / max(rh, 1), 1.0 - (metrics['y_mid'] / max(rh, 1)))
         if metrics['vertical']:
-            if metrics['length'] < max(42, rh * 0.18):
+            if metrics['length'] < max(46, rh * 0.16):
                 continue
-            edge_frac = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
-            if edge_frac < 0.09:
+            if edge_frac_x < 0.12:
+                continue
+            if metrics['length'] > rh * 0.78 and edge_frac_x < 0.18:
                 continue
             core_dist = min(abs(metrics['x_mid'] - cx) for cx, _ in core_centers_local)
-            score = metrics['length'] - core_dist * 0.32 - abs(metrics['x_mid'] - (rw / 2.0)) * 0.05
+            center_penalty = abs(metrics['x_mid'] - (rw / 2.0)) * 0.10
+            score = metrics['length'] - core_dist * 0.45 - center_penalty
+            if 0.24 <= (metrics['x_mid'] / max(rw, 1)) <= 0.76:
+                score += 16.0
             vertical_candidates.append({'element': element, 'score': score, 'x_mid': metrics['x_mid']})
         else:
-            if metrics['length'] < max(32, rw * 0.14):
+            if metrics['length'] < max(34, rw * 0.12):
                 continue
-            if metrics['y_mid'] < rh * 0.18 or metrics['y_mid'] > rh * 0.82:
+            if edge_frac_y < 0.18:
                 continue
-            if metrics['length'] > rw * 0.68:
+            if metrics['length'] > rw * 0.58:
                 continue
-            score = metrics['length'] * 0.60 - abs(metrics['y_mid'] - (rh * 0.50)) * 0.18
+            score = metrics['length'] * 0.55 - abs(metrics['y_mid'] - (rh * 0.50)) * 0.22
             horizontal_candidates.append({'element': element, 'score': score, 'y_mid': metrics['y_mid']})
 
-    chosen_vertical = _select_spaced_items_v7(vertical_candidates, 'x_mid', limit=4, min_spacing=max(26.0, rw * 0.12))
-    chosen_horizontal = _select_spaced_items_v7(horizontal_candidates, 'y_mid', limit=1, min_spacing=max(24.0, rh * 0.10))
+    chosen_vertical = _select_spaced_items_v7(vertical_candidates, 'x_mid', limit=2, min_spacing=max(28.0, rw * 0.16))
+    chosen_horizontal = _select_spaced_items_v7(horizontal_candidates, 'y_mid', limit=1, min_spacing=max(26.0, rh * 0.12))
     kept_walls = [item['element'] for item in chosen_vertical + chosen_horizontal]
+
+    cleaned_walls: List[Dict[str, Any]] = []
+    for element in kept_walls:
+        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
+        edge_frac_y = min(metrics['y_mid'] / max(rh, 1), 1.0 - (metrics['y_mid'] / max(rh, 1)))
+        if metrics['vertical'] and metrics['length'] > rh * 0.70 and edge_frac_x < 0.16:
+            continue
+        if (not metrics['vertical']) and metrics['length'] > rw * 0.54 and edge_frac_y < 0.20:
+            continue
+        cleaned_walls.append(element)
+    kept_walls = cleaned_walls[:3]
 
     if not kept_walls:
         fallback_elements, _ = generate_wall_core_elements_grounded(geometry, record['image'].size)
+        fallback_vertical: List[Dict[str, Any]] = []
         for element in fallback_elements:
             if clean_pdf_text(element.get('type', '')).lower() != 'wall':
                 continue
             metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
-            if metrics['vertical'] and min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1))) >= 0.09:
-                kept_walls.append(element)
-        if len(kept_walls) > 4:
-            keep_scored = []
-            for element in kept_walls:
-                metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+            edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
+            if metrics['vertical'] and edge_frac_x >= 0.14 and metrics['length'] >= max(46, rh * 0.16):
                 core_dist = min(abs(metrics['x_mid'] - cx) for cx, _ in core_centers_local)
-                keep_scored.append({'element': element, 'score': metrics['length'] - core_dist * 0.32, 'x_mid': metrics['x_mid']})
-            kept_walls = [item['element'] for item in _select_spaced_items_v7(keep_scored, 'x_mid', limit=4, min_spacing=max(26.0, rw * 0.12))]
+                fallback_vertical.append({'element': element, 'score': metrics['length'] - core_dist * 0.40, 'x_mid': metrics['x_mid']})
+        kept_walls = [item['element'] for item in _select_spaced_items_v7(fallback_vertical, 'x_mid', limit=2, min_spacing=max(28.0, rw * 0.16))]
 
     cleaned_notes = [clean_pdf_text(item) for item in sketch.get('notes', []) if clean_pdf_text(item)]
-    note = 'Overetasjer er etterfiltrert mot indre vegglinjer for å unngå at ytterkontur og hele blad skjøres inn som bærevegger.'
+    note = 'Overetasjer er etterfiltrert hardere mot indre vegglinjer og kjerner for å unngå at ytterkontur eller hele planomriss blir tolket som bærevegger.'
     if note not in cleaned_notes:
         cleaned_notes = [note] + cleaned_notes
 
-    sketch['elements'] = cores + kept_walls + spans[:1] + beams[:1]
+    sketch['elements'] = cores[:2] + kept_walls + spans[:1] + beams[:1]
     sketch['notes'] = cleaned_notes[:5]
     return sketch
 
@@ -7705,351 +8895,93 @@ def render_inline_click_canvas_editor(
     sketch: Dict[str, Any],
     editor_key: str,
 ) -> Optional[Dict[str, float]]:
-    show_guides = bool(st.session_state.get('rib_editor_show_guides', True))
-    editor_img, region_bbox = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
-    rw, rh = editor_img.size
+    st.caption('Klikk-editor kjører i stabil canvas-modus. Ett klikk skal gi ett punkt og oppdatere skissen direkte.')
+    click = _RENDER_INLINE_CLICK_CANVAS_EDITOR_V6(drawing_record, sketch, editor_key)
     marker_key = f'{editor_key}_canvas_last_click'
+    if isinstance(click, dict) and 'x' in click and 'y' in click:
+        st.session_state[marker_key] = {'x': float(click['x']), 'y': float(click['y'])}
+        st.caption(f"Siste registrerte klikk: x={round(float(click['x']), 1)}, y={round(float(click['y']), 1)}")
+        return click
     last_click = st.session_state.get(marker_key)
-    if not isinstance(last_click, dict):
-        last_click = None
-
-    component = get_click_canvas_component_v2_v7()
-    if component is not None:
-        try:
-            result = component(
-                data={
-                    'image_data': editor_image_data_uri(editor_img),
-                    'natural_width': int(rw),
-                    'natural_height': int(rh),
-                    'status_text': 'Klikk direkte i planutsnittet for å legge inn korrigeringer.',
-                    'version_marker': f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}",
-                    'last_click': last_click,
-                },
-                key=f'{editor_key}_canvas_v7',
-                height=int(min(980, max(420, rh / max(rw, 1) * 920))),
-                on_clicked_change=lambda: None,
-            )
-            st.caption('Innebygd v2-canvas-editor er aktiv. Klikk direkte i planutsnittet.')
-            payload = None
-            if result is not None:
-                payload = getattr(result, 'clicked', None)
-                if payload is None and isinstance(result, dict):
-                    payload = result.get('clicked')
-            if isinstance(payload, dict) and 'x' in payload and 'y' in payload:
-                click = {
-                    'x': float(payload.get('x', 0.0)),
-                    'y': float(payload.get('y', 0.0)),
-                    'event_id': clean_pdf_text(payload.get('event_id', '')),
-                }
-                st.session_state[marker_key] = {'x': click['x'], 'y': click['y']}
-                return click
-        except Exception as exc:
-            st.session_state['rib_click_canvas_error'] = short_text(f"{type(exc).__name__}: {exc}", 240)
-            st.caption(f"Teknisk info (v2-fallback): {st.session_state['rib_click_canvas_error']}")
-
-    return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V6(drawing_record, sketch, editor_key)
+    if isinstance(last_click, dict) and 'x' in last_click and 'y' in last_click:
+        st.caption(f"Sist lagrede klikk: x={round(float(last_click['x']), 1)}, y={round(float(last_click['y']), 1)}")
+    return None
 
 
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
-    go = optional_plotly_go()
-    if go is None:
-        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+    return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
-    show_guides = bool(st.session_state.get('rib_editor_show_guides', True))
-    editor_img, region_bbox = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
-    rw, rh = editor_img.size
-    step = max(14, int(min(rw, rh) * 0.06))
-    grid_x = []
-    grid_y = []
-    for yy in range(0, rh + 1, step):
-        for xx in range(0, rw + 1, step):
-            grid_x.append(xx)
-            grid_y.append(yy)
 
-    fig = go.Figure()
-    fig.add_layout_image(
-        dict(
-            source=editor_image_data_uri(editor_img),
-            xref='x',
-            yref='y',
-            x=0,
-            y=0,
-            sizex=rw,
-            sizey=rh,
-            yanchor='top',
-            sizing='stretch',
-            layer='below',
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=grid_x,
-            y=grid_y,
-            mode='markers',
-            marker=dict(size=max(8, int(step * 0.72)), color='rgba(0,0,0,0.003)'),
-            hoverinfo='skip',
-            showlegend=False,
-            name='Klikkflate',
-        )
-    )
-    fig.update_xaxes(visible=False, range=[0, rw])
-    fig.update_yaxes(visible=False, range=[0, rh], autorange='reversed', scaleanchor='x', scaleratio=1)
-    fig.update_layout(
-        height=int(min(950, max(460, rh / max(rw, 1) * 950))),
-        margin=dict(l=0, r=0, t=0, b=0),
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        dragmode='select',
-        clickmode='event+select',
-        showlegend=False,
-    )
 
+
+# ------------------------------------------------------------
+# 13D. V9 STABIL MUSEPEKER-EDITOR + SLUTTOPPSTRAMMING
+# ------------------------------------------------------------
+_RENDER_INLINE_CLICK_CANVAS_EDITOR_V8_ORIG = render_inline_click_canvas_editor
+
+
+def _optional_streamlit_image_coordinates_v9():
     try:
-        event_state = st.plotly_chart(
-            fig,
-            key=f'{editor_key}_plotly_v7',
-            use_container_width=True,
-            on_select='rerun',
-            selection_mode=('points',),
-        )
-        raw = extract_plotly_click(event_state)
-        if raw is None:
-            return None
-        return {
-            'x': float(clamp(raw['x'], 0, max(rw - 1, 1))),
-            'y': float(clamp(raw['y'], 0, max(rh - 1, 1))),
-            'event_id': clean_pdf_text(f"plotly-{round(raw['x'], 2)}-{round(raw['y'], 2)}-{datetime.now().timestamp()}")
-        }
-    except TypeError:
-        st.caption('Miljøet støtter ikke Plotly-klikk direkte. Bytter til innebygd canvas-editor.')
-        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+        from streamlit_image_coordinates import streamlit_image_coordinates as sic
+        return sic
     except Exception:
-        st.caption('Plotly-editoren kunne ikke startes. Bytter til innebygd canvas-editor.')
-        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
-
-
-
-
-# ------------------------------------------------------------
-# V8 OVERRIDES: canvas-first editor + better wall semantics + optional OpenAI review
-# ------------------------------------------------------------
-import hashlib
-import urllib.error
-import urllib.request
-
-_RENDER_INLINE_CLICK_CANVAS_EDITOR_V7_BASE = render_inline_click_canvas_editor
-_RENDER_PLOTLY_SKETCH_EDITOR_V7_BASE = render_plotly_sketch_editor
-_FILTER_UPPER_FLOOR_ELEMENTS_V7_BASE = filter_upper_floor_elements_v7
-_REFINE_SKETCH_WITH_GEOMETRY_V7_BASE = refine_sketch_with_geometry_v6
-_V8_COMPONENT_CACHE: Dict[str, Any] = {}
-_OPENAI_VISION_CACHE_V8: Dict[str, Any] = {}
-
-
-def _editor_mode_v8() -> str:
-    configured = clean_pdf_text(os.environ.get("RIB_EDITOR_MODE", "")).lower().strip()
-    if configured in {"plotly", "canvas"}:
-        return configured
-    return "canvas"
-
-
-def get_click_canvas_component_v8() -> Any:
-    components_v2 = optional_components_v2_v7()
-    if components_v2 is None:
         return None
-    cache_key = "builtly_rib_click_canvas_v8"
-    if cache_key in _V8_COMPONENT_CACHE:
-        return _V8_COMPONENT_CACHE[cache_key]
 
-    html = """
-<div class="ribv8-wrap">
-  <canvas class="ribv8-canvas"></canvas>
-  <div class="ribv8-status">Klikk i planutsnittet for å redigere bæresystemet.</div>
-</div>
-"""
 
-    css = """
-.ribv8-wrap {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ribv8-canvas {
-  width: 100%;
-  height: auto;
-  display: block;
-  border-radius: 12px;
-  cursor: crosshair;
-  background: #07111a;
-  box-shadow: inset 0 0 0 1px rgba(120,145,170,0.24);
-  touch-action: none;
-}
-.ribv8-status {
-  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
-  line-height: 1.4;
-  color: rgba(207, 218, 227, 0.76);
-  padding: 0 2px 4px 2px;
-}
-"""
+def _render_with_streamlit_image_coordinates_v9(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+    editor_key: str,
+) -> Optional[Dict[str, float]]:
+    sic = _optional_streamlit_image_coordinates_v9()
+    if sic is None:
+        return None
 
-    js = """
-export default function(component) {
-    const { data, setTriggerValue, parentElement } = component;
-    const canvas = parentElement.querySelector('.ribv8-canvas');
-    const status = parentElement.querySelector('.ribv8-status');
-    if (!canvas || !status) {
-        return;
-    }
-    const ctx = canvas.getContext('2d');
-    const state = parentElement.__builtlyRibV8 || (parentElement.__builtlyRibV8 = {});
-    state.data = data || {};
+    show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
+    editor_img, _ = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
+    marker_key = f"{editor_key}_sic_last_click"
+    value = None
+    last_exc = None
 
-    function clamp(value, minValue, maxValue) {
-        return Math.max(minValue, Math.min(maxValue, value));
-    }
+    for kwargs in [
+        {"key": f"{editor_key}_sic", "use_column_width": True},
+        {"key": f"{editor_key}_sic", "width": int(editor_img.size[0])},
+        {"key": f"{editor_key}_sic"},
+    ]:
+        try:
+            value = sic(editor_img, **kwargs)
+            last_exc = None
+            break
+        except TypeError as exc:
+            last_exc = exc
+            continue
+        except Exception as exc:
+            last_exc = exc
+            break
 
-    function setStatus(message) {
-        status.textContent = message || state.data.status_text || 'Klikk i planutsnittet for å redigere bæresystemet.';
-    }
+    st.caption("Klikk-editor kjører i bildekoordinat-modus. Ett museklikk skal registrere et punkt direkte i planutsnittet.")
 
-    function drawPlaceholder(message) {
-        const w = Number(state.data.natural_width || 960);
-        const h = Number(state.data.natural_height || 540);
-        canvas.width = Math.max(32, w);
-        canvas.height = Math.max(32, h);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#07111a';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = '#dbe7f0';
-        ctx.font = '16px sans-serif';
-        ctx.fillText(message || 'Laster editor...', 24, 34);
-        setStatus(message || 'Laster editor...');
-    }
-
-    function drawCrosshair(point) {
-        if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') {
-            return;
+    if isinstance(value, dict) and "x" in value and "y" in value:
+        event_id = clean_pdf_text(value.get("event_id") or value.get("time") or value.get("timestamp") or "")
+        if not event_id:
+            event_id = f"{editor_key}|{datetime.utcnow().timestamp()}"
+        click = {
+            "x": float(value.get("x", 0.0)),
+            "y": float(value.get("y", 0.0)),
+            "event_id": event_id,
         }
-        const x = clamp(point.x, 0, canvas.width);
-        const y = clamp(point.y, 0, canvas.height);
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255,255,255,0.96)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(x, y, 10, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(x - 14, y);
-        ctx.lineTo(x + 14, y);
-        ctx.moveTo(x, y - 14);
-        ctx.lineTo(x, y + 14);
-        ctx.stroke();
-        ctx.restore();
-    }
+        st.session_state[marker_key] = click
+        st.caption(f"Siste registrerte klikk: x={round(click['x'], 1)}, y={round(click['y'], 1)}")
+        st.session_state.pop("rib_click_canvas_error", None)
+        return click
 
-    function renderImage() {
-        setStatus(state.data.status_text || 'Klikk i planutsnittet for å redigere bæresystemet.');
-        if (!state.image) {
-            drawPlaceholder('Laster editor...');
-            return;
-        }
-        const w = Number(state.data.natural_width || state.image.naturalWidth || state.image.width || 960);
-        const h = Number(state.data.natural_height || state.image.naturalHeight || state.image.height || 540);
-        canvas.width = Math.max(32, w);
-        canvas.height = Math.max(32, h);
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(state.image, 0, 0, canvas.width, canvas.height);
-        drawCrosshair(state.data.last_click || null);
-    }
+    if last_exc is not None:
+        st.session_state["rib_click_canvas_error"] = short_text(f"{type(last_exc).__name__}: {last_exc}", 220)
 
-    function loadImage() {
-        const imageData = state.data.image_data || '';
-        if (!imageData) {
-            state.image = null;
-            drawPlaceholder('Fant ikke editorbildet.');
-            return;
-        }
-        const img = new Image();
-        img.onload = function() {
-            state.image = img;
-            renderImage();
-        };
-        img.onerror = function() {
-            state.image = null;
-            drawPlaceholder('Klarte ikke å laste editorbildet.');
-        };
-        img.src = imageData;
-    }
-
-    function readPoint(event) {
-        const rect = canvas.getBoundingClientRect();
-        const clientX = (event.clientX !== undefined) ? event.clientX : ((event.touches && event.touches.length) ? event.touches[0].clientX : 0);
-        const clientY = (event.clientY !== undefined) ? event.clientY : ((event.touches && event.touches.length) ? event.touches[0].clientY : 0);
-        const scaleX = canvas.width / Math.max(rect.width, 1);
-        const scaleY = canvas.height / Math.max(rect.height, 1);
-        return {
-            x: clamp((clientX - rect.left) * scaleX, 0, canvas.width),
-            y: clamp((clientY - rect.top) * scaleY, 0, canvas.height)
-        };
-    }
-
-    function commit(event) {
-        if (event && event.preventDefault) {
-            event.preventDefault();
-        }
-        if (event && event.stopPropagation) {
-            event.stopPropagation();
-        }
-        const point = readPoint(event || {});
-        const payload = {
-            x: Number(point.x.toFixed(2)),
-            y: Number(point.y.toFixed(2)),
-            event_id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8)
-        };
-        state.data = Object.assign({}, state.data, { last_click: payload });
-        renderImage();
-        setStatus('Registrert klikk: x=' + payload.x.toFixed(1) + ', y=' + payload.y.toFixed(1));
-        setTriggerValue('clicked', payload);
-    }
-
-    canvas.onpointerdown = commit;
-    canvas.ontouchstart = commit;
-
-    const signature = JSON.stringify({
-        marker: state.data.version_marker || '',
-        head: state.data.image_data ? state.data.image_data.slice(0, 120) : '',
-        len: state.data.image_data ? state.data.image_data.length : 0,
-        click: state.data.last_click || null,
-        width: state.data.natural_width || 0,
-        height: state.data.natural_height || 0
-    });
-
-    if (state.signature !== signature) {
-        state.signature = signature;
-        loadImage();
-    } else {
-        renderImage();
-    }
-
-    return () => {
-        canvas.onpointerdown = null;
-        canvas.ontouchstart = null;
-    };
-}
-"""
-
-    try:
-        _V8_COMPONENT_CACHE[cache_key] = components_v2.component(
-            cache_key,
-            html=html,
-            css=css,
-            js=js,
-        )
-    except Exception as exc:
-        st.session_state["rib_click_canvas_error"] = short_text(f"{type(exc).__name__}: {exc}", 240)
-        _V8_COMPONENT_CACHE[cache_key] = None
-    return _V8_COMPONENT_CACHE.get(cache_key)
+    last_click = st.session_state.get(marker_key)
+    if isinstance(last_click, dict) and "x" in last_click and "y" in last_click:
+        st.caption(f"Sist lagrede klikk: x={round(float(last_click['x']), 1)}, y={round(float(last_click['y']), 1)}")
+    return None
 
 
 def render_inline_click_canvas_editor(
@@ -8057,579 +8989,20 @@ def render_inline_click_canvas_editor(
     sketch: Dict[str, Any],
     editor_key: str,
 ) -> Optional[Dict[str, float]]:
-    show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
-    editor_img, _ = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
-    rw, rh = editor_img.size
-    marker_key = f"{editor_key}_canvas_last_click"
-    last_click = st.session_state.get(marker_key)
-    if not isinstance(last_click, dict):
-        last_click = None
-
-    component = get_click_canvas_component_v8()
-    if component is None:
-        return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V7_BASE(drawing_record, sketch, editor_key)
-
-    payload = None
-    try:
-        result = component(
-            data={
-                "image_data": editor_image_data_uri(editor_img),
-                "natural_width": int(rw),
-                "natural_height": int(rh),
-                "status_text": "Canvas-editor v8 er aktiv. Klikk direkte i planutsnittet for å redigere.",
-                "version_marker": f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}|v8",
-                "last_click": last_click,
-            },
-            key=f"{editor_key}_canvas_v8",
-            height=int(min(980, max(420, rh / max(rw, 1) * 920))),
-            on_clicked_change=lambda: None,
-        )
-        if result is not None:
-            payload = getattr(result, "clicked", None)
-            if payload is None and isinstance(result, dict):
-                payload = result.get("clicked")
-    except Exception as exc:
-        st.session_state["rib_click_canvas_error"] = short_text(f"{type(exc).__name__}: {exc}", 240)
-        return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V7_BASE(drawing_record, sketch, editor_key)
-
-    st.caption("Canvas-editor v8 er aktiv. Klikk skal registreres direkte i utsnittet uten Plotly-mellomlag.")
-    if isinstance(payload, dict) and "x" in payload and "y" in payload:
-        click = {
-            "x": float(payload.get("x", 0.0)),
-            "y": float(payload.get("y", 0.0)),
-            "event_id": clean_pdf_text(payload.get("event_id", "")),
-        }
-        st.session_state[marker_key] = {"x": click["x"], "y": click["y"]}
+    click = _render_with_streamlit_image_coordinates_v9(drawing_record, sketch, editor_key)
+    if click is not None:
         return click
-    return None
+    return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V8_ORIG(drawing_record, sketch, editor_key)
 
 
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
-    if _editor_mode_v8() != "plotly":
-        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
-    return _RENDER_PLOTLY_SKETCH_EDITOR_V7_BASE(drawing_record, sketch, editor_key)
+    return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
 
-def _np_cv_v8() -> Tuple[Any, Any]:
-    cv2, np = optional_cv_stack()
-    return cv2, np
+refine_sketch_with_geometry_v6 = _refine_sketch_with_geometry_v9_impl
+filter_upper_floor_elements_v7 = _filter_upper_floor_elements_v9_impl
 
 
-def _clip_box_mean_v8(mask: Any, x0: int, y0: int, x1: int, y1: int) -> float:
-    h, w = mask.shape[:2]
-    xa = int(clamp(min(x0, x1), 0, max(w - 1, 0)))
-    xb = int(clamp(max(x0, x1), 0, w))
-    ya = int(clamp(min(y0, y1), 0, max(h - 1, 0)))
-    yb = int(clamp(max(y0, y1), 0, h))
-    if xb <= xa or yb <= ya:
-        return 0.0
-    area = mask[ya:yb, xa:xb]
-    if area.size == 0:
-        return 0.0
-    return float(area.mean())
-
-
-def _segment_points_v8(segment: Dict[str, Any], step: int) -> List[Tuple[int, int]]:
-    points: List[Tuple[int, int]] = []
-    if clean_pdf_text(segment.get("kind", "")).lower() == "vertical":
-        x = int(round(float(segment.get("center", segment.get("x", 0.0) + segment.get("w", 0.0) / 2.0))))
-        y0 = int(round(float(segment.get("y", 0.0))))
-        y1 = int(round(float(segment.get("y", 0.0) + segment.get("h", 0.0))))
-        for y in range(y0 + 4, max(y0 + 5, y1 - 3), max(4, step)):
-            points.append((x, y))
-    else:
-        y = int(round(float(segment.get("center", segment.get("y", 0.0) + segment.get("h", 0.0) / 2.0))))
-        x0 = int(round(float(segment.get("x", 0.0))))
-        x1 = int(round(float(segment.get("x", 0.0) + segment.get("w", 0.0))))
-        for x in range(x0 + 4, max(x0 + 5, x1 - 3), max(4, step)):
-            points.append((x, y))
-    return points
-
-
-def _segment_side_stats_v8(segment: Dict[str, Any], footprint_mask: Any, distance_map: Any) -> Dict[str, float]:
-    h, w = footprint_mask.shape[:2]
-    span = float(segment.get("h", segment.get("w", 0.0)))
-    step = max(5, int(span / 18.0))
-    offset = max(10, int(min(w, h) * 0.022))
-    band = max(2, int(min(w, h) * 0.006))
-    points = _segment_points_v8(segment, step)
-    if not points:
-        return {"both_ratio": 0.0, "one_sided_ratio": 1.0, "median_dist": 0.0}
-
-    both = 0
-    one_sided = 0
-    dists: List[float] = []
-    vertical = clean_pdf_text(segment.get("kind", "")).lower() == "vertical"
-    for px, py in points:
-        if not (0 <= px < w and 0 <= py < h):
-            continue
-        if vertical:
-            left = _clip_box_mean_v8(footprint_mask, px - offset - band, py - band, px - offset + band + 1, py + band + 1)
-            right = _clip_box_mean_v8(footprint_mask, px + offset - band, py - band, px + offset + band + 1, py + band + 1)
-        else:
-            left = _clip_box_mean_v8(footprint_mask, px - band, py - offset - band, px + band + 1, py - offset + band + 1)
-            right = _clip_box_mean_v8(footprint_mask, px - band, py + offset - band, px + band + 1, py + offset + band + 1)
-        left_inside = left >= 0.20
-        right_inside = right >= 0.20
-        if left_inside and right_inside:
-            both += 1
-        if bool(left_inside) != bool(right_inside):
-            one_sided += 1
-        dists.append(float(distance_map[int(py), int(px)]) if distance_map is not None else 0.0)
-    denom = max(len(points), 1)
-    if not dists:
-        dists = [0.0]
-    return {
-        "both_ratio": float(both / denom),
-        "one_sided_ratio": float(one_sided / denom),
-        "median_dist": float(sorted(dists)[len(dists) // 2]),
-    }
-
-
-def _core_centers_local_v8(sketch: Dict[str, Any], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int], geometry: Dict[str, Any]) -> List[Tuple[float, float]]:
-    centers: List[Tuple[float, float]] = []
-    for element in sketch.get("elements", []):
-        if clean_pdf_text(element.get("type", "")).lower() != "core":
-            continue
-        cx_norm = float(element.get("x", 0.0)) + float(element.get("w", 0.0)) / 2.0
-        cy_norm = float(element.get("y", 0.0)) + float(element.get("h", 0.0)) / 2.0
-        cx, cy = page_norm_to_local_crop(cx_norm, cy_norm, record["image"].size, region_bbox_px)
-        centers.append((float(cx), float(cy)))
-    if not centers:
-        core_x, core_y, core_w, core_h = geometry.get("core_bbox", (0, 0, 0, 0))
-        centers.append((float(core_x + core_w / 2.0), float(core_y + core_h / 2.0)))
-    centers.sort(key=lambda item: item[0])
-    return centers
-
-
-def _dedupe_candidates_v8(candidates: List[Dict[str, Any]], spacing_px: float) -> List[Dict[str, Any]]:
-    chosen: List[Dict[str, Any]] = []
-    for candidate in sorted(candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True):
-        c_kind = clean_pdf_text(candidate.get("kind", "")).lower()
-        c_center = float(candidate.get("center", 0.0))
-        if all(
-            clean_pdf_text(prev.get("kind", "")).lower() != c_kind or abs(float(prev.get("center", 0.0)) - c_center) >= spacing_px
-            for prev in chosen
-        ):
-            chosen.append(candidate)
-    return chosen
-
-
-def _build_upper_floor_candidates_v8(sketch: Dict[str, Any], record: Dict[str, Any], geometry: Dict[str, Any]) -> Dict[str, Any]:
-    cv2, np = _np_cv_v8()
-    if cv2 is None or np is None:
-        return {"vertical": [], "horizontal": [], "cores": []}
-    footprint = (geometry.get("footprint_mask") > 0).astype(np.uint8)
-    if footprint.size == 0 or footprint.max() <= 0:
-        return {"vertical": [], "horizontal": [], "cores": []}
-    distance_map = cv2.distanceTransform(footprint, cv2.DIST_L2, 3)
-    rw, rh = geometry.get("crop_size", (0, 0))
-    region_bbox_px = geometry.get("bbox_px", (0, 0, rw, rh))
-    core_bbox = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
-    core_centers = _core_centers_local_v8(sketch, record, region_bbox_px, geometry)
-    edge_margin_x = max(22, int(rw * 0.08))
-    edge_margin_y = max(20, int(rh * 0.10))
-
-    vertical_candidates: List[Dict[str, Any]] = []
-    for seg in geometry.get("vertical_segments", []):
-        center = float(seg.get("center", 0.0))
-        length = float(seg.get("length", seg.get("h", 0.0)))
-        if length < max(42, rh * 0.20):
-            continue
-        if center < edge_margin_x or center > (rw - edge_margin_x):
-            continue
-        if point_inside_local_box(center, float(seg.get("y", 0.0)) + float(seg.get("h", 0.0)) / 2.0, core_bbox, margin=12):
-            continue
-        stats = _segment_side_stats_v8(seg, footprint, distance_map)
-        if stats["both_ratio"] < 0.46:
-            continue
-        if stats["one_sided_ratio"] > 0.40:
-            continue
-        if stats["median_dist"] < 2.5:
-            continue
-        nearest_core_dx = min(abs(center - cx) for cx, _ in core_centers)
-        score = (
-            length * 0.34
-            + stats["both_ratio"] * 120.0
-            + stats["median_dist"] * 4.5
-            - stats["one_sided_ratio"] * 155.0
-            - nearest_core_dx * 0.14
-        )
-        vertical_candidates.append({
-            "kind": "vertical",
-            "center": center,
-            "score": float(score),
-            "stats": stats,
-            **seg,
-        })
-
-    horizontal_candidates: List[Dict[str, Any]] = []
-    for seg in geometry.get("horizontal_segments", []):
-        center = float(seg.get("center", 0.0))
-        length = float(seg.get("length", seg.get("w", 0.0)))
-        if length < max(32, rw * 0.10) or length > (rw * 0.60):
-            continue
-        if center < edge_margin_y or center > (rh - edge_margin_y):
-            continue
-        if point_inside_local_box(float(seg.get("x", 0.0)) + float(seg.get("w", 0.0)) / 2.0, center, core_bbox, margin=12):
-            continue
-        stats = _segment_side_stats_v8(seg, footprint, distance_map)
-        if stats["both_ratio"] < 0.62:
-            continue
-        if stats["one_sided_ratio"] > 0.25:
-            continue
-        if stats["median_dist"] < 3.0:
-            continue
-        nearest_core_dy = min(abs(center - cy) for _, cy in core_centers)
-        score = (
-            length * 0.22
-            + stats["both_ratio"] * 105.0
-            + stats["median_dist"] * 4.2
-            - stats["one_sided_ratio"] * 160.0
-            - nearest_core_dy * 0.26
-        )
-        horizontal_candidates.append({
-            "kind": "horizontal",
-            "center": center,
-            "score": float(score),
-            "stats": stats,
-            **seg,
-        })
-
-    vertical_candidates = _dedupe_candidates_v8(vertical_candidates, spacing_px=max(22.0, rw * 0.08))
-    horizontal_candidates = _dedupe_candidates_v8(horizontal_candidates, spacing_px=max(18.0, rh * 0.08))
-    return {
-        "vertical": vertical_candidates,
-        "horizontal": horizontal_candidates,
-        "cores": core_centers,
-    }
-
-
-def _pick_upper_floor_walls_v8(candidate_info: Dict[str, Any], crop_size: Tuple[int, int]) -> List[Dict[str, Any]]:
-    rw, rh = crop_size
-    vertical_candidates = list(candidate_info.get("vertical", []))
-    horizontal_candidates = list(candidate_info.get("horizontal", []))
-    core_centers = list(candidate_info.get("cores", []))
-    selected: List[Dict[str, Any]] = []
-    band = max(54.0, rw * 0.22)
-    gap = max(18.0, rw * 0.035)
-
-    for cx, cy in core_centers:
-        left_pool = [c for c in vertical_candidates if (cx - band) <= float(c.get("center", 0.0)) <= (cx - gap)]
-        right_pool = [c for c in vertical_candidates if (cx + gap) <= float(c.get("center", 0.0)) <= (cx + band)]
-        if left_pool:
-            selected.append(max(left_pool, key=lambda item: float(item.get("score", 0.0)) - abs(float(item.get("center", 0.0)) - cx) * 0.10))
-        if right_pool:
-            selected.append(max(right_pool, key=lambda item: float(item.get("score", 0.0)) - abs(float(item.get("center", 0.0)) - cx) * 0.10))
-
-    selected = _dedupe_candidates_v8(selected, spacing_px=max(24.0, rw * 0.09))
-
-    if not selected:
-        selected = sorted(vertical_candidates, key=lambda item: float(item.get("score", 0.0)), reverse=True)[: max(2, min(4, len(vertical_candidates)))]
-
-    strong_horizontal = [
-        item for item in horizontal_candidates
-        if float(item.get("stats", {}).get("both_ratio", 0.0)) >= 0.78 and float(item.get("score", 0.0)) >= 80.0
-    ]
-    if strong_horizontal and core_centers:
-        selected.append(max(
-            strong_horizontal,
-            key=lambda item: float(item.get("score", 0.0)) - min(abs(float(item.get("center", 0.0)) - cy) for _, cy in core_centers) * 0.25,
-        ))
-
-    selected = _dedupe_candidates_v8(selected, spacing_px=max(22.0, min(rw, rh) * 0.08))
-    selected.sort(key=lambda item: (0 if clean_pdf_text(item.get("kind", "")).lower() == "vertical" else 1, float(item.get("center", 0.0))))
-    return selected[:6]
-
-
-def _candidate_segment_id_pool_v8(candidate_info: Dict[str, Any], crop_size: Tuple[int, int]) -> List[Dict[str, Any]]:
-    rw, rh = crop_size
-    pool = list(candidate_info.get("vertical", []))[:6] + list(candidate_info.get("horizontal", []))[:2]
-    pool = _dedupe_candidates_v8(pool, spacing_px=max(18.0, min(rw, rh) * 0.06))
-    for idx, item in enumerate(pool, start=1):
-        item["cand_id"] = idx
-    return pool[:8]
-
-
-def _segment_to_wall_element_v8(segment: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int], image_size: Tuple[int, int], label: str) -> Dict[str, Any]:
-    image_w, image_h = image_size
-    if clean_pdf_text(segment.get("kind", "")).lower() == "vertical":
-        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, float(segment.get("center", 0.0)), float(segment.get("y", 0.0)), image_w, image_h)
-        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, float(segment.get("center", 0.0)), float(segment.get("y", 0.0)) + float(segment.get("h", 0.0)), image_w, image_h)
-    else:
-        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, float(segment.get("x", 0.0)), float(segment.get("center", 0.0)), image_w, image_h)
-        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, float(segment.get("x", 0.0)) + float(segment.get("w", 0.0)), float(segment.get("center", 0.0)), image_w, image_h)
-    return {
-        "type": "wall",
-        "x1": x1_norm,
-        "y1": y1_norm,
-        "x2": x2_norm,
-        "y2": y2_norm,
-        "label": label,
-    }
-
-
-def _data_url_for_image_v8(img: Image.Image, max_side: int = 1150) -> str:
-    thumb = copy_rgb(img)
-    thumb.thumbnail((max_side, max_side))
-    return f"data:image/png;base64,{base64.b64encode(png_bytes_from_image(thumb)).decode('utf-8')}"
-
-
-def _candidate_review_overlay_v8(record: Dict[str, Any], geometry: Dict[str, Any], sketch: Dict[str, Any], candidate_pool: List[Dict[str, Any]]) -> Tuple[Image.Image, Image.Image]:
-    rx, ry, rw, rh = geometry["bbox_px"]
-    crop = copy_rgb(record["image"]).crop((rx, ry, rx + rw, ry + rh))
-    overlay = crop.copy()
-    draw = ImageDraw.Draw(overlay)
-    font = ImageFont.load_default()
-
-    for element in sketch.get("elements", []):
-        if clean_pdf_text(element.get("type", "")).lower() != "core":
-            continue
-        x_norm = float(element.get("x", 0.0))
-        y_norm = float(element.get("y", 0.0))
-        w_norm = float(element.get("w", 0.0))
-        h_norm = float(element.get("h", 0.0))
-        x0, y0 = page_norm_to_local_crop(x_norm, y_norm, record["image"].size, geometry["bbox_px"])
-        x1, y1 = page_norm_to_local_crop(x_norm + w_norm, y_norm + h_norm, record["image"].size, geometry["bbox_px"])
-        draw.rounded_rectangle((x0, y0, x1, y1), radius=10, outline=(235, 180, 40), width=5, fill=(235, 180, 40, 40))
-
-    for candidate in candidate_pool:
-        cand_id = int(candidate.get("cand_id", 0))
-        kind = clean_pdf_text(candidate.get("kind", "")).lower()
-        if kind == "vertical":
-            x = float(candidate.get("center", 0.0))
-            y0 = float(candidate.get("y", 0.0))
-            y1 = float(candidate.get("y", 0.0)) + float(candidate.get("h", 0.0))
-            draw.line((x, y0, x, y1), fill=(255, 0, 120), width=6)
-            lx, ly = x + 6, max(6.0, y0 + 8.0)
-        else:
-            y = float(candidate.get("center", 0.0))
-            x0 = float(candidate.get("x", 0.0))
-            x1 = float(candidate.get("x", 0.0)) + float(candidate.get("w", 0.0))
-            draw.line((x0, y, x1, y), fill=(255, 0, 120), width=6)
-            lx, ly = x0 + 6, max(6.0, y - 20.0)
-        label = str(cand_id)
-        tw = max(16, 8 + len(label) * 8)
-        draw.rounded_rectangle((lx, ly, lx + tw, ly + 18), radius=5, fill=(255, 0, 120), outline=(255, 255, 255), width=1)
-        draw.text((lx + 4, ly + 3), label, fill=(255, 255, 255), font=font)
-    return crop, overlay
-
-
-def _openai_vision_enabled_v8() -> bool:
-    key = clean_pdf_text(os.environ.get("OPENAI_API_KEY", "")).strip()
-    enabled = clean_pdf_text(os.environ.get("RIB_USE_OPENAI_VISION", "1")).lower().strip()
-    return bool(key) and enabled not in {"0", "false", "nei", "no"}
-
-
-def _http_json_post_v8(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int = 35) -> Dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
-    return json.loads(raw)
-
-
-def _parse_json_text_v8(text_value: Any) -> Optional[Dict[str, Any]]:
-    if isinstance(text_value, dict):
-        return text_value
-    text = clean_pdf_text(text_value)
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except Exception:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except Exception:
-                return None
-    return None
-
-
-def _openai_select_wall_ids_v8(record: Dict[str, Any], geometry: Dict[str, Any], sketch: Dict[str, Any], candidate_pool: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not _openai_vision_enabled_v8() or not candidate_pool:
-        return None
-
-    cache_material = {
-        "page_index": int(record.get("page_index", 0)),
-        "bbox": list(geometry.get("bbox_px", (0, 0, 0, 0))),
-        "candidates": [
-            {
-                "cand_id": int(item.get("cand_id", 0)),
-                "kind": clean_pdf_text(item.get("kind", "")),
-                "center": round(float(item.get("center", 0.0)), 2),
-                "x": round(float(item.get("x", 0.0)), 2),
-                "y": round(float(item.get("y", 0.0)), 2),
-                "w": round(float(item.get("w", 0.0)), 2),
-                "h": round(float(item.get("h", 0.0)), 2),
-            }
-            for item in candidate_pool
-        ],
-    }
-    cache_key = hashlib.sha1(json.dumps(cache_material, sort_keys=True).encode("utf-8")).hexdigest()
-    if cache_key in _OPENAI_VISION_CACHE_V8:
-        return _OPENAI_VISION_CACHE_V8[cache_key]
-
-    plain_img, overlay_img = _candidate_review_overlay_v8(record, geometry, sketch, candidate_pool)
-    prompt = (
-        "Du er en norsk RIB-fagkontrollor for boligplaner. "
-        "Du far to bilder: ett rent planutsnitt og ett med nummererte kandidatlinjer. "
-        "Velg bare kandidatnumre som mest sannsynlig er interne baerende vegger eller stabiliserende veggskiver i en typisk boligetasje. "
-        "Avvis yttervegger/perimeter, fasadelinjer, terrassekanter, tegningsramme, maalsetting og vanlige lettvegger. "
-        "Foretrekk kontinuerlige leilighetsskiller, korridorvegger og vegger ved trapp/heis/kjerne. "
-        "Svar KUN som JSON med noeklene keep_wall_ids, outer_wall_ids, confidence og comment."
-    )
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a structural-engineering drawing reviewer. "
-                "Return only JSON. Do not include markdown."
-            ),
-        },
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": _data_url_for_image_v8(plain_img), "detail": "high"}},
-                {"type": "image_url", "image_url": {"url": _data_url_for_image_v8(overlay_img), "detail": "high"}},
-            ],
-        },
-    ]
-
-    payload = {
-        "model": clean_pdf_text(os.environ.get("RIB_OPENAI_VISION_MODEL", "gpt-4.1-mini")).strip() or "gpt-4.1-mini",
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-        "temperature": 0.0,
-        "max_tokens": 350,
-    }
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '').strip()}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        response = _http_json_post_v8("https://api.openai.com/v1/chat/completions", payload, headers=headers, timeout=35)
-        content = ""
-        choices = response.get("choices", []) if isinstance(response, dict) else []
-        if choices:
-            message = choices[0].get("message", {}) or {}
-            content = message.get("content", "")
-        parsed = _parse_json_text_v8(content)
-        if isinstance(parsed, dict):
-            keep_ids = [int(x) for x in parsed.get("keep_wall_ids", []) if str(x).isdigit() or isinstance(x, int)]
-            outer_ids = [int(x) for x in parsed.get("outer_wall_ids", []) if str(x).isdigit() or isinstance(x, int)]
-            keep_ids = [x for x in keep_ids if any(int(item.get("cand_id", 0)) == x for item in candidate_pool)]
-            outer_ids = [x for x in outer_ids if any(int(item.get("cand_id", 0)) == x for item in candidate_pool)]
-            result = {
-                "keep_wall_ids": keep_ids,
-                "outer_wall_ids": outer_ids,
-                "confidence": float(parsed.get("confidence", 0.0) or 0.0),
-                "comment": clean_pdf_text(parsed.get("comment", "")),
-            }
-            _OPENAI_VISION_CACHE_V8[cache_key] = result
-            return result
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="ignore")
-        except Exception:
-            detail = str(exc)
-        _OPENAI_VISION_CACHE_V8[cache_key] = {"error": short_text(detail, 220)}
-        return None
-    except Exception as exc:
-        _OPENAI_VISION_CACHE_V8[cache_key] = {"error": short_text(f"{type(exc).__name__}: {exc}", 220)}
-        return None
-    return None
-
-
-def filter_upper_floor_elements_v8(sketch: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
-    sketch = deep_copy_jsonable(sketch)
-    geometry = get_geometry_for_sketch(record, sketch)
-    if not geometry:
-        return _FILTER_UPPER_FLOOR_ELEMENTS_V7_BASE(sketch, record)
-
-    region_bbox_px = geometry["bbox_px"]
-    rw, rh = geometry.get("crop_size", (0, 0))
-    cores = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "core"]
-    spans = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "span_arrow"]
-    beams = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "beam"]
-
-    candidate_info = _build_upper_floor_candidates_v8(sketch, record, geometry)
-    chosen_segments = _pick_upper_floor_walls_v8(candidate_info, geometry.get("crop_size", (rw, rh)))
-    candidate_pool = _candidate_segment_id_pool_v8(candidate_info, geometry.get("crop_size", (rw, rh)))
-    openai_result = None
-
-    should_try_openai = _openai_vision_enabled_v8() and (len(candidate_pool) >= 4 or len(candidate_info.get("cores", [])) >= 2)
-    if should_try_openai:
-        openai_result = _openai_select_wall_ids_v8(record, geometry, sketch, candidate_pool)
-        keep_ids = set(int(x) for x in (openai_result or {}).get("keep_wall_ids", []) if isinstance(x, int))
-        if keep_ids:
-            chosen_segments = [item for item in candidate_pool if int(item.get("cand_id", 0)) in keep_ids]
-            chosen_segments = _dedupe_candidates_v8(chosen_segments, spacing_px=max(22.0, min(rw, rh) * 0.08))[:6]
-
-    if not chosen_segments:
-        return _FILTER_UPPER_FLOOR_ELEMENTS_V7_BASE(sketch, record)
-
-    kept_walls: List[Dict[str, Any]] = []
-    for idx, segment in enumerate(chosen_segments, start=1):
-        kept_walls.append(_segment_to_wall_element_v8(segment, region_bbox_px, record["image"].size, f"Bærevegg {idx}"))
-
-    if not spans:
-        vertical_centers = sorted(
-            [float(seg.get("center", 0.0)) for seg in chosen_segments if clean_pdf_text(seg.get("kind", "")).lower() == "vertical"]
-        )
-        if len(vertical_centers) >= 2:
-            core_centers = candidate_info.get("cores", []) or [(rw / 2.0, rh / 2.0)]
-            arrow_y = min(rh - 18, int(max(cy for _, cy in core_centers) + max(20, rh * 0.08)))
-            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, vertical_centers[0], arrow_y, record["image"].size[0], record["image"].size[1])
-            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, vertical_centers[-1], arrow_y, record["image"].size[0], record["image"].size[1])
-            spans = [{"type": "span_arrow", "x1": x1_norm, "y1": y1_norm, "x2": x2_norm, "y2": y2_norm, "label": "Typisk spenn"}]
-
-    cleaned_notes = [clean_pdf_text(item) for item in sketch.get("notes", []) if clean_pdf_text(item)]
-    base_notes = [
-        "Ytterkontur og ensidige perimeterlinjer filtreres bort med bilateral fotavtrykksjekk før bærevegger beholdes.",
-        "Overetasjer prioriterer indre leilighetsskiller, korridorvegger og vegger ved kjerne fremfor lange fasadelinjer.",
-    ]
-    if openai_result and openai_result.get("keep_wall_ids"):
-        base_notes.insert(0, "OpenAI vision er brukt som faglig finvurdering av nummererte veggkandidater etter geometrisnap og filtrering.")
-    elif should_try_openai and isinstance(openai_result, dict) and openai_result.get("error"):
-        base_notes.insert(0, f"OpenAI vision-review hoppet over: {clean_pdf_text(openai_result.get('error', 'ukjent feil'))}")
-    for note in reversed(base_notes):
-        if note not in cleaned_notes:
-            cleaned_notes = [note] + cleaned_notes
-
-    sketch["elements"] = cores + kept_walls + spans[:1] + beams[:1]
-    sketch["notes"] = cleaned_notes[:6]
-    return sketch
-
-
-def refine_sketch_with_geometry_v6(
-    record: Dict[str, Any],
-    sketch: Optional[Dict[str, Any]],
-    analysis_result: Dict[str, Any],
-    material_preference: str,
-    transfer_hints: Optional[Dict[str, Any]] = None,
-    forced_region: Optional[Dict[str, Any]] = None,
-    forced_region_index: Optional[int] = None,
-) -> Optional[Dict[str, Any]]:
-    refined = _REFINE_SKETCH_WITH_GEOMETRY_V7_BASE(
-        record,
-        sketch,
-        analysis_result,
-        material_preference,
-        transfer_hints,
-        forced_region,
-        forced_region_index,
-    )
-    if refined is None:
-        return None
-    mode = clean_pdf_text(refined.get("grounded_mode", "")).lower()
-    if mode == "wall_core" and not is_basement_like_record_v6(record, refined):
-        refined = filter_upper_floor_elements_v8(refined, record)
-    return refined
 
 if draft_sketch_bundle_exists():
     render_rib_draft_editor_ui()
