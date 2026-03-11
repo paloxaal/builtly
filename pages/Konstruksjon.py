@@ -121,6 +121,58 @@ def clean_pdf_text(text: Any) -> str:
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
+# V11: tidlig, selvstendig fallback slik at veggmetrikker finnes før analyse-knapper/patcher evalueres
+def _page_norm_to_local_crop_v11(
+    x_norm: float,
+    y_norm: float,
+    image_size: Tuple[int, int],
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Tuple[float, float]:
+    try:
+        image_w, image_h = image_size
+    except Exception:
+        image_w, image_h = 1, 1
+    rx, ry, rw, rh = region_bbox_px
+    px = float(x_norm) * float(max(int(image_w or 1), 1))
+    py = float(y_norm) * float(max(int(image_h or 1), 1))
+    local_x = px - float(rx)
+    local_y = py - float(ry)
+    if rw and rw > 1:
+        local_x = max(0.0, min(local_x, float(rw) - 1.0))
+    if rh and rh > 1:
+        local_y = max(0.0, min(local_y, float(rh) - 1.0))
+    return float(local_x), float(local_y)
+
+
+def _wall_metrics_local_v11(
+    element: Dict[str, Any],
+    record: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Dict[str, float]:
+    image_size = (1, 1)
+    try:
+        image_size = tuple(record.get('image').size)  # type: ignore[arg-type]
+    except Exception:
+        pass
+    x1, y1 = _page_norm_to_local_crop_v11(float(element.get('x1', 0.0)), float(element.get('y1', 0.0)), image_size, region_bbox_px)
+    x2, y2 = _page_norm_to_local_crop_v11(float(element.get('x2', 0.0)), float(element.get('y2', 0.0)), image_size, region_bbox_px)
+    return {
+        'x1': float(x1),
+        'y1': float(y1),
+        'x2': float(x2),
+        'y2': float(y2),
+        'x_mid': float((x1 + x2) / 2.0),
+        'y_mid': float((y1 + y2) / 2.0),
+        'length': float(math.hypot(x2 - x1, y2 - y1)),
+        'vertical': bool(abs(x2 - x1) <= abs(y2 - y1)),
+    }
+
+
+# Hvis nyere patch-funksjoner kjøres før den gamle definisjonen lenger ned i filen,
+# må navnet fortsatt eksistere for å unngå NameError i analysefasen.
+_wall_metrics_local_v7 = _wall_metrics_local_v11
+
+
 def ironclad_text_formatter(text: Any) -> str:
     text = clean_pdf_text(text)
     text = text.replace("$", "").replace("*", "").replace("_", "")
@@ -4155,11 +4207,27 @@ def replace_analysis_sketches_with_grounded(
     drawings: List[Dict[str, Any]],
     material_preference: str,
 ) -> Dict[str, Any]:
-    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    try:
+        grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    except Exception as exc:
+        observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+        warning = f"Geometri-kalibrering hoppet over i v11 etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+        if warning not in observations:
+            analysis_result["observasjoner"] = [warning] + observations
+        st.session_state["rib_grounding_error"] = warning
+        return analysis_result
+
     if grounded_sketches:
         analysis_result["sketches"] = grounded_sketches
+        try:
+            analysis_result = calibrate_analysis_from_refined_sketches_v6(analysis_result, grounded_sketches, drawings)
+        except Exception as exc:
+            observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+            warning = f"Skissekalibrering beholdt grunnutkastet etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+            if warning not in observations:
+                analysis_result["observasjoner"] = [warning] + observations
         observations = analysis_result.get("observasjoner", [])
-        note = "Konseptskissene er geometri-snappet til detektert planstruktur før presentasjon og PDF."
+        note = "Konseptskissene er v11-snappet og kalibrert mot geometri når det lykkes; ved feil beholdes AI-utkastet i stedet for å krasje analysen."
         if note not in observations:
             analysis_result["observasjoner"] = [note] + observations
     return analysis_result
@@ -5739,11 +5807,27 @@ def replace_analysis_sketches_with_grounded(
     drawings: List[Dict[str, Any]],
     material_preference: str,
 ) -> Dict[str, Any]:
-    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    try:
+        grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    except Exception as exc:
+        observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+        warning = f"Geometri-kalibrering hoppet over i v11 etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+        if warning not in observations:
+            analysis_result["observasjoner"] = [warning] + observations
+        st.session_state["rib_grounding_error"] = warning
+        return analysis_result
+
     if grounded_sketches:
         analysis_result["sketches"] = grounded_sketches
+        try:
+            analysis_result = calibrate_analysis_from_refined_sketches_v6(analysis_result, grounded_sketches, drawings)
+        except Exception as exc:
+            observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+            warning = f"Skissekalibrering beholdt grunnutkastet etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+            if warning not in observations:
+                analysis_result["observasjoner"] = [warning] + observations
         observations = analysis_result.get("observasjoner", [])
-        note = "Konseptskissene er geometri-snappet og klargjort for musepeker-redigering før rapport."
+        note = "Konseptskissene er v11-snappet og kalibrert mot geometri når det lykkes; ved feil beholdes AI-utkastet i stedet for å krasje analysen."
         if note not in observations:
             analysis_result["observasjoner"] = [note] + observations
     return analysis_result
@@ -7274,12 +7358,27 @@ def replace_analysis_sketches_with_grounded(
     drawings: List[Dict[str, Any]],
     material_preference: str,
 ) -> Dict[str, Any]:
-    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    try:
+        grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    except Exception as exc:
+        observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+        warning = f"Geometri-kalibrering hoppet over i v11 etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+        if warning not in observations:
+            analysis_result["observasjoner"] = [warning] + observations
+        st.session_state["rib_grounding_error"] = warning
+        return analysis_result
+
     if grounded_sketches:
         analysis_result["sketches"] = grounded_sketches
-        analysis_result = calibrate_analysis_from_refined_sketches_v6(analysis_result, grounded_sketches, drawings)
+        try:
+            analysis_result = calibrate_analysis_from_refined_sketches_v6(analysis_result, grounded_sketches, drawings)
+        except Exception as exc:
+            observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+            warning = f"Skissekalibrering beholdt grunnutkastet etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
+            if warning not in observations:
+                analysis_result["observasjoner"] = [warning] + observations
         observations = analysis_result.get("observasjoner", [])
-        note = "Konseptskissene er geometri-snappet og faglig kalibrert mot AI-forslaget før musepeker-redigering og PDF."
+        note = "Konseptskissene er v11-snappet og kalibrert mot geometri når det lykkes; ved feil beholdes AI-utkastet i stedet for å krasje analysen."
         if note not in observations:
             analysis_result["observasjoner"] = [note] + observations
     return analysis_result
@@ -8000,6 +8099,13 @@ def _wall_score_v9(
     return score
 
 
+def _best_wall_cue_distance_v11(metrics: Dict[str, float], cue_walls: List[Dict[str, float]]) -> float:
+    compatible = [item for item in cue_walls if bool(round(item.get("vertical", 0.0))) == bool(metrics.get("vertical", False))]
+    if not compatible:
+        return float("inf")
+    return float(min(math.hypot(metrics["x_mid"] - item["x_mid"], metrics["y_mid"] - item["y_mid"]) for item in compatible))
+
+
 def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[str, Any], analysis_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     sketch = deep_copy_jsonable(sketch)
     geometry = get_geometry_for_sketch(record, sketch)
@@ -8015,28 +8121,72 @@ def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[st
     spans = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "span_arrow"][:1]
     beams = [element for element in sketch.get("elements", []) if clean_pdf_text(element.get("type", "")).lower() == "beam"][:1]
 
+    rw, rh = geometry.get("crop_size", (0, 0))
+    fx, fy, fw, fh = geometry.get("footprint_bbox_local", (0, 0, rw, rh))
+    core_bbox = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+    core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
+    core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
+
     vertical_candidates: List[Dict[str, Any]] = []
     horizontal_candidates: List[Dict[str, Any]] = []
     for element in sketch.get("elements", []):
         if clean_pdf_text(element.get("type", "")).lower() != "wall":
             continue
-        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        metrics = _wall_metrics_local_v11(element, record, region_bbox_px)
+        if metrics["length"] <= max(18.0, min(rw or 0, rh or 0) * 0.05):
+            continue
+
+        inside_x = min(abs(metrics["x_mid"] - fx), abs((fx + fw) - metrics["x_mid"])) / max(float(fw or 1.0), 1.0)
+        inside_y = min(abs(metrics["y_mid"] - fy), abs((fy + fh) - metrics["y_mid"])) / max(float(fh or 1.0), 1.0)
+        cue_dist = _best_wall_cue_distance_v11(metrics, cue_walls)
+
+        if metrics["vertical"]:
+            core_offset = abs(metrics["x_mid"] - core_cx)
+            if metrics["length"] < max(28.0, float(fh or 0) * 0.12):
+                continue
+            if inside_x < 0.14:
+                continue
+            if metrics["length"] > float(fh or 0) * 0.62 and inside_x < 0.22 and cue_dist > max(32.0, float(fw or 0) * 0.16):
+                continue
+            if cue_walls:
+                if cue_dist > max(52.0, float(fw or 0) * 0.24) and core_offset > float(fw or 0) * 0.30:
+                    continue
+            elif core_offset > float(fw or 0) * 0.26:
+                continue
+        else:
+            core_offset = abs(metrics["y_mid"] - core_cy)
+            if metrics["length"] < max(26.0, float(fw or 0) * 0.09):
+                continue
+            if inside_y < 0.16:
+                continue
+            if metrics["length"] > float(fw or 0) * 0.40 and inside_y < 0.22 and cue_dist > max(30.0, float(fh or 0) * 0.16):
+                continue
+            if metrics["length"] > float(fw or 0) * 0.50:
+                continue
+            if cue_walls:
+                if cue_dist > max(46.0, float(fh or 0) * 0.22) and core_offset > float(fh or 0) * 0.24:
+                    continue
+            elif core_offset > float(fh or 0) * 0.18:
+                continue
+
         score = _wall_score_v9(metrics, geometry, cue_walls, cue_cores)
+        if cue_walls and math.isfinite(cue_dist):
+            score += max(0.0, 55.0 - cue_dist * 1.15)
         if score <= -1e8:
             continue
+
         item = {"element": element, "score": score, "x_mid": metrics["x_mid"], "y_mid": metrics["y_mid"]}
         if metrics["vertical"]:
             vertical_candidates.append(item)
         else:
             horizontal_candidates.append(item)
 
-    rw, rh = geometry.get("crop_size", (0, 0))
-    chosen_vertical = _choose_spaced_segments_v9(vertical_candidates, "x_mid", 2, max(28.0, rw * 0.16))
-    chosen_horizontal = _choose_spaced_segments_v9(horizontal_candidates, "y_mid", 1, max(24.0, rh * 0.14))
+    chosen_vertical = _choose_spaced_segments_v9(vertical_candidates, "x_mid", 2, max(30.0, float(rw or 0) * 0.18))
+    chosen_horizontal = _choose_spaced_segments_v9(horizontal_candidates, "y_mid", 1, max(24.0, float(rh or 0) * 0.16))
     kept_walls = [item["element"] for item in chosen_vertical + chosen_horizontal]
 
     notes = [clean_pdf_text(item) for item in sketch.get("notes", []) if clean_pdf_text(item)]
-    note = "Vegger i overetasjer er etterfiltrert mot indre bæresoner og cue-støtte for å redusere feil på yttervegger/perimeter."
+    note = "Vegger i overetasjer er v11-filtrert mer konservativt mot kjerne, indre bæresoner og AI-cues for å unngå yttervegg/perimeter-feil."
     if note not in notes:
         notes = [note] + notes
 
@@ -8665,7 +8815,7 @@ def _choose_region_for_sketch_v6(record: Dict[str, Any], sketch: Optional[Dict[s
     return _CHOOSE_REGION_FOR_SKETCH_V6_BASE(record, sketch)
 
 
-def _wall_metrics_local_v7(element: Dict[str, Any], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int]) -> Dict[str, float]:
+def _wall_metrics_local_v11(element: Dict[str, Any], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int]) -> Dict[str, float]:
     x1, y1 = page_norm_to_local_crop(float(element.get('x1', 0.0)), float(element.get('y1', 0.0)), record['image'].size, region_bbox_px)
     x2, y2 = page_norm_to_local_crop(float(element.get('x2', 0.0)), float(element.get('y2', 0.0)), record['image'].size, region_bbox_px)
     return {
@@ -8723,7 +8873,7 @@ def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any
     for element in sketch.get('elements', []):
         if clean_pdf_text(element.get('type', '')).lower() != 'wall':
             continue
-        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        metrics = _wall_metrics_local_v11(element, record, region_bbox_px)
         edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
         edge_frac_y = min(metrics['y_mid'] / max(rh, 1), 1.0 - (metrics['y_mid'] / max(rh, 1)))
         if metrics['vertical']:
@@ -8755,7 +8905,7 @@ def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any
 
     cleaned_walls: List[Dict[str, Any]] = []
     for element in kept_walls:
-        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        metrics = _wall_metrics_local_v11(element, record, region_bbox_px)
         edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
         edge_frac_y = min(metrics['y_mid'] / max(rh, 1), 1.0 - (metrics['y_mid'] / max(rh, 1)))
         if metrics['vertical'] and metrics['length'] > rh * 0.70 and edge_frac_x < 0.16:
@@ -8771,7 +8921,7 @@ def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any
         for element in fallback_elements:
             if clean_pdf_text(element.get('type', '')).lower() != 'wall':
                 continue
-            metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+            metrics = _wall_metrics_local_v11(element, record, region_bbox_px)
             edge_frac_x = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
             if metrics['vertical'] and edge_frac_x >= 0.14 and metrics['length'] >= max(46, rh * 0.16):
                 core_dist = min(abs(metrics['x_mid'] - cx) for cx, _ in core_centers_local)
