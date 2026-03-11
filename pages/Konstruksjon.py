@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+try:
+    import streamlit.components.v1 as components
+except Exception:
+    components = None
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 
@@ -2483,6 +2487,532 @@ def optional_plotly_go():
         return None
 
 
+_EDITOR_COMPONENT_CACHE: Dict[str, Any] = {}
+
+
+def draw_dashed_line(
+    draw: ImageDraw.ImageDraw,
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    fill,
+    width: int = 3,
+    dash_length: int = 12,
+    gap_length: int = 7,
+) -> None:
+    x1, y1 = float(start[0]), float(start[1])
+    x2, y2 = float(end[0]), float(end[1])
+    total = math.hypot(x2 - x1, y2 - y1)
+    if total <= 1:
+        draw.line((x1, y1, x2, y2), fill=fill, width=width)
+        return
+    dx = (x2 - x1) / total
+    dy = (y2 - y1) / total
+    distance = 0.0
+    while distance < total:
+        seg_end = min(total, distance + dash_length)
+        sx = x1 + dx * distance
+        sy = y1 + dy * distance
+        ex = x1 + dx * seg_end
+        ey = y1 + dy * seg_end
+        draw.line((sx, sy, ex, ey), fill=fill, width=width)
+        distance += dash_length + gap_length
+
+
+def build_editor_crop_overlay_image(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+    show_guides: bool = True,
+) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+    geometry = get_geometry_for_sketch(drawing_record, sketch)
+    image_w, image_h = drawing_record["image"].size
+    if geometry:
+        region_bbox = geometry["bbox_px"]
+    else:
+        region_bbox = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+
+    rx, ry, rw, rh = region_bbox
+    base_crop = copy_rgb(drawing_record["image"]).crop((rx, ry, rx + rw, ry + rh)).convert("RGBA")
+    overlay = Image.new("RGBA", base_crop.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    min_dim = max(1, min(rw, rh))
+    font_small = get_font(max(14, int(min_dim * 0.028)), bold=False)
+    font_micro = get_font(max(12, int(min_dim * 0.022)), bold=False)
+    border_radius = max(10, int(min_dim * 0.03))
+
+    draw.rounded_rectangle(
+        (3, 3, max(4, rw - 4), max(4, rh - 4)),
+        radius=border_radius,
+        outline=(56, 194, 201, 190),
+        width=2,
+    )
+
+    if show_guides and geometry:
+        for seg in geometry.get("vertical_segments", []):
+            if float(seg.get("length", 0.0)) < max(20, int(rh * 0.08)):
+                continue
+            draw_dashed_line(
+                draw,
+                (float(seg["center"]), float(seg["y"])),
+                (float(seg["center"]), float(seg["y"] + seg["h"])),
+                fill=(88, 120, 180, 92),
+                width=2,
+                dash_length=10,
+                gap_length=6,
+            )
+        for seg in geometry.get("horizontal_segments", []):
+            if float(seg.get("length", 0.0)) < max(20, int(rw * 0.08)):
+                continue
+            draw_dashed_line(
+                draw,
+                (float(seg["x"]), float(seg["center"])),
+                (float(seg["x"] + seg["w"]), float(seg["center"])),
+                fill=(60, 170, 110, 88),
+                width=2,
+                dash_length=10,
+                gap_length=6,
+            )
+        core_x, core_y, core_w, core_h = geometry.get("core_bbox", (0, 0, 0, 0))
+        if core_w > 0 and core_h > 0:
+            draw.rounded_rectangle(
+                (core_x, core_y, core_x + core_w, core_y + core_h),
+                radius=max(8, int(min_dim * 0.02)),
+                outline=(255, 196, 64, 160),
+                fill=(255, 196, 64, 32),
+                width=2,
+            )
+        junction_r = max(3, int(min_dim * 0.008))
+        for item in geometry.get("junctions", [])[:64]:
+            x = float(item.get("x", 0.0))
+            y = float(item.get("y", 0.0))
+            draw.ellipse(
+                (x - junction_r, y - junction_r, x + junction_r, y + junction_r),
+                fill=(56, 194, 201, 110),
+            )
+
+    for element in sketch.get("elements", []):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+
+        if e_type == "column":
+            x_local, y_local = page_norm_to_local_crop(
+                float(element.get("x", 0.0)),
+                float(element.get("y", 0.0)),
+                drawing_record["image"].size,
+                region_bbox,
+            )
+            r = max(8, int(min_dim * 0.018))
+            draw.ellipse(
+                (x_local - r, y_local - r, x_local + r, y_local + r),
+                fill=OVERLAY_COLORS["column"],
+                outline=OVERLAY_COLORS["white"],
+                width=2,
+            )
+            label = clean_pdf_text(element.get("label", ""))
+            if label:
+                label_x = int(clamp(x_local + r + 6, 6, max(8, rw - 120)))
+                label_y = int(clamp(y_local - r - 14, 6, max(8, rh - 34)))
+                draw_label(draw, (label_x, label_y), short_text(label, 12), font_micro, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+
+        elif e_type == "core":
+            x_local, y_local = page_norm_to_local_crop(
+                float(element.get("x", 0.0)),
+                float(element.get("y", 0.0)),
+                drawing_record["image"].size,
+                region_bbox,
+            )
+            w_local = float(element.get("w", 0.0)) * image_w
+            h_local = float(element.get("h", 0.0)) * image_h
+            left = clamp(x_local, 0, max(rw - 2, 1))
+            top = clamp(y_local, 0, max(rh - 2, 1))
+            right = clamp(x_local + w_local, left + 2, max(rw - 1, left + 2))
+            bottom = clamp(y_local + h_local, top + 2, max(rh - 1, top + 2))
+            draw.rounded_rectangle(
+                (left, top, right, bottom),
+                radius=max(8, int(min_dim * 0.02)),
+                fill=OVERLAY_COLORS["core_fill"],
+                outline=OVERLAY_COLORS["core_stroke"],
+                width=3,
+            )
+            draw_label(
+                draw,
+                (int(clamp(left + 8, 6, max(8, rw - 130))), int(clamp(top + 8, 6, max(8, rh - 30)))),
+                short_text(clean_pdf_text(element.get("label", "Kjerne")) or "Kjerne", 18),
+                font_micro,
+                (255, 196, 64, 235),
+                (30, 30, 30, 255),
+            )
+
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1_local, y1_local = page_norm_to_local_crop(
+                float(element.get("x1", 0.0)),
+                float(element.get("y1", 0.0)),
+                drawing_record["image"].size,
+                region_bbox,
+            )
+            x2_local, y2_local = page_norm_to_local_crop(
+                float(element.get("x2", 0.0)),
+                float(element.get("y2", 0.0)),
+                drawing_record["image"].size,
+                region_bbox,
+            )
+            if e_type == "wall":
+                draw.line(
+                    (x1_local, y1_local, x2_local, y2_local),
+                    fill=OVERLAY_COLORS["wall"],
+                    width=max(6, int(min_dim * 0.014)),
+                )
+                label_fill = (255, 153, 153, 225)
+            elif e_type == "beam":
+                draw.line(
+                    (x1_local, y1_local, x2_local, y2_local),
+                    fill=OVERLAY_COLORS["beam"],
+                    width=max(5, int(min_dim * 0.011)),
+                )
+                label_fill = (10, 22, 35, 220)
+            else:
+                draw_arrow(
+                    draw,
+                    (int(x1_local), int(y1_local)),
+                    (int(x2_local), int(y2_local)),
+                    OVERLAY_COLORS["span"],
+                    width=max(4, int(min_dim * 0.009)),
+                )
+                label_fill = (196, 235, 176, 230)
+
+            label = clean_pdf_text(element.get("label", ""))
+            if label:
+                mid_x = int((x1_local + x2_local) / 2.0)
+                mid_y = int((y1_local + y2_local) / 2.0)
+                draw_label(
+                    draw,
+                    (
+                        int(clamp(mid_x + 6, 6, max(8, rw - 140))),
+                        int(clamp(mid_y - 24, 6, max(8, rh - 30))),
+                    ),
+                    short_text(label, 22),
+                    font_micro,
+                    label_fill,
+                    OVERLAY_COLORS["white"] if e_type == "beam" else (30, 30, 30, 255),
+                )
+
+        elif e_type == "grid":
+            orientation = clean_pdf_text(element.get("orientation", "")).lower()
+            label = clean_pdf_text(element.get("label", ""))
+            if orientation.startswith("v"):
+                x_local, _ = page_norm_to_local_crop(
+                    float(element.get("x", 0.0)),
+                    0.0,
+                    drawing_record["image"].size,
+                    region_bbox,
+                )
+                draw_dashed_line(draw, (x_local, 0), (x_local, rh), fill=OVERLAY_COLORS["grid"], width=2, dash_length=8, gap_length=6)
+                if label:
+                    draw_label(draw, (int(clamp(x_local + 4, 4, max(8, rw - 42))), 6), short_text(label, 6), font_micro, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+            else:
+                _, y_local = page_norm_to_local_crop(
+                    0.0,
+                    float(element.get("y", 0.0)),
+                    drawing_record["image"].size,
+                    region_bbox,
+                )
+                draw_dashed_line(draw, (0, y_local), (rw, y_local), fill=OVERLAY_COLORS["grid"], width=2, dash_length=8, gap_length=6)
+                if label:
+                    draw_label(draw, (6, int(clamp(y_local + 4, 4, max(8, rh - 30)))), short_text(label, 6), font_micro, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+
+    editor_img = Image.alpha_composite(base_crop, overlay).convert("RGB")
+    return editor_img, region_bbox
+
+
+def ensure_inline_click_canvas_component_dir() -> Optional[Path]:
+    if components is None:
+        return None
+    component_dir = DB_DIR / "_inline_components" / "rib_click_canvas_v4"
+    component_dir.mkdir(parents=True, exist_ok=True)
+    index_path = component_dir / "index.html"
+    version_marker = "Builtly RIB click canvas v4"
+    html = """<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      overflow: hidden;
+    }
+    #wrap {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      border-radius: 12px;
+      cursor: crosshair;
+      background: #07111a;
+      box-shadow: inset 0 0 0 1px rgba(120,145,170,0.22);
+      touch-action: none;
+    }
+    #status {
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.4;
+      color: rgba(207, 218, 227, 0.74);
+      padding: 0 2px 4px 2px;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="canvas"></canvas>
+    <div id="status">Klikk i planutsnittet for å redigere bæresystemet.</div>
+  </div>
+
+  <script>
+    (function() {
+      const root = document.getElementById("wrap");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const status = document.getElementById("status");
+
+      let currentImage = null;
+      let argsState = {};
+      let lastArgsSignature = "";
+
+      function sendMessage(type, data) {
+        const payload = Object.assign({isStreamlitMessage: true, type: type}, data || {});
+        window.parent.postMessage(payload, "*");
+      }
+
+      function setComponentReady() {
+        sendMessage("streamlit:componentReady", {apiVersion: 1});
+      }
+
+      function setFrameHeight() {
+        const height = Math.ceil(root.getBoundingClientRect().height + 4);
+        sendMessage("streamlit:setFrameHeight", {height: height});
+      }
+
+      function setComponentValue(value) {
+        sendMessage("streamlit:setComponentValue", {value: value});
+      }
+
+      function clamp(value, minValue, maxValue) {
+        return Math.max(minValue, Math.min(maxValue, value));
+      }
+
+      function drawPlaceholder(message) {
+        const w = Number(argsState.natural_width || 960);
+        const h = Number(argsState.natural_height || argsState.desired_height || 540);
+        canvas.width = Math.max(32, w);
+        canvas.height = Math.max(32, h);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#07111a";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#dbe7f0";
+        ctx.font = "16px sans-serif";
+        ctx.fillText(message || "Laster editor...", 24, 34);
+        setFrameHeight();
+      }
+
+      function drawCurrentImage() {
+        if (!currentImage) {
+          drawPlaceholder("Laster editor...");
+          return;
+        }
+        const w = currentImage.naturalWidth || currentImage.width || Number(argsState.natural_width || 960);
+        const h = currentImage.naturalHeight || currentImage.height || Number(argsState.natural_height || 540);
+        canvas.width = Math.max(32, w);
+        canvas.height = Math.max(32, h);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(currentImage, 0, 0, canvas.width, canvas.height);
+
+        if (argsState.last_click && typeof argsState.last_click.x === "number" && typeof argsState.last_click.y === "number") {
+          const x = clamp(argsState.last_click.x, 0, canvas.width);
+          const y = clamp(argsState.last_click.y, 0, canvas.height);
+          ctx.save();
+          ctx.strokeStyle = "rgba(255,255,255,0.96)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(x, y, 10, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x - 14, y);
+          ctx.lineTo(x + 14, y);
+          ctx.moveTo(x, y - 14);
+          ctx.lineTo(x, y + 14);
+          ctx.stroke();
+          ctx.restore();
+        }
+        setFrameHeight();
+      }
+
+      function applyArgs(nextArgs) {
+        argsState = nextArgs || {};
+        status.textContent = argsState.status_text || "Klikk i planutsnittet for å redigere bæresystemet.";
+        const sig = JSON.stringify({
+          len: argsState.image_data ? argsState.image_data.length : 0,
+          head: argsState.image_data ? argsState.image_data.slice(0, 80) : "",
+          marker: argsState.version_marker || "",
+          width: argsState.natural_width || 0,
+          height: argsState.natural_height || 0,
+          click: argsState.last_click || null,
+        });
+        if (sig === lastArgsSignature && currentImage) {
+          drawCurrentImage();
+          return;
+        }
+        lastArgsSignature = sig;
+
+        if (!argsState.image_data) {
+          currentImage = null;
+          drawPlaceholder("Fant ikke editorbildet.");
+          return;
+        }
+
+        const img = new Image();
+        img.onload = function() {
+          currentImage = img;
+          drawCurrentImage();
+        };
+        img.onerror = function() {
+          currentImage = null;
+          drawPlaceholder("Klarte ikke å laste editorbildet.");
+        };
+        img.src = argsState.image_data;
+      }
+
+      function readPointFromEvent(event) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / Math.max(rect.width, 1);
+        const scaleY = canvas.height / Math.max(rect.height, 1);
+        const clientX = event.touches && event.touches.length ? event.touches[0].clientX : event.clientX;
+        const clientY = event.touches && event.touches.length ? event.touches[0].clientY : event.clientY;
+        const x = clamp((clientX - rect.left) * scaleX, 0, canvas.width);
+        const y = clamp((clientY - rect.top) * scaleY, 0, canvas.height);
+        return {x: x, y: y};
+      }
+
+      function commitClick(point) {
+        argsState = argsState || {};
+        argsState.last_click = {x: point.x, y: point.y};
+        drawCurrentImage();
+        const eventId = String(Date.now()) + "-" + Math.random().toString(36).slice(2, 8);
+        setComponentValue({
+          x: Number(point.x.toFixed(2)),
+          y: Number(point.y.toFixed(2)),
+          event_id: eventId
+        });
+      }
+
+      canvas.addEventListener("click", function(event) {
+        commitClick(readPointFromEvent(event));
+      });
+
+      canvas.addEventListener("touchstart", function(event) {
+        event.preventDefault();
+        commitClick(readPointFromEvent(event));
+      }, {passive: false});
+
+      window.addEventListener("resize", function() {
+        setFrameHeight();
+      });
+
+      window.addEventListener("message", function(event) {
+        const data = event.data;
+        if (!data || data.type !== "streamlit:render") {
+          return;
+        }
+        applyArgs(data.args || {});
+      });
+
+      setComponentReady();
+      drawPlaceholder("Laster editor...");
+    })();
+  </script>
+</body>
+</html>
+"""
+    if (not index_path.exists()) or (version_marker not in index_path.read_text(encoding="utf-8", errors="ignore")):
+        index_path.write_text(html, encoding="utf-8")
+    return component_dir
+
+
+def get_inline_click_canvas_component():
+    if components is None:
+        return None
+    component_dir = ensure_inline_click_canvas_component_dir()
+    if component_dir is None:
+        return None
+    cache_key = str(component_dir.resolve())
+    if cache_key not in _EDITOR_COMPONENT_CACHE:
+        _EDITOR_COMPONENT_CACHE[cache_key] = components.declare_component(
+            "rib_click_canvas_v4",
+            path=str(component_dir),
+        )
+    return _EDITOR_COMPONENT_CACHE[cache_key]
+
+
+def render_inline_click_canvas_editor(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+    editor_key: str,
+) -> Optional[Dict[str, float]]:
+    component = get_inline_click_canvas_component()
+    if component is None:
+        return None
+
+    show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
+    editor_img, region_bbox = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
+    rw, rh = editor_img.size
+    marker_key = f"{editor_key}_canvas_last_click"
+    last_click = st.session_state.get(marker_key)
+    if not isinstance(last_click, dict):
+        last_click = None
+
+    status_text = (
+        "Innebygd canvas-editor er aktiv. Klikk direkte i planutsnittet for å legge inn korrigeringer."
+    )
+    value = component(
+        image_data=editor_image_data_uri(editor_img),
+        natural_width=rw,
+        natural_height=rh,
+        desired_height=int(min(980, max(420, rh / max(rw, 1) * 920))),
+        status_text=status_text,
+        version_marker=f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}",
+        last_click=last_click,
+        key=f"{editor_key}_canvas",
+        default=None,
+    )
+    st.caption("Innebygd canvas-editor er aktiv i stedet for Plotly. Klikk direkte i planutsnittet.")
+
+    if isinstance(value, dict) and "x" in value and "y" in value:
+        click = {
+            "x": float(value.get("x", 0.0)),
+            "y": float(value.get("y", 0.0)),
+            "event_id": clean_pdf_text(value.get("event_id", "")),
+        }
+        st.session_state[marker_key] = {"x": click["x"], "y": click["y"]}
+        return click
+    return None
+
+
+def click_event_signature(selected_sketch_uid: str, tool: str, click: Dict[str, Any]) -> str:
+    if not isinstance(click, dict):
+        return f"{selected_sketch_uid}|{tool}|none"
+    event_id = clean_pdf_text(click.get("event_id", ""))
+    if event_id:
+        return f"{selected_sketch_uid}|{tool}|{event_id}"
+    return (
+        f"{selected_sketch_uid}|{tool}|"
+        f"{round(float(click.get('x', 0.0)), 1)}|{round(float(click.get('y', 0.0)), 1)}"
+    )
+
+
 def deep_copy_jsonable(data: Any) -> Any:
     try:
         return json.loads(json.dumps(data))
@@ -3672,8 +4202,7 @@ def extract_plotly_click(event_state: Any) -> Optional[Dict[str, float]]:
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
     go = optional_plotly_go()
     if go is None:
-        st.info("Plotly er ikke tilgjengelig i miljøet. Bruk tabellredigeringen under som fallback.")
-        return None
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
     image = copy_rgb(drawing_record["image"])
     image_w, image_h = image.size
@@ -3795,9 +4324,11 @@ def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str
         )
         return extract_plotly_click(event_state)
     except TypeError:
-        st.plotly_chart(fig, key=editor_key, use_container_width=True)
-        st.caption("Klikk-redigering krever nyere Streamlit. Bruk tabellen under som fallback.")
-        return None
+        st.caption("Miljøet støtter ikke Plotly-klikk direkte. Bytter til innebygd canvas-editor.")
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+    except Exception:
+        st.caption("Plotly-editoren kunne ikke startes. Bytter til innebygd canvas-editor.")
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
 
 def finalize_rib_draft_to_pdf() -> bool:
@@ -3963,7 +4494,7 @@ def render_rib_draft_editor_ui() -> None:
             editor_key=f"rib_plotly_editor_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
         )
         if click and tool != "none":
-            click_sig = f"{selected_sketch_uid}|{tool}|{round(click['x'], 1)}|{round(click['y'], 1)}"
+            click_sig = click_event_signature(selected_sketch_uid, tool, click)
             if st.session_state.get("rib_draft_last_click_sig") != click_sig:
                 changed, message, updated_sketch = apply_click_edit_to_sketch(
                     selected_sketch,
@@ -4986,8 +5517,7 @@ def replace_analysis_sketches_with_grounded(
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
     go = optional_plotly_go()
     if go is None:
-        st.info("Plotly er ikke tilgjengelig i miljøet. Bruk tabellredigeringen under som fallback.")
-        return None
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
     geometry = get_geometry_for_sketch(drawing_record, sketch)
     image_w, image_h = drawing_record["image"].size
@@ -5167,9 +5697,11 @@ def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str
         )
         return extract_plotly_click(event_state)
     except TypeError:
-        st.plotly_chart(fig, key=editor_key, use_container_width=True)
-        st.caption("Klikk-redigering krever nyere Streamlit. Bruk tabellen under som fallback.")
-        return None
+        st.caption("Miljøet støtter ikke Plotly-klikk direkte. Bytter til innebygd canvas-editor.")
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+    except Exception:
+        st.caption("Plotly-editoren kunne ikke startes. Bytter til innebygd canvas-editor.")
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
 
 
 def finalize_rib_draft_to_pdf() -> bool:
@@ -5423,7 +5955,7 @@ def render_rib_draft_editor_ui() -> None:
                         break
 
         if click and tool != "none":
-            click_sig = f"{selected_sketch_uid}|{tool}|{round(click['x'], 1)}|{round(click['y'], 1)}"
+            click_sig = click_event_signature(selected_sketch_uid, tool, click)
             if st.session_state.get("rib_draft_last_click_sig") != click_sig:
                 changed, message, updated_sketch = apply_pointer_click_to_sketch(
                     selected_sketch,
