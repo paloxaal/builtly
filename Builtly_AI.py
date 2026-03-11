@@ -52,8 +52,8 @@ if "project_data" not in st.session_state:
 if "assistant_history" not in st.session_state:
     st.session_state.assistant_history = []
 
-if "assistant_input" not in st.session_state:
-    st.session_state.assistant_input = ""
+if "assistant_input_nonce" not in st.session_state:
+    st.session_state.assistant_input_nonce = 0
 
 if "assistant_discipline_codes" not in st.session_state:
     st.session_state.assistant_discipline_codes = ['geo', 'rib', 'fire', 'sha', 'breeam']
@@ -1492,6 +1492,15 @@ def close_assistant() -> None:
     clear_assistant_query_param()
 
 
+def bump_assistant_input_nonce() -> None:
+    st.session_state.assistant_input_nonce = int(st.session_state.get("assistant_input_nonce", 0)) + 1
+
+
+def reset_assistant_conversation() -> None:
+    st.session_state.assistant_history = []
+    bump_assistant_input_nonce()
+
+
 LANGUAGE_QUERY_SLUGS = {
     "🇬🇧 English (UK)": "en-gb",
     "🇺🇸 English (US)": "en-us",
@@ -1673,16 +1682,20 @@ User question:
 """.strip()
 
 
-def parse_gemini_text(response_payload: Dict) -> str:
+def parse_gemini_response(response_payload: Dict) -> tuple[str, bool]:
     candidates = response_payload.get("candidates", [])
     text_parts: List[str] = []
+    was_truncated = False
     for candidate in candidates:
+        finish_reason = str(candidate.get("finishReason", "")).upper()
+        if finish_reason == "MAX_TOKENS":
+            was_truncated = True
         content = candidate.get("content", {})
         for part in content.get("parts", []):
             if isinstance(part, dict) and part.get("text"):
                 text_parts.append(part["text"])
     if text_parts:
-        return "\n".join(text_parts).strip()
+        return "\n".join(text_parts).strip(), was_truncated
 
     block_reason = response_payload.get("promptFeedback", {}).get("blockReason")
     if block_reason:
@@ -1691,30 +1704,24 @@ def parse_gemini_text(response_payload: Dict) -> str:
     raise RuntimeError("No text returned from the AI engine.")
 
 
-def request_builtly_answer(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
-    api_key = gemini_api_key()
-    profile = get_locale_profile(lang_key)
-    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key))
-    if not api_key:
-        return (
-            f"**{get_text_bundle(lang_key)['assistant_note_prefix']}:** "
-            f"Set the AI API key in Render to activate live answers. "
-            f"The front page is already wired to send the selected language ({profile['language_name']}), "
-            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI engine."
-        )
-
-    model_name = os.getenv("BUILTLY_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+def call_gemini_generate_content(
+    *,
+    api_key: str,
+    model_name: str,
+    prompt_text: str,
+    max_output_tokens: int = 2400,
+) -> tuple[str, bool]:
     payload = {
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": build_builtly_prompt(question, selected_codes, lang_key, history)}],
+                "parts": [{"text": prompt_text}],
             }
         ],
         "generationConfig": {
             "temperature": 0.2,
             "topP": 0.9,
-            "maxOutputTokens": 1600,
+            "maxOutputTokens": max_output_tokens,
         },
     }
 
@@ -1731,9 +1738,9 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
     )
 
     try:
-        with urlrequest.urlopen(req, timeout=45) as response:
+        with urlrequest.urlopen(req, timeout=70) as response:
             data = json.loads(response.read().decode("utf-8"))
-        return parse_gemini_text(data)
+        return parse_gemini_response(data)
     except urlerror.HTTPError as exc:
         try:
             details = exc.read().decode("utf-8")
@@ -1742,6 +1749,64 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
         raise RuntimeError(f"AI engine HTTP {exc.code}: {details}") from exc
     except urlerror.URLError as exc:
         raise RuntimeError(f"AI engine connection error: {exc}") from exc
+
+
+def merge_assistant_continuation(answer: str, continuation: str) -> str:
+    primary = answer.strip()
+    extra = continuation.strip()
+    if not extra:
+        return primary
+    if extra in primary:
+        return primary
+    return f"{primary}\n\n{extra}".strip()
+
+
+def request_builtly_answer(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
+    api_key = gemini_api_key()
+    profile = get_locale_profile(lang_key)
+    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key))
+    if not api_key:
+        return (
+            f"**{get_text_bundle(lang_key)['assistant_note_prefix']}:** "
+            f"Set the AI API key in Render to activate live answers. "
+            f"The front page is already wired to send the selected language ({profile['language_name']}), "
+            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI engine."
+        )
+
+    model_name = os.getenv("BUILTLY_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+    primary_prompt = build_builtly_prompt(question, selected_codes, lang_key, history)
+    answer, was_truncated = call_gemini_generate_content(
+        api_key=api_key,
+        model_name=model_name,
+        prompt_text=primary_prompt,
+        max_output_tokens=2400,
+    )
+
+    if was_truncated:
+        continuation_prompt = f"""
+You are continuing a Builtly assistant answer.
+Continue in {profile['language_name']}.
+Do not restart, repeat the introduction, or restate the question.
+Continue directly from the next unfinished point and finish the answer cleanly.
+
+Original user question:
+{question.strip()}
+
+Partial answer to continue:
+{answer}
+""".strip()
+        try:
+            continuation, _ = call_gemini_generate_content(
+                api_key=api_key,
+                model_name=model_name,
+                prompt_text=continuation_prompt,
+                max_output_tokens=1200,
+            )
+            answer = merge_assistant_continuation(answer, continuation)
+        except Exception:
+            pass
+
+    return answer
 
 
 def handle_assistant_submission(question: str, selected_codes: List[str], lang_key: str) -> None:
@@ -1849,6 +1914,8 @@ def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None
         """
     )
 
+    input_key = f"assistant_input_{surface_key}_{st.session_state.get('assistant_input_nonce', 0)}"
+
     with st.form(f"builtly_frontpage_assistant_{surface_key}"):
         selected_codes = st.multiselect(
             lang["assistant_disciplines_label"],
@@ -1858,7 +1925,7 @@ def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None
         )
         question = st.text_area(
             lang["assistant_question_label"],
-            key="assistant_input",
+            key=input_key,
             placeholder=lang["assistant_placeholder"],
             height=170,
         )
@@ -1866,6 +1933,8 @@ def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None
 
     if submitted and question.strip():
         handle_assistant_submission(question, selected_codes, lang_key)
+        bump_assistant_input_nonce()
+        st.rerun()
 
     action_left, action_right = st.columns([0.35, 0.65], gap="small")
     with action_left:
@@ -1874,8 +1943,7 @@ def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None
         st.caption(lang["assistant_disclaimer"])
 
     if clear_clicked:
-        st.session_state.assistant_history = []
-        st.session_state.assistant_input = ""
+        reset_assistant_conversation()
         st.rerun()
 
     if st.session_state.assistant_history:
@@ -3147,8 +3215,7 @@ with top_r:
     if chosen_language != st.session_state.app_lang:
         st.session_state.app_lang = chosen_language
         st.session_state.project_data["land"] = get_locale_profile(chosen_language)["project_land_label"]
-        st.session_state.assistant_history = []
-        st.session_state.assistant_input = ""
+        reset_assistant_conversation()
         st.session_state.assistant_discipline_codes = list(DEFAULT_DISCIPLINES)
         sync_language_query_param(chosen_language)
         st.rerun()
