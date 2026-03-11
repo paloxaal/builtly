@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from fpdf import FPDF
 from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
@@ -478,14 +479,19 @@ FIRE_STYLE_LIBRARY = {
 # -----------------------------------------------------------------------------
 def guess_page_kind(raw_text: str, doc_name: str) -> str:
     haystack = f"{doc_name} {raw_text}".lower()
-    if any(token in haystack for token in ["landskapsplan", "utomhusplan", "oppstilling brann", "atkomst brann", "situasjonsplan"]):
-        return "site_plan"
-    if any(token in haystack for token in ["p-kjeller", "parkering", "rampe", "hc", "parkerings", "kjeller"]):
+
+    parking_tokens = ["p-kjeller", "parkeringskjeller", "parkering", "parkerings", "kjeller", "rampe", "innkjøring", "hc"]
+    residential_tokens = ["typisk etasjeplan", "etasjeplan", "level ", "balkong", "terrasse", "leilighet", "boenhet", "stue/ kj", "stue/kjøkken"]
+    site_tokens = ["situasjonsplan", "utomhusplan", "landskapsplan", "oppstilling brann", "atkomst brann"]
+
+    if any(token in haystack for token in parking_tokens):
         return "parking_plan"
-    if any(token in haystack for token in ["etasjeplan", "typisk etasjeplan", "plan 1", "plan 1-5", "stue/ kj", "stue/kjøkken", "balkong", "terrasse"]):
+    if any(token in haystack for token in residential_tokens):
         return "residential_floor_plan"
     if "snitt" in haystack:
         return "section"
+    if any(token in haystack for token in site_tokens):
+        return "site_plan"
     if "plan" in haystack:
         return "general_plan"
     return "unknown"
@@ -618,6 +624,124 @@ def build_source_register(pages: List[SourcePage]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def rect_iou(a: List[float], b: List[float]) -> float:
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    inter_x0 = max(ax0, bx0)
+    inter_y0 = max(ay0, by0)
+    inter_x1 = min(ax1, bx1)
+    inter_y1 = min(ay1, by1)
+    inter_w = max(0.0, inter_x1 - inter_x0)
+    inter_h = max(0.0, inter_y1 - inter_y0)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+
+def dedupe_rects(rects: List[List[float]], max_items: int = 6, iou_threshold: float = 0.4) -> List[List[float]]:
+    unique: List[List[float]] = []
+    for rect in rects:
+        clean = [round(clamp01(float(v)), 4) for v in rect[:4]]
+        if any(rect_iou(clean, seen) >= iou_threshold for seen in unique):
+            continue
+        unique.append(clean)
+        if len(unique) >= max_items:
+            break
+    return unique
+
+
+
+def hits_for_terms(page: SourcePage, terms: List[str], max_items: int = 5) -> List[List[float]]:
+    rects: List[List[float]] = []
+    for term in terms:
+        rects.extend(page.keyword_hits.get(term, []))
+    return dedupe_rects(rects, max_items=max_items)
+
+
+
+def resolve_page_kind_for_page(page: SourcePage, proposed_kind: str, title: str = "") -> str:
+    haystack = f"{page.doc_name} {page.raw_text} {title}".lower()
+    parking_tokens = ["p-kjeller", "parkeringskjeller", "parkering", "parkerings", "kjeller", "rampe", "innkjøring", "hc"]
+    residential_tokens = ["typisk etasjeplan", "etasjeplan", "level ", "balkong", "terrasse", "leilighet", "boenhet"]
+    site_tokens = ["situasjonsplan", "utomhusplan", "landskapsplan", "oppstilling brann", "atkomst brann"]
+
+    if any(token in haystack for token in parking_tokens):
+        return "parking_plan"
+    if any(token in haystack for token in residential_tokens):
+        return "residential_floor_plan"
+    if "snitt" in haystack:
+        return "section"
+    if any(token in haystack for token in site_tokens):
+        return "site_plan"
+    return proposed_kind if proposed_kind in PAGE_KIND_LABELS else guess_page_kind(page.raw_text, page.doc_name)
+
+
+
+def make_ai_detail_sheet(image: Image.Image, title: str = "") -> Image.Image:
+    base = image.convert("RGB")
+    w, h = base.size
+    panel_w = 560
+    panel_h = 360
+    gap = 18
+    pad = 18
+    header_h = 72
+
+    crops = [
+        ("Helhet", base),
+        ("Venstre halvdel", base.crop((0, 0, max(1, w // 2), h))),
+        ("Høyre halvdel", base.crop((max(0, w // 2), 0, w, h))),
+        ("Øvre del", base.crop((0, 0, w, max(1, h // 2)))),
+        ("Nedre del", base.crop((0, max(0, h // 2), w, h))),
+        ("Tittelfelt / høyre nedre", base.crop((max(0, int(w * 0.56)), max(0, int(h * 0.58)), w, h))),
+    ]
+
+    canvas_w = pad * 2 + panel_w * 2 + gap
+    canvas_h = pad * 2 + header_h + panel_h * 3 + gap * 2
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (247, 249, 251))
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((8, 8, canvas_w - 8, canvas_h - 8), radius=18, outline=(214, 219, 225), width=2, fill=(247, 249, 251))
+    title_font = get_font(28, bold=True)
+    sub_font = get_font(16, bold=False)
+    draw.text((pad, 18), clean_pdf_text(title or "Detaljark for tegningsanalyse"), font=title_font, fill=(20, 28, 38))
+    draw.text((pad, 48), "Helbilde og zoomede utsnitt for a hjelpe AI med a lese romnavn, tittelfelt og brannrelevante detaljer.", font=sub_font, fill=(92, 101, 112))
+
+    label_font = get_font(18, bold=True)
+    for idx, (label, crop) in enumerate(crops):
+        row = idx // 2
+        col = idx % 2
+        x = pad + col * (panel_w + gap)
+        y = pad + header_h + row * (panel_h + gap)
+        fitted = crop.copy()
+        ratio = min((panel_w - 16) / max(fitted.width, 1), (panel_h - 46) / max(fitted.height, 1))
+        new_w = max(1, int(fitted.width * ratio))
+        new_h = max(1, int(fitted.height * ratio))
+        fitted = fitted.resize((new_w, new_h))
+        draw.rounded_rectangle((x, y, x + panel_w, y + panel_h), radius=14, fill=(255, 255, 255), outline=(214, 219, 225), width=2)
+        draw.text((x + 12, y + 10), clean_pdf_text(label), font=label_font, fill=(36, 50, 72))
+        paste_x = x + (panel_w - new_w) // 2
+        paste_y = y + 38 + (panel_h - 46 - new_h) // 2
+        canvas.paste(fitted, (paste_x, paste_y))
+    return canvas
+
+
+
+def image_to_data_url(image: Image.Image, max_width: int = 1400, quality: int = 88) -> str:
+    preview = image.convert("RGB")
+    if preview.width > max_width:
+        ratio = max_width / max(preview.width, 1)
+        preview = preview.resize((int(preview.width * ratio), int(preview.height * ratio)))
+    buffer = io.BytesIO()
+    preview.save(buffer, format="JPEG", quality=quality)
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+
 # -----------------------------------------------------------------------------
 # 6. HEURISTIKK FOR BRANNMARKERING
 # -----------------------------------------------------------------------------
@@ -650,80 +774,69 @@ def create_margin_arrow(rect: List[float], style: str, label: str = "") -> Dict[
 
 
 def heuristic_markup_for_page(page: SourcePage, brann_data: Dict[str, Any]) -> Dict[str, Any]:
-    page_kind = page.page_kind if page.page_kind in DEFAULT_LEGENDS else "general_plan"
+    page_kind = resolve_page_kind_for_page(page, page.page_kind, page.page_title)
     elements: List[Dict[str, Any]] = []
     notes: List[str] = []
     assumptions: List[str] = []
 
-    def first_hit(term: str) -> Optional[List[float]]:
-        values = page.keyword_hits.get(term) or []
-        return values[0] if values else None
-
     if page_kind == "site_plan":
-        for term in ["oppstilling brann", "Oppstilling", "Oppstilling"]:
-            for rect in page.keyword_hits.get(term, [])[:3]:
-                elements.append(create_fill_element(rect, "staging_area", "Oppstillingsplass"))
-        for term in ["atkomst brann", "Innkjøring", "Inngang"]:
-            for rect in page.keyword_hits.get(term, [])[:3]:
-                elements.append(create_margin_arrow(rect, "attack_route", "Innsatsvei"))
-        for term in ["atkomst brann", "Innkjøring", "VEI", "Parkering"]:
-            for rect in page.keyword_hits.get(term, [])[:2]:
-                elements.append(create_box_element(rect, "fire_access", "Brannatkomst"))
-        notes.append("Uteplan er heuristisk markert med atkomst, innsatsvei og oppstillingsflater der relevante teksttreff er funnet.")
-        assumptions.append("Plassering og geometri for kjørbar atkomst/oppstillingsplass må kontrolleres mot landskapsplan og veioppbygging.")
+        for rect in hits_for_terms(page, ["oppstilling brann", "Oppstilling"], max_items=2):
+            elements.append(create_fill_element(rect, "staging_area", "Oppstillingsplass"))
+        for rect in hits_for_terms(page, ["atkomst brann", "Innkjøring", "Inngang"], max_items=2):
+            elements.append(create_margin_arrow(rect, "attack_route", "Innsatsvei"))
+        for rect in hits_for_terms(page, ["atkomst brann", "Innkjøring"], max_items=2):
+            elements.append(create_box_element(rect, "fire_access", "Brannatkomst"))
+        notes.append("Situasjons-/utomhusplan er markert med sannsynlig brannatkomst, innsatsretning og eventuelle oppstillingsflater som kan leses ut av tegningsgrunnlaget.")
+        assumptions.append("Brannvesenets oppstillingsplass og kjørbar atkomst ma verifiseres mot endelig utomhusplan og krav til bæreevne/snuareal.")
 
     elif page_kind == "parking_plan":
-        for term in ["Trapp", "Trapp/ heis", "heis", "Korridor"]:
-            for rect in page.keyword_hits.get(term, [])[:6]:
-                elements.append(create_fill_element(rect, "escape_route", "Rømningskjerne"))
-        for term in ["Sluse", "Teknisk"]:
-            for rect in page.keyword_hits.get(term, [])[:4]:
-                elements.append(create_box_element(rect, "fire_compartment", term))
-        for term in ["Inngang", "Innkjøring"]:
-            for rect in page.keyword_hits.get(term, [])[:3]:
-                elements.append(create_margin_arrow(rect, "attack_route", "Innsatsvei"))
-        notes.append("P-kjeller er heuristisk markert med trapper/sluser som sannsynlige rømnings- og innsatsknutepunkt.")
-        assumptions.append("Brannsluse, branngardin og maksimal slangelengde må bekreftes i detaljprosjektering.")
+        for rect in hits_for_terms(page, ["Trapp", "Trapp/ heis", "heis"], max_items=3):
+            elements.append(create_box_element(rect, "fire_compartment", "Trapperom / kjerne"))
+            elements.append(create_margin_arrow(rect, "escape_arrow", "Rømningsretning"))
+        for rect in hits_for_terms(page, ["Sluse"], max_items=2):
+            elements.append(create_box_element(rect, "fire_compartment", "Brannsluse"))
+        for rect in hits_for_terms(page, ["Korridor"], max_items=2):
+            elements.append(create_fill_element(rect, "escape_route", "Rømningsvei"))
+        for rect in hits_for_terms(page, ["Inngang", "Innkjøring"], max_items=2):
+            elements.append(create_margin_arrow(rect, "attack_route", "Innsatsvei"))
+        notes.append("P-kjeller er markert med trapperom, mulig brannsluse, rømningsretning og sannsynlig innsatsretning der dette er synlig i underlaget.")
+        assumptions.append("Innsatsvei i p-kjeller og eventuell brannsluse/branngardin ma bekreftes mot detaljprosjektert RIBr-underlag.")
 
     elif page_kind == "residential_floor_plan":
-        for term in ["Trapp", "Trapp/ heis", "heis", "Korridor"]:
-            for rect in page.keyword_hits.get(term, [])[:5]:
-                elements.append(create_fill_element(rect, "escape_route", "Rømningsvei"))
-        for term in ["Balkong", "Terrasse"]:
-            for rect in page.keyword_hits.get(term, [])[:8]:
-                elements.append(create_fill_element(rect, "rescue_route", "Balkong / redningsmulighet"))
-        for term in ["Inngang"]:
-            for rect in page.keyword_hits.get(term, [])[:2]:
-                elements.append(create_margin_arrow(rect, "attack_route", "Angrepsvei"))
-        for term in ["Trapp", "Trapp/ heis"]:
-            for rect in page.keyword_hits.get(term, [])[:2]:
-                elements.append(create_box_element(rect, "fire_compartment", "Brannskille / kjerne"))
-        notes.append("Boligplan er heuristisk markert med trapperom, rømningsretning og balkonger/redningsflater der dette kan leses ut av tegningen.")
-        assumptions.append("Branncellebegrensende skiller på leilighetsnivå må verifiseres mot endelig planløsning og detaljert RIBr-underlag.")
+        for rect in hits_for_terms(page, ["Trapp", "Trapp/ heis", "heis"], max_items=3):
+            elements.append(create_box_element(rect, "fire_compartment", "Trapperom / kjerne"))
+            elements.append(create_margin_arrow(rect, "escape_arrow", "Rømningsretning"))
+        for rect in hits_for_terms(page, ["Korridor"], max_items=2):
+            elements.append(create_fill_element(rect, "escape_route", "Rømningsvei"))
+        for rect in hits_for_terms(page, ["Balkong", "Terrasse"], max_items=3):
+            elements.append(create_fill_element(rect, "rescue_route", "Redningsmulighet"))
+        for rect in hits_for_terms(page, ["Inngang"], max_items=2):
+            elements.append(create_margin_arrow(rect, "attack_route", "Innsatsvei"))
+        notes.append("Boligplan er markert med trapperom/kjerne, rømningsretning, sannsynlig rømningsvei og representative balkonger/terrasser som redningsmulighet.")
+        assumptions.append("Brannskiller mellom boenheter, fellesarealer og eventuelle dørklasser ma fastsettes i detaljprosjekteringen.")
 
     else:
-        for term in ["Trapp", "Sluse", "Inngang"]:
-            for rect in page.keyword_hits.get(term, [])[:3]:
-                elements.append(create_box_element(rect, "fire_compartment", term))
+        for rect in hits_for_terms(page, ["Trapp", "Sluse", "Inngang"], max_items=3):
+            elements.append(create_box_element(rect, "fire_compartment", "Brannrelevant punkt"))
         if elements:
-            notes.append("Generell plantegning er markert rundt identifiserte brannrelevante nøkkelord.")
+            notes.append("Siden er markert rundt identifiserte brannrelevante nøkkelord, men krever normalt faglig ettersyn.")
 
     if not elements:
-        assumptions.append("Ingen sikre teksttreff for automatisk overlay; siden bør vurderes manuelt.")
+        assumptions.append("Siden inneholder for lite sikre teksttreff til et godt automatisk overlayutkast og bor vurderes manuelt.")
 
     return {
         "page_kind": page_kind,
         "page_title": page.page_title,
-        "drawing_summary": "Heuristisk førsteutkast basert på teksttreff i tegningen.",
+        "drawing_summary": "Forsiktig førsteutkast basert pa teksttreff, tegningstittel og sideklassifisering.",
         "analysis_notes": notes,
         "assumptions": assumptions,
         "legend_items": DEFAULT_LEGENDS.get(page_kind, DEFAULT_LEGENDS["general_plan"]),
         "elements": elements,
         "qa": {
-            "confidence": 0.45 if elements else 0.2,
+            "confidence": 0.42 if elements else 0.2,
             "human_review_focus": [
-                "Kontroller at markerte rømningsveier og innsatsveier faktisk samsvarer med prosjektets brannstrategi.",
-                "Kontroller at branncelleskiller og dørklasser er riktig spesifisert før bruk i byggesak eller detaljprosjekt.",
+                "Verifiser at markeringene faktisk følger prosjektets brannstrategi og planlosning.",
+                "Suppler med presise brannskiller, dorklasser og detaljer nar dette er dokumentert i prosjektet.",
             ],
         },
         "mode": "heuristic",
@@ -740,30 +853,37 @@ def keyword_summary_for_prompt(keyword_hits: Dict[str, List[List[float]]]) -> st
     return json.dumps(compact, ensure_ascii=False)
 
 
+
 def drawing_prompt_for_page(page: SourcePage, brann_data: Dict[str, Any], manual_notes: str) -> str:
-    default_legends = DEFAULT_LEGENDS.get(page.page_kind, DEFAULT_LEGENDS["general_plan"])
+    resolved_kind = resolve_page_kind_for_page(page, page.page_kind, page.page_title)
+    default_legends = DEFAULT_LEGENDS.get(resolved_kind, DEFAULT_LEGENDS["general_plan"])
     legend_text = "; ".join([f"{item['label']} -> {item['style']}" for item in default_legends])
-    text_excerpt = clean_pdf_text(page.raw_text)[:4500]
+    text_excerpt = clean_pdf_text(page.raw_text)[:6000]
 
     return f"""
-Du er en svært erfaren norsk brannrådgiver (RIBr). Du analyserer en opplastet arkitekttegning og skal returnere et branntegningsutkast som ligger tett på profesjonelle branntegninger.
+Du er en svært erfaren norsk brannrådgiver (RIBr). Du analyserer en opplastet arkitekttegning og skal returnere et nøkternt og faglig troverdig branntegningsutkast.
 
-OPPGAVE:
-1. Forsta hvilken tegningstype dette er.
-2. Marker kun forhold som faktisk kan begrunnes ut fra tegningen, synlige romnavn og teksttreff.
-3. Returner et nøkternt, faglig og anvendbart overlayutkast som kan legges direkte over plantegningen.
-4. Bruk standardiserte brannsymboler og farger inspirert av profesjonelle branntegninger:
-   - fire_compartment = rødt stiplet skille / branncellegrense
-   - escape_route = grønt transparent bånd for rømningsvei / trapp / korridor
-   - escape_arrow = grønn pil for rømningsretning
-   - rescue_route = orange transparent markering for balkong / redningsmulighet
-   - attack_route = rød pil for innsatsvei / angrepsvei
-   - fire_access = blå skravur/bånd for kjørbar atkomst brannvesen
-   - staging_area = rødt/rosa felt for oppstillingsplass
-   - door_class = liten hvit tagg med rød kant for dørklasse eller referanse
-   - note_box = diskret hvit kommentarboks
-5. Ikke lag en perfekt detaljprosjektert fasit. Lever et godt RIBr-utkast som er konkret, lesbart og egnet for faglig kontroll.
-6. Ikke dekk til tittelblokk, målestokk eller revisjonsfelt dersom det finnes stor ledig hvitflate et annet sted.
+VIKTIGSTE OPPGAVE:
+- Les tegningsgrunnlaget grundig før du markerer noe.
+- Bruk både helbilde, zoomede utsnitt, tegningsnavn, sidetittel og lesbar PDF-tekst.
+- Hvis tegningen f.eks. sier "P-kjeller - se landskapsplan for mer", er dette fortsatt en p-kjellerplan og ikke en situasjonsplan.
+- Ikke marker noe du ikke kan begrunne ut fra selve tegningen eller brukerens instrukser.
+- Foretrekk færre og bedre markeringer fremfor mange usikre markeringer.
+
+STIL FOR OVERLAY:
+- Bruk korte, profesjonelle etiketter som er egnet som callouts utenfor tegningen (typisk 2-6 ord).
+- Unnga lange setninger inne i elementetikettene.
+- Ikke oppgi presise EI-/REI-klasser eller dorklasser med mindre dette faktisk fremgar av tegningsunderlaget eller brukerens eksplisitte instruks.
+- Bruk standardiserte symboler/farger:
+  - fire_compartment = rødt stiplet brannskille / kjerne
+  - escape_route = grønt bånd for rømningsvei / korridor
+  - escape_arrow = grønn pil for rømningsretning
+  - rescue_route = oransje markering for balkong / redningsmulighet
+  - attack_route = rød pil for innsatsvei / angrepsvei
+  - fire_access = blå markering for kjørbar brannatkomst
+  - staging_area = rød/rosa markering for oppstillingsplass
+  - door_class = liten dørtagg hvis dette faktisk er dokumentert
+  - note_box = kort nøytral kommentarboks ved behov
 
 KONTEKST:
 Prosjekt: {pd_state.get('p_name', '-')}
@@ -778,8 +898,8 @@ Manuelle merknader fra bruker: {manual_notes or 'Ingen ekstra notater'}
 TEGNINGSINFO:
 Dokument: {page.doc_name}
 Side: {page.page_number}
-Tolket tegningstype: {PAGE_KIND_LABELS.get(page.page_kind, page.page_kind)}
-Tolkning av sidetittel: {page.page_title}
+Regelbasert tegningstype-hint: {PAGE_KIND_LABELS.get(resolved_kind, resolved_kind)}
+Tolket sidetittel: {page.page_title}
 Viktige teksttreff med koordinater (normalisert 0-1): {keyword_summary_for_prompt(page.keyword_hits)}
 Utdrag av lesbar tekst fra PDF: {text_excerpt}
 
@@ -790,28 +910,61 @@ RETURNER KUN GYLDIG JSON MED DENNE STRUKTUREN:
 {json.dumps({
     'page_kind': 'site_plan | parking_plan | residential_floor_plan | general_plan',
     'page_title': 'Kort og ryddig tittel',
-    'drawing_summary': '1-3 setninger om hva tegningen viser og hva som er markert',
+    'drawing_summary': '1-3 setninger om hva tegningen faktisk viser og hva som er markert',
     'analysis_notes': ['Punktvis observasjon 1', 'Punktvis observasjon 2'],
-    'assumptions': ['Hva som er antatt eller ma kontrolleres'],
-    'legend_items': [{'label': 'Branncelle EI 60', 'style': 'fire_compartment'}],
+    'assumptions': ['Korte, faglige forutsetninger uten overskriftstekst'],
+    'legend_items': [{'label': 'Branncelle / kjerne', 'style': 'fire_compartment'}],
     'elements': [
-        {'type': 'dashed_polyline', 'points': [[0.12, 0.20], [0.32, 0.20], [0.32, 0.45]], 'style': 'fire_compartment', 'label': 'EI 60'},
+        {'type': 'dashed_polyline', 'points': [[0.12, 0.20], [0.32, 0.20], [0.32, 0.45]], 'style': 'fire_compartment', 'label': 'Brannskille'},
         {'type': 'band', 'points': [[0.45, 0.18], [0.45, 0.42]], 'style': 'escape_route', 'label': 'Rømningsvei'},
         {'type': 'arrow', 'points': [[0.65, 0.30], [0.72, 0.30]], 'style': 'escape_arrow', 'label': 'Rømningsretning'},
-        {'type': 'box', 'rect': [0.41, 0.17, 0.50, 0.32], 'style': 'door_class', 'label': 'EI2 30 Sa'},
-        {'type': 'area_fill', 'rect': [0.12, 0.65, 0.26, 0.77], 'style': 'rescue_route', 'label': 'Balkong / redningsmulighet'},
-        {'type': 'note_box', 'rect': [0.62, 0.70, 0.90, 0.88], 'style': 'note_box', 'label': 'Kort notat'}
+        {'type': 'area_fill', 'rect': [0.12, 0.65, 0.26, 0.77], 'style': 'rescue_route', 'label': 'Redningsmulighet'}
     ],
     'qa': {'confidence': 0.0, 'human_review_focus': ['Hva fagperson ma kontrollere']}
 }, ensure_ascii=False)}
 
 VIKTIGE REGLER:
 - Koordinater skal være normaliserte 0-1.
-- Elementlisten skal være praktisk og ikke overfylt. Vanligvis 4-14 elementer.
-- Bruk dashed_polyline eller box for brannskiller.
-- Bruk band og arrow for rømningslinjer og innsatsveier.
-- Legg legend_items og note_box slik at de kan brukes direkte i en rapport.
+- Elementlisten skal være praktisk og ikke overfylt. Vanligvis 4-10 gode elementer er bedre enn 16 svake.
+- Hvis underlaget er uklart, reduser antall elementer og skriv en kort forutsetning fremfor å gjette.
 - Ikke returner markdown, forklaring eller tekst utenfor JSON.
+"""
+
+
+
+def refine_prompt_for_page(page: SourcePage, current_analysis: Dict[str, Any], brann_data: Dict[str, Any], manual_notes: str, refine_instruction: str) -> str:
+    resolved_kind = resolve_page_kind_for_page(page, current_analysis.get("page_kind", page.page_kind), current_analysis.get("page_title", page.page_title))
+    compact_current = deepcopy(current_analysis)
+    compact_current["elements"] = compact_current.get("elements", [])[:20]
+    compact_current.pop("annotated_image", None)
+    return f"""
+Du reviderer en eksisterende branntegningsanalyse for en norsk RIBr-bruker.
+
+BRUKERENS NYE INSTRUKS:
+{refine_instruction}
+
+REGLER:
+- Revider dagens analyse i stedet for å starte helt på nytt.
+- Behold gode elementer, fjern svake elementer, og legg bare til nye markeringer dersom de kan begrunnes av tegningen.
+- Hold etiketter korte og egnet som callouts utenfor tegningen.
+- Ikke skriv lange forklaringer inne i etikettene.
+- Ikke oppgi presise EI-/REI-klasser eller dorklasser uten tydelig grunnlag.
+- Dersom siden er en p-kjeller, skal den ikke behandles som situasjonsplan bare fordi den henviser til landskapsplan.
+- Returner kun gyldig JSON i samme struktur som eksisterende analyse.
+
+KONTEKST:
+Prosjekt: {pd_state.get('p_name', '-')}
+Risikoklasse: {brann_data.get('rkl', '-')}
+Brannklasse: {brann_data.get('bkl', '-')}
+Slokkeanlegg: {brann_data.get('sprinkler', '-')}
+Alarm: {brann_data.get('alarm', '-')}
+Regelverk: {brann_data.get('regelverk', 'TEK17 / VTEK17')}
+Generelle brukermerknader: {manual_notes or 'Ingen ekstra notater'}
+Regelbasert tegningstype-hint: {PAGE_KIND_LABELS.get(resolved_kind, resolved_kind)}
+Dokument: {page.doc_name} | side {page.page_number} | tittel {page.page_title}
+
+EKSISTERENDE ANALYSE JSON:
+{json.dumps(compact_current, ensure_ascii=False)}
 """
 
 
@@ -1024,27 +1177,67 @@ def invalidate_generated_outputs() -> None:
     st.session_state.brann_manual_edits_dirty = True
 
 
+
 def refresh_analysis_item(item: Dict[str, Any]) -> None:
     page = item["page"]
     item["analysis"] = normalize_analysis_payload(item.get("analysis") or {}, item.get("page_kind") or page.page_kind)
+    item["analysis"]["page_kind"] = resolve_page_kind_for_page(page, item["analysis"].get("page_kind", page.page_kind), item["analysis"].get("page_title") or page.page_title)
     item["page_kind"] = item["analysis"].get("page_kind", page.page_kind)
     item["annotated_image"] = render_overlay(page, item["analysis"])
     invalidate_generated_outputs()
 
 
+
 def analyze_page(page: SourcePage, brann_data: Dict[str, Any], manual_notes: str = "") -> Dict[str, Any]:
     heuristic = normalize_analysis_payload(heuristic_markup_for_page(page, brann_data), page.page_kind)
+    heuristic["page_kind"] = resolve_page_kind_for_page(page, heuristic.get("page_kind", page.page_kind), heuristic.get("page_title") or page.page_title)
     if not AI_AVAILABLE or page.page_kind not in DRAWABLE_PAGE_KINDS:
         return heuristic
 
     try:
         model = genai.GenerativeModel(pick_model_name())
-        response = model.generate_content([drawing_prompt_for_page(page, brann_data, manual_notes), page.image])
+        detail_sheet = make_ai_detail_sheet(page.image, page.page_title)
+        response = model.generate_content([
+            drawing_prompt_for_page(page, brann_data, manual_notes),
+            page.image,
+            detail_sheet,
+        ])
         parsed = try_parse_json(extract_response_text(response))
         merged = merge_analysis(parsed, heuristic)
-        return normalize_analysis_payload(merged, page.page_kind)
+        merged["page_kind"] = resolve_page_kind_for_page(page, merged.get("page_kind", page.page_kind), merged.get("page_title") or page.page_title)
+        return normalize_analysis_payload(merged, merged.get("page_kind", page.page_kind))
     except Exception:
         return heuristic
+
+
+
+def refine_analysis_with_instruction(
+    page: SourcePage,
+    current_analysis: Dict[str, Any],
+    brann_data: Dict[str, Any],
+    manual_notes: str,
+    refine_instruction: str,
+) -> Dict[str, Any]:
+    base = normalize_analysis_payload(current_analysis or {}, current_analysis.get("page_kind", page.page_kind) if current_analysis else page.page_kind)
+    base["page_kind"] = resolve_page_kind_for_page(page, base.get("page_kind", page.page_kind), base.get("page_title") or page.page_title)
+
+    if not refine_instruction.strip() or not AI_AVAILABLE:
+        return base
+
+    try:
+        model = genai.GenerativeModel(pick_model_name())
+        detail_sheet = make_ai_detail_sheet(page.image, page.page_title)
+        response = model.generate_content([
+            refine_prompt_for_page(page, base, brann_data, manual_notes, refine_instruction),
+            page.image,
+            detail_sheet,
+        ])
+        parsed = try_parse_json(extract_response_text(response))
+        merged = merge_analysis(parsed, base)
+        merged["page_kind"] = resolve_page_kind_for_page(page, merged.get("page_kind", page.page_kind), merged.get("page_title") or page.page_title)
+        return normalize_analysis_payload(merged, merged.get("page_kind", page.page_kind))
+    except Exception:
+        return base
 
 
 # -----------------------------------------------------------------------------
@@ -1279,11 +1472,216 @@ def make_comparison_image(original: Image.Image, annotated: Image.Image, title: 
     return canvas
 
 
+def callout_content_box(image: Image.Image, left: int = 260, right: int = 320, top: int = 36, bottom: int = 36) -> Tuple[int, int, int, int, int, int]:
+    canvas_w = image.width + left + right
+    canvas_h = image.height + top + bottom
+    return left, top, left + image.width, top + image.height, canvas_w, canvas_h
+
+
+
+def norm_pt_to_px_in_box(point: List[float], box: Tuple[int, int, int, int]) -> Tuple[int, int]:
+    x0, y0, x1, y1 = box
+    return (
+        int(x0 + clamp01(point[0]) * max(x1 - x0, 1)),
+        int(y0 + clamp01(point[1]) * max(y1 - y0, 1)),
+    )
+
+
+
+def norm_rect_to_px_in_box(rect: List[float], box: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    x0, y0, x1, y1 = box
+    bx0 = int(x0 + clamp01(rect[0]) * max(x1 - x0, 1))
+    by0 = int(y0 + clamp01(rect[1]) * max(y1 - y0, 1))
+    bx1 = int(x0 + clamp01(rect[2]) * max(x1 - x0, 1))
+    by1 = int(y0 + clamp01(rect[3]) * max(y1 - y0, 1))
+    return (min(bx0, bx1), min(by0, by1), max(bx0, bx1), max(by0, by1))
+
+
+
+def anchor_for_element(element: Dict[str, Any], content_box: Tuple[int, int, int, int]) -> Optional[Tuple[int, int]]:
+    etype = element.get("type")
+    if etype in {"box", "area_fill", "note_box", "door_tag"} and element.get("rect"):
+        x0, y0, x1, y1 = norm_rect_to_px_in_box(element.get("rect"), content_box)
+        return ((x0 + x1) // 2, (y0 + y1) // 2)
+    if etype in {"dashed_polyline", "polyline", "band", "arrow"} and element.get("points"):
+        points = [norm_pt_to_px_in_box(pt, content_box) for pt in element.get("points") or []]
+        if not points:
+            return None
+        return (sum(p[0] for p in points) // len(points), sum(p[1] for p in points) // len(points))
+    return None
+
+
+
+def wrap_draw_text(draw: ImageDraw.ImageDraw, text: str, box: Tuple[int, int, int, int], font: ImageFont.ImageFont, fill: Tuple[int, int, int, int]) -> None:
+    x0, y0, x1, y1 = box
+    lines = wrap_text_px(text, font, max(40, x1 - x0 - 22))
+    yy = y0 + 12
+    for line in lines[:3]:
+        draw.text((x0 + 12, yy), clean_pdf_text(line), font=font, fill=fill)
+        yy += font.getbbox(line)[3] - font.getbbox(line)[1] + 4
+
+
+
+def collect_callouts(elements: List[Dict[str, Any]], content_box: Tuple[int, int, int, int], max_items: int = 10) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], List[Tuple[int, int]]] = {}
+    raw_elements: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for element in elements or []:
+        label = clean_pdf_text(element.get("label", "")).strip()
+        if not label:
+            continue
+        if element.get("type") in {"note_box", "door_tag"}:
+            continue
+        anchor = anchor_for_element(element, content_box)
+        if not anchor:
+            continue
+        key = (label, element.get("style", "fire_compartment"))
+        grouped.setdefault(key, []).append(anchor)
+        raw_elements[key] = element
+
+    candidates: List[Dict[str, Any]] = []
+    for idx, (key, anchors) in enumerate(grouped.items(), start=1):
+        label, style = key
+        xs = [pt[0] for pt in anchors]
+        ys = sorted(pt[1] for pt in anchors)
+        anchor = (int(sum(xs) / len(xs)), ys[len(ys) // 2])
+        candidates.append({
+            "label": label,
+            "style": style,
+            "anchor": anchor,
+            "count": len(anchors),
+            "element": raw_elements[key],
+        })
+    candidates.sort(key=lambda item: item["anchor"][1])
+    return candidates[:max_items]
+
+
+
+def layout_callouts(candidates: List[Dict[str, Any]], canvas_size: Tuple[int, int], content_box: Tuple[int, int, int, int]) -> List[Dict[str, Any]]:
+    canvas_w, canvas_h = canvas_size
+    x0, y0, x1, y1 = content_box
+    mid_x = (x0 + x1) / 2.0
+    top_limit = y0 + 8
+    bottom_limit = y1 - 8
+    left_box_w = max(220, x0 - 28)
+    right_box_w = max(250, canvas_w - x1 - 28)
+
+    result: List[Dict[str, Any]] = []
+    for side in ["left", "right"]:
+        items = [item for item in candidates if (item["anchor"][0] < mid_x) == (side == "left")]
+        last_y = top_limit - 8
+        prepared: List[Dict[str, Any]] = []
+        for number, item in enumerate(items, start=1):
+            box_w = left_box_w if side == "left" else right_box_w
+            style = FIRE_STYLE_LIBRARY.get(item["style"], FIRE_STYLE_LIBRARY["fire_compartment"])
+            font = get_font(18, bold=True)
+            line_count = len(wrap_text_px(item["label"], font, box_w - 56))
+            box_h = 24 + line_count * 24
+            desired_y = int(item["anchor"][1] - box_h / 2)
+            y_pos = max(top_limit, desired_y)
+            if y_pos < last_y + 10:
+                y_pos = last_y + 10
+            x_pos = 14 if side == "left" else canvas_w - box_w - 14
+            prepared.append({
+                **item,
+                "side": side,
+                "box": (x_pos, y_pos, x_pos + box_w, y_pos + box_h),
+                "box_h": box_h,
+                "number": len(result) + len(prepared) + 1,
+                "style_cfg": style,
+            })
+            last_y = y_pos + box_h
+        overflow = max(0, (prepared[-1]["box"][3] - bottom_limit) if prepared else 0)
+        if overflow > 0:
+            shift = overflow
+            for entry in reversed(prepared):
+                bx0, by0, bx1, by1 = entry["box"]
+                moved = min(shift, max(0, by0 - top_limit))
+                entry["box"] = (bx0, by0 - moved, bx1, by1 - moved)
+                shift -= moved
+        result.extend(prepared)
+    return result
+
+
+
+def draw_callouts(draw: ImageDraw.ImageDraw, elements: List[Dict[str, Any]], content_box: Tuple[int, int, int, int], canvas_size: Tuple[int, int]) -> None:
+    candidates = collect_callouts(elements, content_box)
+    laid_out = layout_callouts(candidates, canvas_size, content_box)
+    title_font = get_font(18, bold=True)
+    body_font = get_font(17, bold=False)
+
+    for callout in laid_out:
+        style = callout["style_cfg"]
+        anchor_x, anchor_y = callout["anchor"]
+        x0, y0, x1, y1 = callout["box"]
+        stroke = rgba(style.get("stroke", "#334155"), 255)
+        text_fill = rgba(style.get("text", style.get("stroke", "#0f172a")), 255)
+        draw.rounded_rectangle(callout["box"], radius=16, fill=rgba("#ffffff", 248), outline=stroke, width=2)
+
+        bubble_r = 13
+        if callout["side"] == "left":
+            elbow = (content_box[0] - 20, anchor_y)
+            end = (x1, y0 + (y1 - y0) // 2)
+        else:
+            elbow = (content_box[2] + 20, anchor_y)
+            end = (x0, y0 + (y1 - y0) // 2)
+        draw.line([callout["anchor"], elbow, end], fill=stroke, width=3)
+        draw.ellipse((anchor_x - bubble_r, anchor_y - bubble_r, anchor_x + bubble_r, anchor_y + bubble_r), fill=rgba("#ffffff", 248), outline=stroke, width=2)
+        num_text = str(callout["number"])
+        num_bbox = title_font.getbbox(num_text)
+        draw.text((anchor_x - (num_bbox[2] - num_bbox[0]) / 2, anchor_y - (num_bbox[3] - num_bbox[1]) / 2 - 1), num_text, font=title_font, fill=text_fill)
+
+        bubble_x = x0 + 14
+        bubble_y = y0 + 12
+        draw.ellipse((bubble_x, bubble_y, bubble_x + 28, bubble_y + 28), fill=rgba("#ffffff", 248), outline=stroke, width=2)
+        draw.text((bubble_x + 7, bubble_y + 3), num_text, font=title_font, fill=text_fill)
+        wrap_draw_text(draw, clean_pdf_text(callout["label"]), (x0 + 42, y0 + 8, x1 - 10, y1 - 8), body_font, text_fill)
+
+
+
+def draw_legend_box_fixed(draw: ImageDraw.ImageDraw, rect: Tuple[int, int, int, int], legend_items: List[Dict[str, Any]], title: str = "Symbolforklaring") -> None:
+    if not legend_items:
+        return
+    x0, y0, x1, y1 = rect
+    draw.rounded_rectangle(rect, radius=18, fill=rgba("#ffffff", 242), outline=rgba("#94a3b8", 255), width=2)
+    title_font = get_font(20, bold=True)
+    body_font = get_font(17, bold=False)
+    draw.text((x0 + 18, y0 + 12), clean_pdf_text(title), font=title_font, fill=rgba("#0f172a", 255))
+    line_y = y0 + 48
+    swatch_x = x0 + 18
+    text_x = x0 + 90
+    row_gap = max(24, int((y1 - y0 - 58) / max(len(legend_items), 1)))
+    for item in legend_items[:7]:
+        style = FIRE_STYLE_LIBRARY.get(item.get("style", "fire_compartment"), FIRE_STYLE_LIBRARY["fire_compartment"])
+        label = clean_pdf_text(item.get("label", ""))
+        if item.get("style") == "fire_compartment":
+            draw_dashed_polyline(draw, [(swatch_x, line_y + 8), (swatch_x + 50, line_y + 8)], rgba(style.get("stroke"), 255), 5)
+        elif item.get("style") == "escape_route":
+            draw_band(draw, [(swatch_x, line_y + 8), (swatch_x + 50, line_y + 8)], style)
+        elif item.get("style") == "escape_arrow":
+            draw_arrow(draw, (swatch_x, line_y + 8), (swatch_x + 50, line_y + 8), rgba(style.get("stroke"), 255), 5)
+        elif item.get("style") == "rescue_route":
+            draw_band(draw, [(swatch_x, line_y + 8), (swatch_x + 50, line_y + 8)], style)
+        elif item.get("style") == "attack_route":
+            draw_arrow(draw, (swatch_x, line_y + 8), (swatch_x + 50, line_y + 8), rgba(style.get("stroke"), 255), 5)
+        elif item.get("style") == "fire_access":
+            draw_hatched_band(draw, [(swatch_x, line_y + 8), (swatch_x + 50, line_y + 8)], style)
+        elif item.get("style") == "staging_area":
+            draw.rounded_rectangle((swatch_x, line_y, swatch_x + 50, line_y + 16), radius=4, fill=rgba(style.get("fill"), int(style.get("alpha", 120))), outline=rgba(style.get("stroke"), 255), width=2)
+        else:
+            draw.rounded_rectangle((swatch_x, line_y, swatch_x + 50, line_y + 16), radius=4, fill=rgba(style.get("fill", "#ffffff"), int(style.get("alpha", 180))), outline=rgba(style.get("stroke"), 255), width=2)
+        draw.text((text_x, line_y - 3), label, font=body_font, fill=rgba("#0f172a", 255))
+        line_y += row_gap
+
+
+
 def render_overlay(page: SourcePage, analysis: Dict[str, Any]) -> Image.Image:
-    canvas = page.image.convert("RGBA")
-    overlay = Image.new("RGBA", canvas.size, (255, 255, 255, 0))
+    content_left, content_top, content_right, content_bottom, canvas_w, canvas_h = callout_content_box(page.image)
+    content_box = (content_left, content_top, content_right, content_bottom)
+
+    base_canvas = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+    base_canvas.paste(page.image.convert("RGBA"), (content_left, content_top))
+    overlay = Image.new("RGBA", base_canvas.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
-    label_font = get_font(max(18, int(canvas.width * 0.018)), bold=True)
 
     for element in analysis.get("elements", []) or []:
         style_name = element.get("style", "fire_compartment")
@@ -1292,7 +1690,7 @@ def render_overlay(page: SourcePage, analysis: Dict[str, Any]) -> Image.Image:
         etype = element.get("type")
 
         if etype in {"dashed_polyline", "polyline", "band", "arrow"}:
-            points = [norm_pt_to_px(pt, canvas.size) for pt in element.get("points", []) or []]
+            points = [norm_pt_to_px_in_box(pt, content_box) for pt in element.get("points", []) or []]
             if len(points) < 2:
                 continue
             if etype == "dashed_polyline":
@@ -1306,17 +1704,12 @@ def render_overlay(page: SourcePage, analysis: Dict[str, Any]) -> Image.Image:
                     draw_band(draw, points, style)
             elif etype == "arrow":
                 draw_arrow(draw, points[0], points[-1], rgba(style.get("stroke"), 255), int(style.get("width", 4)))
-            if label:
-                mx = int(sum(p[0] for p in points) / len(points))
-                my = int(sum(p[1] for p in points) / len(points))
-                bbox = (mx + 10, my - 10, mx + 180, my + 38)
-                draw_text_label(draw, bbox, label, style.get("stroke", "#0f172a"), "#ffffff", style.get("text", "#0f172a"), max(16, int(canvas.width * 0.012)))
 
         elif etype in {"box", "area_fill", "note_box"}:
             rect = element.get("rect")
             if not rect:
                 continue
-            px_rect = norm_rect_to_px(rect, canvas.size)
+            px_rect = norm_rect_to_px_in_box(rect, content_box)
             if etype == "box":
                 if style_name == "fire_compartment":
                     x0, y0, x1, y1 = px_rect
@@ -1326,29 +1719,26 @@ def render_overlay(page: SourcePage, analysis: Dict[str, Any]) -> Image.Image:
                     pts = [(px_rect[0], (px_rect[1] + px_rect[3]) // 2), (px_rect[2], (px_rect[1] + px_rect[3]) // 2)]
                     draw_hatched_band(draw, pts, style)
                 else:
-                    draw.rounded_rectangle(px_rect, radius=12, outline=rgba(style.get("stroke"), 255), width=int(style.get("width", 3)), fill=rgba(style.get("fill"), int(style.get("alpha", 90))))
-                if label:
-                    label_rect = (px_rect[0], max(10, px_rect[1] - 42), min(canvas.width - 10, px_rect[0] + 220), max(44, px_rect[1] - 6))
-                    draw_text_label(draw, label_rect, label, style.get("stroke", "#0f172a"), "#ffffff", style.get("text", "#0f172a"), max(16, int(canvas.width * 0.012)))
+                    draw.rounded_rectangle(px_rect, radius=12, outline=rgba(style.get("stroke"), 255), width=int(style.get("width", 3)), fill=rgba(style.get("fill"), int(style.get("alpha", 80))))
             elif etype == "area_fill":
-                draw.rounded_rectangle(px_rect, radius=12, outline=rgba(style.get("stroke"), 255), width=max(2, int(style.get("width", 2) * 0.12)), fill=rgba(style.get("fill"), int(style.get("alpha", 100))))
-                if label:
-                    label_rect = (px_rect[0], max(10, px_rect[1] - 42), min(canvas.width - 10, px_rect[0] + 260), max(44, px_rect[1] - 6))
-                    draw_text_label(draw, label_rect, label, style.get("stroke", "#0f172a"), "#ffffff", style.get("text", "#0f172a"), max(16, int(canvas.width * 0.012)))
+                draw.rounded_rectangle(px_rect, radius=12, outline=rgba(style.get("stroke"), 255), width=max(2, int(style.get("width", 2) * 0.12)), fill=rgba(style.get("fill"), int(style.get("alpha", 90))))
             else:
-                draw_text_label(draw, px_rect, label or "Kommentar", style.get("stroke", "#94a3b8"), style.get("fill", "#ffffff"), style.get("text", "#0f172a"), max(16, int(canvas.width * 0.012)))
+                draw_text_label(draw, px_rect, label or "Kommentar", style.get("stroke", "#94a3b8"), style.get("fill", "#ffffff"), style.get("text", "#0f172a"), max(16, int(page.image.width * 0.012)))
 
         elif etype == "door_tag":
             rect = element.get("rect")
             if not rect:
                 continue
-            px_rect = norm_rect_to_px(rect, canvas.size)
-            draw_text_label(draw, px_rect, label or "EI2 30 Sa", style.get("stroke", "#ef4444"), style.get("fill", "#ffffff"), style.get("text", "#ef4444"), max(14, int(canvas.width * 0.010)))
+            px_rect = norm_rect_to_px_in_box(rect, content_box)
+            draw_text_label(draw, px_rect, label or "EI2 30 Sa", style.get("stroke", "#ef4444"), style.get("fill", "#ffffff"), style.get("text", "#ef4444"), max(14, int(page.image.width * 0.010)))
 
-    combined = Image.alpha_composite(canvas, overlay).convert("RGB")
+    combined = Image.alpha_composite(base_canvas, overlay).convert("RGB")
     overlay_draw = ImageDraw.Draw(combined)
-    legend_items = analysis.get("legend_items") or DEFAULT_LEGENDS.get(page.page_kind, DEFAULT_LEGENDS["general_plan"])
-    draw_legend_box(overlay_draw, combined, legend_items)
+    draw_callouts(overlay_draw, analysis.get("elements", []) or [], content_box, combined.size)
+
+    legend_items = analysis.get("legend_items") or DEFAULT_LEGENDS.get(analysis.get("page_kind", page.page_kind), DEFAULT_LEGENDS["general_plan"])
+    legend_rect = (content_right + 16, max(content_top + 18, content_bottom - 220), canvas_w - 16, content_bottom - 12)
+    draw_legend_box_fixed(overlay_draw, legend_rect, legend_items)
     return combined
 
 
@@ -1925,7 +2315,7 @@ def create_full_report_pdf(project_data: Dict[str, Any], brann_data: Dict[str, A
             if notes:
                 pdf.highlight_box("Analysepunkter", notes[:5], fill=(245, 247, 250), accent=(56, 194, 201))
             if assumptions:
-                pdf.highlight_box("Forutsetninger / ma avklares", assumptions[:4], fill=(255, 249, 235), accent=(245, 158, 11))
+                pdf.highlight_box("Forutsetninger", assumptions[:4], fill=(255, 249, 235), accent=(245, 158, 11))
 
     return as_pdf_bytes(pdf)
 
@@ -2114,9 +2504,373 @@ st.markdown(
 )
 
 
+def render_mouse_canvas_editor(page: SourcePage, elements: List[Dict[str, Any]], bridge_label: str, component_key: str) -> None:
+    editable_elements = []
+    passthrough = []
+    for element in elements or []:
+        if element.get("type") in {"box", "area_fill", "arrow"}:
+            editable_elements.append(normalize_element(element))
+        else:
+            passthrough.append(normalize_element(element))
+
+    image_data_url = image_to_data_url(page.image, max_width=1500)
+    payload = {
+        "image": image_data_url,
+        "editable": editable_elements,
+        "passthrough": passthrough,
+        "bridgeLabel": bridge_label,
+        "styles": list(FIRE_STYLE_LIBRARY.keys()),
+    }
+
+    html = f"""
+    <div style=\"font-family: Inter, Arial, sans-serif; color: #e5eef8;\">
+      <div style=\"margin-bottom:8px; color:#9fb0c3; font-size:13px;\">Museeditor (beta): flytt, tegn og juster bokser/felt/piler. Klikk deretter <b>Send til Streamlit</b> og bruk knappen under for å importere.</div>
+      <div style=\"display:flex; gap:12px; align-items:flex-start;\">
+        <div style=\"width:220px; background:#0c1520; border:1px solid rgba(120,145,170,0.25); border-radius:12px; padding:12px; box-sizing:border-box;\">
+          <div style=\"font-weight:700; margin-bottom:8px; color:#f5f7fb;\">Verktøy</div>
+          <div style=\"display:grid; grid-template-columns:1fr; gap:8px;\">
+            <button id=\"toolSelect\">Velg / flytt</button>
+            <button id=\"toolBox\">Ny boks</button>
+            <button id=\"toolArea\">Nytt felt</button>
+            <button id=\"toolArrow\">Ny pil</button>
+            <button id=\"deleteBtn\">Slett valgt</button>
+          </div>
+          <div style=\"margin-top:14px; font-weight:700; color:#f5f7fb;\">Egenskaper</div>
+          <label style=\"display:block; font-size:12px; color:#9fb0c3; margin-top:10px;\">Etikett</label>
+          <input id=\"labelInput\" type=\"text\" style=\"width:100%; box-sizing:border-box; background:#0d1824; color:white; border:1px solid rgba(120,145,170,0.35); border-radius:8px; padding:8px;\" />
+          <label style=\"display:block; font-size:12px; color:#9fb0c3; margin-top:10px;\">Stil</label>
+          <select id=\"styleInput\" style=\"width:100%; box-sizing:border-box; background:#0d1824; color:white; border:1px solid rgba(120,145,170,0.35); border-radius:8px; padding:8px;\"></select>
+          <button id=\"saveBtn\" style=\"margin-top:14px; width:100%;\">Send til Streamlit</button>
+          <div id=\"statusBox\" style=\"margin-top:10px; font-size:12px; color:#9fb0c3;\"></div>
+        </div>
+        <div style=\"flex:1; min-width:0;\">
+          <canvas id=\"editorCanvas\" style=\"width:100%; background:#ffffff; border-radius:14px; border:1px solid rgba(120,145,170,0.25); cursor:crosshair;\"></canvas>
+          <textarea id=\"exportPayload\" style=\"width:100%; min-height:110px; margin-top:10px; background:#0c1520; color:#c8d3df; border:1px solid rgba(120,145,170,0.25); border-radius:12px; padding:10px; box-sizing:border-box;\" readonly></textarea>
+        </div>
+      </div>
+    </div>
+    <style>
+      button {{ background: rgba(56,194,201,0.15); color:#f5f7fb; border:1px solid rgba(56,194,201,0.35); border-radius:10px; padding:8px 10px; cursor:pointer; }}
+      button:hover {{ background: rgba(56,194,201,0.22); }}
+      button.active {{ background: rgba(56,194,201,0.35); }}
+    </style>
+    <script>
+    const payload = {json.dumps(payload, ensure_ascii=False)};
+    const canvas = document.getElementById('editorCanvas');
+    const ctx = canvas.getContext('2d');
+    const exportBox = document.getElementById('exportPayload');
+    const labelInput = document.getElementById('labelInput');
+    const styleInput = document.getElementById('styleInput');
+    const statusBox = document.getElementById('statusBox');
+    const img = new Image();
+    img.src = payload.image;
+
+    payload.styles.forEach(style => {{
+      const opt = document.createElement('option');
+      opt.value = style;
+      opt.textContent = style;
+      styleInput.appendChild(opt);
+    }});
+
+    let tool = 'select';
+    let activeIndex = -1;
+    let dragMode = null;
+    let start = null;
+    let scale = 1;
+    let offsetX = 0;
+    let offsetY = 0;
+    let imageW = 0;
+    let imageH = 0;
+    let elements = JSON.parse(JSON.stringify(payload.editable || []));
+    const passthrough = JSON.parse(JSON.stringify(payload.passthrough || []));
+
+    const buttons = {{
+      select: document.getElementById('toolSelect'),
+      box: document.getElementById('toolBox'),
+      area_fill: document.getElementById('toolArea'),
+      arrow: document.getElementById('toolArrow'),
+    }};
+
+    function setTool(next) {{
+      tool = next;
+      Object.entries(buttons).forEach(([key, btn]) => btn.classList.toggle('active', key === next));
+      canvas.style.cursor = next === 'select' ? 'default' : 'crosshair';
+    }}
+    document.getElementById('toolSelect').onclick = () => setTool('select');
+    document.getElementById('toolBox').onclick = () => setTool('box');
+    document.getElementById('toolArea').onclick = () => setTool('area_fill');
+    document.getElementById('toolArrow').onclick = () => setTool('arrow');
+    setTool('select');
+
+    function resizeCanvas() {{
+      const maxW = canvas.parentElement.clientWidth || 980;
+      const ratio = Math.min(1, maxW / img.width);
+      imageW = Math.max(1, Math.round(img.width * ratio));
+      imageH = Math.max(1, Math.round(img.height * ratio));
+      canvas.width = imageW;
+      canvas.height = imageH;
+      scale = imageW / img.width;
+      offsetX = 0;
+      offsetY = 0;
+      render();
+    }}
+
+    function normToPx(pt) {{
+      return [pt[0] * imageW, pt[1] * imageH];
+    }}
+    function pxToNorm(x, y) {{
+      return [Math.max(0, Math.min(1, x / imageW)), Math.max(0, Math.min(1, y / imageH))];
+    }}
+    function rectToPx(rect) {{
+      return [rect[0] * imageW, rect[1] * imageH, rect[2] * imageW, rect[3] * imageH];
+    }}
+    function hitRect(rect, x, y) {{
+      const [x0, y0, x1, y1] = rectToPx(rect);
+      return x >= Math.min(x0, x1) && x <= Math.max(x0, x1) && y >= Math.min(y0, y1) && y <= Math.max(y0, y1);
+    }}
+    function lineDistance(x, y, x1, y1, x2, y2) {{
+      const A = x - x1;
+      const B = y - y1;
+      const C = x2 - x1;
+      const D = y2 - y1;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = -1;
+      if (lenSq !== 0) param = dot / lenSq;
+      let xx, yy;
+      if (param < 0) {{ xx = x1; yy = y1; }}
+      else if (param > 1) {{ xx = x2; yy = y2; }}
+      else {{ xx = x1 + param * C; yy = y1 + param * D; }}
+      const dx = x - xx;
+      const dy = y - yy;
+      return Math.sqrt(dx * dx + dy * dy);
+    }}
+    function hitArrow(points, x, y) {{
+      if (!points || points.length < 2) return false;
+      const p1 = normToPx(points[0]);
+      const p2 = normToPx(points[points.length - 1]);
+      return lineDistance(x, y, p1[0], p1[1], p2[0], p2[1]) < 12;
+    }}
+    function getMouse(evt) {{
+      const rect = canvas.getBoundingClientRect();
+      return {{ x: (evt.clientX - rect.left) * (canvas.width / rect.width), y: (evt.clientY - rect.top) * (canvas.height / rect.height) }};
+    }}
+    function updateForm() {{
+      if (activeIndex < 0 || !elements[activeIndex]) {{
+        labelInput.value = '';
+        return;
+      }}
+      labelInput.value = elements[activeIndex].label || '';
+      styleInput.value = elements[activeIndex].style || 'fire_compartment';
+    }}
+    function findElementAt(x, y) {{
+      for (let i = elements.length - 1; i >= 0; i--) {{
+        const el = elements[i];
+        if ((el.type === 'box' || el.type === 'area_fill') && el.rect && hitRect(el.rect, x, y)) return i;
+        if (el.type === 'arrow' && el.points && hitArrow(el.points, x, y)) return i;
+      }}
+      return -1;
+    }}
+
+    function render() {{
+      if (!img.complete) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, imageW, imageH);
+      elements.forEach((el, idx) => {{
+        const style = el.style || 'fire_compartment';
+        let stroke = '#e53935';
+        let fill = null;
+        if (style === 'escape_route') {{ stroke = '#2e7d32'; fill = 'rgba(110,231,183,0.35)'; }}
+        if (style === 'rescue_route') {{ stroke = '#f59e0b'; fill = 'rgba(253,186,116,0.30)'; }}
+        if (style === 'attack_route') {{ stroke = '#ef4444'; }}
+        if (style === 'fire_access') {{ stroke = '#2563eb'; fill = 'rgba(219,234,254,0.35)'; }}
+        ctx.lineWidth = idx === activeIndex ? 4 : 3;
+        ctx.strokeStyle = stroke;
+        ctx.fillStyle = fill || 'transparent';
+        if ((el.type === 'box' || el.type === 'area_fill') && el.rect) {{
+          const [x0, y0, x1, y1] = rectToPx(el.rect);
+          const w = x1 - x0;
+          const h = y1 - y0;
+          if (fill) ctx.fillRect(x0, y0, w, h);
+          ctx.strokeRect(x0, y0, w, h);
+          const hx = x1;
+          const hy = y1;
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.rect(hx - 6, hy - 6, 12, 12);
+          ctx.fill();
+          ctx.stroke();
+        }}
+        if (el.type === 'arrow' && el.points && el.points.length >= 2) {{
+          const p1 = normToPx(el.points[0]);
+          const p2 = normToPx(el.points[el.points.length - 1]);
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = idx === activeIndex ? 4 : 3;
+          ctx.beginPath();
+          ctx.moveTo(p1[0], p1[1]);
+          ctx.lineTo(p2[0], p2[1]);
+          ctx.stroke();
+          const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
+          const head = 14;
+          ctx.beginPath();
+          ctx.moveTo(p2[0], p2[1]);
+          ctx.lineTo(p2[0] - head * Math.cos(angle - Math.PI / 6), p2[1] - head * Math.sin(angle - Math.PI / 6));
+          ctx.lineTo(p2[0] - head * Math.cos(angle + Math.PI / 6), p2[1] - head * Math.sin(angle + Math.PI / 6));
+          ctx.closePath();
+          ctx.fillStyle = stroke;
+          ctx.fill();
+          [p1, p2].forEach(pt => {{
+            ctx.beginPath();
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 2;
+            ctx.arc(pt[0], pt[1], 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+          }});
+        }}
+      }});
+      exportBox.value = JSON.stringify([...passthrough, ...elements], null, 2);
+    }}
+
+    canvas.addEventListener('mousedown', (evt) => {{
+      const pos = getMouse(evt);
+      start = pos;
+      if (tool === 'select') {{
+        activeIndex = findElementAt(pos.x, pos.y);
+        dragMode = activeIndex >= 0 ? 'move' : null;
+        if (activeIndex >= 0) {{
+          const el = elements[activeIndex];
+          if ((el.type === 'box' || el.type === 'area_fill') && el.rect) {{
+            const [x0, y0, x1, y1] = rectToPx(el.rect);
+            if (Math.abs(pos.x - x1) < 12 && Math.abs(pos.y - y1) < 12) dragMode = 'resize-br';
+          }}
+          if (el.type === 'arrow' && el.points && el.points.length >= 2) {{
+            const p1 = normToPx(el.points[0]);
+            const p2 = normToPx(el.points[el.points.length - 1]);
+            const dist1 = Math.hypot(pos.x - p1[0], pos.y - p1[1]);
+            const dist2 = Math.hypot(pos.x - p2[0], pos.y - p2[1]);
+            if (dist1 < 12) dragMode = 'move-start';
+            else if (dist2 < 12) dragMode = 'move-end';
+          }}
+        }}
+      }} else if (tool === 'box' || tool === 'area_fill') {{
+        elements.push({{ element_id: Math.random().toString(16).slice(2), type: tool === 'box' ? 'box' : 'area_fill', style: tool === 'box' ? 'fire_compartment' : 'escape_route', label: tool === 'box' ? 'Brannskille' : 'Rømningsvei', rect: [...pxToNorm(pos.x, pos.y), ...pxToNorm(pos.x, pos.y)] }});
+        activeIndex = elements.length - 1;
+        dragMode = 'draw-rect';
+      }} else if (tool === 'arrow') {{
+        elements.push({{ element_id: Math.random().toString(16).slice(2), type: 'arrow', style: 'attack_route', label: 'Innsatsvei', points: [pxToNorm(pos.x, pos.y), pxToNorm(pos.x, pos.y)] }});
+        activeIndex = elements.length - 1;
+        dragMode = 'draw-arrow';
+      }}
+      updateForm();
+      render();
+    }});
+
+    canvas.addEventListener('mousemove', (evt) => {{
+      if (activeIndex < 0 || !dragMode || !start) return;
+      const pos = getMouse(evt);
+      const dx = (pos.x - start.x) / imageW;
+      const dy = (pos.y - start.y) / imageH;
+      const el = elements[activeIndex];
+      if ((dragMode === 'move' || dragMode === 'resize-br' || dragMode === 'draw-rect') && el.rect) {{
+        if (dragMode === 'move') {{
+          el.rect = [
+            Math.max(0, Math.min(1, el.rect[0] + dx)),
+            Math.max(0, Math.min(1, el.rect[1] + dy)),
+            Math.max(0, Math.min(1, el.rect[2] + dx)),
+            Math.max(0, Math.min(1, el.rect[3] + dy)),
+          ];
+          start = pos;
+        }} else {{
+          const p = pxToNorm(pos.x, pos.y);
+          el.rect[2] = p[0];
+          el.rect[3] = p[1];
+        }}
+      }}
+      if ((dragMode === 'move' || dragMode === 'move-start' || dragMode === 'move-end' || dragMode === 'draw-arrow') && el.type === 'arrow' && el.points) {{
+        if (dragMode === 'move') {{
+          el.points = el.points.map(pt => [Math.max(0, Math.min(1, pt[0] + dx)), Math.max(0, Math.min(1, pt[1] + dy))]);
+          start = pos;
+        }} else if (dragMode === 'move-start') {{
+          el.points[0] = pxToNorm(pos.x, pos.y);
+        }} else {{
+          el.points[el.points.length - 1] = pxToNorm(pos.x, pos.y);
+        }}
+      }}
+      render();
+    }});
+
+    function normalizeActive() {{
+      const el = elements[activeIndex];
+      if (!el) return;
+      if (el.rect) {{
+        const x0 = Math.min(el.rect[0], el.rect[2]);
+        const y0 = Math.min(el.rect[1], el.rect[3]);
+        const x1 = Math.max(el.rect[0], el.rect[2]);
+        const y1 = Math.max(el.rect[1], el.rect[3]);
+        el.rect = [x0, y0, x1, y1];
+      }}
+    }}
+
+    window.addEventListener('mouseup', () => {{
+      if (activeIndex >= 0) normalizeActive();
+      dragMode = null;
+      render();
+    }});
+
+    labelInput.addEventListener('input', () => {{
+      if (activeIndex >= 0 && elements[activeIndex]) {{
+        elements[activeIndex].label = labelInput.value;
+        render();
+      }}
+    }});
+    styleInput.addEventListener('change', () => {{
+      if (activeIndex >= 0 && elements[activeIndex]) {{
+        elements[activeIndex].style = styleInput.value;
+        render();
+      }}
+    }});
+    document.getElementById('deleteBtn').onclick = () => {{
+      if (activeIndex >= 0) {{
+        elements.splice(activeIndex, 1);
+        activeIndex = -1;
+        updateForm();
+        render();
+      }}
+    }};
+
+    function sendToStreamlit() {{
+      exportBox.value = JSON.stringify([...passthrough, ...elements], null, 2);
+      try {{
+        const ta = window.parent.document.querySelector(`textarea[aria-label="${{payload.bridgeLabel}}"]`);
+        if (!ta) throw new Error('Fant ikke Streamlit-broen.');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, exportBox.value);
+        ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        statusBox.textContent = 'JSON er sendt til Streamlit. Klikk nå på "Bruk museendringer" under.';
+      }} catch (err) {{
+        statusBox.textContent = 'Automatisk sending feilet. Kopier innholdet i boksen under manuelt til bufferfeltet i appen og klikk "Bruk museendringer".';
+      }}
+    }}
+    document.getElementById('saveBtn').onclick = sendToStreamlit;
+
+    img.onload = resizeCanvas;
+    window.addEventListener('resize', resizeCanvas);
+    </script>
+    """
+    components.html(html, height=980, key=component_key)
+
+
+
 def render_analysis_editor(item: Dict[str, Any]) -> None:
     page = item["page"]
+    item.setdefault("locked", False)
     item["analysis"] = normalize_analysis_payload(item.get("analysis") or {}, item.get("page_kind") or page.page_kind)
+    item["analysis"]["page_kind"] = resolve_page_kind_for_page(page, item["analysis"].get("page_kind", page.page_kind), item["analysis"].get("page_title") or page.page_title)
     item["page_kind"] = item["analysis"].get("page_kind", page.page_kind)
     item["page_title"] = clean_pdf_text(item.get("page_title") or item["analysis"].get("page_title") or page.page_title)
 
@@ -2126,7 +2880,7 @@ def render_analysis_editor(item: Dict[str, Any]) -> None:
     current_kind = item.get("page_kind", page.page_kind)
     kind_index = page_kind_options.index(current_kind) if current_kind in page_kind_options else 0
 
-    st.caption("V2: finrediger sideinfo, kontrollpunkter og overlay-elementer direkte i appen før PDF genereres.")
+    st.caption("V3: bedre sideklassifisering, musebasert finredigering, AI-revisjon per side og mer ryddige callouts i generert branntegning.")
 
     with st.form(key=f"{key_root}_page_meta_form"):
         selected_kind = st.selectbox(
@@ -2144,21 +2898,91 @@ def render_analysis_editor(item: Dict[str, Any]) -> None:
             height=140,
         )
         new_assumptions = meta_cols[1].text_area(
-            "Forutsetninger / ma avklares (en per linje)",
+            "Forutsetninger (en per linje)",
             value="\n".join(analysis.get("assumptions", [])),
             height=140,
         )
-        save_page = st.form_submit_button("Oppdater sideinfo og tekst", use_container_width=True)
+        lock_col, save_col = st.columns([1, 2])
+        locked_value = lock_col.checkbox("Lås denne siden mot ny AI-endring", value=item.get("locked", False))
+        save_page = save_col.form_submit_button("Oppdater sideinfo og tekst", use_container_width=True)
     if save_page:
         item["page_title"] = clean_pdf_text(new_title) or item.get("page_title", page.page_title)
         analysis["page_title"] = item["page_title"]
-        analysis["page_kind"] = selected_kind
-        item["page_kind"] = selected_kind
+        analysis["page_kind"] = resolve_page_kind_for_page(page, selected_kind, item["page_title"])
+        item["page_kind"] = analysis["page_kind"]
+        item["locked"] = bool(locked_value)
         analysis["drawing_summary"] = ironclad_text_formatter(new_summary)
         analysis["analysis_notes"] = split_lines_to_list(new_notes)
         analysis["assumptions"] = split_lines_to_list(new_assumptions)
         item["analysis"] = analysis
         refresh_analysis_item(item)
+        request_rerun()
+    else:
+        item["locked"] = bool(locked_value)
+
+    st.markdown("**Museeditor (beta)**")
+    st.caption("Museeditoren er laget for raske visuelle justeringer av bokser, felt og piler. Avanserte polylinjer kan fortsatt finjusteres lenger ned med de vanlige feltene.")
+    bridge_key = f"{key_root}_mouse_bridge"
+    bridge_label = f"MOUSE_BRIDGE__{key_root}"
+    if bridge_key not in st.session_state:
+        st.session_state[bridge_key] = json.dumps(analysis.get("elements", []), ensure_ascii=False, indent=2)
+    render_mouse_canvas_editor(page, analysis.get("elements", []), bridge_label=bridge_label, component_key=f"{key_root}_mouse_component")
+    st.text_area(
+        "Museeditor-data (teknisk buffer / fallback)",
+        key=bridge_key,
+        height=120,
+        help="Denne brukes av museeditoren. Du kan også lime inn JSON manuelt her hvis automatisk overføring i nettleseren din er blokkert.",
+    )
+    mcols = st.columns(3)
+    if mcols[0].button("Bruk museendringer", key=f"{key_root}_apply_mouse", use_container_width=True):
+        try:
+            parsed = json.loads(st.session_state.get(bridge_key, "[]") or "[]")
+            if not isinstance(parsed, list):
+                raise ValueError("Museeditor-data ma vaere en liste med elementer.")
+            analysis["elements"] = [normalize_element(element) for element in parsed]
+            item["analysis"] = analysis
+            refresh_analysis_item(item)
+            st.success("Museendringer er lagt inn i siden.")
+            request_rerun()
+        except Exception as exc:
+            st.error(f"Klarte ikke a lese museeditor-data: {exc}")
+    if mcols[1].button("Nullstill musebuffer", key=f"{key_root}_reset_mouse", use_container_width=True):
+        st.session_state[bridge_key] = json.dumps(item.get("analysis", {}).get("elements", []), ensure_ascii=False, indent=2)
+        request_rerun()
+    if mcols[2].button("Sync buffer fra dagens elementer", key=f"{key_root}_sync_mouse", use_container_width=True):
+        st.session_state[bridge_key] = json.dumps(item.get("analysis", {}).get("elements", []), ensure_ascii=False, indent=2)
+        st.success("Musebuffer er oppdatert fra gjeldende analyse.")
+
+    st.markdown("**AI-revisjon av denne siden**")
+    ai_instruction_key = f"{key_root}_ai_instruction"
+    ai_instruction = st.text_area(
+        "Gi AI en konkret instruks for denne siden",
+        key=ai_instruction_key,
+        height=110,
+        placeholder="Eksempel: Les denne siden som p-kjeller, fjern oppstillingsplass, og trekk innsatsvei inn mot trapp i øst.",
+    )
+    ai_cols = st.columns(2)
+    if ai_cols[0].button(
+        "Kjør AI-revisjon på denne siden",
+        key=f"{key_root}_run_ai_revision",
+        use_container_width=True,
+        disabled=item.get("locked", False),
+    ):
+        if not ai_instruction.strip():
+            st.warning("Skriv en konkret instruks for AI-revisjonen først.")
+        elif not AI_AVAILABLE:
+            st.warning("Google AI er ikke tilgjengelig i denne kjøringen.")
+        else:
+            with st.spinner("AI reviderer markeringene for denne siden..."):
+                revised = refine_analysis_with_instruction(page, item["analysis"], brann_data, manual_notes, ai_instruction)
+                item["analysis"] = revised
+                item["page_kind"] = revised.get("page_kind", page.page_kind)
+                item["page_title"] = clean_pdf_text(revised.get("page_title") or item.get("page_title") or page.page_title)
+                refresh_analysis_item(item)
+            st.success("Siden er oppdatert med AI-revisjon.")
+            request_rerun()
+    if ai_cols[1].button("Tøm AI-instruks", key=f"{key_root}_clear_ai_revision", use_container_width=True):
+        st.session_state[ai_instruction_key] = ""
         request_rerun()
 
     fill_style = "staging_area" if item.get("page_kind") == "site_plan" else "escape_route"
@@ -2450,12 +3274,14 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
                         for note in analysis.get("analysis_notes", [])[:6]:
                             st.markdown(f"- {note}")
                     if analysis.get("assumptions"):
-                        st.markdown("**Forutsetninger / ma avklares**")
+                        st.markdown("**Forutsetninger**")
                         for note in analysis.get("assumptions", [])[:5]:
                             st.markdown(f"- {note}")
                     if analysis.get("legend_items"):
                         legends = ", ".join([x.get("label", "") for x in analysis.get("legend_items", [])])
                         st.caption(f"Symbolsett: {legends}")
+                    if item.get("locked"):
+                        st.info("Denne siden er låst mot nye AI-revisjoner til du fjerner låsen i redigering-fanen.")
                 with edit_tab:
                     render_analysis_editor(item)
 
