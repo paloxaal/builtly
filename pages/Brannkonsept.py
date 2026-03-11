@@ -2862,7 +2862,8 @@ def render_mouse_canvas_editor(page: SourcePage, elements: List[Dict[str, Any]],
     window.addEventListener('resize', resizeCanvas);
     </script>
     """
-    components.html(html, height=980, key=component_key)
+    html = f"<!-- {component_key} -->\n" + html
+    components.html(html, height=980, scrolling=False)
 
 
 
@@ -3234,11 +3235,17 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
                     )
                     progress.progress(idx / max(len(candidates), 1))
                 st.session_state.brann_analyses = analyses
-                st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
-                st.session_state.generated_pdf = None
-                st.session_state.generated_report_text = ""
-                st.session_state.brann_manual_edits_dirty = False
-                st.success(f"Generert {len(analyses)} branntegningsutkast.")
+                try:
+                    st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                    st.session_state.generated_pdf = None
+                    st.session_state.generated_report_text = ""
+                    st.session_state.brann_manual_edits_dirty = False
+                    st.success(f"Generert {len(analyses)} branntegningsutkast.")
+                except Exception as exc:
+                    st.session_state.generated_fire_drawings_pdf = None
+                    st.session_state.generated_pdf = None
+                    st.session_state.generated_report_text = ""
+                    st.error(f"Branntegning-PDF feilet etter analyse: {exc}")
 
     analyses = st.session_state.brann_analyses
     if analyses:
@@ -3246,9 +3253,13 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
             st.warning("Manuelle endringer er registrert. Oppdater branntegning-PDF eller generer komplett rapport pa nytt i steg 4.")
             if st.button("Oppdater branntegning-PDF fra redigerte markeringer", key="refresh_fire_pdf_after_edits", type="secondary", use_container_width=True):
                 with st.spinner("Oppdaterer vedlegg med redigerte markeringer..."):
-                    st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
-                    st.session_state.brann_manual_edits_dirty = False
-                st.success("Branntegning-PDF er oppdatert.")
+                    try:
+                        st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                        st.session_state.brann_manual_edits_dirty = False
+                        st.success("Branntegning-PDF er oppdatert.")
+                    except Exception as exc:
+                        st.session_state.generated_fire_drawings_pdf = None
+                        st.error(f"Kunne ikke oppdatere branntegning-PDF: {exc}")
 
         st.markdown("##### Forhaandsvisning av genererte branntegninger")
         for item in analyses:
@@ -3283,7 +3294,17 @@ with st.expander("3. Analyser tegninger og generer branntegninger", expanded=Tru
                     if item.get("locked"):
                         st.info("Denne siden er låst mot nye AI-revisjoner til du fjerner låsen i redigering-fanen.")
                 with edit_tab:
-                    render_analysis_editor(item)
+                    editor_toggle_key = f"enable_editor__{re.sub(r'[^0-9A-Za-z_]+', '_', item['page'].uid)}"
+                    editor_enabled = st.toggle(
+                        "Aktiver finredigering for denne siden",
+                        key=editor_toggle_key,
+                        value=False,
+                        help="Museeditoren lastes bare når du slår på denne bryteren. Det gjør generering av branntegninger mer stabil når mange sider analyseres samtidig.",
+                    )
+                    if editor_enabled:
+                        render_analysis_editor(item)
+                    else:
+                        st.info("Finredigering er av for denne siden. Slå på bryteren over når du vil åpne museeditor og AI-revisjon.")
 
 
 # -----------------------------------------------------------------------------
@@ -3312,19 +3333,28 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                 )
             elif st.button("Bygg branntegning-PDF", key="build_fire_pdf_step4", type="secondary", use_container_width=True):
                 with st.spinner("Setter sammen branntegningsvedlegg..."):
-                    st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
-                    st.session_state.brann_manual_edits_dirty = False
-                st.success("Branntegning-PDF er klar.")
+                    try:
+                        st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                        st.session_state.brann_manual_edits_dirty = False
+                        st.success("Branntegning-PDF er klar.")
+                    except Exception as exc:
+                        st.session_state.generated_fire_drawings_pdf = None
+                        st.error(f"Klarte ikke a bygge branntegning-PDF: {exc}")
 
         if st.button("🚀 Generer komplett brannkonsept med rapport og vedlegg", type="primary", use_container_width=True):
             with st.spinner("Skriver rapport og setter sammen vedlegg..."):
-                report_text = generate_report_text(pd_state, brann_data, analyses, manual_notes)
-                report_pdf = create_full_report_pdf(pd_state, brann_data, report_text, analyses)
-                st.session_state.generated_report_text = report_text
-                st.session_state.generated_pdf = report_pdf
-                st.session_state.generated_fire_drawings_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
-                st.session_state.brann_manual_edits_dirty = False
-            st.success("Brannkonsept og vedlagte branntegninger er generert.")
+                try:
+                    report_text = generate_report_text(pd_state, brann_data, analyses, manual_notes)
+                    report_pdf = create_full_report_pdf(pd_state, brann_data, report_text, analyses)
+                    fire_pdf = create_fire_drawings_pdf(pd_state, brann_data, analyses)
+                    st.session_state.generated_report_text = report_text
+                    st.session_state.generated_pdf = report_pdf
+                    st.session_state.generated_fire_drawings_pdf = fire_pdf
+                    st.session_state.brann_manual_edits_dirty = False
+                    st.success("Brannkonsept og vedlagte branntegninger er generert.")
+                except Exception as exc:
+                    st.session_state.generated_pdf = None
+                    st.error(f"Generering av rapport/vedlegg feilet: {exc}")
 
         if st.session_state.get("generated_report_text"):
             with st.expander("Forhaandsvis tekstutkast", expanded=False):
