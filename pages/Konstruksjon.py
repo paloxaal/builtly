@@ -8285,87 +8285,11 @@ filter_upper_floor_elements_v7 = _filter_upper_floor_elements_v9_impl
 
 
 
-action_col1, action_col2 = st.columns(2)
-analyze_clicked = action_col1.button(
-    "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
-    type="primary",
-    use_container_width=True,
-)
-direct_pdf_clicked = action_col2.button(
-    "⚡ DIREKTE PDF UTEN MANUELL REDIGERING",
-    type="secondary",
-    use_container_width=True,
-)
-
-if analyze_clicked or direct_pdf_clicked:
-    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=4) if files else []
-    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
-
-    if not all_drawings:
-        st.error("Fant ingen tegninger å analysere. Last opp minst én plan eller hent tegninger fra Project Setup.")
-    else:
-        clear_generated_rib_session()
-        st.info(f"Klar! Sender totalt {len(all_drawings)} tegninger/bilder til RIB-agenten for vurdering.")
-        backend_warning = st.session_state.pop("rib_ai_backend_warning", None)
-        if backend_warning:
-            st.caption(f"AI-backend: {backend_warning}")
-
-        with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
-            valid_models = list_available_models()
-            valgt_modell = pick_model(valid_models)
-            if not valgt_modell:
-                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
-                st.stop()
-
-            model = build_runtime_ai_model(valgt_modell)
-            candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
-            candidate_df = build_candidate_dataframe(candidates)
-
-            analysis_result = run_structured_drawing_analysis(
-                model=model,
-                drawings=all_drawings,
-                candidates=candidates,
-                project_data=pd_state,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-                safety_mode=safety_mode,
-            )
-            analysis_result = replace_analysis_sketches_with_grounded(
-                analysis_result=analysis_result,
-                drawings=all_drawings,
-                material_preference=material_valg,
-            )
-
-            report_text = run_report_writer(
-                model=model,
-                analysis_result=analysis_result,
-                candidates=candidates,
-                project_data=pd_state,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-            )
-
-            persist_rib_draft_to_session(
-                analysis_result=analysis_result,
-                report_text=report_text,
-                candidate_df=candidate_df,
-                candidates=candidates,
-                drawings=all_drawings,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-                safety_mode=safety_mode,
-            )
-
-        if direct_pdf_clicked:
-            with st.spinner("Låser auto-skissene og bygger PDF..."):
-                finalize_rib_draft_to_pdf()
-        st.rerun()
-
-
-
+# ------------------------------------------------------------
+# 13B-13D PATCH BLOKK FLYTTET OPP I v10
+# Må ligge over analyseknappen slik at regionvalg, wall-filter og editor-hooks
+# er definert før første analyse-kjøring og før st.rerun().
+# ------------------------------------------------------------
 # ------------------------------------------------------------
 # 13B. V7 PATCH - bedre planvalg, mer konservativ veggbæring,
 #      og mer robust musepeker-editor for Streamlit.
@@ -9001,6 +8925,89 @@ def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str
 
 refine_sketch_with_geometry_v6 = _refine_sketch_with_geometry_v9_impl
 filter_upper_floor_elements_v7 = _filter_upper_floor_elements_v9_impl
+
+
+
+
+action_col1, action_col2 = st.columns(2)
+analyze_clicked = action_col1.button(
+    "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
+    type="primary",
+    use_container_width=True,
+)
+direct_pdf_clicked = action_col2.button(
+    "⚡ DIREKTE PDF UTEN MANUELL REDIGERING",
+    type="secondary",
+    use_container_width=True,
+)
+
+if analyze_clicked or direct_pdf_clicked:
+    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=4) if files else []
+    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
+
+    if not all_drawings:
+        st.error("Fant ingen tegninger å analysere. Last opp minst én plan eller hent tegninger fra Project Setup.")
+    else:
+        clear_generated_rib_session()
+        st.info(f"Klar! Sender totalt {len(all_drawings)} tegninger/bilder til RIB-agenten for vurdering.")
+        backend_warning = st.session_state.pop("rib_ai_backend_warning", None)
+        if backend_warning:
+            st.caption(f"AI-backend: {backend_warning}")
+
+        with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
+            valid_models = list_available_models()
+            valgt_modell = pick_model(valid_models)
+            if not valgt_modell:
+                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
+                st.stop()
+
+            model = build_runtime_ai_model(valgt_modell)
+            candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
+            candidate_df = build_candidate_dataframe(candidates)
+
+            analysis_result = run_structured_drawing_analysis(
+                model=model,
+                drawings=all_drawings,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
+            )
+            analysis_result = replace_analysis_sketches_with_grounded(
+                analysis_result=analysis_result,
+                drawings=all_drawings,
+                material_preference=material_valg,
+            )
+
+            report_text = run_report_writer(
+                model=model,
+                analysis_result=analysis_result,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+            )
+
+            persist_rib_draft_to_session(
+                analysis_result=analysis_result,
+                report_text=report_text,
+                candidate_df=candidate_df,
+                candidates=candidates,
+                drawings=all_drawings,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
+            )
+
+        if direct_pdf_clicked:
+            with st.spinner("Låser auto-skissene og bygger PDF..."):
+                finalize_rib_draft_to_pdf()
+        st.rerun()
+
 
 
 
