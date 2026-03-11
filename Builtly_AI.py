@@ -208,7 +208,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                      'assistant_empty_body': 'Visitors can ask questions about building technology and property right on the front page, '
                                              'and the answer can be steered by discipline, language and national regulations.',
                      'assistant_latest_answer': 'Latest answer',
-                     'assistant_status_live': 'Gemini connected',
+                     'assistant_status_live': 'AI ready',
                      'assistant_status_setup': 'UI ready',
                      'assistant_error_prefix': 'Could not generate an answer',
                      'assistant_note_prefix': 'Setup note',
@@ -345,7 +345,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'assistant_empty_body': 'Besøkende kan stille spørsmål om bygningsteknikk og eiendom direkte på forsiden, og svarene styres '
                                       'av fagvalg, språk og nasjonalt regelverk.',
               'assistant_latest_answer': 'Siste svar',
-              'assistant_status_live': 'Gemini tilkoblet',
+              'assistant_status_live': 'AI klar',
               'assistant_status_setup': 'UI klart',
               'assistant_error_prefix': 'Kunne ikke generere svar',
               'assistant_note_prefix': 'Oppsett',
@@ -479,7 +479,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                 'assistant_empty_body': 'Besökare kan ställa frågor om byggteknik och fastighet direkt på startsidan, och svaren styrs av '
                                         'disciplin, språk och nationella regler.',
                 'assistant_latest_answer': 'Senaste svar',
-                'assistant_status_live': 'Gemini ansluten',
+                'assistant_status_live': 'AI klar',
                 'assistant_status_setup': 'UI klart',
                 'assistant_error_prefix': 'Kunde inte generera svar',
                 'assistant_note_prefix': 'Konfiguration',
@@ -614,7 +614,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'assistant_empty_body': 'Besøgende kan stille spørgsmål om byggeteknik og ejendom direkte på forsiden, og svarene styres af '
                                       'fagvalg, sprog og nationale regler.',
               'assistant_latest_answer': 'Seneste svar',
-              'assistant_status_live': 'Gemini tilkoblet',
+              'assistant_status_live': 'AI klar',
               'assistant_status_setup': 'UI klar',
               'assistant_error_prefix': 'Kunne ikke generere svar',
               'assistant_note_prefix': 'Opsætning',
@@ -764,7 +764,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                      'assistant_empty_body': 'Visitors can ask questions about building technology and property right on the front page, '
                                              'and the answer can be steered by discipline, language and national regulations.',
                      'assistant_latest_answer': 'Latest answer',
-                     'assistant_status_live': 'Gemini connected',
+                     'assistant_status_live': 'AI ready',
                      'assistant_status_setup': 'UI ready',
                      'assistant_error_prefix': 'Could not generate an answer',
                      'assistant_note_prefix': 'Setup note',
@@ -1644,9 +1644,9 @@ def parse_gemini_text(response_payload: Dict) -> str:
 
     block_reason = response_payload.get("promptFeedback", {}).get("blockReason")
     if block_reason:
-        raise RuntimeError(f"Response blocked by Gemini: {block_reason}")
+        raise RuntimeError(f"Response blocked by AI engine: {block_reason}")
 
-    raise RuntimeError("No text returned from Gemini.")
+    raise RuntimeError("No text returned from the AI engine.")
 
 
 def request_builtly_answer(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
@@ -1656,9 +1656,9 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
     if not api_key:
         return (
             f"**{get_text_bundle(lang_key)['assistant_note_prefix']}:** "
-            f"Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` on Render to activate live answers. "
+            f"Set the AI API key in Render to activate live answers. "
             f"The front page is already wired to send the selected language ({profile['language_name']}), "
-            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to Gemini."
+            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI engine."
         )
 
     model_name = os.getenv("BUILTLY_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
@@ -1697,9 +1697,9 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
             details = exc.read().decode("utf-8")
         except Exception:
             details = str(exc)
-        raise RuntimeError(f"Gemini HTTP {exc.code}: {details}") from exc
+        raise RuntimeError(f"AI engine HTTP {exc.code}: {details}") from exc
     except urlerror.URLError as exc:
-        raise RuntimeError(f"Gemini connection error: {exc}") from exc
+        raise RuntimeError(f"AI engine connection error: {exc}") from exc
 
 
 def handle_assistant_submission(question: str, selected_codes: List[str], lang_key: str) -> None:
@@ -1735,24 +1735,63 @@ def handle_assistant_submission(question: str, selected_codes: List[str], lang_k
         st.session_state.assistant_history = st.session_state.assistant_history[-8:]
 
 
+ASSISTANT_TEASER_TITLE_COPY = {
+    "🇬🇧 English (UK)": "Ask about building technology and property.",
+    "🇺🇸 English (US)": "Ask about building technology and property.",
+    "🇳🇴 Norsk": "Still spørsmål om bygg, eiendom og regelverk.",
+    "🇸🇪 Svenska": "Ställ frågor om bygg, fastighet och regelverk.",
+    "🇩🇰 Dansk": "Stil spørgsmål om byggeri, ejendom og regelværk.",
+    "🇫🇮 Suomi": "Kysy rakentamisesta, kiinteistöistä ja määräyksistä.",
+    "🇩🇪 Deutsch": "Fragen zu Bau, Immobilie und Regelwerk stellen.",
+}
+
+ASSISTANT_TEASER_SUBTITLE_COPY = {
+    "🇬🇧 English (UK)": "A practical Q&A surface adapted to the selected language and national baseline.",
+    "🇺🇸 English (US)": "A practical Q&A surface adapted to the selected language and national baseline.",
+    "🇳🇴 Norsk": "En spørreflate som følger valgt språk og nasjonalt rammeverk.",
+    "🇸🇪 Svenska": "En frågeyta som följer valt språk och nationellt ramverk.",
+    "🇩🇰 Dansk": "En spørgeflade som følger valgt sprog og nationalt regelsæt.",
+    "🇫🇮 Suomi": "Kysymysikkuna, joka seuraa valittua kieltä ja kansallista viitekehystä.",
+    "🇩🇪 Deutsch": "Ein Fragenfenster passend zu Sprache und nationalem Regelwerk.",
+}
+
+ASSISTANT_TEASER_FOOT_COPY = {
+    "🇬🇧 English (UK)": "Covers GEO, structural, demolition, acoustics, fire, environment, SHA, BREEAM and property.",
+    "🇺🇸 English (US)": "Covers GEO, structural, demolition, acoustics, fire, environment, SHA, BREEAM and property.",
+    "🇳🇴 Norsk": "Dekker GEO, RIB, rive, RIAku, RIBr, miljø, SHA, BREEAM og eiendom.",
+    "🇸🇪 Svenska": "Täcker GEO, konstruktion, rivning, akustik, brand, miljö, SHA, BREEAM och fastighet.",
+    "🇩🇰 Dansk": "Dækker GEO, konstruktion, nedrivning, akustik, brand, miljø, SHA, BREEAM og ejendom.",
+    "🇫🇮 Suomi": "Kattaa GEO, rakenteet, purun, akustiikan, palon, ympäristön, SHA:n, BREEAMin ja kiinteistöt.",
+    "🇩🇪 Deutsch": "Deckt GEO, Tragwerk, Rückbau, Akustik, Brandschutz, Umwelt, SHA, BREEAM und Immobilie ab.",
+}
+
+
+def assistant_teaser_title(lang_key: str) -> str:
+    return ASSISTANT_TEASER_TITLE_COPY.get(lang_key, ASSISTANT_TEASER_TITLE_COPY["🇬🇧 English (UK)"])
+
+
+def assistant_teaser_subtitle(lang_key: str) -> str:
+    return ASSISTANT_TEASER_SUBTITLE_COPY.get(lang_key, ASSISTANT_TEASER_SUBTITLE_COPY["🇬🇧 English (UK)"])
+
+
+def assistant_teaser_foot(lang_key: str) -> str:
+    return ASSISTANT_TEASER_FOOT_COPY.get(lang_key, ASSISTANT_TEASER_FOOT_COPY["🇬🇧 English (UK)"])
+
+
 def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None:
     lang = get_text_bundle(lang_key)
     locale_profile = get_locale_profile(lang_key)
     selected_codes = st.session_state.get("assistant_discipline_codes", list(DEFAULT_DISCIPLINES))
-    status_class = "live" if gemini_ready() else "ready"
-    status_text = lang["assistant_status_live"] if gemini_ready() else lang["assistant_status_setup"]
-    loaded_packs = loaded_reference_pack_names(lang_key, selected_codes)
 
     render_html(
         f"""
         <div class="assistant-dialog-hero">
             <div class="assistant-kicker">{lang['assistant_kicker']}</div>
-            <div class="assistant-title">{lang['assistant_title']}</div>
-            <div class="assistant-subtitle">{lang['assistant_subtitle']}</div>
-            <div class="context-chips">
+            <div class="assistant-title">{assistant_teaser_title(lang_key)}</div>
+            <div class="assistant-subtitle">{assistant_teaser_subtitle(lang_key)}</div>
+            <div class="context-chips compact">
                 <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
                 <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
-                <div class="context-chip {status_class}"><span>{lang['assistant_label_status']}:</span> {status_text}</div>
             </div>
             <div class="assistant-dialog-note">{locale_profile['variation_note']}</div>
         </div>
@@ -1805,13 +1844,14 @@ def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None
                 st.caption(" · ".join(latest["disciplines"]))
             st.markdown(latest["answer"])
 
-        with st.expander(lang["assistant_history_label"], expanded=False):
-            for item in reversed(st.session_state.assistant_history[-8:]):
-                st.markdown(f"**Q:** {item['question']}")
-                if item.get("disciplines"):
-                    st.caption(" · ".join(item["disciplines"]))
-                st.markdown(item["answer"])
-                st.markdown("---")
+        if len(st.session_state.assistant_history) > 1:
+            with st.expander(lang["assistant_history_label"], expanded=False):
+                for item in reversed(st.session_state.assistant_history[-8:]):
+                    st.markdown(f"**Q:** {item['question']}")
+                    if item.get("disciplines"):
+                        st.caption(" · ".join(item["disciplines"]))
+                    st.markdown(item["answer"])
+                    st.markdown("---")
     else:
         render_html(
             f"""
@@ -2772,6 +2812,218 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.markdown(
+    """
+<style>
+    .assistant-teaser {
+        margin-top: auto;
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(120,145,170,0.16);
+        border-radius: 20px;
+        padding: 1rem 1rem 0.95rem 1rem;
+        box-shadow: none;
+    }
+
+    .assistant-teaser-row {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+
+    .assistant-teaser-copy {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .assistant-teaser .assistant-title {
+        font-size: 1.02rem;
+        margin-bottom: 0.32rem;
+    }
+
+    .assistant-teaser .assistant-subtitle {
+        font-size: 0.88rem;
+        line-height: 1.58;
+        color: var(--muted);
+        margin-bottom: 0;
+        display: block;
+    }
+
+    .assistant-teaser-link.compact {
+        margin-top: 0;
+        min-height: 42px;
+        padding: 0.7rem 0.95rem;
+        border-radius: 12px;
+        white-space: nowrap;
+        background: rgba(56,194,201,0.12);
+        border: 1px solid rgba(56,194,201,0.24);
+        color: var(--text) !important;
+        flex-shrink: 0;
+    }
+
+    .assistant-teaser-link.compact:hover {
+        background: rgba(56,194,201,0.16);
+    }
+
+    .assistant-teaser-foot {
+        margin-top: 0.72rem;
+        padding-top: 0.72rem;
+        border-top: 1px solid rgba(120,145,170,0.12);
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1.55;
+    }
+
+    .context-chips.compact {
+        margin-top: 0.05rem;
+    }
+
+    div[data-testid="stDialog"] {
+        backdrop-filter: blur(6px);
+    }
+
+    div[data-testid="stDialog"] [role="dialog"] {
+        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
+        border: 1px solid rgba(120,145,170,0.18) !important;
+        border-radius: 26px !important;
+        box-shadow: 0 32px 90px rgba(0,0,0,0.44) !important;
+        color: var(--text) !important;
+        overflow: hidden !important;
+    }
+
+    div[data-testid="stDialog"] [data-baseweb="modal"],
+    div[data-testid="stDialog"] [data-baseweb="modal-header"],
+    div[data-testid="stDialog"] [data-baseweb="modal-body"],
+    div[data-testid="stDialog"] [data-testid="stDialogContent"] {
+        background: transparent !important;
+        color: var(--text) !important;
+    }
+
+    div[data-testid="stDialog"] [data-baseweb="modal-header"] {
+        border-bottom: 1px solid rgba(120,145,170,0.12);
+    }
+
+    div[data-testid="stDialog"] div[data-testid="stForm"] {
+        background: rgba(255,255,255,0.03) !important;
+        border: 1px solid rgba(120,145,170,0.16) !important;
+        border-radius: 22px !important;
+        padding: 1.1rem 1.05rem 1.05rem 1.05rem !important;
+        box-shadow: none !important;
+    }
+
+    div[data-testid="stDialog"] div[data-testid="stForm"] label,
+    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] p,
+    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] li,
+    div[data-testid="stDialog"] div[data-testid="stCaptionContainer"],
+    div[data-testid="stDialog"] .stCaptionContainer {
+        color: var(--soft) !important;
+    }
+
+    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] strong,
+    div[data-testid="stDialog"] h1,
+    div[data-testid="stDialog"] h2,
+    div[data-testid="stDialog"] h3,
+    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] p strong {
+        color: var(--text) !important;
+    }
+
+    div[data-testid="stDialog"] div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 18px !important;
+        border: 1px solid rgba(120,145,170,0.16) !important;
+        background: rgba(255,255,255,0.03) !important;
+    }
+
+    div[data-testid="stDialog"] div[data-testid="stMultiSelect"] > div,
+    div[data-testid="stDialog"] div[data-testid="stTextArea"] > div {
+        background: transparent !important;
+        border: 0 !important;
+    }
+
+    div[data-testid="stDialog"] div[data-baseweb="select"] > div,
+    div[data-testid="stDialog"] div[data-baseweb="base-input"] > div,
+    div[data-testid="stDialog"] div[data-baseweb="textarea"] > div,
+    div[data-testid="stDialog"] div[data-testid="stTextArea"] textarea {
+        background: rgba(255,255,255,0.03) !important;
+        border: 1px solid rgba(120,145,170,0.16) !important;
+        color: var(--text) !important;
+    }
+
+    div[data-testid="stDialog"] input,
+    div[data-testid="stDialog"] textarea,
+    div[data-testid="stDialog"] div[data-baseweb="select"] input {
+        color: var(--text) !important;
+        -webkit-text-fill-color: var(--text) !important;
+        caret-color: var(--accent-2) !important;
+    }
+
+    div[data-testid="stDialog"] input::placeholder,
+    div[data-testid="stDialog"] textarea::placeholder {
+        color: var(--muted) !important;
+    }
+
+    div[data-testid="stDialog"] div[data-baseweb="tag"] {
+        background: rgba(56,194,201,0.12) !important;
+        border: 1px solid rgba(56,194,201,0.2) !important;
+    }
+
+    div[data-testid="stDialog"] div[data-baseweb="tag"] span {
+        color: var(--text) !important;
+    }
+
+    div[data-testid="stDialog"] div.stButton > button,
+    div[data-testid="stDialog"] div[data-testid="stFormSubmitButton"] button {
+        background: rgba(56,194,201,0.12) !important;
+        border: 1px solid rgba(56,194,201,0.28) !important;
+        color: var(--text) !important;
+    }
+
+    div[data-testid="stDialog"] div.stButton > button:hover,
+    div[data-testid="stDialog"] div[data-testid="stFormSubmitButton"] button:hover {
+        background: rgba(56,194,201,0.16) !important;
+        border-color: rgba(120,220,225,0.42) !important;
+        transform: translateY(-1px);
+    }
+
+    div[data-baseweb="popover"],
+    div[data-baseweb="menu"] {
+        background: linear-gradient(180deg, rgba(10,22,35,0.98), rgba(7,16,24,0.98)) !important;
+        border: 1px solid rgba(120,145,170,0.18) !important;
+        color: var(--text) !important;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.32) !important;
+    }
+
+    div[data-baseweb="popover"] *,
+    div[data-baseweb="menu"] *,
+    ul[role="listbox"] *,
+    li[role="option"] * {
+        color: var(--text) !important;
+    }
+
+    li[role="option"] {
+        background: transparent !important;
+    }
+
+    li[role="option"][aria-selected="true"],
+    li[role="option"]:hover {
+        background: rgba(56,194,201,0.12) !important;
+    }
+
+    @media (max-width: 1100px) {
+        .assistant-teaser-row {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .assistant-teaser-link.compact {
+            width: 100%;
+            justify-content: center;
+        }
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 # -------------------------------------------------
 # 7) TOP BAR
 # -------------------------------------------------
@@ -2808,9 +3060,6 @@ st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 if assistant_query_requested():
     open_assistant()
     clear_assistant_query_param()
-
-status_class = "live" if gemini_ready() else "ready"
-status_text = lang["assistant_status_live"] if gemini_ready() else lang["assistant_status_setup"]
 
 render_html(
     f"""
@@ -2864,15 +3113,15 @@ with right:
                 </div>
             </div>
             <div class="assistant-teaser">
-                <div class="assistant-kicker">{lang['assistant_kicker']}</div>
-                <div class="assistant-title">{lang['assistant_title']}</div>
-                <div class="assistant-subtitle">{lang['assistant_subtitle']}</div>
-                <div class="context-chips">
-                    <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
-                    <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
-                    <div class="context-chip {status_class}"><span>{lang['assistant_label_status']}:</span> {status_text}</div>
+                <div class="assistant-teaser-row">
+                    <div class="assistant-teaser-copy">
+                        <div class="assistant-kicker">{lang['assistant_kicker']}</div>
+                        <div class="assistant-title">{assistant_teaser_title(st.session_state.app_lang)}</div>
+                        <div class="assistant-subtitle">{assistant_teaser_subtitle(st.session_state.app_lang)}</div>
+                    </div>
+                    <a href="?assistant=open" target="_self" class="assistant-teaser-link compact">{lang['assistant_btn']}</a>
                 </div>
-                <a href="?assistant=open" target="_self" class="assistant-teaser-link">{lang['assistant_btn']}</a>
+                <div class="assistant-teaser-foot">{assistant_teaser_foot(st.session_state.app_lang)}</div>
             </div>
         </div>
         """
