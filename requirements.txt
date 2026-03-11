@@ -12,4 +12,8 @@ shapely
 pyproj
 rasterio
 pymupdf
+openai
+opencv-python
+openai>=1.0.0
+scikit-image
 Matplotlib
