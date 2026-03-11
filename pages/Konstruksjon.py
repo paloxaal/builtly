@@ -48,13 +48,13 @@ SSOT_FILE = DB_DIR / "ssot.json"
 DB_DIR.mkdir(exist_ok=True)
 IMG_DIR.mkdir(exist_ok=True)
 
-google_key = os.environ.get("AIzaSyB4V9VOkgCLZlNFbMt1jif75m3PiB8HSv4")
+google_key = os.environ.get("GOOGLE_API_KEY")
 if genai is None:
     st.error("Kritisk feil: Python-pakken 'google.generativeai' er ikke tilgjengelig i miljøet.")
     st.stop()
 
 if google_key:
-    genai.configure(api_key=AIzaSyB4V9VOkgCLZlNFbMt1jif75m3PiB8HSv4)
+    genai.configure(api_key=google_key)
 else:
     st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
     st.stop()
