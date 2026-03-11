@@ -7194,6 +7194,640 @@ if analyze_clicked or direct_pdf_clicked:
 
 
 
+# ------------------------------------------------------------
+# 13B. V7 PATCH - bedre planvalg, mer konservativ veggbæring,
+#      og mer robust musepeker-editor for Streamlit.
+# ------------------------------------------------------------
+_RENDER_INLINE_CLICK_CANVAS_EDITOR_V6 = render_inline_click_canvas_editor
+_RENDER_PLOTLY_SKETCH_EDITOR_V6 = render_plotly_sketch_editor
+_GET_PLAN_REGIONS_FOR_RECORD_V6_BASE = get_plan_regions_for_record_v6
+_CHOOSE_REGION_FOR_SKETCH_V6_BASE = _choose_region_for_sketch_v6
+_REFINE_SKETCH_WITH_GEOMETRY_V6_BASE = refine_sketch_with_geometry_v6
+_V7_COMPONENT_CACHE: Dict[str, Any] = {}
+
+
+def optional_components_v2_v7() -> Any:
+    try:
+        import streamlit.components.v2 as components_v2  # type: ignore
+        return components_v2
+    except Exception:
+        return None
+
+
+def get_click_canvas_component_v2_v7() -> Any:
+    components_v2 = optional_components_v2_v7()
+    if components_v2 is None:
+        return None
+    cache_key = 'builtly_rib_click_canvas_v7'
+    if cache_key in _V7_COMPONENT_CACHE:
+        return _V7_COMPONENT_CACHE[cache_key]
+
+    html = """
+<div id="wrap">
+  <canvas id="canvas"></canvas>
+  <div id="status">Klikk i planutsnittet for å redigere bæresystemet.</div>
+</div>
+"""
+    css = """
+#wrap {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 12px;
+  cursor: crosshair;
+  background: #07111a;
+  box-shadow: inset 0 0 0 1px rgba(120,145,170,0.22);
+  touch-action: none;
+}
+#status {
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(207, 218, 227, 0.74);
+  padding: 0 2px 4px 2px;
+}
+"""
+    js = """
+export default function(component) {
+    const { data, setTriggerValue, parentElement } = component;
+    const root = parentElement.querySelector('#wrap');
+    const canvas = parentElement.querySelector('#canvas');
+    const status = parentElement.querySelector('#status');
+    if (!root || !canvas || !status) {
+        return;
+    }
+    const ctx = canvas.getContext('2d');
+    const state = parentElement.__builtlyRibV7 || (parentElement.__builtlyRibV7 = {});
+    state.data = data || {};
+
+    function clamp(value, minValue, maxValue) {
+        return Math.max(minValue, Math.min(maxValue, value));
+    }
+
+    function drawCrosshair(point) {
+        if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') {
+            return;
+        }
+        const x = clamp(point.x, 0, canvas.width);
+        const y = clamp(point.y, 0, canvas.height);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,255,255,0.96)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, 10, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x - 14, y);
+        ctx.lineTo(x + 14, y);
+        ctx.moveTo(x, y - 14);
+        ctx.lineTo(x, y + 14);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawPlaceholder(message) {
+        const w = Number(state.data.natural_width || 960);
+        const h = Number(state.data.natural_height || 540);
+        canvas.width = Math.max(32, w);
+        canvas.height = Math.max(32, h);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#07111a';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#dbe7f0';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(message || 'Laster editor...', 24, 34);
+    }
+
+    function renderImage() {
+        status.textContent = state.data.status_text || 'Klikk i planutsnittet for å redigere bæresystemet.';
+        if (!state.image) {
+            drawPlaceholder('Laster editor...');
+            return;
+        }
+        const w = Number(state.data.natural_width || state.image.naturalWidth || state.image.width || 960);
+        const h = Number(state.data.natural_height || state.image.naturalHeight || state.image.height || 540);
+        canvas.width = Math.max(32, w);
+        canvas.height = Math.max(32, h);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(state.image, 0, 0, canvas.width, canvas.height);
+        drawCrosshair(state.data.last_click || null);
+    }
+
+    function loadImage() {
+        const imageData = state.data.image_data || '';
+        if (!imageData) {
+            state.image = null;
+            drawPlaceholder('Fant ikke editorbildet.');
+            return;
+        }
+        const img = new Image();
+        img.onload = function() {
+            state.image = img;
+            renderImage();
+        };
+        img.onerror = function() {
+            state.image = null;
+            drawPlaceholder('Klarte ikke å laste editorbildet.');
+        };
+        img.src = imageData;
+    }
+
+    function readPoint(event) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = (event.clientX !== undefined) ? event.clientX : ((event.touches && event.touches.length) ? event.touches[0].clientX : 0);
+        const clientY = (event.clientY !== undefined) ? event.clientY : ((event.touches && event.touches.length) ? event.touches[0].clientY : 0);
+        const scaleX = canvas.width / Math.max(rect.width, 1);
+        const scaleY = canvas.height / Math.max(rect.height, 1);
+        return {
+            x: clamp((clientX - rect.left) * scaleX, 0, canvas.width),
+            y: clamp((clientY - rect.top) * scaleY, 0, canvas.height),
+        };
+    }
+
+    function commit(event) {
+        if (event && event.preventDefault) {
+            event.preventDefault();
+        }
+        if (event && event.stopPropagation) {
+            event.stopPropagation();
+        }
+        const point = readPoint(event || {});
+        const payload = {
+            x: Number(point.x.toFixed(2)),
+            y: Number(point.y.toFixed(2)),
+            event_id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8),
+        };
+        state.data = Object.assign({}, state.data, { last_click: payload });
+        renderImage();
+        setTriggerValue('clicked', payload);
+    }
+
+    canvas.onpointerdown = commit;
+    canvas.ontouchstart = commit;
+
+    const signature = JSON.stringify({
+        marker: state.data.version_marker || '',
+        len: state.data.image_data ? state.data.image_data.length : 0,
+        head: state.data.image_data ? state.data.image_data.slice(0, 80) : '',
+        click: state.data.last_click || null,
+        width: state.data.natural_width || 0,
+        height: state.data.natural_height || 0,
+    });
+
+    if (state.signature !== signature) {
+        state.signature = signature;
+        loadImage();
+    } else {
+        renderImage();
+    }
+}
+"""
+
+    try:
+        _V7_COMPONENT_CACHE[cache_key] = components_v2.component(
+            cache_key,
+            html=html,
+            css=css,
+            js=js,
+        )
+        st.session_state.pop('rib_click_canvas_error', None)
+    except Exception as exc:
+        st.session_state['rib_click_canvas_error'] = short_text(f"{type(exc).__name__}: {exc}", 240)
+        _V7_COMPONENT_CACHE[cache_key] = None
+    return _V7_COMPONENT_CACHE.get(cache_key)
+
+
+def _projection_segments_v7(values: Any, min_size: int, threshold: float) -> List[Tuple[int, int, float]]:
+    segments: List[Tuple[int, int, float]] = []
+    start = None
+    for idx, flag in enumerate(values >= threshold):
+        if flag and start is None:
+            start = idx
+        elif (not flag) and start is not None:
+            if (idx - start) >= min_size:
+                segments.append((start, idx - 1, float(values[start:idx].mean())))
+            start = None
+    if start is not None and (len(values) - start) >= min_size:
+        segments.append((start, len(values) - 1, float(values[start:].mean())))
+    return segments
+
+
+def split_large_plan_region_v7(image: Image.Image, bbox: Tuple[int, int, int, int]) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+    image_w, image_h = image.size
+    x, y, w, h = bbox
+    if w <= 180 or h <= 140:
+        return []
+
+    arr = np.array(copy_rgb(image))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    crop = gray[y:y + h, x:x + w]
+    if crop.size == 0:
+        return []
+
+    bw = cv2.adaptiveThreshold(crop, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 5)
+    opened = cv2.morphologyEx(
+        bw,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+    )
+    dilate_k = max(7, int(min(w, h) * 0.010))
+    close_k = max(17, int(min(w, h) * 0.028))
+    blob = cv2.dilate(opened, cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k)), iterations=1)
+    blob = cv2.morphologyEx(blob, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k)))
+
+    x_proj = (blob > 0).mean(axis=0)
+    smooth_k = max(15, int(w * 0.015))
+    x_smooth = np.convolve(x_proj, np.ones(smooth_k) / smooth_k, mode='same')
+    x_threshold = max(float(np.percentile(x_smooth, 20)) * 0.60, 0.005)
+    x_segments = _projection_segments_v7(x_smooth, max(40, int(w * 0.18)), x_threshold)
+    if len(x_segments) < 2 or len(x_segments) > 4:
+        return []
+
+    children: List[Dict[str, Any]] = []
+    for x0, x1, seg_score in x_segments:
+        child_w = int(x1 - x0 + 1)
+        if child_w < int(w * 0.18):
+            continue
+        segment_blob = blob[:, x0:x1 + 1]
+        y_proj = (segment_blob > 0).mean(axis=1)
+        y_smooth = np.convolve(y_proj, np.ones(max(11, int(h * 0.015))) / max(11, int(h * 0.015)), mode='same')
+        y_threshold = max(float(np.percentile(y_smooth, 20)) * 0.65, 0.005)
+        y_segments = _projection_segments_v7(y_smooth, max(30, int(h * 0.20)), y_threshold)
+        if not y_segments:
+            continue
+        y0 = min(seg[0] for seg in y_segments)
+        y1 = max(seg[1] for seg in y_segments)
+        child_h = int(y1 - y0 + 1)
+        if child_h < int(h * 0.32):
+            continue
+        margin_x = max(8, int(w * 0.010))
+        margin_y = max(8, int(h * 0.012))
+        bx0 = int(clamp(x + x0 - margin_x, x, x + w - 12))
+        by0 = int(clamp(y + y0 - margin_y, y, y + h - 12))
+        bx1 = int(clamp(x + x1 + margin_x, bx0 + 12, x + w))
+        by1 = int(clamp(y + y1 + margin_y, by0 + 12, y + h))
+        bbox_px = (bx0, by0, bx1 - bx0, by1 - by0)
+        density = float(segment_blob[max(0, y0):min(segment_blob.shape[0], y1 + 1), :].mean()) / 255.0
+        cx, cy = bbox_center(bbox_px)
+        centrality = max(0.35, 1.0 - abs((cx / max(image_w, 1)) - 0.5) * 0.55 - abs((cy / max(image_h, 1)) - 0.48) * 0.40)
+        score = float((bbox_px[2] * bbox_px[3]) * max(0.03, density) * centrality * max(0.4, seg_score * 4.0))
+        children.append({
+            'bbox_px': bbox_px,
+            'bbox_norm': px_bbox_to_norm(bbox_px, image_w, image_h),
+            'score': score,
+            'density': density,
+            'split_child': True,
+        })
+
+    if len(children) < 2:
+        return []
+    children = dedupe_region_candidates(children)
+    children.sort(key=lambda item: item.get('score', 0.0), reverse=True)
+    return children[:4]
+
+
+def regions_form_horizontal_strip_v7(regions: List[Dict[str, Any]]) -> bool:
+    if len(regions) < 3:
+        return False
+    ordered = sorted(regions, key=lambda item: bbox_center(item['bbox_px'])[0])
+    ys = [bbox_center(item['bbox_px'])[1] for item in ordered[:3]]
+    widths = [item['bbox_px'][2] for item in ordered[:3]]
+    heights = [item['bbox_px'][3] for item in ordered[:3]]
+    if max(ys) - min(ys) > max(24, min(heights) * 0.20):
+        return False
+    if min(widths) <= 0:
+        return False
+    if (max(widths) / max(min(widths), 1)) > 2.4:
+        return False
+    return True
+
+
+def get_plan_regions_for_record_v6(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    cache_key = '_plan_regions_v7'
+    cached = record.get(cache_key)
+    if isinstance(cached, list) and cached:
+        return cached
+
+    base_regions = deep_copy_jsonable(_GET_PLAN_REGIONS_FOR_RECORD_V6_BASE(record))
+    expanded: List[Dict[str, Any]] = []
+    for region in base_regions:
+        bbox = tuple(region.get('bbox_px', (0, 0, 0, 0)))
+        area_ratio = bbox_area(bbox) / float(max(record['image'].size[0] * record['image'].size[1], 1))
+        should_try_split = area_ratio >= 0.22 or (bbox[2] >= record['image'].size[0] * 0.68 and bbox[3] >= record['image'].size[1] * 0.30)
+        children = split_large_plan_region_v7(record['image'], bbox) if should_try_split else []
+        if len(children) >= 2:
+            expanded.extend(children)
+        else:
+            expanded.append(region)
+
+    if not expanded:
+        expanded = base_regions
+
+    expanded = dedupe_region_candidates(expanded)
+
+    if regions_form_horizontal_strip_v7(expanded) and not is_basement_like_record_v6(record):
+        ordered_x = sorted(expanded, key=lambda item: bbox_center(item['bbox_px'])[0])
+        middle_region = ordered_x[len(ordered_x) // 2]
+        for region in expanded:
+            if region is middle_region:
+                region['score'] = float(region.get('score', 0.0)) * 1.35
+            else:
+                region['score'] = float(region.get('score', 0.0)) * 0.92
+
+    expanded.sort(key=lambda item: item.get('score', 0.0), reverse=True)
+    record[cache_key] = expanded[:3]
+    return record[cache_key]
+
+
+def _choose_region_for_sketch_v6(record: Dict[str, Any], sketch: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], int]:
+    regions = get_plan_regions_for_record_v6(record)
+    if not regions:
+        return _CHOOSE_REGION_FOR_SKETCH_V6_BASE(record, sketch)
+
+    if regions_form_horizontal_strip_v7(regions) and not is_basement_like_record_v6(record):
+        text = _record_text_v6(record, sketch).lower()
+        prefer_middle = any(token in text for token in ['typisk', 'typical', '2-4', '2 4'])
+        ai_bbox = None
+        if isinstance(sketch, dict) and isinstance(sketch.get('plan_bbox'), dict):
+            ai_bbox = norm_bbox_to_px(sketch.get('plan_bbox'), record['image'].size[0], record['image'].size[1])
+        if ai_bbox is not None:
+            prefer_middle = prefer_middle or (bbox_area(ai_bbox) > (record['image'].size[0] * record['image'].size[1] * 0.22))
+        if prefer_middle or not sketch or not sketch.get('elements'):
+            ordered = sorted(regions, key=lambda item: bbox_center(item['bbox_px'])[0])
+            chosen = ordered[len(ordered) // 2]
+            return chosen, regions.index(chosen)
+
+    return _CHOOSE_REGION_FOR_SKETCH_V6_BASE(record, sketch)
+
+
+def _wall_metrics_local_v7(element: Dict[str, Any], record: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int]) -> Dict[str, float]:
+    x1, y1 = page_norm_to_local_crop(float(element.get('x1', 0.0)), float(element.get('y1', 0.0)), record['image'].size, region_bbox_px)
+    x2, y2 = page_norm_to_local_crop(float(element.get('x2', 0.0)), float(element.get('y2', 0.0)), record['image'].size, region_bbox_px)
+    return {
+        'x1': float(x1),
+        'y1': float(y1),
+        'x2': float(x2),
+        'y2': float(y2),
+        'x_mid': float((x1 + x2) / 2.0),
+        'y_mid': float((y1 + y2) / 2.0),
+        'length': float(math.hypot(x2 - x1, y2 - y1)),
+        'vertical': bool(abs(x2 - x1) <= abs(y2 - y1)),
+    }
+
+
+def _select_spaced_items_v7(items: List[Dict[str, Any]], value_key: str, limit: int, min_spacing: float) -> List[Dict[str, Any]]:
+    chosen: List[Dict[str, Any]] = []
+    for item in sorted(items, key=lambda entry: float(entry.get('score', 0.0)), reverse=True):
+        value = float(item.get(value_key, 0.0))
+        if all(abs(value - float(prev.get(value_key, 0.0))) >= min_spacing for prev in chosen):
+            chosen.append(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def filter_upper_floor_elements_v7(sketch: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    sketch = deep_copy_jsonable(sketch)
+    geometry = get_geometry_for_sketch(record, sketch)
+    if not geometry:
+        return sketch
+
+    region_bbox_px = geometry['bbox_px']
+    rw, rh = geometry.get('crop_size', (0, 0))
+    core_centers_local: List[Tuple[float, float]] = []
+    for element in sketch.get('elements', []):
+        if clean_pdf_text(element.get('type', '')).lower() != 'core':
+            continue
+        cx_norm = float(element.get('x', 0.0)) + float(element.get('w', 0.0)) / 2.0
+        cy_norm = float(element.get('y', 0.0)) + float(element.get('h', 0.0)) / 2.0
+        cx_local, cy_local = page_norm_to_local_crop(cx_norm, cy_norm, record['image'].size, region_bbox_px)
+        core_centers_local.append((float(cx_local), float(cy_local)))
+    if not core_centers_local:
+        core_box = geometry.get('core_bbox', (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+        core_centers_local = [(float(core_box[0] + core_box[2] / 2.0), float(core_box[1] + core_box[3] / 2.0))]
+
+    cores = [element for element in sketch.get('elements', []) if clean_pdf_text(element.get('type', '')).lower() == 'core']
+    spans = [element for element in sketch.get('elements', []) if clean_pdf_text(element.get('type', '')).lower() == 'span_arrow']
+    beams = [element for element in sketch.get('elements', []) if clean_pdf_text(element.get('type', '')).lower() == 'beam']
+
+    vertical_candidates: List[Dict[str, Any]] = []
+    horizontal_candidates: List[Dict[str, Any]] = []
+    for element in sketch.get('elements', []):
+        if clean_pdf_text(element.get('type', '')).lower() != 'wall':
+            continue
+        metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+        if metrics['vertical']:
+            if metrics['length'] < max(42, rh * 0.18):
+                continue
+            edge_frac = min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1)))
+            if edge_frac < 0.09:
+                continue
+            core_dist = min(abs(metrics['x_mid'] - cx) for cx, _ in core_centers_local)
+            score = metrics['length'] - core_dist * 0.32 - abs(metrics['x_mid'] - (rw / 2.0)) * 0.05
+            vertical_candidates.append({'element': element, 'score': score, 'x_mid': metrics['x_mid']})
+        else:
+            if metrics['length'] < max(32, rw * 0.14):
+                continue
+            if metrics['y_mid'] < rh * 0.18 or metrics['y_mid'] > rh * 0.82:
+                continue
+            if metrics['length'] > rw * 0.68:
+                continue
+            score = metrics['length'] * 0.60 - abs(metrics['y_mid'] - (rh * 0.50)) * 0.18
+            horizontal_candidates.append({'element': element, 'score': score, 'y_mid': metrics['y_mid']})
+
+    chosen_vertical = _select_spaced_items_v7(vertical_candidates, 'x_mid', limit=4, min_spacing=max(26.0, rw * 0.12))
+    chosen_horizontal = _select_spaced_items_v7(horizontal_candidates, 'y_mid', limit=1, min_spacing=max(24.0, rh * 0.10))
+    kept_walls = [item['element'] for item in chosen_vertical + chosen_horizontal]
+
+    if not kept_walls:
+        fallback_elements, _ = generate_wall_core_elements_grounded(geometry, record['image'].size)
+        for element in fallback_elements:
+            if clean_pdf_text(element.get('type', '')).lower() != 'wall':
+                continue
+            metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+            if metrics['vertical'] and min(metrics['x_mid'] / max(rw, 1), 1.0 - (metrics['x_mid'] / max(rw, 1))) >= 0.09:
+                kept_walls.append(element)
+        if len(kept_walls) > 4:
+            keep_scored = []
+            for element in kept_walls:
+                metrics = _wall_metrics_local_v7(element, record, region_bbox_px)
+                core_dist = min(abs(metrics['x_mid'] - cx) for cx, _ in core_centers_local)
+                keep_scored.append({'element': element, 'score': metrics['length'] - core_dist * 0.32, 'x_mid': metrics['x_mid']})
+            kept_walls = [item['element'] for item in _select_spaced_items_v7(keep_scored, 'x_mid', limit=4, min_spacing=max(26.0, rw * 0.12))]
+
+    cleaned_notes = [clean_pdf_text(item) for item in sketch.get('notes', []) if clean_pdf_text(item)]
+    note = 'Overetasjer er etterfiltrert mot indre vegglinjer for å unngå at ytterkontur og hele blad skjøres inn som bærevegger.'
+    if note not in cleaned_notes:
+        cleaned_notes = [note] + cleaned_notes
+
+    sketch['elements'] = cores + kept_walls + spans[:1] + beams[:1]
+    sketch['notes'] = cleaned_notes[:5]
+    return sketch
+
+
+def refine_sketch_with_geometry_v6(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    transfer_hints: Optional[Dict[str, Any]] = None,
+    forced_region: Optional[Dict[str, Any]] = None,
+    forced_region_index: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    refined = _REFINE_SKETCH_WITH_GEOMETRY_V6_BASE(
+        record,
+        sketch,
+        analysis_result,
+        material_preference,
+        transfer_hints,
+        forced_region,
+        forced_region_index,
+    )
+    if refined is None:
+        return None
+    mode = clean_pdf_text(refined.get('grounded_mode', '')).lower()
+    if mode == 'wall_core' and not is_basement_like_record_v6(record, refined):
+        refined = filter_upper_floor_elements_v7(refined, record)
+    return refined
+
+
+def render_inline_click_canvas_editor(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+    editor_key: str,
+) -> Optional[Dict[str, float]]:
+    show_guides = bool(st.session_state.get('rib_editor_show_guides', True))
+    editor_img, region_bbox = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
+    rw, rh = editor_img.size
+    marker_key = f'{editor_key}_canvas_last_click'
+    last_click = st.session_state.get(marker_key)
+    if not isinstance(last_click, dict):
+        last_click = None
+
+    component = get_click_canvas_component_v2_v7()
+    if component is not None:
+        try:
+            result = component(
+                data={
+                    'image_data': editor_image_data_uri(editor_img),
+                    'natural_width': int(rw),
+                    'natural_height': int(rh),
+                    'status_text': 'Klikk direkte i planutsnittet for å legge inn korrigeringer.',
+                    'version_marker': f"{st.session_state.get('rib_draft_updated_at', '')}|{st.session_state.get('rib_editor_show_guides', True)}",
+                    'last_click': last_click,
+                },
+                key=f'{editor_key}_canvas_v7',
+                height=int(min(980, max(420, rh / max(rw, 1) * 920))),
+                on_clicked_change=lambda: None,
+            )
+            st.caption('Innebygd v2-canvas-editor er aktiv. Klikk direkte i planutsnittet.')
+            payload = None
+            if result is not None:
+                payload = getattr(result, 'clicked', None)
+                if payload is None and isinstance(result, dict):
+                    payload = result.get('clicked')
+            if isinstance(payload, dict) and 'x' in payload and 'y' in payload:
+                click = {
+                    'x': float(payload.get('x', 0.0)),
+                    'y': float(payload.get('y', 0.0)),
+                    'event_id': clean_pdf_text(payload.get('event_id', '')),
+                }
+                st.session_state[marker_key] = {'x': click['x'], 'y': click['y']}
+                return click
+        except Exception as exc:
+            st.session_state['rib_click_canvas_error'] = short_text(f"{type(exc).__name__}: {exc}", 240)
+            st.caption(f"Teknisk info (v2-fallback): {st.session_state['rib_click_canvas_error']}")
+
+    return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V6(drawing_record, sketch, editor_key)
+
+
+def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
+    go = optional_plotly_go()
+    if go is None:
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+
+    show_guides = bool(st.session_state.get('rib_editor_show_guides', True))
+    editor_img, region_bbox = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
+    rw, rh = editor_img.size
+    step = max(14, int(min(rw, rh) * 0.06))
+    grid_x = []
+    grid_y = []
+    for yy in range(0, rh + 1, step):
+        for xx in range(0, rw + 1, step):
+            grid_x.append(xx)
+            grid_y.append(yy)
+
+    fig = go.Figure()
+    fig.add_layout_image(
+        dict(
+            source=editor_image_data_uri(editor_img),
+            xref='x',
+            yref='y',
+            x=0,
+            y=0,
+            sizex=rw,
+            sizey=rh,
+            yanchor='top',
+            sizing='stretch',
+            layer='below',
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=grid_x,
+            y=grid_y,
+            mode='markers',
+            marker=dict(size=max(8, int(step * 0.72)), color='rgba(0,0,0,0.003)'),
+            hoverinfo='skip',
+            showlegend=False,
+            name='Klikkflate',
+        )
+    )
+    fig.update_xaxes(visible=False, range=[0, rw])
+    fig.update_yaxes(visible=False, range=[0, rh], autorange='reversed', scaleanchor='x', scaleratio=1)
+    fig.update_layout(
+        height=int(min(950, max(460, rh / max(rw, 1) * 950))),
+        margin=dict(l=0, r=0, t=0, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        dragmode='select',
+        clickmode='event+select',
+        showlegend=False,
+    )
+
+    try:
+        event_state = st.plotly_chart(
+            fig,
+            key=f'{editor_key}_plotly_v7',
+            use_container_width=True,
+            on_select='rerun',
+            selection_mode=('points',),
+        )
+        raw = extract_plotly_click(event_state)
+        if raw is None:
+            return None
+        return {
+            'x': float(clamp(raw['x'], 0, max(rw - 1, 1))),
+            'y': float(clamp(raw['y'], 0, max(rh - 1, 1))),
+            'event_id': clean_pdf_text(f"plotly-{round(raw['x'], 2)}-{round(raw['y'], 2)}-{datetime.now().timestamp()}")
+        }
+    except TypeError:
+        st.caption('Miljøet støtter ikke Plotly-klikk direkte. Bytter til innebygd canvas-editor.')
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+    except Exception:
+        st.caption('Plotly-editoren kunne ikke startes. Bytter til innebygd canvas-editor.')
+        return render_inline_click_canvas_editor(drawing_record, sketch, editor_key)
+
+
 if draft_sketch_bundle_exists():
     render_rib_draft_editor_ui()
 
