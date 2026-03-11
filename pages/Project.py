@@ -20,9 +20,9 @@ except ImportError:
 # --- 1. GRUNNINNSTILLINGER & API ---
 st.set_page_config(page_title="Project Setup | Builtly", page_icon="⚙️", layout="wide", initial_sidebar_state="collapsed")
 
-google_key = os.environ.get("GOOGLE_API_KEY")
+google_key = os.environ.get("AIzaSyB4V9VOkgCLZlNFbMt1jif75m3PiB8HSv4")
 if google_key:
-    genai.configure(api_key=google_key)
+    genai.configure(api_key=AIzaSyB4V9VOkgCLZlNFbMt1jif75m3PiB8HSv4)
 
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
