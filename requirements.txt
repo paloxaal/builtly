@@ -12,3 +12,4 @@ shapely
 pyproj
 rasterio
 pymupdf
+Matplotlib
