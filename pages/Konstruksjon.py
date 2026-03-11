@@ -6129,6 +6129,993 @@ def render_rib_draft_editor_ui() -> None:
             st.rerun()
 
 
+
+
+# ------------------------------------------------------------
+# 13B. V6 HYBRID AI + GEOMETRISK KALIBRERING AV BÆRESYSTEM
+# ------------------------------------------------------------
+BASEMENT_KEYWORDS_V6 = [
+    "kjeller", "p-kjeller", "parkering", "parkering", "parking", "garage", "garasje",
+    "underetasje", "underetg", "u.etg", "u-etg", "u1", "u2", "basement",
+]
+PLAN_KEYWORDS_V6 = [
+    "plan", "plantegning", "etg", "etasje", "etasjeplan", "typisk", "level", "nivå",
+]
+
+
+def detect_drawing_hint(name: str) -> str:
+    low = clean_pdf_text(name).lower()
+    if any(k in low for k in PLAN_KEYWORDS_V6 + BASEMENT_KEYWORDS_V6 + ["floor", "plan1", "plan 1"]):
+        return "plan"
+    if any(k in low for k in ["snitt", "section", "cut"]):
+        return "section"
+    if any(k in low for k in ["fasade", "facade", "elevation"]):
+        return "facade"
+    if any(k in low for k in ["detalj", "detail"]):
+        return "detail"
+    return "unknown"
+
+
+
+def _record_text_v6(record: Dict[str, Any], sketch: Optional[Dict[str, Any]] = None) -> str:
+    parts = [
+        clean_pdf_text(record.get("name", "")),
+        clean_pdf_text(record.get("label", "")),
+        clean_pdf_text(record.get("source", "")),
+        clean_pdf_text(record.get("hint", "")),
+    ]
+    if isinstance(sketch, dict):
+        parts.append(clean_pdf_text(sketch.get("page_label", "")))
+    return " ".join(part for part in parts if part).lower()
+
+
+
+def _is_basement_like_text_v6(text: str) -> bool:
+    low = clean_pdf_text(text).lower()
+    return any(word in low for word in BASEMENT_KEYWORDS_V6)
+
+
+
+def is_basement_like_record_v6(record: Dict[str, Any], sketch: Optional[Dict[str, Any]] = None) -> bool:
+    return _is_basement_like_text_v6(_record_text_v6(record, sketch))
+
+
+
+def get_plan_regions_for_record_v6(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    cache_key = "_plan_regions_v6"
+    cached = record.get(cache_key)
+    if isinstance(cached, list) and cached:
+        return cached
+    regions = detect_plan_regions_grounded(record["image"])
+    if not regions:
+        width, height = record["image"].size
+        fallback_bbox = (
+            int(width * 0.08),
+            int(height * 0.12),
+            int(width * 0.84),
+            int(height * 0.72),
+        )
+        regions = [{"bbox_px": fallback_bbox, "bbox_norm": px_bbox_to_norm(fallback_bbox, width, height), "score": 1.0}]
+    record[cache_key] = regions
+    return regions
+
+
+
+def is_plan_like_record_v6(record: Dict[str, Any]) -> bool:
+    hint = clean_pdf_text(record.get("hint", "")).lower()
+    if hint == "plan":
+        return True
+    if hint in {"section", "facade", "detail"}:
+        return False
+    if is_basement_like_record_v6(record):
+        return True
+    regions = get_plan_regions_for_record_v6(record)
+    if not regions:
+        return False
+    image_w, image_h = record["image"].size
+    best_area = max(bbox_area(region["bbox_px"]) for region in regions)
+    return (best_area / float(max(image_w * image_h, 1))) >= 0.12
+
+
+
+def prioritize_drawings(drawings: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+    out = []
+    for record in drawings:
+        try:
+            if is_plan_like_record_v6(record):
+                record["hint"] = "plan"
+        except Exception:
+            pass
+        out.append(record)
+    out = sorted(out, key=drawing_priority, reverse=True)[:limit]
+    for idx, record in enumerate(out):
+        record["page_index"] = idx
+    return out
+
+
+
+def _element_center_norm_v6(element: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    e_type = clean_pdf_text(element.get("type", "")).lower()
+    try:
+        if e_type == "column":
+            return float(element.get("x", 0.0)), float(element.get("y", 0.0))
+        if e_type == "core":
+            return (
+                float(element.get("x", 0.0)) + float(element.get("w", 0.0)) / 2.0,
+                float(element.get("y", 0.0)) + float(element.get("h", 0.0)) / 2.0,
+            )
+        if e_type in {"wall", "beam", "span_arrow"}:
+            return (
+                (float(element.get("x1", 0.0)) + float(element.get("x2", 0.0))) / 2.0,
+                (float(element.get("y1", 0.0)) + float(element.get("y2", 0.0))) / 2.0,
+            )
+        if e_type == "grid":
+            orientation = clean_pdf_text(element.get("orientation", "")).lower()
+            if orientation.startswith("v"):
+                return float(element.get("x", 0.0)), 0.5
+            return 0.5, float(element.get("y", 0.0))
+    except Exception:
+        return None
+    return None
+
+
+
+def _point_in_bbox_v6(px: float, py: float, bbox: Tuple[int, int, int, int]) -> bool:
+    x, y, w, h = bbox
+    return x <= px <= x + w and y <= py <= y + h
+
+
+
+def _choose_region_for_sketch_v6(record: Dict[str, Any], sketch: Optional[Dict[str, Any]]) -> Tuple[Dict[str, Any], int]:
+    regions = get_plan_regions_for_record_v6(record)
+    if not regions:
+        width, height = record["image"].size
+        full_bbox = (0, 0, width, height)
+        return {"bbox_px": full_bbox, "bbox_norm": px_bbox_to_norm(full_bbox, width, height), "score": 1.0}, 0
+
+    image_w, image_h = record["image"].size
+    ai_bbox = None
+    if isinstance(sketch, dict) and isinstance(sketch.get("plan_bbox"), dict):
+        ai_bbox = norm_bbox_to_px(sketch.get("plan_bbox"), image_w, image_h)
+
+    centers_px: List[Tuple[float, float]] = []
+    if isinstance(sketch, dict):
+        for element in sketch.get("elements", []):
+            center_norm = _element_center_norm_v6(element)
+            if center_norm is None:
+                continue
+            centers_px.append(page_norm_to_px(center_norm[0], center_norm[1], image_w, image_h))
+
+    best_idx = 0
+    best_score = None
+    for idx, region in enumerate(regions):
+        bbox = region["bbox_px"]
+        inside_count = sum(1 for px, py in centers_px if _point_in_bbox_v6(px, py, bbox))
+        region_score = float(region.get("score", 0.0))
+        if ai_bbox is not None:
+            region_score += bbox_iou(bbox, ai_bbox) * 2500.0
+        if centers_px:
+            cx, cy = bbox_center(bbox)
+            avg_dist = sum(math.hypot(px - cx, py - cy) for px, py in centers_px) / max(len(centers_px), 1)
+        else:
+            avg_dist = 0.0
+        total_score = region_score + inside_count * 1800.0 - avg_dist * 0.12
+        if best_score is None or total_score > best_score:
+            best_idx = idx
+            best_score = total_score
+    return regions[best_idx], best_idx
+
+
+
+def _clusters_from_relative_pairs_v6(pairs: List[Tuple[float, float]], tolerance: float = 0.06) -> List[Dict[str, Any]]:
+    clean_pairs = []
+    for pos, weight in pairs:
+        try:
+            pos_v = float(pos)
+            weight_v = max(0.1, float(weight))
+        except Exception:
+            continue
+        if 0.0 <= pos_v <= 1.0:
+            clean_pairs.append((pos_v, weight_v))
+    if not clean_pairs:
+        return []
+    clusters = cluster_weighted_positions(clean_pairs, tolerance)
+    return sorted(clusters, key=lambda item: (float(item.get("weight", 0.0)), int(item.get("count", 0))), reverse=True)
+
+
+
+def collect_transfer_hints_v6(sketches: List[Dict[str, Any]], drawings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    x_pairs: List[Tuple[float, float]] = []
+    y_pairs: List[Tuple[float, float]] = []
+    core_boxes: List[Dict[str, float]] = []
+
+    for sketch in sketches or []:
+        if not isinstance(sketch, dict):
+            continue
+        record = lookup_record_by_page(drawings, int(sketch.get("page_index", -1)))
+        if record is None or is_basement_like_record_v6(record, sketch):
+            continue
+        counts = count_elements_by_type(sketch)
+        if (counts["wall"] + counts["core"]) <= 0:
+            continue
+        region, _ = _choose_region_for_sketch_v6(record, sketch)
+        region_bbox = region["bbox_px"]
+        rw, rh = region_bbox[2], region_bbox[3]
+        image_w, image_h = record["image"].size
+        for element in sketch.get("elements", []):
+            e_type = clean_pdf_text(element.get("type", "")).lower()
+            if e_type == "wall":
+                x1, y1 = page_norm_to_local_crop(float(element.get("x1", 0.0)), float(element.get("y1", 0.0)), record["image"].size, region_bbox)
+                x2, y2 = page_norm_to_local_crop(float(element.get("x2", 0.0)), float(element.get("y2", 0.0)), record["image"].size, region_bbox)
+                dx = x2 - x1
+                dy = y2 - y1
+                if abs(dx) <= abs(dy):
+                    x_pairs.append((clamp((x1 + x2) / 2.0 / max(rw, 1), 0.0, 1.0), max(0.6, abs(dy) / max(rh, 1))))
+                else:
+                    y_pairs.append((clamp((y1 + y2) / 2.0 / max(rh, 1), 0.0, 1.0), max(0.6, abs(dx) / max(rw, 1))))
+            elif e_type == "core":
+                x_local, y_local = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), record["image"].size, region_bbox)
+                w_local = float(element.get("w", 0.0)) * image_w
+                h_local = float(element.get("h", 0.0)) * image_h
+                if w_local <= 4 or h_local <= 4:
+                    continue
+                rel_box = {
+                    "x": clamp(x_local / max(rw, 1), 0.0, 1.0),
+                    "y": clamp(y_local / max(rh, 1), 0.0, 1.0),
+                    "w": clamp(w_local / max(rw, 1), 0.04, 0.40),
+                    "h": clamp(h_local / max(rh, 1), 0.04, 0.45),
+                    "weight": 1.0 + min(2.0, (w_local * h_local) / float(max(rw * rh, 1)) * 20.0),
+                }
+                core_boxes.append(rel_box)
+                x_pairs.append((clamp((x_local + w_local / 2.0) / max(rw, 1), 0.0, 1.0), 1.6))
+                y_pairs.append((clamp((y_local + h_local / 2.0) / max(rh, 1), 0.0, 1.0), 1.0))
+
+    deduped_core_boxes: List[Dict[str, float]] = []
+    for box in sorted(core_boxes, key=lambda item: float(item.get("weight", 0.0)), reverse=True):
+        if any(
+            abs((box["x"] + box["w"] / 2.0) - (other["x"] + other["w"] / 2.0)) < 0.08
+            and abs((box["y"] + box["h"] / 2.0) - (other["y"] + other["h"] / 2.0)) < 0.10
+            for other in deduped_core_boxes
+        ):
+            continue
+        deduped_core_boxes.append(box)
+        if len(deduped_core_boxes) >= 4:
+            break
+
+    return {
+        "x_clusters": _clusters_from_relative_pairs_v6(x_pairs, tolerance=0.055)[:6],
+        "y_clusters": _clusters_from_relative_pairs_v6(y_pairs, tolerance=0.075)[:5],
+        "core_boxes": deduped_core_boxes,
+    }
+
+
+
+def _nearest_support_position_px_v6(value_px: float, extent_px: int, clusters: List[Dict[str, Any]], max_dist_px: float) -> Optional[float]:
+    if not clusters or extent_px <= 0:
+        return None
+    positions = [float(item.get("pos", 0.0)) * extent_px for item in clusters if 0.0 <= float(item.get("pos", 0.0)) <= 1.0]
+    if not positions:
+        return None
+    nearest = min(positions, key=lambda item: abs(item - value_px))
+    return nearest if abs(nearest - value_px) <= max_dist_px else None
+
+
+
+def _snap_point_with_transfer_hints_v6(
+    local_x: float,
+    local_y: float,
+    geometry: Dict[str, Any],
+    transfer_hints: Optional[Dict[str, Any]] = None,
+    prefer_transfer: bool = False,
+) -> Tuple[float, float]:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    local_x = float(clamp(local_x, 0, max(rw - 1, 1)))
+    local_y = float(clamp(local_y, 0, max(rh - 1, 1)))
+    junctions = geometry.get("junctions", [])
+    footprint = geometry.get("footprint_mask")
+    core_bbox = geometry.get("core_bbox", (0, 0, 0, 0))
+    if not junctions:
+        return snap_local_point_to_geometry(local_x, local_y, geometry, prefer="column")
+
+    support_x = None
+    support_y = None
+    if transfer_hints:
+        support_x = _nearest_support_position_px_v6(local_x, rw, transfer_hints.get("x_clusters", []), max(22, int(rw * (0.18 if prefer_transfer else 0.10))))
+        support_y = _nearest_support_position_px_v6(local_y, rh, transfer_hints.get("y_clusters", []), max(22, int(rh * (0.18 if prefer_transfer else 0.12))))
+
+    best = None
+    for junction in junctions:
+        jx = float(junction.get("x", 0.0))
+        jy = float(junction.get("y", 0.0))
+        if point_inside_local_box(jx, jy, core_bbox, margin=12):
+            continue
+        if footprint is not None:
+            iy = int(clamp(jy, 0, footprint.shape[0] - 1))
+            ix = int(clamp(jx, 0, footprint.shape[1] - 1))
+            if footprint[iy, ix] <= 0:
+                continue
+        score = float(junction.get("score", 0.0))
+        score -= math.hypot(jx - local_x, jy - local_y) * 0.95
+        if support_x is not None:
+            dist_x = abs(jx - support_x)
+            score -= dist_x * (1.15 if prefer_transfer else 0.70)
+            if dist_x <= max(20, int(rw * 0.08)):
+                score += 22.0
+        if support_y is not None:
+            dist_y = abs(jy - support_y)
+            score -= dist_y * (0.95 if prefer_transfer else 0.55)
+            if dist_y <= max(18, int(rh * 0.08)):
+                score += 10.0
+        if best is None or score > best[0]:
+            best = (score, jx, jy)
+
+    if best is not None:
+        return float(best[1]), float(best[2])
+    return snap_local_point_to_geometry(local_x, local_y, geometry, prefer="column")
+
+
+
+def _snap_bbox_to_geometry_v6(x0: float, y0: float, x1: float, y1: float, geometry: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    x0 = float(clamp(x0, 0, max(rw - 8, 1)))
+    x1 = float(clamp(x1, x0 + 8, max(rw - 1, x0 + 8)))
+    y0 = float(clamp(y0, 0, max(rh - 8, 1)))
+    y1 = float(clamp(y1, y0 + 8, max(rh - 1, y0 + 8)))
+    max_snap_x = max(14, int(rw * 0.08))
+    max_snap_y = max(14, int(rh * 0.08))
+    x0 = float(snap_edge_to_lines(x0, geometry.get("vertical_segments", []), max_snap_x))
+    x1 = float(snap_edge_to_lines(x1, geometry.get("vertical_segments", []), max_snap_x))
+    y0 = float(snap_edge_to_lines(y0, geometry.get("horizontal_segments", []), max_snap_y))
+    y1 = float(snap_edge_to_lines(y1, geometry.get("horizontal_segments", []), max_snap_y))
+    if x1 <= x0 + 10:
+        x1 = min(float(rw - 2), x0 + max(20.0, rw * 0.12))
+    if y1 <= y0 + 10:
+        y1 = min(float(rh - 2), y0 + max(24.0, rh * 0.14))
+    return x0, y0, x1, y1
+
+
+
+def _core_element_from_local_bbox_v6(
+    region_bbox_px: Tuple[int, int, int, int],
+    bbox_local: Tuple[float, float, float, float],
+    image_size: Tuple[int, int],
+    label: str,
+) -> Dict[str, Any]:
+    image_w, image_h = image_size
+    x0, y0, x1, y1 = bbox_local
+    x_norm, y_norm = local_point_to_page_norm(region_bbox_px, x0, y0, image_w, image_h)
+    return {
+        "type": "core",
+        "x": x_norm,
+        "y": y_norm,
+        "w": round(clamp((x1 - x0) / max(image_w, 1), 0.03, 0.35), 6),
+        "h": round(clamp((y1 - y0) / max(image_h, 1), 0.03, 0.35), 6),
+        "label": clean_pdf_text(label) or "Kjerne",
+    }
+
+
+
+def _column_element_from_local_v6(
+    region_bbox_px: Tuple[int, int, int, int],
+    local_x: float,
+    local_y: float,
+    image_size: Tuple[int, int],
+    label: str,
+) -> Dict[str, Any]:
+    image_w, image_h = image_size
+    x_norm, y_norm = local_point_to_page_norm(region_bbox_px, local_x, local_y, image_w, image_h)
+    return {"type": "column", "x": x_norm, "y": y_norm, "label": clean_pdf_text(label)}
+
+
+
+def _line_element_from_local_v6(
+    kind: str,
+    region_bbox_px: Tuple[int, int, int, int],
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    image_size: Tuple[int, int],
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    image_w, image_h = image_size
+    if math.hypot(x2 - x1, y2 - y1) < 18:
+        return None
+    x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, x1, y1, image_w, image_h)
+    x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, x2, y2, image_w, image_h)
+    return {
+        "type": kind,
+        "x1": x1_norm,
+        "y1": y1_norm,
+        "x2": x2_norm,
+        "y2": y2_norm,
+        "label": clean_pdf_text(label),
+    }
+
+
+
+def _segment_to_wall_element_v6(
+    segment: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+    image_size: Tuple[int, int],
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    if segment.get("kind") == "vertical":
+        return _line_element_from_local_v6(
+            "wall",
+            region_bbox_px,
+            float(segment["center"]),
+            float(segment["y"]),
+            float(segment["center"]),
+            float(segment["y"] + segment["h"]),
+            image_size,
+            label,
+        )
+    return _line_element_from_local_v6(
+        "wall",
+        region_bbox_px,
+        float(segment["x"]),
+        float(segment["center"]),
+        float(segment["x"] + segment["w"]),
+        float(segment["center"]),
+        image_size,
+        label,
+    )
+
+
+
+def _select_perimeter_segments_v6(geometry: Dict[str, Any], max_items: int = 3) -> List[Dict[str, Any]]:
+    rw, rh = geometry.get("crop_size", (0, 0))
+    candidates: List[Tuple[float, Dict[str, Any]]] = []
+    for segment in geometry.get("vertical_segments", []):
+        center = float(segment.get("center", 0.0))
+        edge_dist = min(center, max(0.0, rw - center))
+        if edge_dist > rw * 0.22:
+            continue
+        score = float(segment.get("length", 0.0)) - edge_dist * 0.4
+        candidates.append((score, segment))
+    for segment in geometry.get("horizontal_segments", []):
+        center = float(segment.get("center", 0.0))
+        edge_dist = min(center, max(0.0, rh - center))
+        if edge_dist > rh * 0.22:
+            continue
+        score = float(segment.get("length", 0.0)) - edge_dist * 0.4
+        candidates.append((score, segment))
+    selected: List[Dict[str, Any]] = []
+    for _, segment in sorted(candidates, key=lambda item: item[0], reverse=True):
+        if any(
+            segment.get("kind") == other.get("kind")
+            and abs(float(segment.get("center", 0.0)) - float(other.get("center", 0.0))) < (24 if segment.get("kind") == "vertical" else 18)
+            for other in selected
+        ):
+            continue
+        selected.append(segment)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+
+def generate_transfer_basement_elements_v6(
+    geometry: Dict[str, Any],
+    image_size: Tuple[int, int],
+    transfer_hints: Optional[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry.get("crop_size", (0, 0))
+    elements: List[Dict[str, Any]] = []
+
+    projected_core_boxes = []
+    if transfer_hints:
+        for box in transfer_hints.get("core_boxes", [])[:3]:
+            x0 = float(box.get("x", 0.0)) * rw
+            y0 = float(box.get("y", 0.0)) * rh
+            x1 = x0 + float(box.get("w", 0.16)) * rw
+            y1 = y0 + float(box.get("h", 0.18)) * rh
+            projected_core_boxes.append(_snap_bbox_to_geometry_v6(x0, y0, x1, y1, geometry))
+    if not projected_core_boxes:
+        core_x, core_y, core_w, core_h = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+        projected_core_boxes.append((float(core_x), float(core_y), float(core_x + core_w), float(core_y + core_h)))
+
+    for idx, bbox_local in enumerate(projected_core_boxes, start=1):
+        elements.append(_core_element_from_local_bbox_v6(region_bbox_px, bbox_local, image_size, f"Kjerne {idx}"))
+
+    for segment in _select_perimeter_segments_v6(geometry, max_items=3):
+        wall = _segment_to_wall_element_v6(segment, region_bbox_px, image_size, "Perimetervegg")
+        if wall is not None:
+            elements.append(wall)
+
+    x_targets = [float(item.get("pos", 0.0)) * rw for item in (transfer_hints or {}).get("x_clusters", [])[:5]]
+    if not x_targets:
+        x_targets = [float(line.get("pos", 0.0)) for line in geometry.get("grid_x", [])[:4]]
+    y_targets = [float(line.get("pos", 0.0)) for line in geometry.get("grid_y", [])[:3]]
+    if not y_targets and geometry.get("junctions"):
+        y_targets = [float(item.get("y", 0.0)) for item in sorted(geometry.get("junctions", []), key=lambda item: float(item.get("score", 0.0)), reverse=True)[:3]]
+
+    support_columns: List[Dict[str, Any]] = []
+    for x_target in x_targets:
+        for y_target in y_targets:
+            snapped_x, snapped_y = _snap_point_with_transfer_hints_v6(x_target, y_target, geometry, transfer_hints, prefer_transfer=True)
+            support_columns.append({"x": snapped_x, "y": snapped_y})
+    if len(support_columns) < 6:
+        for junction in sorted(geometry.get("junctions", []), key=lambda item: float(item.get("score", 0.0)), reverse=True):
+            support_columns.append({"x": float(junction.get("x", 0.0)), "y": float(junction.get("y", 0.0))})
+            if len(support_columns) >= 10:
+                break
+
+    chosen_points: List[Tuple[float, float]] = []
+    min_spacing = max(24, int(min(rw, rh) * 0.12))
+    for candidate in support_columns:
+        cx = float(candidate["x"])
+        cy = float(candidate["y"])
+        if any((cx - px) ** 2 + (cy - py) ** 2 <= (min_spacing ** 2) for px, py in chosen_points):
+            continue
+        if any(point_inside_local_box(cx, cy, (int(b[0]), int(b[1]), int(b[2] - b[0]), int(b[3] - b[1])), margin=10) for b in projected_core_boxes):
+            continue
+        chosen_points.append((cx, cy))
+        if len(chosen_points) >= 12:
+            break
+
+    for idx, (cx, cy) in enumerate(sorted(chosen_points, key=lambda item: (item[1], item[0])), start=1):
+        elements.append(_column_element_from_local_v6(region_bbox_px, cx, cy, image_size, f"C{idx}"))
+
+    notes = [
+        "Kjeller tolkes som transfer-sone: søyler søkes under overliggende vegg- og kjernelinjer.",
+        "Perimetervegger holdes ved åpne randsoner der kjellergeometrien tillater det.",
+        "Auto-plasseringen er kalibrert for mindre tilfeldig søylegrid i parkeringsplan.",
+    ]
+    return elements, notes
+
+
+
+def _refine_core_element_v6(
+    element: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+    geometry: Dict[str, Any],
+    fallback_label: str,
+) -> Optional[Dict[str, Any]]:
+    image_w, image_h = drawing_record["image"].size
+    x_local, y_local = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, region_bbox_px)
+    w_local = float(element.get("w", 0.0)) * image_w
+    h_local = float(element.get("h", 0.0)) * image_h
+    rw, rh = geometry.get("crop_size", (0, 0))
+    if w_local <= 8 or h_local <= 8:
+        core_x, core_y, core_w, core_h = geometry.get("core_bbox", (rw * 0.40, rh * 0.35, rw * 0.18, rh * 0.22))
+        x_local, y_local, w_local, h_local = float(core_x), float(core_y), float(core_w), float(core_h)
+    bbox_local = _snap_bbox_to_geometry_v6(x_local, y_local, x_local + w_local, y_local + h_local, geometry)
+    return _core_element_from_local_bbox_v6(region_bbox_px, bbox_local, drawing_record["image"].size, clean_pdf_text(element.get("label", "")) or fallback_label)
+
+
+
+def _refine_column_element_v6(
+    element: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+    geometry: Dict[str, Any],
+    transfer_hints: Optional[Dict[str, Any]],
+    prefer_transfer: bool,
+    fallback_label: str,
+) -> Optional[Dict[str, Any]]:
+    local_x, local_y = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, region_bbox_px)
+    snapped_x, snapped_y = _snap_point_with_transfer_hints_v6(local_x, local_y, geometry, transfer_hints, prefer_transfer=prefer_transfer)
+    return _column_element_from_local_v6(region_bbox_px, snapped_x, snapped_y, drawing_record["image"].size, clean_pdf_text(element.get("label", "")) or fallback_label)
+
+
+
+def _refine_linear_element_v6(
+    element: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+    geometry: Dict[str, Any],
+    kind: str,
+    fallback_label: str,
+) -> Optional[Dict[str, Any]]:
+    x1, y1 = page_norm_to_local_crop(float(element.get("x1", 0.0)), float(element.get("y1", 0.0)), drawing_record["image"].size, region_bbox_px)
+    x2, y2 = page_norm_to_local_crop(float(element.get("x2", 0.0)), float(element.get("y2", 0.0)), drawing_record["image"].size, region_bbox_px)
+    rw, rh = geometry.get("crop_size", (0, 0))
+    dx = x2 - x1
+    dy = y2 - y1
+    vertical = abs(dx) <= abs(dy)
+
+    if vertical:
+        center_x = (x1 + x2) / 2.0
+        candidates = [seg for seg in geometry.get("vertical_segments", []) if float(seg.get("length", 0.0)) >= max(28, int(rh * 0.14))]
+        segment = min(candidates, key=lambda seg: abs(float(seg.get("center", 0.0)) - center_x)) if candidates else None
+        if segment is not None and abs(float(segment.get("center", 0.0)) - center_x) <= max(22, int(rw * 0.10)):
+            x_line = float(segment.get("center", center_x))
+            y_start = max(min(y1, y2), float(segment.get("y", min(y1, y2))))
+            y_end = min(max(y1, y2), float(segment.get("y", 0.0) + segment.get("h", 0.0)))
+            if (y_end - y_start) < max(26, int(rh * 0.08)):
+                y_start = float(segment.get("y", y_start))
+                y_end = float(segment.get("y", 0.0) + segment.get("h", 0.0))
+        else:
+            x_line = float(min(geometry.get("grid_x", [{"pos": center_x}]), key=lambda item: abs(float(item.get("pos", center_x)) - center_x)).get("pos", center_x)) if geometry.get("grid_x") else center_x
+            y_start = float(clamp(min(y1, y2), 0, max(rh - 2, 1)))
+            y_end = float(clamp(max(y1, y2), y_start + 12, max(rh - 1, y_start + 12)))
+        return _line_element_from_local_v6(kind, region_bbox_px, x_line, y_start, x_line, y_end, drawing_record["image"].size, clean_pdf_text(element.get("label", "")) or fallback_label)
+
+    center_y = (y1 + y2) / 2.0
+    candidates = [seg for seg in geometry.get("horizontal_segments", []) if float(seg.get("length", 0.0)) >= max(28, int(rw * 0.14))]
+    segment = min(candidates, key=lambda seg: abs(float(seg.get("center", 0.0)) - center_y)) if candidates else None
+    if segment is not None and abs(float(segment.get("center", 0.0)) - center_y) <= max(22, int(rh * 0.10)):
+        y_line = float(segment.get("center", center_y))
+        x_start = max(min(x1, x2), float(segment.get("x", min(x1, x2))))
+        x_end = min(max(x1, x2), float(segment.get("x", 0.0) + segment.get("w", 0.0)))
+        if (x_end - x_start) < max(26, int(rw * 0.08)):
+            x_start = float(segment.get("x", x_start))
+            x_end = float(segment.get("x", 0.0) + segment.get("w", 0.0))
+    else:
+        y_line = float(min(geometry.get("grid_y", [{"pos": center_y}]), key=lambda item: abs(float(item.get("pos", center_y)) - center_y)).get("pos", center_y)) if geometry.get("grid_y") else center_y
+        x_start = float(clamp(min(x1, x2), 0, max(rw - 2, 1)))
+        x_end = float(clamp(max(x1, x2), x_start + 12, max(rw - 1, x_start + 12)))
+    return _line_element_from_local_v6(kind, region_bbox_px, x_start, y_line, x_end, y_line, drawing_record["image"].size, clean_pdf_text(element.get("label", "")) or fallback_label)
+
+
+
+def _dedupe_refined_elements_v6(elements: List[Dict[str, Any]], image_size: Tuple[int, int]) -> List[Dict[str, Any]]:
+    image_w, image_h = image_size
+    columns: List[Dict[str, Any]] = []
+    cores: List[Dict[str, Any]] = []
+    lines: List[Dict[str, Any]] = []
+    others: List[Dict[str, Any]] = []
+
+    def line_px(element: Dict[str, Any]) -> Tuple[float, float, float, float]:
+        return (
+            float(element.get("x1", 0.0)) * image_w,
+            float(element.get("y1", 0.0)) * image_h,
+            float(element.get("x2", 0.0)) * image_w,
+            float(element.get("y2", 0.0)) * image_h,
+        )
+
+    for element in elements:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type == "column":
+            px, py = page_norm_to_px(float(element.get("x", 0.0)), float(element.get("y", 0.0)), image_w, image_h)
+            if any((px - ox) ** 2 + (py - oy) ** 2 <= (22 ** 2) for ox, oy in [page_norm_to_px(float(item.get("x", 0.0)), float(item.get("y", 0.0)), image_w, image_h) for item in columns]):
+                continue
+            columns.append(element)
+        elif e_type == "core":
+            candidate_bbox = (
+                int(float(element.get("x", 0.0)) * image_w),
+                int(float(element.get("y", 0.0)) * image_h),
+                int(float(element.get("w", 0.0)) * image_w),
+                int(float(element.get("h", 0.0)) * image_h),
+            )
+            if any(bbox_iou(candidate_bbox, (int(float(item.get("x", 0.0)) * image_w), int(float(item.get("y", 0.0)) * image_h), int(float(item.get("w", 0.0)) * image_w), int(float(item.get("h", 0.0)) * image_h))) > 0.45 for item in cores):
+                continue
+            cores.append(element)
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            cx1, cy1, cx2, cy2 = line_px(element)
+            vertical = abs(cx2 - cx1) <= abs(cy2 - cy1)
+            midpoint = ((cx1 + cx2) / 2.0, (cy1 + cy2) / 2.0)
+            length = math.hypot(cx2 - cx1, cy2 - cy1)
+            duplicate = False
+            for other in lines:
+                if clean_pdf_text(other.get("type", "")).lower() != e_type:
+                    continue
+                ox1, oy1, ox2, oy2 = line_px(other)
+                other_vertical = abs(ox2 - ox1) <= abs(oy2 - oy1)
+                if other_vertical != vertical:
+                    continue
+                other_midpoint = ((ox1 + ox2) / 2.0, (oy1 + oy2) / 2.0)
+                other_length = math.hypot(ox2 - ox1, oy2 - oy1)
+                if math.hypot(midpoint[0] - other_midpoint[0], midpoint[1] - other_midpoint[1]) <= 24 and abs(length - other_length) <= 80:
+                    duplicate = True
+                    break
+            if not duplicate:
+                lines.append(element)
+        else:
+            others.append(element)
+
+    ordered = cores + lines + columns + others
+    col_idx = 1
+    core_idx = 1
+    wall_idx = 1
+    beam_idx = 1
+    span_idx = 1
+    for element in ordered:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        label = clean_pdf_text(element.get("label", ""))
+        if e_type == "column":
+            element["label"] = label or f"C{col_idx}"
+            col_idx += 1
+        elif e_type == "core":
+            element["label"] = label or f"Kjerne {core_idx}"
+            core_idx += 1
+        elif e_type == "wall":
+            element["label"] = label or f"Bærevegg {wall_idx}"
+            wall_idx += 1
+        elif e_type == "beam":
+            element["label"] = label or ("Primærdrager" if beam_idx == 1 else f"Bjelke {beam_idx}")
+            beam_idx += 1
+        elif e_type == "span_arrow":
+            element["label"] = label or ("Spennretning" if span_idx == 1 else f"Spenn {span_idx}")
+            span_idx += 1
+    return ordered
+
+
+
+def infer_sketch_mode_v6(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+) -> str:
+    counts = count_elements_by_type(sketch or {}) if isinstance(sketch, dict) else {"column": 0, "wall": 0, "beam": 0, "core": 0, "span_arrow": 0}
+    if is_basement_like_record_v6(record, sketch):
+        return "transfer_basement"
+    if counts.get("wall", 0) >= max(3, counts.get("column", 0) + 1):
+        return "wall_core"
+    if counts.get("core", 0) >= 2 and counts.get("column", 0) <= counts.get("wall", 0) + 1:
+        return "wall_core"
+    if counts.get("column", 0) >= max(5, counts.get("wall", 0) + 2):
+        return "column_core"
+    return structural_mode_from_analysis(analysis_result, material_preference)
+
+
+
+def refine_sketch_with_geometry_v6(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    transfer_hints: Optional[Dict[str, Any]] = None,
+    forced_region: Optional[Dict[str, Any]] = None,
+    forced_region_index: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    if not is_plan_like_record_v6(record):
+        return None
+    if forced_region is None:
+        region, region_index = _choose_region_for_sketch_v6(record, sketch)
+    else:
+        region = forced_region
+        region_index = int(forced_region_index or 0)
+    geometry = build_plan_geometry_grounded(record["image"], region["bbox_px"])
+    if not geometry:
+        return None
+
+    mode = infer_sketch_mode_v6(record, sketch, analysis_result, material_preference)
+    if mode == "transfer_basement":
+        fallback_elements, fallback_notes = generate_transfer_basement_elements_v6(geometry, record["image"].size, transfer_hints)
+    elif mode == "wall_core":
+        fallback_elements, fallback_notes = generate_wall_core_elements_grounded(geometry, record["image"].size)
+        fallback_elements = [element for element in fallback_elements if clean_pdf_text(element.get("type", "")).lower() != "column"]
+    else:
+        fallback_elements, fallback_notes = generate_column_core_elements_grounded(geometry, record["image"].size)
+        fallback_elements = [element for element in fallback_elements if clean_pdf_text(element.get("type", "")).lower() != "grid"]
+
+    ai_elements = sketch.get("elements", []) if isinstance(sketch, dict) and isinstance(sketch.get("elements"), list) else []
+    refined_elements: List[Dict[str, Any]] = []
+    fallback_by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for element in fallback_elements:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        fallback_by_type.setdefault(e_type, []).append(element)
+
+    ai_cores = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "core"]
+    if ai_cores:
+        for idx, element in enumerate(ai_cores[:4], start=1):
+            refined = _refine_core_element_v6(element, record, region["bbox_px"], geometry, f"Kjerne {idx}")
+            if refined is not None:
+                refined_elements.append(refined)
+    else:
+        refined_elements.extend(fallback_by_type.get("core", [])[: (3 if mode == "transfer_basement" else 2)])
+
+    ai_walls = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "wall"]
+    if ai_walls:
+        for idx, element in enumerate(ai_walls[:10], start=1):
+            refined = _refine_linear_element_v6(element, record, region["bbox_px"], geometry, "wall", f"Bærevegg {idx}")
+            if refined is not None:
+                refined_elements.append(refined)
+    else:
+        if mode in {"wall_core", "transfer_basement"}:
+            refined_elements.extend(fallback_by_type.get("wall", [])[:6])
+
+    ai_columns = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "column"]
+    if mode != "wall_core":
+        if ai_columns:
+            for idx, element in enumerate(ai_columns[:16], start=1):
+                refined = _refine_column_element_v6(element, record, region["bbox_px"], geometry, transfer_hints, mode == "transfer_basement", f"C{idx}")
+                if refined is not None:
+                    refined_elements.append(refined)
+        needed_columns = 0
+        if mode == "transfer_basement":
+            needed_columns = max(6, len(fallback_by_type.get("column", [])))
+        elif mode == "column_core" and not ai_columns:
+            needed_columns = max(4, len(fallback_by_type.get("column", [])))
+        current_columns = sum(1 for element in refined_elements if clean_pdf_text(element.get("type", "")).lower() == "column")
+        if needed_columns > current_columns:
+            refined_elements.extend(fallback_by_type.get("column", [])[: needed_columns - current_columns])
+
+    ai_beams = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "beam"]
+    if ai_beams:
+        for idx, element in enumerate(ai_beams[:4], start=1):
+            refined = _refine_linear_element_v6(element, record, region["bbox_px"], geometry, "beam", f"Bjelke {idx}")
+            if refined is not None:
+                refined_elements.append(refined)
+    elif mode == "column_core":
+        refined_elements.extend(fallback_by_type.get("beam", [])[:1])
+
+    ai_spans = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "span_arrow"]
+    if ai_spans:
+        for idx, element in enumerate(ai_spans[:3], start=1):
+            refined = _refine_linear_element_v6(element, record, region["bbox_px"], geometry, "span_arrow", f"Spenn {idx}")
+            if refined is not None:
+                refined_elements.append(refined)
+    elif mode in {"wall_core", "column_core"}:
+        refined_elements.extend(fallback_by_type.get("span_arrow", [])[:1])
+
+    refined_elements = _dedupe_refined_elements_v6(refined_elements, record["image"].size)
+    if not refined_elements:
+        return None
+
+    page_label = clean_pdf_text((sketch or {}).get("page_label", "")) or clean_pdf_text(record.get("label", "Tegning"))
+    if forced_region is not None and len(get_plan_regions_for_record_v6(record)) > 1 and "delplan" not in page_label.lower():
+        page_label = f"{page_label} - delplan {region_index + 1}"
+
+    notes = []
+    if mode == "transfer_basement":
+        notes.append("Auto-skissen projiserer bæring i kjeller mot overliggende vegg- og kjerneprinsipper før rapport.")
+    else:
+        notes.append("AI-skissen er beholdt semantisk, men snappet til detektert plan-geometri før rapport.")
+    notes.extend([clean_pdf_text(item) for item in fallback_notes[:3] if clean_pdf_text(item)])
+    if isinstance(sketch, dict):
+        for item in sketch.get("notes", [])[:3]:
+            cleaned = clean_pdf_text(item)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+
+    return {
+        "page_index": int(record.get("page_index", 0)),
+        "region_index": int(region_index),
+        "page_label": page_label,
+        "plan_bbox": region.get("bbox_norm") or px_bbox_to_norm(region["bbox_px"], record["image"].size[0], record["image"].size[1]),
+        "notes": notes[:5],
+        "elements": refined_elements,
+        "grounded_engine": True,
+        "grounded_mode": mode,
+    }
+
+
+
+def calibrate_analysis_from_refined_sketches_v6(
+    analysis_result: Dict[str, Any],
+    refined_sketches: List[Dict[str, Any]],
+    drawings: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    analysis_result = deep_copy_jsonable(analysis_result)
+    rec = deep_copy_jsonable(analysis_result.get("recommended_system", {}))
+    upper_wall = upper_core = upper_column = 0
+    basement_wall = basement_core = basement_column = 0
+
+    for sketch in refined_sketches:
+        record = lookup_record_by_page(drawings, int(sketch.get("page_index", -1)))
+        if record is None:
+            continue
+        counts = count_elements_by_type(sketch)
+        if is_basement_like_record_v6(record, sketch):
+            basement_wall += counts["wall"]
+            basement_core += counts["core"]
+            basement_column += counts["column"]
+        else:
+            upper_wall += counts["wall"]
+            upper_core += counts["core"]
+            upper_column += counts["column"]
+
+    observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
+    injected_obs = []
+
+    if upper_wall + upper_core >= max(4, upper_column * 2):
+        rec["vertical_system"] = "Tolket som veggbærende overetasjer med kjerner/skiver som hovedbæring og avstivning."
+        rec["stability_system"] = "Kjerner og bærende veggskiver, med dekker som horisontale skiver."
+        injected_obs.append("Autoanalysen er etterkalibrert mot vegg-/kjernebæring i overliggende plan før rapportskriving.")
+    elif basement_column + upper_column >= max(5, upper_wall + basement_wall):
+        rec["vertical_system"] = "Tolket som søylepreget eller blandet søyle-/veggsystem med kjerner for stabilitet."
+
+    if basement_column > 0 and upper_wall > 0:
+        rec["vertical_system"] = "Tolket som veggbærende overetasjer med transfer til søyler/vegger/kjerner i kjeller der planen åpner seg."
+        rec["load_path"] = [
+            "Dekker i boligetasjer -> bærende vegger og kjerner.",
+            "Lastene føres videre til søyler, vegger og kjerner i kjeller der parkeringsplanen åpner bæresystemet.",
+            "Kjerner/skiver og fundamenter tar laster videre til grunnen.",
+        ]
+        injected_obs.append("Kjeller er tolket som transfer-sone der søyleplassering søkes under overliggende vegg- og kjerne-laster.")
+
+    note = "Auto-skissene er ikke lenger generert som frie standardoppsett; AI-semantikk og plan-geometri er slått sammen før rapport og redigering."
+    if note not in observations:
+        observations = [note] + observations
+    for item in reversed(injected_obs):
+        if item not in observations:
+            observations = [item] + observations
+
+    analysis_result["recommended_system"] = rec
+    analysis_result["observasjoner"] = observations[:10]
+    return analysis_result
+
+
+
+def generate_grounded_sketches(
+    drawings: List[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    max_sketches: int = 3,
+) -> List[Dict[str, Any]]:
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return []
+
+    ai_sketches = deep_copy_jsonable(analysis_result.get("sketches", [])) if isinstance(analysis_result.get("sketches", []), list) else []
+    transfer_hints = collect_transfer_hints_v6(ai_sketches, drawings)
+    refined: List[Dict[str, Any]] = []
+    used_keys = set()
+
+    for sketch in ai_sketches:
+        if not isinstance(sketch, dict):
+            continue
+        record = lookup_record_by_page(drawings, int(sketch.get("page_index", -1)))
+        if record is None:
+            continue
+        refined_sketch = refine_sketch_with_geometry_v6(record, sketch, analysis_result, material_preference, transfer_hints)
+        if refined_sketch is None:
+            continue
+        key = (int(refined_sketch.get("page_index", -1)), int(refined_sketch.get("region_index", 0)))
+        if key in used_keys:
+            continue
+        refined.append(refined_sketch)
+        used_keys.add(key)
+        if len(refined) >= max_sketches:
+            return refined[:max_sketches]
+
+    for record in drawings:
+        if not is_plan_like_record_v6(record):
+            continue
+        regions = get_plan_regions_for_record_v6(record)
+        for region_index, region in enumerate(regions[:2]):
+            key = (int(record.get("page_index", -1)), int(region_index))
+            if key in used_keys:
+                continue
+            seed_sketch = {
+                "page_index": int(record.get("page_index", 0)),
+                "page_label": clean_pdf_text(record.get("label", "Tegning")),
+                "elements": [],
+                "notes": [],
+            }
+            refined_sketch = refine_sketch_with_geometry_v6(
+                record,
+                seed_sketch,
+                analysis_result,
+                material_preference,
+                transfer_hints,
+                forced_region=region,
+                forced_region_index=region_index,
+            )
+            if refined_sketch is None:
+                continue
+            refined.append(refined_sketch)
+            used_keys.add(key)
+            if len(refined) >= max_sketches:
+                return refined[:max_sketches]
+
+    return refined[:max_sketches]
+
+
+
+def replace_analysis_sketches_with_grounded(
+    analysis_result: Dict[str, Any],
+    drawings: List[Dict[str, Any]],
+    material_preference: str,
+) -> Dict[str, Any]:
+    grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+    if grounded_sketches:
+        analysis_result["sketches"] = grounded_sketches
+        analysis_result = calibrate_analysis_from_refined_sketches_v6(analysis_result, grounded_sketches, drawings)
+        observations = analysis_result.get("observasjoner", [])
+        note = "Konseptskissene er geometri-snappet og faglig kalibrert mot AI-forslaget før musepeker-redigering og PDF."
+        if note not in observations:
+            analysis_result["observasjoner"] = [note] + observations
+    return analysis_result
+
+
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
     "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
