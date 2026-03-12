@@ -2653,7 +2653,7 @@ with st.expander("2. Strategi for bæresystem og sikkerhet", expanded=True):
 
 with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
     st.info(
-        "Last opp plan, snitt og eventuelt fasader. Agenten prioriterer plan og snitt, analyserer tegningsgrunnlaget og legger foreslått bæresystem som punkter, kjerner og spennretninger på de mest relevante sidene."
+        "Last opp plan, snitt, fasader og gjerne IFC/DXF/DWG. Agenten prioriterer IFC der det finnes, bruker PDF/bilder som fallback og legger foreslått bæresystem som punkter, kjerner og spennretninger på de mest relevante sidene."
     )
 
     saved_drawings = load_saved_project_drawings()
@@ -2667,9 +2667,9 @@ with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
         st.warning("Ingen felles tegninger ble funnet automatisk. Last opp plan og snitt manuelt.")
 
     files = st.file_uploader(
-        "Last opp arkitekttegninger / snitt / PDF-er",
+        "Last opp arkitekttegninger / snitt / PDF-er / IFC / DXF / DWG",
         accept_multiple_files=True,
-        type=["png", "jpg", "jpeg", "webp", "pdf"],
+        type=["png", "jpg", "jpeg", "webp", "pdf", "ifc", "ifczip", "dxf", "dwg"],
     )
 
 with st.expander("4. Hva modulen gjør i denne versjonen", expanded=False):
@@ -9079,6 +9079,1551 @@ filter_upper_floor_elements_v7 = _filter_upper_floor_elements_v9_impl
 
 
 
+
+# ------------------------------------------------------------
+# 13E. V12 DELPLAN-SPLITTING + BEDRE KJERNE + ENKLERE MUSEFLYTT
+# ------------------------------------------------------------
+_REFINE_SKETCH_WITH_GEOMETRY_V11_BASE = refine_sketch_with_geometry_v6
+_FIND_NEAREST_POINTLIKE_ELEMENT_INDEX_V11_BASE = find_nearest_pointlike_element_index
+_APPLY_POINTER_CLICK_TO_SKETCH_V11_BASE = apply_pointer_click_to_sketch
+_BUILD_EDITOR_CROP_OVERLAY_IMAGE_V11_BASE = build_editor_crop_overlay_image
+_PAGE_CUE_PROMPT_V11_BASE = _page_cue_prompt_v9
+
+
+def _page_cue_prompt_v9(record: Dict[str, Any]) -> str:
+    base = _PAGE_CUE_PROMPT_V11_BASE(record)
+    extra = """
+
+V12-tillegg for bedre kjernedeteksjon:
+- core_candidates skal primart representere trapperom, heis-/sjaktkjerner eller tydelige avstivningskjerner i indre sone.
+- Ikke bruk balkonger, nisjer, titleblock, terrasser, situasjonsinnstikk eller andre randobjekter som kjerne.
+- Hvis siden viser flere distinkte planpaneler av samme bygg, sett multi_plan=true og fordel core_candidates på de panelene som faktisk har trapperom/heiskjerne.
+- Vær mer konservativ med kjerne enn med vegg: returner heller ingen kjerne enn en feilplassert kjerne.
+""".strip()
+    return f"{base}\n\n{extra}"
+
+
+def _element_center_px_v12(element: Dict[str, Any], image_size: Tuple[int, int]) -> Tuple[float, float]:
+    image_w, image_h = image_size
+    e_type = clean_pdf_text(element.get("type", "")).lower()
+    if e_type == "column":
+        return float(element.get("x", 0.0)) * image_w, float(element.get("y", 0.0)) * image_h
+    if e_type == "core":
+        return (
+            (float(element.get("x", 0.0)) + float(element.get("w", 0.0)) / 2.0) * image_w,
+            (float(element.get("y", 0.0)) + float(element.get("h", 0.0)) / 2.0) * image_h,
+        )
+    if e_type in {"wall", "beam", "span_arrow"}:
+        return (
+            ((float(element.get("x1", 0.0)) + float(element.get("x2", 0.0))) / 2.0) * image_w,
+            ((float(element.get("y1", 0.0)) + float(element.get("y2", 0.0))) / 2.0) * image_h,
+        )
+    return 0.0, 0.0
+
+
+def _core_bbox_px_v12(element: Dict[str, Any], image_size: Tuple[int, int]) -> Tuple[float, float, float, float]:
+    image_w, image_h = image_size
+    x = float(element.get("x", 0.0)) * image_w
+    y = float(element.get("y", 0.0)) * image_h
+    w = float(element.get("w", 0.0)) * image_w
+    h = float(element.get("h", 0.0)) * image_h
+    return x, y, w, h
+
+
+def _point_to_bbox_distance_v12(px: float, py: float, bbox: Tuple[float, float, float, float]) -> float:
+    x, y, w, h = bbox
+    dx = max(x - px, 0.0, px - (x + w))
+    dy = max(y - py, 0.0, py - (y + h))
+    if dx <= 0.0 and dy <= 0.0:
+        return 0.0
+    return float(math.hypot(dx, dy))
+
+
+def find_nearest_pointlike_element_index(
+    elements: List[Dict[str, Any]],
+    image_size: Tuple[int, int],
+    click_x_norm: float,
+    click_y_norm: float,
+    element_types: List[str],
+) -> Tuple[Optional[int], Optional[float]]:
+    image_w, image_h = image_size
+    cx, cy = page_norm_to_px(click_x_norm, click_y_norm, image_w, image_h)
+    best_idx: Optional[int] = None
+    best_dist: Optional[float] = None
+    wanted = {clean_pdf_text(item).lower() for item in element_types}
+    for idx, element in enumerate(elements):
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type not in wanted:
+            continue
+        if e_type == "core":
+            dist = _point_to_bbox_distance_v12(float(cx), float(cy), _core_bbox_px_v12(element, image_size))
+        elif e_type == "column":
+            ex, ey = _element_center_px_v12(element, image_size)
+            dist = float(math.hypot(ex - cx, ey - cy))
+        else:
+            ex, ey = _element_center_px_v12(element, image_size)
+            dist = float(math.hypot(ex - cx, ey - cy))
+        if best_dist is None or dist < best_dist:
+            best_idx = idx
+            best_dist = dist
+    return best_idx, best_dist
+
+
+def _region_union_bbox_v12(regions: List[Dict[str, Any]]) -> Optional[Tuple[int, int, int, int]]:
+    boxes = [tuple(item.get("bbox_px", (0, 0, 0, 0))) for item in regions if isinstance(item, dict)]
+    boxes = [box for box in boxes if bbox_area(box) > 0]
+    if not boxes:
+        return None
+    x0 = min(box[0] for box in boxes)
+    y0 = min(box[1] for box in boxes)
+    x1 = max(box[0] + box[2] for box in boxes)
+    y1 = max(box[1] + box[3] for box in boxes)
+    return (int(x0), int(y0), int(max(0, x1 - x0)), int(max(0, y1 - y0)))
+
+
+def _is_horizontal_multi_panel_v12(regions: List[Dict[str, Any]], image_size: Tuple[int, int]) -> bool:
+    if len(regions) < 2 or len(regions) > 4:
+        return False
+    ordered = sorted(regions, key=lambda item: bbox_center(tuple(item.get("bbox_px", (0, 0, 0, 0))))[0])
+    centers_y = [bbox_center(tuple(item.get("bbox_px", (0, 0, 0, 0))))[1] for item in ordered]
+    widths = [tuple(item.get("bbox_px", (0, 0, 0, 0)))[2] for item in ordered]
+    heights = [tuple(item.get("bbox_px", (0, 0, 0, 0)))[3] for item in ordered]
+    if not widths or min(widths) <= 0 or min(heights) <= 0:
+        return False
+    if (max(centers_y) - min(centers_y)) > max(32.0, min(heights) * 0.22):
+        return False
+    if (max(widths) / max(min(widths), 1)) > 2.8:
+        return False
+    page_w, page_h = image_size
+    total_area = sum(bbox_area(tuple(item.get("bbox_px", (0, 0, 0, 0)))) for item in ordered)
+    if total_area < (page_w * page_h * 0.08):
+        return False
+    return True
+
+
+def _element_belongs_to_region_v12(element: Dict[str, Any], region_bbox_px: Tuple[int, int, int, int], image_size: Tuple[int, int]) -> bool:
+    rx, ry, rw, rh = region_bbox_px
+    margin_x = max(18.0, rw * 0.06)
+    margin_y = max(18.0, rh * 0.06)
+    e_type = clean_pdf_text(element.get("type", "")).lower()
+    cx, cy = _element_center_px_v12(element, image_size)
+    inside_center = (rx - margin_x) <= cx <= (rx + rw + margin_x) and (ry - margin_y) <= cy <= (ry + rh + margin_y)
+    if e_type != "core":
+        return inside_center
+    bx, by, bw, bh = _core_bbox_px_v12(element, image_size)
+    core_box = (int(bx), int(by), int(max(1, bw)), int(max(1, bh)))
+    return inside_center or bbox_iou(core_box, region_bbox_px) >= 0.10 or bbox_contains(region_bbox_px, core_box, min_cover=0.45)
+
+
+def _build_region_seed_sketch_v12(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    region: Dict[str, Any],
+    region_index: int,
+    analysis_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    image_size = record["image"].size
+    region_bbox_px = tuple(region.get("bbox_px", (0, 0, image_size[0], image_size[1])))
+    source_elements = []
+    if isinstance(sketch, dict) and isinstance(sketch.get("elements"), list):
+        source_elements.extend([deep_copy_jsonable(item) for item in sketch.get("elements", []) if isinstance(item, dict)])
+
+    cue = _get_page_cue_for_record_v9(analysis_result, record)
+    cue_seed = _build_seed_sketch_from_page_cue_v9(cue, record)
+    if isinstance(cue_seed, dict) and isinstance(cue_seed.get("elements"), list):
+        source_elements.extend([deep_copy_jsonable(item) for item in cue_seed.get("elements", []) if isinstance(item, dict)])
+
+    picked: List[Dict[str, Any]] = []
+    for element in source_elements:
+        if _element_belongs_to_region_v12(element, region_bbox_px, image_size):
+            picked.append(element)
+
+    notes: List[str] = []
+    for source in [((sketch or {}).get("notes", []) if isinstance(sketch, dict) else []), ((cue_seed or {}).get("notes", []) if isinstance(cue_seed, dict) else [])]:
+        for item in source[:4]:
+            cleaned = clean_pdf_text(item)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+
+    return {
+        "page_index": int(record.get("page_index", 0)),
+        "region_index": int(region_index),
+        "page_label": clean_pdf_text((sketch or {}).get("page_label", "")) or clean_pdf_text(record.get("label", "Tegning")),
+        "plan_bbox": region.get("bbox_norm") or px_bbox_to_norm(region_bbox_px, image_size[0], image_size[1]),
+        "notes": notes[:4],
+        "elements": picked,
+    }
+
+
+def _replicate_missing_core_to_region_v12(
+    record: Dict[str, Any],
+    template_core: Dict[str, Any],
+    template_region_bbox_px: Tuple[int, int, int, int],
+    target_region_bbox_px: Tuple[int, int, int, int],
+) -> Optional[Dict[str, Any]]:
+    template_w = max(float(template_region_bbox_px[2]), 1.0)
+    template_h = max(float(template_region_bbox_px[3]), 1.0)
+    target_w = max(float(target_region_bbox_px[2]), 1.0)
+    target_h = max(float(target_region_bbox_px[3]), 1.0)
+
+    tx, ty, tw, th = _core_bbox_px_v12(template_core, record["image"].size)
+    rel_x = (tx - float(template_region_bbox_px[0])) / template_w
+    rel_y = (ty - float(template_region_bbox_px[1])) / template_h
+    rel_w = tw / template_w
+    rel_h = th / template_h
+
+    if not (0.0 <= rel_x <= 0.95 and 0.0 <= rel_y <= 0.95):
+        return None
+    rel_w = float(clamp(rel_w, 0.06, 0.35))
+    rel_h = float(clamp(rel_h, 0.08, 0.38))
+
+    local_x0 = float(target_region_bbox_px[2]) * float(clamp(rel_x, 0.02, 0.86))
+    local_y0 = float(target_region_bbox_px[3]) * float(clamp(rel_y, 0.02, 0.82))
+    local_x1 = local_x0 + float(target_region_bbox_px[2]) * rel_w
+    local_y1 = local_y0 + float(target_region_bbox_px[3]) * rel_h
+    geometry = build_plan_geometry_grounded(record["image"], target_region_bbox_px)
+    if not geometry:
+        return None
+    snapped = _snap_bbox_to_geometry_v6(local_x0, local_y0, local_x1, local_y1, geometry)
+    label = clean_pdf_text(template_core.get("label", "")) or "Kjerne"
+    return _core_element_from_local_bbox_v6(target_region_bbox_px, snapped, record["image"].size, label)
+
+
+def _merge_subregion_results_v12(
+    record: Dict[str, Any],
+    region_results: List[Dict[str, Any]],
+    regions: List[Dict[str, Any]],
+    sketch: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    valid_results = [item for item in region_results if isinstance(item, dict) and item.get("elements")]
+    if not valid_results:
+        return None
+
+    if len(valid_results) >= 2:
+        template_idx = None
+        template_core = None
+        for idx, result in enumerate(valid_results):
+            cores = [el for el in result.get("elements", []) if clean_pdf_text(el.get("type", "")).lower() == "core"]
+            if cores:
+                template_idx = idx
+                template_core = cores[0]
+                break
+        if template_core is not None and template_idx is not None:
+            template_region = regions[template_idx]
+            for idx, result in enumerate(valid_results):
+                has_core = any(clean_pdf_text(el.get("type", "")).lower() == "core" for el in result.get("elements", []))
+                if has_core:
+                    continue
+                src_box = tuple(template_region.get("bbox_px", (0, 0, 0, 0)))
+                dst_box = tuple(regions[idx].get("bbox_px", (0, 0, 0, 0)))
+                if min(src_box[2], dst_box[2]) <= 0 or min(src_box[3], dst_box[3]) <= 0:
+                    continue
+                width_ratio = max(src_box[2], dst_box[2]) / max(min(src_box[2], dst_box[2]), 1)
+                height_ratio = max(src_box[3], dst_box[3]) / max(min(src_box[3], dst_box[3]), 1)
+                if width_ratio > 1.9 or height_ratio > 1.9:
+                    continue
+                replicated = _replicate_missing_core_to_region_v12(record, template_core, src_box, dst_box)
+                if replicated is not None:
+                    result.setdefault("elements", []).append(replicated)
+                    note = "Kjerne er v12-replikert fra søskenplan med lignende geometri for bedre konsistens mellom delplaner."
+                    result.setdefault("notes", [])
+                    if note not in result["notes"]:
+                        result["notes"].append(note)
+
+    merged_elements: List[Dict[str, Any]] = []
+    notes: List[str] = [
+        "Skissen er v12-splittet per delplan før sammenslåing, slik at kjerne og bærelinjer vurderes på hvert planpanel separat.",
+    ]
+    for result in valid_results:
+        for element in result.get("elements", []):
+            if isinstance(element, dict):
+                merged_elements.append(element)
+        for item in result.get("notes", [])[:3]:
+            cleaned = clean_pdf_text(item)
+            if cleaned and cleaned not in notes:
+                notes.append(cleaned)
+
+    merged_elements = _dedupe_refined_elements_v6(merged_elements, record["image"].size)
+    if not merged_elements:
+        return None
+
+    union_bbox = _region_union_bbox_v12(regions[:len(valid_results)])
+    page_label = clean_pdf_text((sketch or {}).get("page_label", "")) or clean_pdf_text(record.get("label", "Tegning"))
+    result = {
+        "page_index": int(record.get("page_index", 0)),
+        "region_index": 0,
+        "page_label": page_label,
+        "plan_bbox": px_bbox_to_norm(union_bbox, record["image"].size[0], record["image"].size[1]) if union_bbox else (sketch or {}).get("plan_bbox"),
+        "notes": notes[:6],
+        "elements": merged_elements,
+        "grounded_engine": True,
+        "grounded_mode": "wall_core",
+        "multi_region_merge_v12": True,
+    }
+    return result
+
+
+def _refine_sketch_with_geometry_v12_impl(
+    record: Dict[str, Any],
+    sketch: Optional[Dict[str, Any]],
+    analysis_result: Dict[str, Any],
+    material_preference: str,
+    transfer_hints: Optional[Dict[str, Any]] = None,
+    forced_region: Optional[Dict[str, Any]] = None,
+    forced_region_index: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    if forced_region is not None:
+        return _REFINE_SKETCH_WITH_GEOMETRY_V11_BASE(
+            record,
+            sketch,
+            analysis_result,
+            material_preference,
+            transfer_hints,
+            forced_region,
+            forced_region_index,
+        )
+
+    mode_probe = infer_sketch_mode_v6(record, sketch, analysis_result, material_preference)
+    if mode_probe != "wall_core" or is_basement_like_record_v6(record, sketch):
+        return _REFINE_SKETCH_WITH_GEOMETRY_V11_BASE(record, sketch, analysis_result, material_preference, transfer_hints, forced_region, forced_region_index)
+
+    regions = get_plan_regions_for_record_v6(record)
+    if not _is_horizontal_multi_panel_v12(regions, record["image"].size):
+        return _REFINE_SKETCH_WITH_GEOMETRY_V11_BASE(record, sketch, analysis_result, material_preference, transfer_hints, forced_region, forced_region_index)
+
+    ordered_regions = sorted(regions, key=lambda item: bbox_center(tuple(item.get("bbox_px", (0, 0, 0, 0))))[0])[:4]
+    sub_results: List[Dict[str, Any]] = []
+    for idx, region in enumerate(ordered_regions):
+        seed_sketch = _build_region_seed_sketch_v12(record, sketch, region, idx, analysis_result)
+        sub = _REFINE_SKETCH_WITH_GEOMETRY_V8_BASE(
+            record,
+            seed_sketch,
+            analysis_result,
+            material_preference,
+            transfer_hints,
+            forced_region=region,
+            forced_region_index=idx,
+        )
+        if sub is None:
+            continue
+        sub = _filter_upper_floor_elements_v9_impl(sub, record, analysis_result)
+        sub_results.append(sub)
+
+    merged = _merge_subregion_results_v12(record, sub_results, ordered_regions, sketch)
+    if merged is not None:
+        return merged
+    return _REFINE_SKETCH_WITH_GEOMETRY_V11_BASE(record, sketch, analysis_result, material_preference, transfer_hints, forced_region, forced_region_index)
+
+
+def build_editor_crop_overlay_image(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+    show_guides: bool = True,
+) -> Tuple[Image.Image, Tuple[int, int, int, int]]:
+    base_img, region_bbox = _BUILD_EDITOR_CROP_OVERLAY_IMAGE_V11_BASE(drawing_record, sketch, show_guides=show_guides)
+    sketch_key = sketch_uid(sketch)
+    state = get_pointer_state(sketch_key)
+    target_idx = state.get("target_idx") if isinstance(state, dict) else None
+    if target_idx is None:
+        return base_img, region_bbox
+    try:
+        idx = int(target_idx)
+    except Exception:
+        return base_img, region_bbox
+    elements = sketch.get("elements", []) if isinstance(sketch.get("elements"), list) else []
+    if not (0 <= idx < len(elements)):
+        return base_img, region_bbox
+    element = elements[idx]
+    e_type = clean_pdf_text(element.get("type", "")).lower()
+    overlay = copy_rgb(base_img).convert("RGBA")
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    rx, ry, rw, rh = region_bbox
+    min_dim = max(1, min(rw, rh))
+    accent = (56, 194, 201, 255)
+    halo = (56, 194, 201, 90)
+    if e_type == "core":
+        x_local, y_local = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, region_bbox)
+        ew = float(element.get("w", 0.0)) * drawing_record["image"].size[0]
+        eh = float(element.get("h", 0.0)) * drawing_record["image"].size[1]
+        left = clamp(x_local, 0, max(rw - 2, 1))
+        top = clamp(y_local, 0, max(rh - 2, 1))
+        right = clamp(x_local + ew, left + 2, max(rw - 1, left + 2))
+        bottom = clamp(y_local + eh, top + 2, max(rh - 1, top + 2))
+        draw.rounded_rectangle((left - 6, top - 6, right + 6, bottom + 6), radius=max(10, int(min_dim * 0.03)), outline=accent, fill=halo, width=4)
+    elif e_type == "column":
+        cx, cy = page_norm_to_local_crop(float(element.get("x", 0.0)), float(element.get("y", 0.0)), drawing_record["image"].size, region_bbox)
+        r = max(12, int(min_dim * 0.028))
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=accent, fill=halo, width=4)
+    return overlay.convert("RGB"), region_bbox
+
+
+def _move_core_element_to_local_v12(
+    sketch: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    geometry: Dict[str, Any],
+    target_idx: int,
+    local_x: float,
+    local_y: float,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    sketch = deep_copy_jsonable(sketch)
+    region_bbox_px = geometry["bbox_px"]
+    rw, rh = geometry.get("crop_size", (0, 0))
+    if not (0 <= target_idx < len(sketch.get("elements", []))):
+        return False, "Kjernevalg ble ugyldig. Prøv på nytt.", sketch
+    core = sketch["elements"][int(target_idx)]
+    if clean_pdf_text(core.get("type", "")).lower() != "core":
+        return False, "Valgt element er ikke en kjerne.", sketch
+    image_w, image_h = drawing_record["image"].size
+    core_w_px = max(float(core.get("w", 0.12)) * image_w, 18.0)
+    core_h_px = max(float(core.get("h", 0.16)) * image_h, 18.0)
+    left = float(clamp(local_x - (core_w_px / 2.0), 0, max(rw - core_w_px, 1)))
+    top = float(clamp(local_y - (core_h_px / 2.0), 0, max(rh - core_h_px, 1)))
+    snapped = _snap_bbox_to_geometry_v6(left, top, left + core_w_px, top + core_h_px, geometry)
+    snapped_element = _core_element_from_local_bbox_v6(region_bbox_px, snapped, drawing_record["image"].size, clean_pdf_text(core.get("label", "")) or "Kjerne")
+    sketch["elements"][int(target_idx)] = snapped_element
+    return True, "Kjernen er flyttet med v12-boks-snapping og beholdt faglig størrelse.", sketch
+
+
+def apply_pointer_click_to_sketch(
+    sketch: Dict[str, Any],
+    drawing_record: Dict[str, Any],
+    tool: str,
+    click_x_local: float,
+    click_y_local: float,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    if tool != "move_core":
+        return _APPLY_POINTER_CLICK_TO_SKETCH_V11_BASE(sketch, drawing_record, tool, click_x_local, click_y_local)
+
+    sketch = deep_copy_jsonable(sketch)
+    geometry = get_geometry_for_sketch(drawing_record, sketch)
+    if not geometry:
+        return False, "Fant ikke brukbar geometri for valgt skisse.", sketch
+
+    image_w, image_h = drawing_record["image"].size
+    region_bbox_px = geometry["bbox_px"]
+    _, _, rw, rh = region_bbox_px
+    local_x = float(clamp(click_x_local, 0, max(rw - 1, 1)))
+    local_y = float(clamp(click_y_local, 0, max(rh - 1, 1)))
+    x_norm_raw, y_norm_raw = local_point_to_page_norm(region_bbox_px, local_x, local_y, image_w, image_h)
+    sketch_key = sketch_uid(sketch)
+    state_key = pointer_state_key(sketch_key)
+    state = get_pointer_state(sketch_key)
+    if state.get("tool") and state.get("tool") != tool:
+        clear_pointer_state(sketch_key)
+        state = {}
+
+    core_indices = [idx for idx, element in enumerate(sketch.get("elements", [])) if clean_pdf_text(element.get("type", "")).lower() == "core"]
+    if not core_indices:
+        return False, "Fant ingen kjerne å flytte.", sketch
+
+    if len(core_indices) == 1 and "target_idx" not in state:
+        changed, message, moved = _move_core_element_to_local_v12(sketch, drawing_record, geometry, int(core_indices[0]), local_x, local_y)
+        clear_pointer_state(sketch_key)
+        return changed, message, moved
+
+    if "target_idx" not in state:
+        idx, dist = find_nearest_pointlike_element_index(sketch.get("elements", []), drawing_record["image"].size, x_norm_raw, y_norm_raw, ["core"])
+        pick_dist = max(34.0, min(rw, rh) * 0.11)
+        if idx is None or (dist is not None and dist > pick_dist):
+            return False, "Klikk inne i eller tett ved kjernen du vil flytte.", sketch
+        st.session_state[state_key] = {"tool": tool, "target_idx": int(idx)}
+        return False, "Kjerne valgt. Klikk nå ny plassering for kjernesenter.", sketch
+
+    idx = int(state.get("target_idx", -1))
+    clear_pointer_state(sketch_key)
+    return _move_core_element_to_local_v12(sketch, drawing_record, geometry, idx, local_x, local_y)
+
+
+refine_sketch_with_geometry_v6 = _refine_sketch_with_geometry_v12_impl
+
+
+
+# ------------------------------------------------------------
+# 13F. v13 FRI IFC/DXF/DWG-MOTOR UTEN ODA-KONTO
+# IFC prioriteres som semantisk sannhet, DXF brukes som vektorraster,
+# og DWG forsøkes gratis via LibreDWG hvis dwgread er tilgjengelig.
+# ------------------------------------------------------------
+import copy as _copy_v13
+import shutil as _shutil_v13
+import subprocess as _subprocess_v13
+
+try:
+    import numpy as _np_v13
+except Exception:
+    _np_v13 = None
+
+try:
+    import ifcopenshell as _ifcopenshell_v13
+except Exception:
+    _ifcopenshell_v13 = None
+
+try:
+    import ifcopenshell.geom as _ifc_geom_v13  # type: ignore
+except Exception:
+    _ifc_geom_v13 = None
+
+try:
+    from ifcopenshell.util import element as _ifc_element_v13  # type: ignore
+except Exception:
+    _ifc_element_v13 = None
+
+try:
+    import ezdxf as _ezdxf_v13
+except Exception:
+    _ezdxf_v13 = None
+
+_V13_IMAGE_GEOMETRY_CACHE: Dict[str, Dict[str, Any]] = {}
+_V13_IMAGE_REGION_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+_IFC_GEOM_SETTINGS_V13: Any = None
+
+_LOAD_UPLOADED_DRAWINGS_V12_BASE = load_uploaded_drawings
+_DRAWING_PRIORITY_V12_BASE = drawing_priority
+_PRIORITIZE_DRAWINGS_V12_BASE = prioritize_drawings
+_DRAWING_MANIFEST_TEXT_V12_BASE = drawing_manifest_text
+_GET_PLAN_REGIONS_FOR_RECORD_V12_BASE = get_plan_regions_for_record_v6
+_DETECT_PAGE_CUES_WITH_OPENAI_V12_BASE = _detect_page_cues_with_openai_v9
+_GET_GEOMETRY_FOR_SKETCH_V12_BASE = get_geometry_for_sketch
+_BUILD_PLAN_GEOMETRY_GROUNDED_V12_BASE = build_plan_geometry_grounded
+
+
+def _safe_upload_bytes_v13(file_obj: Any) -> bytes:
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+    data = file_obj.read()
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+    return data if isinstance(data, (bytes, bytearray)) else bytes(data or b"")
+
+
+def _append_upload_warning_v13(message: str) -> None:
+    cleaned = clean_pdf_text(message)
+    if not cleaned:
+        return
+    warnings = st.session_state.get("rib_upload_warnings_v13", [])
+    if cleaned not in warnings:
+        warnings = list(warnings) + [cleaned]
+    st.session_state["rib_upload_warnings_v13"] = warnings
+
+
+
+def _norm_bbox_from_px_v13(bbox_px: Tuple[int, int, int, int], size: Tuple[int, int]) -> Dict[str, float]:
+    return px_bbox_to_norm(bbox_px, int(size[0]), int(size[1]))
+
+
+
+def _semantic_level_type_v13(label: str) -> str:
+    low = clean_pdf_text(label).lower()
+    if any(word in low for word in ["kjeller", "u.etg", "underet", "parkering", "basement", "garage", "p-"]):
+        return "basement"
+    if any(word in low for word in ["tak", "roof"]):
+        return "roof"
+    if any(word in low for word in ["1. etg", "1.etg", "plan 1", "ground"]):
+        return "ground_floor"
+    if any(word in low for word in ["plan", "etg", "etasje", "level", "typisk"]):
+        return "upper_floor"
+    return "unknown"
+
+
+
+def _bbox_intersects_v13(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float], gap: float = 0.0) -> bool:
+    return not (a[2] + gap < b[0] or b[2] + gap < a[0] or a[3] + gap < b[1] or b[3] + gap < a[1])
+
+
+
+def _bbox_union_v13(boxes: List[Tuple[float, float, float, float]]) -> Optional[Tuple[float, float, float, float]]:
+    if not boxes:
+        return None
+    xs0 = [float(b[0]) for b in boxes]
+    ys0 = [float(b[1]) for b in boxes]
+    xs1 = [float(b[2]) for b in boxes]
+    ys1 = [float(b[3]) for b in boxes]
+    return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+
+
+def _expand_bbox_v13(bbox: Tuple[float, float, float, float], margin: float, limits: Optional[Tuple[float, float, float, float]] = None) -> Tuple[float, float, float, float]:
+    x0, y0, x1, y1 = bbox
+    out = (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+    if limits is None:
+        return out
+    lx0, ly0, lx1, ly1 = limits
+    return (
+        float(clamp(out[0], lx0, lx1)),
+        float(clamp(out[1], ly0, ly1)),
+        float(clamp(out[2], lx0, lx1)),
+        float(clamp(out[3], ly0, ly1)),
+    )
+
+
+
+def _ifc_geom_settings_v13() -> Any:
+    global _IFC_GEOM_SETTINGS_V13
+    if _IFC_GEOM_SETTINGS_V13 is not None:
+        return _IFC_GEOM_SETTINGS_V13
+    if _ifc_geom_v13 is None:
+        return None
+    try:
+        settings = _ifc_geom_v13.settings()
+        for attr_name, value in [("USE_WORLD_COORDS", True), ("APPLY_DEFAULT_MATERIALS", False)]:
+            try:
+                settings.set(getattr(settings, attr_name), value)
+            except Exception:
+                pass
+        _IFC_GEOM_SETTINGS_V13 = settings
+    except Exception:
+        _IFC_GEOM_SETTINGS_V13 = None
+    return _IFC_GEOM_SETTINGS_V13
+
+
+
+def _ifc_is_loadbearing_v13(product: Any) -> Optional[bool]:
+    if _ifc_element_v13 is None:
+        return None
+    try:
+        psets = _ifc_element_v13.get_psets(product) or {}
+    except Exception:
+        return None
+    for pset_name in ["Pset_WallCommon", "Pset_ColumnCommon", "Pset_BeamCommon", "Pset_MemberCommon"]:
+        pset = psets.get(pset_name)
+        if isinstance(pset, dict) and "LoadBearing" in pset:
+            try:
+                return bool(pset.get("LoadBearing"))
+            except Exception:
+                return None
+    return None
+
+
+
+def _ifc_product_kind_v13(product: Any) -> str:
+    cls = clean_pdf_text(product.is_a() if hasattr(product, "is_a") else "")
+    name_low = " ".join(
+        [
+            clean_pdf_text(getattr(product, "Name", "")),
+            clean_pdf_text(getattr(product, "ObjectType", "")),
+            clean_pdf_text(getattr(product, "Description", "")),
+        ]
+    ).lower()
+    if cls in {"IfcWall", "IfcWallStandardCase", "IfcCurtainWall"}:
+        return "wall"
+    if cls in {"IfcColumn", "IfcPile"}:
+        return "column"
+    if cls in {"IfcSlab", "IfcRoof"}:
+        return "slab"
+    if cls in {"IfcBeam", "IfcMember"}:
+        return "beam"
+    if cls in {"IfcStair", "IfcStairFlight", "IfcRamp", "IfcRampFlight"} or any(word in name_low for word in ["trapp", "stair", "rampe"]):
+        return "stair"
+    if cls == "IfcTransportElement" or any(word in name_low for word in ["heis", "lift", "elevator"]):
+        return "transport"
+    if cls == "IfcSpace" and any(word in name_low for word in ["sjakt", "shaft", "heis", "lift", "trapp", "stair"]):
+        return "core_space"
+    return ""
+
+
+
+def _ifc_bbox_v13(product: Any) -> Optional[Tuple[float, float, float, float, float, float]]:
+    if _ifc_geom_v13 is None:
+        return None
+    settings = _ifc_geom_settings_v13()
+    if settings is None:
+        return None
+    try:
+        shape = _ifc_geom_v13.create_shape(settings, product)
+        geometry = getattr(shape, "geometry", shape)
+        verts = getattr(geometry, "verts", None)
+        if not verts:
+            return None
+        xs = verts[0::3]
+        ys = verts[1::3]
+        zs = verts[2::3]
+        if not xs or not ys or not zs:
+            return None
+        return (
+            float(min(xs)),
+            float(min(ys)),
+            float(min(zs)),
+            float(max(xs)),
+            float(max(ys)),
+            float(max(zs)),
+        )
+    except Exception:
+        return None
+
+
+
+def _ifc_storey_elements_v13(storey: Any) -> List[Any]:
+    elements: List[Any] = []
+    seen: set = set()
+    for rel in list(getattr(storey, "ContainsElements", []) or []):
+        for elem in list(getattr(rel, "RelatedElements", []) or []):
+            gid = clean_pdf_text(getattr(elem, "GlobalId", "")) or str(id(elem))
+            if gid in seen:
+                continue
+            seen.add(gid)
+            elements.append(elem)
+    return elements
+
+
+
+def _cluster_boxes_v13(boxes: List[Tuple[float, float, float, float]], gap: float) -> List[Tuple[float, float, float, float]]:
+    clusters: List[Tuple[float, float, float, float]] = []
+    for box in boxes:
+        merged = False
+        for idx, cluster in enumerate(list(clusters)):
+            if _bbox_intersects_v13(cluster, box, gap=gap):
+                clusters[idx] = (
+                    min(cluster[0], box[0]),
+                    min(cluster[1], box[1]),
+                    max(cluster[2], box[2]),
+                    max(cluster[3], box[3]),
+                )
+                merged = True
+                break
+        if not merged:
+            clusters.append(box)
+    changed = True
+    while changed:
+        changed = False
+        new_clusters: List[Tuple[float, float, float, float]] = []
+        while clusters:
+            cluster = clusters.pop(0)
+            merged_any = False
+            for idx, other in enumerate(list(clusters)):
+                if _bbox_intersects_v13(cluster, other, gap=gap):
+                    cluster = (
+                        min(cluster[0], other[0]),
+                        min(cluster[1], other[1]),
+                        max(cluster[2], other[2]),
+                        max(cluster[3], other[3]),
+                    )
+                    clusters.pop(idx)
+                    clusters.insert(0, cluster)
+                    merged_any = True
+                    changed = True
+                    break
+            if not merged_any:
+                new_clusters.append(cluster)
+        clusters = new_clusters
+    return clusters
+
+
+
+def _map_bbox_to_px_v13(
+    bbox: Tuple[float, float, float, float],
+    extents: Tuple[float, float, float, float],
+    canvas_size: Tuple[int, int],
+    pad: int,
+) -> Tuple[int, int, int, int]:
+    minx, miny, maxx, maxy = extents
+    width = max(maxx - minx, 1e-6)
+    height = max(maxy - miny, 1e-6)
+    canvas_w, canvas_h = canvas_size
+    scale = min((canvas_w - 2 * pad) / width, (canvas_h - 2 * pad) / height)
+    x0, y0, x1, y1 = bbox
+    px0 = int(round(pad + (x0 - minx) * scale))
+    px1 = int(round(pad + (x1 - minx) * scale))
+    py1 = int(round(canvas_h - pad - (y0 - miny) * scale))
+    py0 = int(round(canvas_h - pad - (y1 - miny) * scale))
+    return (
+        int(clamp(min(px0, px1), 0, canvas_w - 1)),
+        int(clamp(min(py0, py1), 0, canvas_h - 1)),
+        int(clamp(max(px0, px1), 1, canvas_w - 1)),
+        int(clamp(max(py0, py1), 1, canvas_h - 1)),
+    )
+
+
+
+def _local_geometry_from_semantic_objects_v13(
+    image_size: Tuple[int, int],
+    region_bbox_px: Tuple[int, int, int, int],
+    objects_px: List[Dict[str, Any]],
+    core_boxes_px: List[Tuple[int, int, int, int]],
+) -> Dict[str, Any]:
+    if _np_v13 is None:
+        import numpy as _np_v13_local  # type: ignore
+    else:
+        _np_v13_local = _np_v13
+
+    rx, ry, rw, rh = region_bbox_px
+    rw = max(int(rw), 2)
+    rh = max(int(rh), 2)
+    mask = _np_v13_local.zeros((rh, rw), dtype="uint8")
+    vertical_segments: List[Dict[str, Any]] = []
+    horizontal_segments: List[Dict[str, Any]] = []
+    columns_local: List[Tuple[float, float]] = []
+
+    for obj in objects_px:
+        kind = clean_pdf_text(obj.get("kind", "")).lower()
+        x0, y0, x1, y1 = [int(v) for v in obj.get("bbox_px", (0, 0, 0, 0))]
+        lx0 = int(clamp(x0 - rx, 0, rw - 1))
+        ly0 = int(clamp(y0 - ry, 0, rh - 1))
+        lx1 = int(clamp(x1 - rx, lx0 + 1, rw - 1))
+        ly1 = int(clamp(y1 - ry, ly0 + 1, rh - 1))
+        if kind in {"slab", "wall", "column", "stair", "transport", "core_space"}:
+            mask[ly0:ly1 + 1, lx0:lx1 + 1] = 255
+        width = max(1, lx1 - lx0)
+        height = max(1, ly1 - ly0)
+        if kind == "wall":
+            if height >= width:
+                vertical_segments.append({
+                    "kind": "vertical",
+                    "center": float((lx0 + lx1) / 2.0),
+                    "x": float(lx0),
+                    "y": float(ly0),
+                    "w": float(width),
+                    "h": float(height),
+                    "length": float(height),
+                    "thickness": float(width),
+                })
+            else:
+                horizontal_segments.append({
+                    "kind": "horizontal",
+                    "center": float((ly0 + ly1) / 2.0),
+                    "x": float(lx0),
+                    "y": float(ly0),
+                    "w": float(width),
+                    "h": float(height),
+                    "length": float(width),
+                    "thickness": float(height),
+                })
+        elif kind == "column":
+            columns_local.append((float((lx0 + lx1) / 2.0), float((ly0 + ly1) / 2.0)))
+
+    core_bbox = None
+    for box in core_boxes_px[:1]:
+        x0, y0, x1, y1 = [int(v) for v in box]
+        lx0 = int(clamp(x0 - rx, 0, rw - 1))
+        ly0 = int(clamp(y0 - ry, 0, rh - 1))
+        lx1 = int(clamp(x1 - rx, lx0 + 1, rw - 1))
+        ly1 = int(clamp(y1 - ry, ly0 + 1, rh - 1))
+        core_bbox = (lx0, ly0, max(8, lx1 - lx0), max(8, ly1 - ly0))
+        break
+    if core_bbox is None:
+        core_bbox = (int(rw * 0.42), int(rh * 0.34), max(18, int(rw * 0.12)), max(24, int(rh * 0.18)))
+
+    support_vertical = sorted(vertical_segments, key=lambda item: (float(item.get("length", 0.0)), -abs(float(item.get("center", 0.0)) - (rw / 2.0))), reverse=True)[:3]
+    support_horizontal = sorted(horizontal_segments, key=lambda item: (float(item.get("length", 0.0)), -abs(float(item.get("center", 0.0)) - (rh / 2.0))), reverse=True)[:2]
+
+    grid_x = [{"pos": float(item[0]), "score": 1.0} for item in columns_local]
+    grid_y = [{"pos": float(item[1]), "score": 1.0} for item in columns_local]
+    for segment in vertical_segments:
+        grid_x.append({"pos": float(segment.get("center", 0.0)), "score": min(1.0, float(segment.get("length", 0.0)) / max(rh, 1.0))})
+    for segment in horizontal_segments:
+        grid_y.append({"pos": float(segment.get("center", 0.0)), "score": min(1.0, float(segment.get("length", 0.0)) / max(rw, 1.0))})
+
+    def _dedupe_positions(items: List[Dict[str, float]], min_gap: float) -> List[Dict[str, float]]:
+        ordered = sorted(items, key=lambda item: (-float(item.get("score", 0.0)), float(item.get("pos", 0.0))))
+        kept: List[Dict[str, float]] = []
+        for item in ordered:
+            pos = float(item.get("pos", 0.0))
+            if all(abs(pos - float(other.get("pos", 0.0))) >= min_gap for other in kept):
+                kept.append({"pos": pos, "score": float(item.get("score", 0.0))})
+        return sorted(kept, key=lambda item: float(item.get("pos", 0.0)))
+
+    grid_x = _dedupe_positions(grid_x, max(14.0, rw * 0.05))
+    grid_y = _dedupe_positions(grid_y, max(14.0, rh * 0.05))
+
+    junctions: List[Dict[str, Any]] = []
+    for x_item in grid_x:
+        x = float(x_item.get("pos", 0.0))
+        for y_item in grid_y:
+            y = float(y_item.get("pos", 0.0))
+            if 0 <= int(clamp(y, 0, rh - 1)) < rh and 0 <= int(clamp(x, 0, rw - 1)) < rw and mask[int(y), int(x)] > 0:
+                junctions.append({"x": x, "y": y, "score": float(x_item.get("score", 0.0)) + float(y_item.get("score", 0.0))})
+    for cx, cy in columns_local:
+        junctions.append({"x": float(cx), "y": float(cy), "score": 2.0})
+
+    min_gap = max(16.0, min(rw, rh) * 0.05)
+    deduped_junctions: List[Dict[str, Any]] = []
+    for item in sorted(junctions, key=lambda obj: float(obj.get("score", 0.0)), reverse=True):
+        x = float(item.get("x", 0.0))
+        y = float(item.get("y", 0.0))
+        if all((x - float(prev.get("x", 0.0))) ** 2 + (y - float(prev.get("y", 0.0))) ** 2 > (min_gap ** 2) for prev in deduped_junctions):
+            deduped_junctions.append({"x": x, "y": y, "score": float(item.get("score", 0.0))})
+        if len(deduped_junctions) >= 64:
+            break
+
+    return {
+        "bbox_px": (int(rx), int(ry), int(rw), int(rh)),
+        "crop_size": (int(rw), int(rh)),
+        "footprint_mask": mask,
+        "footprint_bbox_local": (0, 0, int(rw), int(rh)),
+        "vertical_segments": vertical_segments,
+        "horizontal_segments": horizontal_segments,
+        "support_vertical_v9": support_vertical,
+        "support_horizontal_v9": support_horizontal,
+        "grid_x": grid_x,
+        "grid_y": grid_y,
+        "junctions": deduped_junctions,
+        "core_bbox": core_bbox,
+    }
+
+
+
+def _render_ifc_storey_record_v13(file_name: str, storey_label: str, objects: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not objects:
+        return None
+    extents = _bbox_union_v13([tuple(obj["bbox_world_xy"]) for obj in objects if obj.get("bbox_world_xy")])
+    if extents is None:
+        return None
+    minx, miny, maxx, maxy = extents
+    dx = max(maxx - minx, 0.1)
+    dy = max(maxy - miny, 0.1)
+    canvas_w = 1500
+    canvas_h = 1150
+    if dx > dy * 1.65:
+        canvas_w, canvas_h = 1580, 980
+    elif dy > dx * 1.30:
+        canvas_w, canvas_h = 1180, 1580
+    pad = 64
+    image = Image.new("RGB", (canvas_w, canvas_h), (247, 247, 244))
+    draw = ImageDraw.Draw(image, "RGBA")
+    objects_px: List[Dict[str, Any]] = []
+    for obj in objects:
+        bbox_px = _map_bbox_to_px_v13(tuple(obj["bbox_world_xy"]), extents, image.size, pad)
+        x0, y0, x1, y1 = bbox_px
+        if x1 <= x0 or y1 <= y0:
+            continue
+        obj_px = {**obj, "bbox_px": bbox_px}
+        objects_px.append(obj_px)
+
+    slabs = [obj for obj in objects_px if clean_pdf_text(obj.get("kind", "")).lower() == "slab"]
+    walls = [obj for obj in objects_px if clean_pdf_text(obj.get("kind", "")).lower() == "wall"]
+    columns = [obj for obj in objects_px if clean_pdf_text(obj.get("kind", "")).lower() == "column"]
+    stairs = [obj for obj in objects_px if clean_pdf_text(obj.get("kind", "")).lower() in {"stair", "transport", "core_space"}]
+    beams = [obj for obj in objects_px if clean_pdf_text(obj.get("kind", "")).lower() == "beam"]
+
+    for obj in slabs:
+        x0, y0, x1, y1 = obj["bbox_px"]
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=4, fill=(230, 225, 214, 120), outline=(222, 214, 198, 100), width=1)
+    for obj in walls:
+        x0, y0, x1, y1 = obj["bbox_px"]
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=2, fill=(118, 122, 126, 245), outline=(72, 76, 80, 255), width=1)
+    for obj in beams:
+        x0, y0, x1, y1 = obj["bbox_px"]
+        draw.line((x0, (y0 + y1) / 2.0, x1, (y0 + y1) / 2.0), fill=(154, 160, 170, 200), width=max(2, min(8, int(min(abs(y1 - y0), abs(x1 - x0)) or 2))))
+    for obj in columns:
+        x0, y0, x1, y1 = obj["bbox_px"]
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=3, fill=(37, 84, 107, 255), outline=(255, 255, 255, 230), width=1)
+    for obj in stairs:
+        x0, y0, x1, y1 = obj["bbox_px"]
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=6, fill=(255, 193, 94, 95), outline=(225, 145, 31, 255), width=3)
+
+    envelope_boxes = [tuple(obj["bbox_px"]) for obj in walls + slabs] or [tuple(obj["bbox_px"]) for obj in objects_px]
+    envelope_px = _bbox_union_v13(envelope_boxes) or (pad, pad, canvas_w - pad, canvas_h - pad)
+    seed_core_boxes = [tuple(obj["bbox_px"]) for obj in stairs]
+    if seed_core_boxes:
+        core_gap = max(18.0, min(canvas_w, canvas_h) * 0.025)
+        core_boxes_px = _cluster_boxes_v13(seed_core_boxes, core_gap)
+    else:
+        core_boxes_px = []
+
+    expanded_core_boxes: List[Tuple[int, int, int, int]] = []
+    near_gap = max(22.0, min(canvas_w, canvas_h) * 0.035)
+    for core_box in core_boxes_px[:2]:
+        merged = list(core_box)
+        for obj in walls:
+            wall_box = tuple(obj["bbox_px"])
+            if _bbox_intersects_v13(_expand_bbox_v13(tuple(merged), near_gap), wall_box, gap=0):
+                merged = [min(merged[0], wall_box[0]), min(merged[1], wall_box[1]), max(merged[2], wall_box[2]), max(merged[3], wall_box[3])]
+        expanded_core_boxes.append((int(merged[0]), int(merged[1]), int(merged[2]), int(merged[3])))
+
+    if not expanded_core_boxes:
+        env_x0, env_y0, env_x1, env_y1 = [int(v) for v in envelope_px]
+        cx = int((env_x0 + env_x1) / 2)
+        cy = int((env_y0 + env_y1) / 2)
+        cw = max(54, int((env_x1 - env_x0) * 0.12))
+        ch = max(72, int((env_y1 - env_y0) * 0.18))
+        expanded_core_boxes = [(cx - cw // 2, cy - ch // 2, cx + cw // 2, cy + ch // 2)]
+
+    for idx, core_box in enumerate(expanded_core_boxes[:2], start=1):
+        x0, y0, x1, y1 = core_box
+        draw.rounded_rectangle((x0, y0, x1, y1), radius=8, fill=(255, 196, 64, 56), outline=(230, 158, 41, 255), width=3)
+        font = get_font(20, bold=True)
+        draw_label(draw, (x0 + 8, y0 + 8), f"Kjerne {idx}", font, (80, 60, 10, 255), (255, 230, 180, 235))
+
+    env_x0, env_y0, env_x1, env_y1 = [int(v) for v in envelope_px]
+    region_margin = max(26, int(min(canvas_w, canvas_h) * 0.03))
+    plan_bbox_px = (
+        int(clamp(env_x0 - region_margin, 0, canvas_w - 2)),
+        int(clamp(env_y0 - region_margin, 0, canvas_h - 2)),
+        int(clamp((env_x1 - env_x0) + (region_margin * 2), 2, canvas_w)),
+        int(clamp((env_y1 - env_y0) + (region_margin * 2), 2, canvas_h)),
+    )
+
+    wall_candidates_scored: List[Dict[str, Any]] = []
+    edge_margin_px = max(24.0, min(canvas_w, canvas_h) * 0.06)
+    for obj in walls:
+        x0, y0, x1, y1 = [float(v) for v in obj["bbox_px"]]
+        width_px = max(x1 - x0, 1.0)
+        height_px = max(y1 - y0, 1.0)
+        orientation = "horizontal" if width_px >= height_px else "vertical"
+        center_x = (x0 + x1) / 2.0
+        center_y = (y0 + y1) / 2.0
+        length = max(width_px, height_px)
+        edge_penalty = 0.0
+        if orientation == "vertical":
+            if min(abs(center_x - env_x0), abs(env_x1 - center_x)) < edge_margin_px:
+                edge_penalty += 80.0
+        else:
+            if min(abs(center_y - env_y0), abs(env_y1 - center_y)) < edge_margin_px:
+                edge_penalty += 80.0
+        loadbearing = obj.get("load_bearing") is True
+        score = length + (55.0 if loadbearing else 0.0) - edge_penalty
+        if expanded_core_boxes:
+            core_cx = sum((box[0] + box[2]) / 2.0 for box in expanded_core_boxes) / len(expanded_core_boxes)
+            core_cy = sum((box[1] + box[3]) / 2.0 for box in expanded_core_boxes) / len(expanded_core_boxes)
+            score -= abs((center_x if orientation == "vertical" else center_y) - (core_cx if orientation == "vertical" else core_cy)) * 0.07
+        wall_candidates_scored.append({**obj, "score": score, "orientation": orientation})
+
+    chosen_walls: List[Dict[str, Any]] = []
+    min_wall_spacing = max(24.0, min(canvas_w, canvas_h) * 0.10)
+    for obj in sorted(wall_candidates_scored, key=lambda item: float(item.get("score", 0.0)), reverse=True):
+        x0, y0, x1, y1 = [float(v) for v in obj["bbox_px"]]
+        axis_value = ((x0 + x1) / 2.0) if obj.get("orientation") == "vertical" else ((y0 + y1) / 2.0)
+        if all(abs(axis_value - (prev.get("axis_value", axis_value))) >= min_wall_spacing for prev in chosen_walls):
+            obj = {**obj, "axis_value": axis_value}
+            chosen_walls.append(obj)
+        if len(chosen_walls) >= 4:
+            break
+
+    cue = {
+        "page_index": 0,
+        "drawing_role": "plan",
+        "plan_confidence": 0.99,
+        "multi_plan": False,
+        "level_type": _semantic_level_type_v13(storey_label),
+        "plan_bbox": _norm_bbox_from_px_v13(plan_bbox_px, image.size),
+        "exterior_envelope_bbox": _norm_bbox_from_px_v13((env_x0, env_y0, env_x1 - env_x0, env_y1 - env_y0), image.size),
+        "core_candidates": [],
+        "bearing_wall_candidates": [],
+        "column_candidates": [],
+        "notes": [
+            "IFC-basert semantisk plan er brukt som primær tegnekilde.",
+            "Yttervegg/perimeter er filtrert separat fra sannsynlige indre bærelinjer.",
+        ],
+    }
+
+    for idx, box in enumerate(expanded_core_boxes[:2], start=1):
+        x0, y0, x1, y1 = [int(v) for v in box]
+        cue["core_candidates"].append({
+            "x": round(x0 / max(canvas_w, 1), 6),
+            "y": round(y0 / max(canvas_h, 1), 6),
+            "w": round((x1 - x0) / max(canvas_w, 1), 6),
+            "h": round((y1 - y0) / max(canvas_h, 1), 6),
+            "confidence": 0.94 - (idx * 0.03),
+        })
+
+    for obj in chosen_walls:
+        x0, y0, x1, y1 = [float(v) for v in obj["bbox_px"]]
+        orientation = obj.get("orientation")
+        if orientation == "vertical":
+            cue["bearing_wall_candidates"].append({
+                "x1": round(((x0 + x1) / 2.0) / max(canvas_w, 1), 6),
+                "y1": round(y0 / max(canvas_h, 1), 6),
+                "x2": round(((x0 + x1) / 2.0) / max(canvas_w, 1), 6),
+                "y2": round(y1 / max(canvas_h, 1), 6),
+                "confidence": 0.88 if obj.get("load_bearing") is True else 0.74,
+                "reason": "IFC-vegg i indre sone",
+            })
+        else:
+            cue["bearing_wall_candidates"].append({
+                "x1": round(x0 / max(canvas_w, 1), 6),
+                "y1": round(((y0 + y1) / 2.0) / max(canvas_h, 1), 6),
+                "x2": round(x1 / max(canvas_w, 1), 6),
+                "y2": round(((y0 + y1) / 2.0) / max(canvas_h, 1), 6),
+                "confidence": 0.84 if obj.get("load_bearing") is True else 0.70,
+                "reason": "IFC-vegg i indre sone",
+            })
+
+    for obj in sorted(columns, key=lambda item: (item["bbox_px"][1], item["bbox_px"][0]))[:12]:
+        x0, y0, x1, y1 = [float(v) for v in obj["bbox_px"]]
+        cue["column_candidates"].append({
+            "x": round(((x0 + x1) / 2.0) / max(canvas_w, 1), 6),
+            "y": round(((y0 + y1) / 2.0) / max(canvas_h, 1), 6),
+            "confidence": 0.92,
+            "reason": "IFC-søyle",
+        })
+
+    semantic_geometry = _local_geometry_from_semantic_objects_v13(image.size, plan_bbox_px, objects_px, expanded_core_boxes)
+    cache_key = f"ifc-sem-{file_name}-{storey_label}-{abs(hash((file_name, storey_label, len(objects_px))))}"
+    try:
+        image.info["_semantic_geometry_key_v13"] = cache_key
+    except Exception:
+        pass
+    _V13_IMAGE_GEOMETRY_CACHE[cache_key] = semantic_geometry
+    _V13_IMAGE_REGION_CACHE[cache_key] = [{"bbox_px": semantic_geometry["bbox_px"], "bbox_norm": cue["plan_bbox"], "score": 1.0}]
+
+    record = build_drawing_record(f"{file_name} - {storey_label}", image, "Opplastet IFC")
+    try:
+        record["image"].info["_semantic_geometry_key_v13"] = cache_key
+    except Exception:
+        pass
+    record.update(
+        {
+            "name": clean_pdf_text(f"{file_name} - {storey_label}"),
+            "label": clean_pdf_text(storey_label),
+            "hint": "plan",
+            "drawing_format": "ifc",
+            "ifc_storey_name": clean_pdf_text(storey_label),
+            "semantic_page_cue_v13": cue,
+            "semantic_geometry_v13": semantic_geometry,
+            "semantic_plan_regions_v13": _V13_IMAGE_REGION_CACHE.get(cache_key, []),
+            "semantic_summary_v13": {
+                "walls": len(walls),
+                "columns": len(columns),
+                "stairs_or_transport": len(stairs),
+                "cores": len(expanded_core_boxes),
+            },
+        }
+    )
+    return record
+
+
+
+def _load_ifc_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
+    if _ifcopenshell_v13 is None:
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet.")
+        return []
+    tmp_path = None
+    drawings: List[Dict[str, Any]] = []
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".ifc") as tmp:
+            tmp.write(file_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
+        model = _ifcopenshell_v13.open(tmp_path)
+        storeys = list(model.by_type("IfcBuildingStorey") or [])
+        if not storeys:
+            _append_upload_warning_v13(f"IFC-filen '{file_name}' inneholdt ingen IfcBuildingStorey og ble hoppet over.")
+            return []
+        storeys = sorted(storeys, key=lambda item: float(getattr(item, "Elevation", 0.0) or 0.0))
+        for storey in storeys[:8]:
+            storey_label = clean_pdf_text(getattr(storey, "Name", "")) or f"Storey {len(drawings) + 1}"
+            objects: List[Dict[str, Any]] = []
+            for product in _ifc_storey_elements_v13(storey):
+                kind = _ifc_product_kind_v13(product)
+                if not kind:
+                    continue
+                bbox6 = _ifc_bbox_v13(product)
+                if bbox6 is None:
+                    continue
+                x0, y0, z0, x1, y1, z1 = bbox6
+                if x1 - x0 <= 0 or y1 - y0 <= 0:
+                    continue
+                objects.append(
+                    {
+                        "gid": clean_pdf_text(getattr(product, "GlobalId", "")),
+                        "name": clean_pdf_text(getattr(product, "Name", "")),
+                        "kind": kind,
+                        "class_name": clean_pdf_text(product.is_a() if hasattr(product, "is_a") else ""),
+                        "bbox_world_xy": (float(x0), float(y0), float(x1), float(y1)),
+                        "z_range": (float(z0), float(z1)),
+                        "load_bearing": _ifc_is_loadbearing_v13(product),
+                    }
+                )
+            record = _render_ifc_storey_record_v13(file_name, storey_label, objects)
+            if record is not None:
+                drawings.append(record)
+        if not drawings:
+            _append_upload_warning_v13(f"IFC-filen '{file_name}' kunne leses, men ingen brukbare planobjekter ble funnet.")
+        return drawings
+    except Exception as exc:
+        _append_upload_warning_v13(f"IFC-lesing feilet for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}")
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+
+def _collect_dxf_primitives_v13(doc: Any) -> List[Dict[str, Any]]:
+    primitives: List[Dict[str, Any]] = []
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        return primitives
+    for entity in msp:
+        try:
+            etype = clean_pdf_text(entity.dxftype()).upper()
+        except Exception:
+            continue
+        try:
+            if etype == "LINE":
+                start = entity.dxf.start
+                end = entity.dxf.end
+                primitives.append({"type": "line", "points": [(float(start.x), float(start.y)), (float(end.x), float(end.y))]})
+            elif etype == "LWPOLYLINE":
+                pts = [(float(point[0]), float(point[1])) for point in entity.get_points("xy")]
+                if len(pts) >= 2:
+                    primitives.append({"type": "poly", "points": pts, "closed": bool(entity.closed)})
+            elif etype == "POLYLINE":
+                pts = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
+                if len(pts) >= 2:
+                    primitives.append({"type": "poly", "points": pts, "closed": bool(getattr(entity, "is_closed", False))})
+            elif etype == "CIRCLE":
+                center = entity.dxf.center
+                radius = float(entity.dxf.radius)
+                primitives.append({"type": "circle", "center": (float(center.x), float(center.y)), "radius": radius})
+            elif etype == "ARC":
+                center = entity.dxf.center
+                radius = float(entity.dxf.radius)
+                primitives.append({"type": "circle", "center": (float(center.x), float(center.y)), "radius": radius})
+        except Exception:
+            continue
+    return primitives
+
+
+
+def _dxf_extents_v13(primitives: List[Dict[str, Any]]) -> Optional[Tuple[float, float, float, float]]:
+    xs: List[float] = []
+    ys: List[float] = []
+    for item in primitives:
+        if item.get("type") in {"line", "poly"}:
+            for x, y in item.get("points", []):
+                xs.append(float(x))
+                ys.append(float(y))
+        elif item.get("type") == "circle":
+            cx, cy = item.get("center", (0.0, 0.0))
+            radius = float(item.get("radius", 0.0))
+            xs.extend([float(cx) - radius, float(cx) + radius])
+            ys.extend([float(cy) - radius, float(cy) + radius])
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+
+def _rasterize_dxf_primitives_v13(file_name: str, primitives: List[Dict[str, Any]], source_label: str) -> Optional[Dict[str, Any]]:
+    extents = _dxf_extents_v13(primitives)
+    if extents is None:
+        return None
+    minx, miny, maxx, maxy = extents
+    dx = max(maxx - minx, 0.1)
+    dy = max(maxy - miny, 0.1)
+    canvas_w = 1500
+    canvas_h = 1150
+    if dx > dy * 1.65:
+        canvas_w, canvas_h = 1580, 980
+    elif dy > dx * 1.25:
+        canvas_w, canvas_h = 1180, 1580
+    pad = 64
+    image = Image.new("RGB", (canvas_w, canvas_h), (252, 252, 251))
+    draw = ImageDraw.Draw(image, "RGBA")
+
+    def map_point(point: Tuple[float, float]) -> Tuple[float, float]:
+        x, y = float(point[0]), float(point[1])
+        scale = min((canvas_w - 2 * pad) / dx, (canvas_h - 2 * pad) / dy)
+        px = pad + (x - minx) * scale
+        py = canvas_h - pad - (y - miny) * scale
+        return float(px), float(py)
+
+    for item in primitives:
+        if item.get("type") == "line":
+            p1, p2 = item.get("points", [(0.0, 0.0), (0.0, 0.0)])[:2]
+            x1, y1 = map_point(p1)
+            x2, y2 = map_point(p2)
+            draw.line((x1, y1, x2, y2), fill=(90, 94, 98, 255), width=2)
+        elif item.get("type") == "poly":
+            pts = [map_point(pt) for pt in item.get("points", [])]
+            if len(pts) >= 2:
+                draw.line(pts + ([pts[0]] if item.get("closed") else []), fill=(80, 84, 89, 255), width=2)
+        elif item.get("type") == "circle":
+            cx, cy = map_point(item.get("center", (0.0, 0.0)))
+            radius = float(item.get("radius", 0.0))
+            scale = min((canvas_w - 2 * pad) / dx, (canvas_h - 2 * pad) / dy)
+            rr = max(1.0, radius * scale)
+            draw.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), outline=(110, 110, 110, 255), width=2)
+
+    region_bbox_px = (pad // 2, pad // 2, canvas_w - pad, canvas_h - pad)
+    cache_key = f"dxf-sem-{file_name}-{abs(hash((file_name, len(primitives), source_label)))}"
+    try:
+        image.info["_semantic_geometry_key_v13"] = cache_key
+    except Exception:
+        pass
+    _V13_IMAGE_REGION_CACHE[cache_key] = [{"bbox_px": region_bbox_px, "bbox_norm": _norm_bbox_from_px_v13(region_bbox_px, image.size), "score": 0.8}]
+
+    record = build_drawing_record(file_name, image, source_label)
+    try:
+        record["image"].info["_semantic_geometry_key_v13"] = cache_key
+    except Exception:
+        pass
+    record.update(
+        {
+            "name": clean_pdf_text(file_name),
+            "label": clean_pdf_text(Path(file_name).stem),
+            "hint": detect_drawing_hint(file_name),
+            "drawing_format": "dxf" if source_label.lower().endswith("dxf") else ("dwg" if "dwg" in source_label.lower() else "dxf"),
+            "semantic_plan_regions_v13": _V13_IMAGE_REGION_CACHE.get(cache_key, []),
+            "semantic_page_cue_v13": {
+                "page_index": 0,
+                "drawing_role": "plan" if detect_drawing_hint(file_name) == "plan" else detect_drawing_hint(file_name),
+                "plan_confidence": 0.82,
+                "multi_plan": False,
+                "level_type": _semantic_level_type_v13(file_name),
+                "plan_bbox": _norm_bbox_from_px_v13(region_bbox_px, image.size),
+                "exterior_envelope_bbox": _norm_bbox_from_px_v13(region_bbox_px, image.size),
+                "core_candidates": [],
+                "bearing_wall_candidates": [],
+                "column_candidates": [],
+                "notes": ["DXF/DWG-vektor er rasterisert lokalt uten ODA-konto."],
+            },
+        }
+    )
+    return record
+
+
+
+def _load_dxf_or_dwg_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
+    if _ezdxf_v13 is None:
+        _append_upload_warning_v13("DXF/DWG-fil ble lastet opp, men pakken 'ezdxf' er ikke installert i miljøet.")
+        return []
+    tmp_in = None
+    tmp_dxf = None
+    try:
+        suffix = clean_pdf_text(suffix).lower() or ".dxf"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp.flush()
+            tmp_in = tmp.name
+
+        source_label = "Opplastet DXF"
+        parse_path = tmp_in
+        if suffix == ".dwg":
+            dwgread = _shutil_v13.which("dwgread")
+            if not dwgread:
+                _append_upload_warning_v13(
+                    f"DWG-filen '{file_name}' kan ikke leses direkte uten ODA. Last opp IFC eller eksporter DXF, eller installer LibreDWG med kommandoen 'dwgread'."
+                )
+                return []
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as out_dxf:
+                tmp_dxf = out_dxf.name
+            command = [dwgread, "-O", "DXF", "-o", tmp_dxf, tmp_in]
+            result = _subprocess_v13.run(command, stdout=_subprocess_v13.PIPE, stderr=_subprocess_v13.PIPE, text=True, timeout=120)
+            if int(result.returncode or 0) != 0 or not os.path.exists(tmp_dxf) or os.path.getsize(tmp_dxf) <= 0:
+                stderr = short_text(result.stderr or result.stdout or "ukjent feil", 180)
+                _append_upload_warning_v13(f"DWG-konvertering via LibreDWG feilet for '{file_name}': {stderr}")
+                return []
+            parse_path = tmp_dxf
+            source_label = "Opplastet DWG via LibreDWG"
+
+        doc = _ezdxf_v13.readfile(parse_path)
+        primitives = _collect_dxf_primitives_v13(doc)
+        record = _rasterize_dxf_primitives_v13(file_name, primitives, source_label)
+        return [record] if record is not None else []
+    except Exception as exc:
+        _append_upload_warning_v13(f"DXF/DWG-lesing feilet for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}")
+        return []
+    finally:
+        for candidate in [tmp_in, tmp_dxf]:
+            if candidate and os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except Exception:
+                    pass
+
+
+
+def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 4) -> List[Dict[str, Any]]:
+    drawings: List[Dict[str, Any]] = []
+    st.session_state["rib_upload_warnings_v13"] = []
+    if not files:
+        return drawings
+
+    for f in files:
+        name = clean_pdf_text(getattr(f, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        file_bytes = _safe_upload_bytes_v13(f)
+        if not file_bytes:
+            continue
+
+        if suffix in {".ifc", ".ifczip"}:
+            drawings.extend(_load_ifc_drawings_v13(name, file_bytes, suffix))
+            continue
+        if suffix in {".dxf", ".dwg"}:
+            drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
+            continue
+        if suffix == ".pdf":
+            drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+            continue
+        if suffix in SUPPORTED_IMAGE_EXTS:
+            drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+            continue
+        _append_upload_warning_v13(f"Filtypen '{suffix or name}' støttes ikke i denne versjonen.")
+
+    drawings = prioritize_drawings(drawings, limit=18)
+    for idx, record in enumerate(drawings):
+        record["page_index"] = idx
+    return drawings
+
+
+
+def drawing_priority(record: Dict[str, Any]) -> int:
+    score = _DRAWING_PRIORITY_V12_BASE(record)
+    fmt = clean_pdf_text(record.get("drawing_format", "")).lower()
+    if fmt == "ifc":
+        score += 40
+    elif fmt in {"dxf", "dwg"}:
+        score += 18
+    if isinstance(record.get("semantic_page_cue_v13"), dict):
+        score += 20
+    if isinstance(record.get("semantic_geometry_v13"), dict):
+        score += 15
+    if clean_pdf_text(record.get("ifc_storey_name", "")).lower():
+        score += 5
+    return score
+
+
+
+def prioritize_drawings(drawings: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+    ranked = _PRIORITIZE_DRAWINGS_V12_BASE(drawings, limit=max(limit, len(drawings)))
+    out = ranked[:limit]
+    for idx, record in enumerate(out):
+        record["page_index"] = idx
+    return out
+
+
+
+def drawing_manifest_text(drawings: List[Dict[str, Any]]) -> str:
+    if not drawings:
+        return _DRAWING_MANIFEST_TEXT_V12_BASE(drawings)
+    lines = []
+    for record in drawings:
+        extra: List[str] = []
+        fmt = clean_pdf_text(record.get("drawing_format", ""))
+        if fmt:
+            extra.append(f"format: {fmt}")
+        storey = clean_pdf_text(record.get("ifc_storey_name", ""))
+        if storey:
+            extra.append(f"etasje: {storey}")
+        summary = record.get("semantic_summary_v13") if isinstance(record.get("semantic_summary_v13"), dict) else {}
+        if summary:
+            extra.append(
+                "semantikk: " + ", ".join(
+                    f"{key}={summary.get(key)}" for key in ["walls", "columns", "stairs_or_transport", "cores"] if summary.get(key) is not None
+                )
+            )
+        lines.append(
+            f"- side_index {record.get('page_index', 0)}: {record.get('name', '')} | kilde: {record.get('source', '')} | hint: {record.get('hint', '')}" + (f" | {' | '.join(extra)}" if extra else "")
+        )
+    return "\n".join(lines)
+
+
+
+def get_plan_regions_for_record_v6(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    semantic_regions = record.get("semantic_plan_regions_v13")
+    if isinstance(semantic_regions, list) and semantic_regions:
+        return semantic_regions
+    cache_key = None
+    try:
+        cache_key = record.get("image", Image.new("RGB", (1, 1))).info.get("_semantic_geometry_key_v13")
+    except Exception:
+        cache_key = None
+    cached_regions = _V13_IMAGE_REGION_CACHE.get(str(cache_key)) if cache_key else None
+    if isinstance(cached_regions, list) and cached_regions:
+        return cached_regions
+    return _GET_PLAN_REGIONS_FOR_RECORD_V12_BASE(record)
+
+
+
+def _merge_page_cues_v13(primary: Dict[str, Any], secondary: Optional[Dict[str, Any]], record: Dict[str, Any]) -> Dict[str, Any]:
+    merged = _normalize_page_cue_v9(primary or {}, record)
+    other = _normalize_page_cue_v9(secondary or {}, record) if isinstance(secondary, dict) else None
+    if not other:
+        return merged
+    if float(other.get("plan_confidence", 0.0)) > float(merged.get("plan_confidence", 0.0)):
+        merged["plan_confidence"] = float(other.get("plan_confidence", 0.0))
+    for key in ["plan_bbox", "exterior_envelope_bbox"]:
+        if merged.get(key) is None and other.get(key) is not None:
+            merged[key] = other.get(key)
+    for key in ["core_candidates", "bearing_wall_candidates", "column_candidates"]:
+        merged_list = list(merged.get(key, []) or [])
+        for item in other.get(key, []) or []:
+            if len(merged_list) >= (2 if key == "core_candidates" else 5 if key == "bearing_wall_candidates" else 10):
+                break
+            merged_list.append(item)
+        merged[key] = merged_list
+    notes = [clean_pdf_text(item) for item in merged.get("notes", []) if clean_pdf_text(item)]
+    for item in other.get("notes", []) or []:
+        cleaned = clean_pdf_text(item)
+        if cleaned and cleaned not in notes:
+            notes.append(cleaned)
+    merged["notes"] = notes[:6]
+    return merged
+
+
+
+def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cues: List[Dict[str, Any]] = []
+    openai_enabled = isinstance(model, dict) and model.get("provider") == "openai"
+    for record in drawings[: min(len(drawings), 8)]:
+        semantic = record.get("semantic_page_cue_v13") if isinstance(record.get("semantic_page_cue_v13"), dict) else None
+        if semantic and clean_pdf_text(record.get("drawing_format", "")).lower() == "ifc":
+            cue = _normalize_page_cue_v9(semantic, record)
+            record["ai_page_cue_v9"] = cue
+            cues.append(cue)
+            continue
+        ai_cue = None
+        if openai_enabled:
+            try:
+                ai_cue_list = _DETECT_PAGE_CUES_WITH_OPENAI_V12_BASE(model, [record])
+                ai_cue = ai_cue_list[0] if ai_cue_list else None
+            except Exception:
+                ai_cue = None
+        cue = _merge_page_cues_v13(semantic or {}, ai_cue, record) if semantic else (_normalize_page_cue_v9(ai_cue or {}, record))
+        record["ai_page_cue_v9"] = cue
+        cues.append(cue)
+    return cues
+
+
+
+def build_plan_geometry_grounded(
+    image: Image.Image,
+    region_bbox_px: Tuple[int, int, int, int],
+) -> Dict[str, Any]:
+    cache_key = None
+    try:
+        cache_key = image.info.get("_semantic_geometry_key_v13")
+    except Exception:
+        cache_key = None
+    if cache_key and str(cache_key) in _V13_IMAGE_GEOMETRY_CACHE:
+        try:
+            return _copy_v13.deepcopy(_V13_IMAGE_GEOMETRY_CACHE[str(cache_key)])
+        except Exception:
+            return _V13_IMAGE_GEOMETRY_CACHE[str(cache_key)]
+    return _BUILD_PLAN_GEOMETRY_GROUNDED_V12_BASE(image, region_bbox_px)
+
+
+
+def get_geometry_for_sketch(drawing_record: Dict[str, Any], sketch: Dict[str, Any]) -> Dict[str, Any]:
+    semantic_geometry = drawing_record.get("semantic_geometry_v13")
+    if isinstance(semantic_geometry, dict):
+        try:
+            return _copy_v13.deepcopy(semantic_geometry)
+        except Exception:
+            return semantic_geometry
+    return _GET_GEOMETRY_FOR_SKETCH_V12_BASE(drawing_record, sketch)
+
+
+
+def _render_upload_warnings_v13() -> None:
+    warnings = st.session_state.get("rib_upload_warnings_v13", [])
+    if isinstance(warnings, list) and warnings:
+        for item in warnings[:4]:
+            st.warning(item)
+
+
+# Synliggjør eventuelle DWG/IFC-varsel i UI like før analyseknappene.
+_render_upload_warnings_v13()
+
+
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
     "1️⃣ ANALYSER TEGNINGSGRUNNLAG",
@@ -9093,6 +10638,7 @@ direct_pdf_clicked = action_col2.button(
 
 if analyze_clicked or direct_pdf_clicked:
     uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=4) if files else []
+    _render_upload_warnings_v13()
     all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
 
     if not all_drawings:
