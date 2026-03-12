@@ -2664,7 +2664,7 @@ with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
             with preview_cols[idx % len(preview_cols)]:
                 st.image(record["image"], caption=f"{record['name']} ({record['hint']})", use_container_width=True)
     else:
-        st.warning("Ingen felles tegninger ble funnet automatisk. Last opp plan og snitt manuelt.")
+        st.info("Ingen lagrede tegninger fra Project Setup ble funnet. Du kan fortsatt laste opp IFC, PDF, DXF eller DWG manuelt her.")
 
     files = st.file_uploader(
         "Last opp arkitekttegninger / snitt / PDF-er / IFC / DXF / DWG",
@@ -9609,6 +9609,104 @@ def _append_upload_warning_v13(message: str) -> None:
     st.session_state["rib_upload_warnings_v13"] = warnings
 
 
+def _append_upload_info_v14(message: str) -> None:
+    cleaned = clean_pdf_text(message)
+    if not cleaned:
+        return
+    infos = st.session_state.get("rib_upload_infos_v14", [])
+    if cleaned not in infos:
+        infos = list(infos) + [cleaned]
+    st.session_state["rib_upload_infos_v14"] = infos
+
+
+def _safe_float_v14(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _ifc_relevant_product_types_v14() -> List[str]:
+    return [
+        "IfcWall",
+        "IfcWallStandardCase",
+        "IfcCurtainWall",
+        "IfcColumn",
+        "IfcPile",
+        "IfcSlab",
+        "IfcRoof",
+        "IfcBeam",
+        "IfcMember",
+        "IfcStair",
+        "IfcStairFlight",
+        "IfcRamp",
+        "IfcRampFlight",
+        "IfcTransportElement",
+        "IfcSpace",
+    ]
+
+
+def _ifc_collect_storey_product_meta_v14(
+    storey: Any,
+    storeys_sorted: List[Any],
+    storey_index: int,
+    meta_by_gid: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    storey_gid = clean_pdf_text(getattr(storey, "GlobalId", "")) or str(id(storey))
+    elevation = _safe_float_v14(getattr(storey, "Elevation", 0.0), 0.0)
+    next_elev = None
+    for later in storeys_sorted[storey_index + 1:]:
+        later_elev = _safe_float_v14(getattr(later, "Elevation", elevation), elevation)
+        if later_elev > elevation + 0.01:
+            next_elev = later_elev
+            break
+    z_low = elevation - 1.25
+    z_high = (next_elev + 1.25) if next_elev is not None else (elevation + 6.0)
+
+    selected: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def add_meta(meta: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(meta, dict):
+            return
+        gid = clean_pdf_text(meta.get("gid", "")) or str(id(meta))
+        if gid in seen:
+            return
+        selected.append(meta)
+        seen.add(gid)
+
+    for product in _ifc_storey_elements_v13(storey):
+        gid = clean_pdf_text(getattr(product, "GlobalId", ""))
+        add_meta(meta_by_gid.get(gid))
+
+    if len(selected) < 8:
+        for meta in list(meta_by_gid.values()):
+            gid = clean_pdf_text(meta.get("gid", ""))
+            if gid in seen:
+                continue
+            product = meta.get("_product")
+            matched = False
+            for rel in list(getattr(product, "ContainedInStructure", []) or []):
+                structure = getattr(rel, "RelatingStructure", None)
+                structure_gid = clean_pdf_text(getattr(structure, "GlobalId", ""))
+                if structure is storey or structure_gid == storey_gid:
+                    matched = True
+                    break
+            if matched:
+                add_meta(meta)
+
+    if len(selected) < 8:
+        for meta in list(meta_by_gid.values()):
+            gid = clean_pdf_text(meta.get("gid", ""))
+            if gid in seen:
+                continue
+            z0, z1 = meta.get("z_range", (0.0, 0.0))
+            overlap = min(float(z1), float(z_high)) - max(float(z0), float(z_low))
+            if overlap > max(0.15, (float(z1) - float(z0)) * 0.10):
+                add_meta(meta)
+
+    return selected
+
 
 def _norm_bbox_from_px_v13(bbox_px: Tuple[int, int, int, int], size: Tuple[int, int]) -> Dict[str, float]:
     return px_bbox_to_norm(bbox_px, int(size[0]), int(size[1]))
@@ -10187,50 +10285,108 @@ def _render_ifc_storey_record_v13(file_name: str, storey_label: str, objects: Li
 
 def _load_ifc_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
     if _ifcopenshell_v13 is None:
-        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet.")
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet. Legg den til i requirements for å bruke IFC som primærkilde.")
         return []
+    if _ifc_geom_v13 is None:
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men 'ifcopenshell.geom' er ikke tilgjengelig i miljøet. IFC kan ikke rasteriseres til planbilder i denne installasjonen.")
+        return []
+
     tmp_path = None
     drawings: List[Dict[str, Any]] = []
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".ifc") as tmp:
-            tmp.write(file_bytes)
-            tmp.flush()
-            tmp_path = tmp.name
+        suffix_low = clean_pdf_text(suffix).lower() or ".ifc"
+        if suffix_low == ".ifczip":
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                members = [name for name in zf.namelist() if clean_pdf_text(name).lower().endswith('.ifc')]
+                if not members:
+                    _append_upload_warning_v13(f"IFCZIP-filen '{file_name}' inneholdt ingen .ifc-fil.")
+                    return []
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.ifc') as tmp:
+                    tmp.write(zf.read(members[0]))
+                    tmp.flush()
+                    tmp_path = tmp.name
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or '.ifc') as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                tmp_path = tmp.name
+
         model = _ifcopenshell_v13.open(tmp_path)
-        storeys = list(model.by_type("IfcBuildingStorey") or [])
+        storeys = list(model.by_type('IfcBuildingStorey') or [])
         if not storeys:
             _append_upload_warning_v13(f"IFC-filen '{file_name}' inneholdt ingen IfcBuildingStorey og ble hoppet over.")
             return []
-        storeys = sorted(storeys, key=lambda item: float(getattr(item, "Elevation", 0.0) or 0.0))
-        for storey in storeys[:8]:
-            storey_label = clean_pdf_text(getattr(storey, "Name", "")) or f"Storey {len(drawings) + 1}"
+
+        storeys = sorted(storeys, key=lambda item: _safe_float_v14(getattr(item, 'Elevation', 0.0), 0.0))
+        relevant_products: List[Any] = []
+        seen_products: set = set()
+        for type_name in _ifc_relevant_product_types_v14():
+            try:
+                for product in list(model.by_type(type_name) or []):
+                    gid = clean_pdf_text(getattr(product, 'GlobalId', '')) or str(id(product))
+                    if gid in seen_products:
+                        continue
+                    seen_products.add(gid)
+                    relevant_products.append(product)
+            except Exception:
+                continue
+
+        meta_by_gid: Dict[str, Dict[str, Any]] = {}
+        for product in relevant_products:
+            kind = _ifc_product_kind_v13(product)
+            if not kind:
+                continue
+            bbox6 = _ifc_bbox_v13(product)
+            if bbox6 is None:
+                continue
+            x0, y0, z0, x1, y1, z1 = bbox6
+            if x1 - x0 <= 0 or y1 - y0 <= 0:
+                continue
+            gid = clean_pdf_text(getattr(product, 'GlobalId', '')) or str(id(product))
+            meta_by_gid[gid] = {
+                'gid': gid,
+                'name': clean_pdf_text(getattr(product, 'Name', '')),
+                'kind': kind,
+                'class_name': clean_pdf_text(product.is_a() if hasattr(product, 'is_a') else ''),
+                'bbox_world_xy': (float(x0), float(y0), float(x1), float(y1)),
+                'z_range': (float(z0), float(z1)),
+                'load_bearing': _ifc_is_loadbearing_v13(product),
+                '_product': product,
+            }
+
+        if not meta_by_gid:
+            _append_upload_warning_v13(f"IFC-filen '{file_name}' kunne leses, men ingen brukbare IFC-objekter med geometri ble funnet.")
+            return []
+
+        for storey_index, storey in enumerate(storeys[:12]):
+            storey_label = clean_pdf_text(getattr(storey, 'Name', '')) or f"Storey {len(drawings) + 1}"
+            selected_meta = _ifc_collect_storey_product_meta_v14(storey, storeys, storey_index, meta_by_gid)
             objects: List[Dict[str, Any]] = []
-            for product in _ifc_storey_elements_v13(storey):
-                kind = _ifc_product_kind_v13(product)
-                if not kind:
+            for meta in selected_meta:
+                bbox_world_xy = meta.get('bbox_world_xy')
+                if not isinstance(bbox_world_xy, tuple) or len(bbox_world_xy) != 4:
                     continue
-                bbox6 = _ifc_bbox_v13(product)
-                if bbox6 is None:
-                    continue
-                x0, y0, z0, x1, y1, z1 = bbox6
-                if x1 - x0 <= 0 or y1 - y0 <= 0:
-                    continue
+                x0, y0, x1, y1 = bbox_world_xy
                 objects.append(
                     {
-                        "gid": clean_pdf_text(getattr(product, "GlobalId", "")),
-                        "name": clean_pdf_text(getattr(product, "Name", "")),
-                        "kind": kind,
-                        "class_name": clean_pdf_text(product.is_a() if hasattr(product, "is_a") else ""),
-                        "bbox_world_xy": (float(x0), float(y0), float(x1), float(y1)),
-                        "z_range": (float(z0), float(z1)),
-                        "load_bearing": _ifc_is_loadbearing_v13(product),
+                        'gid': meta.get('gid', ''),
+                        'name': meta.get('name', ''),
+                        'kind': meta.get('kind', ''),
+                        'class_name': meta.get('class_name', ''),
+                        'bbox_world_xy': (float(x0), float(y0), float(x1), float(y1)),
+                        'z_range': tuple(meta.get('z_range', (0.0, 0.0))),
+                        'load_bearing': meta.get('load_bearing'),
                     }
                 )
             record = _render_ifc_storey_record_v13(file_name, storey_label, objects)
             if record is not None:
                 drawings.append(record)
-        if not drawings:
-            _append_upload_warning_v13(f"IFC-filen '{file_name}' kunne leses, men ingen brukbare planobjekter ble funnet.")
+
+        if drawings:
+            _append_upload_info_v14(f"IFC lest OK: {len(drawings)} etasje-/planbilder generert fra '{file_name}'.")
+        else:
+            _append_upload_warning_v13(f"IFC-filen '{file_name}' kunne leses, men ingen brukbare planbilder ble generert fra modellen.")
         return drawings
     except Exception as exc:
         _append_upload_warning_v13(f"IFC-lesing feilet for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}")
@@ -10241,7 +10397,6 @@ def _load_ifc_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> Li
                 os.remove(tmp_path)
             except Exception:
                 pass
-
 
 
 def _collect_dxf_primitives_v13(doc: Any) -> List[Dict[str, Any]]:
@@ -10400,7 +10555,7 @@ def _load_dxf_or_dwg_drawings_v13(file_name: str, file_bytes: bytes, suffix: str
             dwgread = _shutil_v13.which("dwgread")
             if not dwgread:
                 _append_upload_warning_v13(
-                    f"DWG-filen '{file_name}' kan ikke leses direkte uten ODA. Last opp IFC eller eksporter DXF, eller installer LibreDWG med kommandoen 'dwgread'."
+                    f"DWG-filen '{file_name}' kan ikke leses direkte i denne installasjonen fordi 'dwgread' ikke er tilgjengelig. Last opp IFC/PDF eller eksporter DXF, eller installer LibreDWG på serveren."
                 )
                 return []
             with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as out_dxf:
@@ -10434,35 +10589,74 @@ def _load_dxf_or_dwg_drawings_v13(file_name: str, file_bytes: bytes, suffix: str
 def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 4) -> List[Dict[str, Any]]:
     drawings: List[Dict[str, Any]] = []
     st.session_state["rib_upload_warnings_v13"] = []
+    st.session_state["rib_upload_infos_v14"] = []
     if not files:
         return drawings
 
+    grouped: Dict[str, List[Tuple[Any, str, str, bytes]]] = {"ifc": [], "dxf": [], "dwg": [], "pdf": [], "image": [], "other": []}
     for f in files:
         name = clean_pdf_text(getattr(f, "name", "ukjent_fil"))
         suffix = Path(name).suffix.lower()
         file_bytes = _safe_upload_bytes_v13(f)
         if not file_bytes:
             continue
-
+        bucket = "other"
         if suffix in {".ifc", ".ifczip"}:
-            drawings.extend(_load_ifc_drawings_v13(name, file_bytes, suffix))
-            continue
-        if suffix in {".dxf", ".dwg"}:
-            drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
-            continue
-        if suffix == ".pdf":
-            drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
-            continue
-        if suffix in SUPPORTED_IMAGE_EXTS:
-            drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
-            continue
+            bucket = "ifc"
+        elif suffix == ".dxf":
+            bucket = "dxf"
+        elif suffix == ".dwg":
+            bucket = "dwg"
+        elif suffix == ".pdf":
+            bucket = "pdf"
+        elif suffix in SUPPORTED_IMAGE_EXTS:
+            bucket = "image"
+        grouped[bucket].append((f, name, suffix, file_bytes))
+
+    for f, name, suffix, file_bytes in grouped["ifc"]:
+        drawings.extend(_load_ifc_drawings_v13(name, file_bytes, suffix))
+
+    ifc_count = sum(1 for record in drawings if clean_pdf_text(record.get("drawing_format", "")).lower() == "ifc")
+
+    for f, name, suffix, file_bytes in grouped["pdf"]:
+        drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+
+    for f, name, suffix, file_bytes in grouped["image"]:
+        drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+
+    for f, name, suffix, file_bytes in grouped["dxf"]:
+        drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
+
+    if grouped["dwg"]:
+        dwgread = _shutil_v13.which("dwgread")
+        if not dwgread:
+            if ifc_count > 0:
+                _append_upload_info_v14(
+                    f"{len(grouped['dwg'])} DWG-fil(er) ble hoppet over. IFC ble lest og brukes som primær modellkilde i denne kjøringen."
+                )
+            else:
+                sample_names = ", ".join(name for _, name, _, _ in grouped["dwg"][:3])
+                _append_upload_warning_v13(
+                    f"{len(grouped['dwg'])} DWG-fil(er) kunne ikke leses direkte fordi 'dwgread' ikke er tilgjengelig i miljøet. Last opp IFC/PDF eller eksporter DXF. Eksempel: {sample_names}."
+                )
+        else:
+            before_dwg = len(drawings)
+            for f, name, suffix, file_bytes in grouped["dwg"]:
+                drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
+            loaded_dwg = max(0, len(drawings) - before_dwg)
+            if loaded_dwg > 0:
+                _append_upload_info_v14(f"DWG lest via LibreDWG: {loaded_dwg} tegningsbilde(r) generert i denne kjøringen.")
+
+    for _, name, suffix, _ in grouped["other"]:
         _append_upload_warning_v13(f"Filtypen '{suffix or name}' støttes ikke i denne versjonen.")
 
     drawings = prioritize_drawings(drawings, limit=18)
     for idx, record in enumerate(drawings):
         record["page_index"] = idx
-    return drawings
 
+    if not drawings and files:
+        _append_upload_warning_v13("Ingen brukbare tegninger kunne genereres fra opplastingen. Kontroller at IFC/DXF-pakker er installert i miljøet eller bruk PDF som fallback.")
+    return drawings
 
 
 def drawing_priority(record: Dict[str, Any]) -> int:
@@ -10614,6 +10808,10 @@ def get_geometry_for_sketch(drawing_record: Dict[str, Any], sketch: Dict[str, An
 
 
 def _render_upload_warnings_v13() -> None:
+    infos = st.session_state.get("rib_upload_infos_v14", [])
+    if isinstance(infos, list) and infos:
+        for item in infos[:4]:
+            st.info(item)
     warnings = st.session_state.get("rib_upload_warnings_v13", [])
     if isinstance(warnings, list) and warnings:
         for item in warnings[:4]:
@@ -10622,7 +10820,12 @@ def _render_upload_warnings_v13() -> None:
 
 # Synliggjør eventuelle DWG/IFC-varsel i UI like før analyseknappene.
 _render_upload_warnings_v13()
-
+backend_status_parts = [
+    "IFC=" + ("aktiv" if (_ifcopenshell_v13 is not None and _ifc_geom_v13 is not None) else "mangler pakke"),
+    "DXF=" + ("aktiv" if _ezdxf_v13 is not None else "mangler pakke"),
+    "DWG-konvertering=" + ("aktiv" if bool(_shutil_v13.which('dwgread')) else "ikke tilgjengelig"),
+]
+st.caption("CAD-backend: " + " | ".join(backend_status_parts))
 
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
