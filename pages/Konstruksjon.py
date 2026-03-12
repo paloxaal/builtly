@@ -2667,10 +2667,11 @@ with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
         st.info("Ingen lagrede tegninger fra Project Setup ble funnet. Du kan fortsatt laste opp IFC, PDF, DXF eller DWG manuelt her.")
 
     files = st.file_uploader(
-        "Last opp arkitekttegninger / snitt / PDF-er / IFC / DXF / DWG",
+        "Last opp arkitekttegninger / snitt / PDF-er / IFC / DXF / DWG / ZIP",
         accept_multiple_files=True,
-        type=["png", "jpg", "jpeg", "webp", "pdf", "ifc", "ifczip", "dxf", "dwg"],
+        type=["png", "jpg", "jpeg", "webp", "pdf", "ifc", "ifczip", "dxf", "dwg", "zip"],
     )
+    st.caption("Tips ved 400-feil i Streamlit/Render: bruk ASCII-filnavn uten æ/ø/å og last gjerne opp IFC/DWG samlet i en ZIP med enkelt navn, f.eks. prosjekt_upload.zip.")
 
 with st.expander("4. Hva modulen gjør i denne versjonen", expanded=False):
     st.markdown(
@@ -10818,6 +10819,499 @@ def _render_upload_warnings_v13() -> None:
             st.warning(item)
 
 
+
+# ------------------------------------------------------------
+# 15. PDF-RELEVANSUTVALG FOR STORE TEGNINGSSETT
+# ------------------------------------------------------------
+_LOAD_UPLOADED_DRAWINGS_V14_BASE = load_uploaded_drawings
+_DRAWING_PRIORITY_V14_BASE = drawing_priority
+_PRIORITIZE_DRAWINGS_V14_BASE = prioritize_drawings
+
+_PDF_ROLE_KEYWORDS_V15: Dict[str, List[Tuple[str, int]]] = {
+    "plan": [
+        ("plantegning", 28), ("etasjeplan", 28), ("plan", 20), ("typisk etasje", 24),
+        ("typisk plan", 22), ("level", 16), ("nivå", 16), ("floor plan", 26),
+        ("floor", 10), ("etasje", 14), ("etg", 12), ("kjeller", 16), ("u. etg", 16),
+        ("underetasje", 16), ("takplan", 18), ("roof plan", 18), ("loft", 10),
+    ],
+    "section": [
+        ("snitt", 24), ("section", 22), ("schnitt", 18), ("cut", 12), ("longitudinal", 8),
+    ],
+    "facade": [
+        ("fasade", 22), ("facade", 22), ("elevation", 20), ("oppstalt", 16),
+    ],
+    "site": [
+        ("situasjonsplan", 12), ("site plan", 12), ("utomhus", 8), ("landskap", 6),
+    ],
+}
+_PDF_NEGATIVE_KEYWORDS_V15: List[Tuple[str, int]] = [
+    ("tegningsliste", -34), ("drawing list", -30), ("innholdsfortegnelse", -34), ("contents", -28),
+    ("forside", -24), ("cover", -22), ("legend", -18), ("forklaring", -18), ("symbolforklaring", -18),
+    ("detalj", -24), ("detail", -22), ("details", -18), ("dørskjema", -22), ("vindusskjema", -22),
+    ("romskjema", -22), ("schedule", -20), ("tabell", -16), ("general notes", -22), ("notes", -14),
+    ("beskrivelse", -18), ("prinsipp", -10), ("diagram", -8), ("skjema", -16),
+]
+_PDF_TOKEN_STOPWORDS_V15 = {
+    "plan", "snitt", "fasade", "tegning", "drawing", "project", "prosjekt", "bygg", "block", "blok", "arkitekt",
+    "ark", "sheet", "side", "page", "ifc", "dwg", "dxf", "pdf", "etasje", "etg", "level", "nivå", "typisk",
+    "builtly", "rib", "modul", "konstruksjon", "modell", "model", "norge", "norway",
+}
+
+
+def _tokenize_context_v15(text: Any) -> List[str]:
+    tokens: List[str] = []
+    for token in re.findall(r"[A-Za-zÆØÅæøå0-9\-]{4,}", clean_pdf_text(text).lower()):
+        normalized = token.strip("-_ ")
+        if not normalized or normalized in _PDF_TOKEN_STOPWORDS_V15:
+            continue
+        if normalized.isdigit() and len(normalized) < 4:
+            continue
+        if normalized not in tokens:
+            tokens.append(normalized)
+    return tokens
+
+
+
+def _pdf_context_tokens_v15(files: Optional[List[Any]] = None) -> List[str]:
+    pieces: List[str] = []
+    project_data = safe_session_state_get("project_data", {})
+    if isinstance(project_data, dict):
+        for key in ["p_name", "adresse", "kommune", "p_desc", "b_type"]:
+            pieces.append(clean_pdf_text(project_data.get(key, "")))
+    if isinstance(files, list):
+        for item in files[:20]:
+            pieces.append(clean_pdf_text(getattr(item, "name", "")))
+    tokens = _tokenize_context_v15(" ".join(pieces))
+    return tokens[:18]
+
+
+
+def _count_keyword_hits_v15(text: str, keyword_weights: List[Tuple[str, int]]) -> Tuple[int, List[str]]:
+    score = 0
+    hits: List[str] = []
+    for keyword, weight in keyword_weights:
+        if keyword and keyword in text:
+            score += int(weight)
+            if keyword not in hits:
+                hits.append(keyword)
+    return score, hits
+
+
+
+def _infer_pdf_page_role_v15(file_name: str, page_text: str) -> Tuple[str, Dict[str, int], List[str]]:
+    combined = f"{clean_pdf_text(file_name)}\n{clean_pdf_text(page_text)}".lower()
+    role_scores: Dict[str, int] = {"plan": 0, "section": 0, "facade": 0, "site": 0}
+    reasons: List[str] = []
+    for role, keyword_weights in _PDF_ROLE_KEYWORDS_V15.items():
+        role_score, hits = _count_keyword_hits_v15(combined, keyword_weights)
+        role_scores[role] = role_score
+        if hits:
+            reasons.append(f"{role}: " + ", ".join(hits[:3]))
+    best_role = max(role_scores, key=role_scores.get)
+    if role_scores.get(best_role, 0) < 10:
+        fallback_role = detect_drawing_hint(file_name)
+        if fallback_role in {"plan", "section", "facade"}:
+            best_role = fallback_role
+    return best_role, role_scores, reasons
+
+
+
+def _project_token_score_v15(text: str, tokens: List[str]) -> Tuple[int, List[str]]:
+    score = 0
+    hits: List[str] = []
+    for token in tokens:
+        if token and token in text:
+            score += 5 if any(ch.isdigit() for ch in token) else 4
+            if token not in hits:
+                hits.append(token)
+    return score, hits[:5]
+
+
+
+def _render_pdf_thumb_v15(page: Any, zoom: float = 0.48) -> Optional[Image.Image]:
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    except Exception:
+        return None
+
+
+
+def _visual_pdf_page_score_v15(page: Any) -> Tuple[int, List[str]]:
+    if fitz is None:
+        return 0, []
+    img = _render_pdf_thumb_v15(page, zoom=0.46)
+    if img is None:
+        return 0, []
+    score = 0
+    reasons: List[str] = []
+    try:
+        regions = detect_plan_regions_grounded(img)
+    except Exception:
+        regions = []
+    valid_ratios: List[float] = []
+    for region in regions[:6]:
+        try:
+            _, _, rw, rh = region.get("bbox_px", (0, 0, 0, 0))
+            ratio = float(rw * rh) / float(max(1, img.width * img.height))
+        except Exception:
+            ratio = 0.0
+        if ratio > 0.03:
+            valid_ratios.append(ratio)
+    if valid_ratios:
+        best_ratio = max(valid_ratios)
+        region_bonus = min(38, int(best_ratio * 120.0) + min(8, len(valid_ratios) * 2))
+        score += region_bonus
+        reasons.append(f"planregion={best_ratio:.2f}")
+        if len(valid_ratios) >= 2:
+            score += 4
+            reasons.append("flere delplan")
+
+    try:
+        gray = img.convert("L").resize((140, 140))
+        hist = gray.histogram()
+        total = max(1, int(sum(hist)))
+        dark_ratio = float(sum(hist[:190])) / float(total)
+        mid_ratio = float(sum(hist[190:245])) / float(total)
+        if 0.03 <= dark_ratio <= 0.34 and mid_ratio >= 0.18:
+            score += 6
+            reasons.append("linjetett planark")
+        elif dark_ratio < 0.01:
+            score -= 6
+    except Exception:
+        pass
+    return score, reasons
+
+
+
+def _score_pdf_page_v15(
+    doc: Any,
+    page_num: int,
+    file_name: str,
+    project_tokens: List[str],
+    force_visual: bool = False,
+) -> Dict[str, Any]:
+    page = doc.load_page(page_num)
+    try:
+        page_text = clean_pdf_text(page.get_text("text"))
+    except Exception:
+        page_text = ""
+    normalized = f"{clean_pdf_text(file_name)}\n{page_text}".lower()
+    role, role_scores, role_reasons = _infer_pdf_page_role_v15(file_name, page_text)
+    project_score, project_hits = _project_token_score_v15(normalized, project_tokens)
+    negative_score, negative_hits = _count_keyword_hits_v15(normalized, _PDF_NEGATIVE_KEYWORDS_V15)
+
+    score = int(role_scores.get(role, 0)) + int(project_score) + int(negative_score)
+    reasons: List[str] = []
+    reasons.extend(role_reasons[:2])
+    if project_hits:
+        reasons.append("prosjektmatch: " + ", ".join(project_hits[:3]))
+    if negative_hits:
+        reasons.append("minus: " + ", ".join(negative_hits[:3]))
+
+    visual_score = 0
+    visual_reasons: List[str] = []
+    text_len = len(page_text.strip())
+    if force_visual:
+        visual_score, visual_reasons = _visual_pdf_page_score_v15(page)
+        score += int(visual_score)
+        reasons.extend(visual_reasons[:2])
+
+    return {
+        "page_num": int(page_num),
+        "role": clean_pdf_text(role or "unknown") or "unknown",
+        "score": int(score),
+        "text_len": int(text_len),
+        "page_text": short_text(page_text, 2200),
+        "role_scores": role_scores,
+        "project_hits": project_hits,
+        "negative_hits": negative_hits,
+        "visual_score": int(visual_score),
+        "reasons": reasons[:6],
+    }
+
+
+
+def _select_pdf_pages_v15(page_infos: List[Dict[str, Any]], target_pages: int) -> List[Dict[str, Any]]:
+    if not page_infos:
+        return []
+    target_pages = max(1, int(target_pages or 4))
+    ranked = sorted(page_infos, key=lambda item: (float(item.get("score", 0.0)), float(item.get("visual_score", 0.0))), reverse=True)
+    selected: List[Dict[str, Any]] = []
+    selected_ids: set = set()
+
+    def _push(candidate: Optional[Dict[str, Any]]) -> None:
+        if not candidate:
+            return
+        page_num = int(candidate.get("page_num", -1))
+        if page_num < 0 or page_num in selected_ids or len(selected) >= target_pages:
+            return
+        selected.append(candidate)
+        selected_ids.add(page_num)
+
+    plan_candidates = [item for item in ranked if item.get("role") == "plan" and float(item.get("score", 0.0)) >= 12]
+    section_candidates = [item for item in ranked if item.get("role") == "section" and float(item.get("score", 0.0)) >= 10]
+    facade_candidates = [item for item in ranked if item.get("role") == "facade" and float(item.get("score", 0.0)) >= 10]
+
+    desired_plans = 2 if target_pages >= 4 else 1
+    for candidate in plan_candidates[:desired_plans]:
+        _push(candidate)
+
+    if target_pages >= 4:
+        _push(section_candidates[0] if section_candidates else None)
+        _push(facade_candidates[0] if facade_candidates else None)
+
+    if len(selected) < target_pages:
+        for candidate in ranked:
+            _push(candidate)
+            if len(selected) >= target_pages:
+                break
+
+    if not selected:
+        selected = sorted(page_infos, key=lambda item: int(item.get("page_num", 0)))[:target_pages]
+    return sorted(selected, key=lambda item: int(item.get("page_num", 0)))
+
+
+
+def _load_pdf_drawings_relevant_v15(file_name: str, file_bytes: bytes, max_pdf_pages: int = 6, batch_tokens: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    drawings: List[Dict[str, Any]] = []
+    if fitz is None:
+        _append_upload_warning_v13(f"PDF-filen '{file_name}' kan ikke leses fordi PyMuPDF ('fitz') ikke er tilgjengelig i miljøet.")
+        return drawings
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception as exc:
+        _append_upload_warning_v13(f"PDF-lesing feilet for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}")
+        return drawings
+
+    page_count = len(doc)
+    if page_count <= 0:
+        doc.close()
+        return drawings
+
+    target_pages = max(4, int(max_pdf_pages or 4)) if page_count > 8 else max(1, int(max_pdf_pages or 4))
+    target_pages = min(target_pages, max(1, page_count), 8)
+    project_tokens = list(batch_tokens or [])
+    for token in _pdf_context_tokens_v15([]):
+        if token not in project_tokens:
+            project_tokens.append(token)
+
+    page_infos: List[Dict[str, Any]] = []
+    for page_num in range(page_count):
+        info = _score_pdf_page_v15(doc, page_num, file_name, project_tokens, force_visual=False)
+        page_infos.append(info)
+
+    visual_candidate_ids = set()
+    if page_count <= 24:
+        visual_candidate_ids.update(range(page_count))
+    else:
+        prelim_ranked = sorted(page_infos, key=lambda item: float(item.get("score", 0.0)), reverse=True)
+        for item in prelim_ranked[: min(28, len(prelim_ranked))]:
+            visual_candidate_ids.add(int(item.get("page_num", 0)))
+        step = max(1, page_count // 18)
+        visual_candidate_ids.update(range(0, page_count, step))
+        visual_candidate_ids.update({0, page_count - 1, page_count // 2})
+
+    for page_num in sorted(x for x in visual_candidate_ids if 0 <= x < page_count):
+        rescored = _score_pdf_page_v15(doc, page_num, file_name, project_tokens, force_visual=True)
+        page_infos[page_num] = rescored
+
+    selected_pages = _select_pdf_pages_v15(page_infos, target_pages)
+    if not selected_pages:
+        doc.close()
+        return drawings
+
+    chosen_numbers = [int(item.get("page_num", 0)) + 1 for item in selected_pages]
+    role_summary: Dict[str, int] = {}
+    for item in selected_pages:
+        role = clean_pdf_text(item.get("role", "unknown")) or "unknown"
+        role_summary[role] = int(role_summary.get(role, 0)) + 1
+
+    for item in selected_pages:
+        page_num = int(item.get("page_num", 0))
+        page = doc.load_page(page_num)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        record = build_drawing_record(f"{file_name} - side {page_num + 1}", img, "Opplastet PDF (auto-utvalg)")
+        record.update(
+            {
+                "hint": clean_pdf_text(item.get("role")) or record.get("hint", "unknown"),
+                "drawing_format": "pdf",
+                "pdf_page_number": page_num + 1,
+                "pdf_page_score_v15": float(item.get("score", 0.0)),
+                "pdf_selection_reasons_v15": list(item.get("reasons", [])[:4]),
+                "pdf_page_text_v15": clean_pdf_text(item.get("page_text", "")),
+            }
+        )
+        drawings.append(record)
+
+    role_bits = ", ".join(f"{role}={count}" for role, count in sorted(role_summary.items()))
+    _append_upload_info_v14(
+        f"PDF '{file_name}': skannet {page_count} side(r) og valgte side {', '.join(str(x) for x in chosen_numbers)} som mest relevante" + (f" ({role_bits})." if role_bits else ".")
+    )
+    doc.close()
+    return drawings
+
+
+
+def drawing_priority(record: Dict[str, Any]) -> int:
+    score = _DRAWING_PRIORITY_V14_BASE(record)
+    fmt = clean_pdf_text(record.get("drawing_format", "")).lower()
+    if fmt == "pdf":
+        try:
+            score += min(18, int(float(record.get("pdf_page_score_v15", 0.0)) * 0.18))
+        except Exception:
+            pass
+    return score
+
+
+
+def prioritize_drawings(drawings: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+    ranked = sorted(drawings, key=drawing_priority, reverse=True)
+    out = ranked[:limit]
+    for idx, record in enumerate(out):
+        record["page_index"] = idx
+    return out
+
+
+
+def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 6) -> List[Dict[str, Any]]:
+    drawings: List[Dict[str, Any]] = []
+    pdf_files: List[Any] = []
+    other_files: List[Any] = []
+    file_list = list(files or [])
+    batch_tokens = _pdf_context_tokens_v15(file_list)
+
+    for file_obj in file_list:
+        name = clean_pdf_text(getattr(file_obj, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        if suffix == ".pdf":
+            pdf_files.append(file_obj)
+        else:
+            other_files.append(file_obj)
+
+    if other_files:
+        drawings.extend(_LOAD_UPLOADED_DRAWINGS_V14_BASE(other_files, max_pdf_pages=max_pdf_pages))
+    else:
+        st.session_state["rib_upload_warnings_v13"] = []
+        st.session_state["rib_upload_infos_v14"] = []
+
+    for file_obj in pdf_files:
+        name = clean_pdf_text(getattr(file_obj, "name", "ukjent_fil"))
+        file_bytes = _safe_upload_bytes_v13(file_obj)
+        if not file_bytes:
+            continue
+        drawings.extend(_load_pdf_drawings_relevant_v15(name, file_bytes, max_pdf_pages=max_pdf_pages, batch_tokens=batch_tokens))
+
+    drawings = prioritize_drawings(drawings, limit=18)
+    for idx, record in enumerate(drawings):
+        record["page_index"] = idx
+
+    if not drawings and file_list:
+        _append_upload_warning_v13("Ingen brukbare tegninger kunne genereres fra opplastingen. Kontroller IFC/DXF-pakker i miljøet eller bruk PDF som fallback.")
+    return drawings
+
+
+
+# ------------------------------------------------------------
+# 15B. V16 UPLOAD-ROBUSTHET FOR IFC/DWG/ZIP I DEPLOYED STREAMLIT
+# ------------------------------------------------------------
+
+import unicodedata as _unicodedata_v16
+import zipfile as _zipfile_v16
+
+_SUPPORTED_ARCHIVE_SUFFIXES_V16 = {
+    ".ifc", ".ifczip", ".dxf", ".dwg", ".pdf", ".png", ".jpg", ".jpeg", ".webp"
+}
+
+
+def _ascii_safe_filename_v16(name: str) -> str:
+    raw = clean_pdf_text(Path(clean_pdf_text(name or "fil")).name) or "fil"
+    stem = Path(raw).stem or "fil"
+    suffix = Path(raw).suffix.lower()
+    try:
+        stem_ascii = _unicodedata_v16.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
+    except Exception:
+        stem_ascii = stem
+    stem_ascii = re.sub(r"[^A-Za-z0-9._-]+", "_", stem_ascii).strip("._-") or "fil"
+    suffix_ascii = re.sub(r"[^A-Za-z0-9.]+", "", suffix).lower()
+    if suffix_ascii and not suffix_ascii.startswith("."):
+        suffix_ascii = "." + suffix_ascii
+    return f"{stem_ascii}{suffix_ascii}" if suffix_ascii else stem_ascii
+
+
+class _UploadedBytesV16(io.BytesIO):
+    def __init__(self, name: str, data: bytes):
+        super().__init__(data)
+        self.name = name
+        self.type = None
+        self.size = len(data or b"")
+
+
+def _expand_archives_v16(files: Optional[List[Any]]) -> List[Any]:
+    expanded: List[Any] = []
+    used_names: Dict[str, int] = {}
+    for file_obj in list(files or []):
+        name = clean_pdf_text(getattr(file_obj, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        if suffix != ".zip":
+            expanded.append(file_obj)
+            continue
+        file_bytes = _safe_upload_bytes_v13(file_obj)
+        if not file_bytes:
+            _append_upload_warning_v13(f"ZIP-filen '{name}' var tom eller kunne ikke leses.")
+            continue
+        try:
+            with _zipfile_v16.ZipFile(io.BytesIO(file_bytes)) as zf:
+                members = [m for m in zf.namelist() if m and not m.endswith("/")]
+                extracted_count = 0
+                skipped_count = 0
+                for member in members:
+                    inner_name = Path(member).name
+                    inner_suffix = Path(inner_name).suffix.lower()
+                    if inner_suffix not in _SUPPORTED_ARCHIVE_SUFFIXES_V16:
+                        skipped_count += 1
+                        continue
+                    try:
+                        data = zf.read(member)
+                    except Exception:
+                        skipped_count += 1
+                        continue
+                    safe_name = _ascii_safe_filename_v16(inner_name)
+                    if not safe_name:
+                        safe_name = f"fil_{extracted_count + 1}{inner_suffix}"
+                    base_key = safe_name.lower()
+                    seq = used_names.get(base_key, 0)
+                    used_names[base_key] = seq + 1
+                    if seq > 0:
+                        safe_name = f"{Path(safe_name).stem}_{seq + 1}{Path(safe_name).suffix}"
+                    expanded.append(_UploadedBytesV16(safe_name, data))
+                    extracted_count += 1
+                if extracted_count > 0:
+                    msg = f"ZIP '{name}': pakket ut {extracted_count} støttet fil(er) for videre analyse."
+                    if skipped_count:
+                        msg += f" {skipped_count} andre fil(er) ble ignorert."
+                    _append_upload_info_v14(msg)
+                else:
+                    _append_upload_warning_v13(
+                        f"ZIP-filen '{name}' inneholdt ingen støttede IFC/DXF/DWG/PDF/bildefiler."
+                    )
+        except Exception as exc:
+            _append_upload_warning_v13(f"ZIP-lesing feilet for '{name}': {type(exc).__name__}: {short_text(exc, 180)}")
+    return expanded
+
+
+_LOAD_UPLOADED_DRAWINGS_V15_BASE = load_uploaded_drawings
+
+
+def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 6) -> List[Dict[str, Any]]:
+    st.session_state["rib_upload_warnings_v13"] = []
+    st.session_state["rib_upload_infos_v14"] = []
+    expanded_files = _expand_archives_v16(files)
+    return _LOAD_UPLOADED_DRAWINGS_V15_BASE(expanded_files, max_pdf_pages=max_pdf_pages)
+
+
+
 # Synliggjør eventuelle DWG/IFC-varsel i UI like før analyseknappene.
 _render_upload_warnings_v13()
 backend_status_parts = [
@@ -10840,7 +11334,7 @@ direct_pdf_clicked = action_col2.button(
 )
 
 if analyze_clicked or direct_pdf_clicked:
-    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=4) if files else []
+    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=6) if files else []
     _render_upload_warnings_v13()
     all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
 
