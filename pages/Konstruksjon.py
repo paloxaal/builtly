@@ -11312,6 +11312,164 @@ def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 6) -
 
 
 
+
+# ------------------------------------------------------------
+# 15C. V17 ROBUST IFC-INGEST MED ISOLERT SUBPROSESS OG BEDRE ANALYSE-FEEDBACK
+# ------------------------------------------------------------
+_LOAD_IFC_DRAWINGS_V13_INPROCESS = _load_ifc_drawings_v13
+
+
+def _ensure_ifc_subprocess_helper_v17() -> Path:
+    helper_dir = DB_DIR / "_ifc_helpers"
+    helper_dir.mkdir(parents=True, exist_ok=True)
+    helper_path = helper_dir / "ifc_subprocess_helper_v17.py"
+    marker = "Builtly IFC helper v17"
+    helper_code = '#!/usr/bin/env python3\n# Builtly IFC helper v17\nimport argparse\nimport json\nimport traceback\n\n\ndef _clean(value):\n    if value is None:\n        return ""\n    text = str(value)\n    replacements = {\n        "–": "-",\n        "—": "-",\n        "“": \'"\',\n        "”": \'"\',\n        "‘": "\'",\n        "’": "\'",\n        "…": "...",\n        "•": "-",\n    }\n    for old, new in replacements.items():\n        text = text.replace(old, new)\n    return text.strip()\n\n\ndef _safe_float(value, default=0.0):\n    try:\n        return float(value)\n    except Exception:\n        return float(default)\n\n\ndef _kind(product):\n    cls = _clean(product.is_a() if hasattr(product, "is_a") else "")\n    name_low = " ".join(\n        [\n            _clean(getattr(product, "Name", "")),\n            _clean(getattr(product, "ObjectType", "")),\n            _clean(getattr(product, "Description", "")),\n        ]\n    ).lower()\n    if cls in {"IfcWall", "IfcWallStandardCase", "IfcCurtainWall"}:\n        return "wall"\n    if cls in {"IfcColumn", "IfcPile"}:\n        return "column"\n    if cls in {"IfcSlab", "IfcRoof"}:\n        return "slab"\n    if cls in {"IfcBeam", "IfcMember"}:\n        return "beam"\n    if cls in {"IfcStair", "IfcStairFlight", "IfcRamp", "IfcRampFlight"} or any(word in name_low for word in ["trapp", "stair", "rampe"]):\n        return "stair"\n    if cls == "IfcTransportElement" or any(word in name_low for word in ["heis", "lift", "elevator"]):\n        return "transport"\n    if cls == "IfcSpace" and any(word in name_low for word in ["sjakt", "shaft", "heis", "lift", "trapp", "stair"]):\n        return "core_space"\n    return ""\n\n\ndef _storey_elements(storey):\n    elements = []\n    seen = set()\n    for rel in list(getattr(storey, "ContainsElements", []) or []):\n        for elem in list(getattr(rel, "RelatedElements", []) or []):\n            gid = _clean(getattr(elem, "GlobalId", "")) or str(id(elem))\n            if gid in seen:\n                continue\n            seen.add(gid)\n            elements.append(elem)\n    return elements\n\n\ndef _loadbearing(product):\n    try:\n        from ifcopenshell.util import element as ifc_element\n    except Exception:\n        return None\n    try:\n        psets = ifc_element.get_psets(product) or {}\n    except Exception:\n        return None\n    for pset_name in ["Pset_WallCommon", "Pset_ColumnCommon", "Pset_BeamCommon", "Pset_MemberCommon"]:\n        pset = psets.get(pset_name)\n        if isinstance(pset, dict) and "LoadBearing" in pset:\n            try:\n                return bool(pset.get("LoadBearing"))\n            except Exception:\n                return None\n    return None\n\n\ndef _bbox_from_verts(verts):\n    if not verts:\n        return None\n    try:\n        xs = verts[0::3]\n        ys = verts[1::3]\n        zs = verts[2::3]\n        if not xs or not ys or not zs:\n            return None\n        return [float(min(xs)), float(min(ys)), float(min(zs)), float(max(xs)), float(max(ys)), float(max(zs))]\n    except Exception:\n        return None\n\n\ndef _collect_bboxes(model, products):\n    import ifcopenshell.geom\n    settings = ifcopenshell.geom.settings()\n    for key, value in [("use-world-coords", True), ("apply-default-materials", False)]:\n        try:\n            settings.set(key, value)\n        except Exception:\n            try:\n                settings.set(getattr(settings, key.upper().replace("-", "_")), value)\n            except Exception:\n                pass\n\n    bbox_by_gid = {}\n    try:\n        iterator = ifcopenshell.geom.iterator(settings, model, 1, include=list(products))\n        ok = iterator.initialize()\n    except Exception:\n        ok = False\n\n    if ok:\n        while True:\n            shape = None\n            try:\n                shape = iterator.get()\n            except Exception:\n                shape = None\n            if shape is not None:\n                try:\n                    element = model.by_id(shape.id)\n                except Exception:\n                    element = None\n                if element is not None:\n                    gid = _clean(getattr(element, "GlobalId", "")) or str(id(element))\n                    verts = getattr(getattr(shape, "geometry", shape), "verts", None)\n                    bbox = _bbox_from_verts(verts)\n                    if bbox is not None:\n                        bbox_by_gid[gid] = bbox\n            try:\n                if not iterator.next():\n                    break\n            except Exception:\n                break\n\n    if bbox_by_gid:\n        return bbox_by_gid\n\n    for product in list(products)[:1200]:\n        gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n        try:\n            shape = ifcopenshell.geom.create_shape(settings, product)\n            verts = getattr(getattr(shape, "geometry", shape), "verts", None)\n            bbox = _bbox_from_verts(verts)\n            if bbox is not None:\n                bbox_by_gid[gid] = bbox\n        except Exception:\n            continue\n    return bbox_by_gid\n\n\ndef _serialize_storeys(model, max_storeys):\n    relevant_types = [\n        "IfcWall", "IfcWallStandardCase", "IfcCurtainWall",\n        "IfcColumn", "IfcPile", "IfcSlab", "IfcRoof",\n        "IfcBeam", "IfcMember", "IfcStair", "IfcStairFlight",\n        "IfcRamp", "IfcRampFlight", "IfcTransportElement", "IfcSpace",\n    ]\n    seen = set()\n    products = []\n    for type_name in relevant_types:\n        try:\n            iterable = list(model.by_type(type_name) or [])\n        except Exception:\n            iterable = []\n        for product in iterable:\n            gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n            if gid in seen:\n                continue\n            seen.add(gid)\n            products.append(product)\n\n    bbox_by_gid = _collect_bboxes(model, products)\n    meta_by_gid = {}\n    for product in products:\n        gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n        bbox = bbox_by_gid.get(gid)\n        kind = _kind(product)\n        if not bbox or not kind:\n            continue\n        x0, y0, z0, x1, y1, z1 = bbox\n        if x1 - x0 <= 0 or y1 - y0 <= 0:\n            continue\n        contained = []\n        for rel in list(getattr(product, "ContainedInStructure", []) or []):\n            structure = getattr(rel, "RelatingStructure", None)\n            if structure is None:\n                continue\n            structure_gid = _clean(getattr(structure, "GlobalId", ""))\n            if structure_gid:\n                contained.append(structure_gid)\n        meta_by_gid[gid] = {\n            "gid": gid,\n            "name": _clean(getattr(product, "Name", "")),\n            "kind": kind,\n            "class_name": _clean(product.is_a() if hasattr(product, "is_a") else ""),\n            "bbox_world_xy": [float(x0), float(y0), float(x1), float(y1)],\n            "z_range": [float(z0), float(z1)],\n            "load_bearing": _loadbearing(product),\n            "contained_storeys": contained,\n        }\n\n    storeys = list(model.by_type("IfcBuildingStorey") or [])\n    storeys = sorted(storeys, key=lambda item: _safe_float(getattr(item, "Elevation", 0.0), 0.0))\n    payload_storeys = []\n    for idx, storey in enumerate(storeys[:max_storeys]):\n        storey_gid = _clean(getattr(storey, "GlobalId", "")) or str(id(storey))\n        storey_label = _clean(getattr(storey, "Name", "")) or f"Storey {idx + 1}"\n        elev = _safe_float(getattr(storey, "Elevation", 0.0), 0.0)\n        next_elev = None\n        for later in storeys[idx + 1:]:\n            later_elev = _safe_float(getattr(later, "Elevation", elev), elev)\n            if later_elev > elev + 0.01:\n                next_elev = later_elev\n                break\n        z_low = elev - 1.25\n        z_high = (next_elev + 1.25) if next_elev is not None else (elev + 6.0)\n\n        selected = []\n        selected_gids = set()\n        for elem in _storey_elements(storey):\n            gid = _clean(getattr(elem, "GlobalId", "")) or str(id(elem))\n            meta = meta_by_gid.get(gid)\n            if meta is not None and gid not in selected_gids:\n                selected.append(meta)\n                selected_gids.add(gid)\n\n        if len(selected) < 8:\n            for gid, meta in meta_by_gid.items():\n                if gid in selected_gids:\n                    continue\n                if storey_gid in list(meta.get("contained_storeys", []) or []):\n                    selected.append(meta)\n                    selected_gids.add(gid)\n\n        if len(selected) < 8:\n            for gid, meta in meta_by_gid.items():\n                if gid in selected_gids:\n                    continue\n                z0, z1 = meta.get("z_range", [0.0, 0.0])\n                overlap = min(float(z1), float(z_high)) - max(float(z0), float(z_low))\n                if overlap > max(0.15, (float(z1) - float(z0)) * 0.10):\n                    selected.append(meta)\n                    selected_gids.add(gid)\n\n        if not selected:\n            continue\n        payload_storeys.append({\n            "label": storey_label,\n            "elevation": elev,\n            "objects": selected,\n        })\n    return payload_storeys, len(meta_by_gid)\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument("--input", required=True)\n    parser.add_argument("--output", required=True)\n    parser.add_argument("--max-storeys", type=int, default=8)\n    args = parser.parse_args()\n\n    try:\n        import ifcopenshell\n        model = ifcopenshell.open(args.input)\n        storeys, object_count = _serialize_storeys(model, max(1, int(args.max_storeys or 8)))\n        payload = {\n            "ok": True,\n            "storeys": storeys,\n            "stats": {\n                "storey_count": len(storeys),\n                "object_count": int(object_count),\n            },\n        }\n        with open(args.output, "w", encoding="utf-8") as fh:\n            json.dump(payload, fh, ensure_ascii=False)\n        return 0\n    except Exception as exc:\n        payload = {\n            "ok": False,\n            "error": f"{type(exc).__name__}: {exc}",\n            "traceback": traceback.format_exc(limit=6),\n        }\n        try:\n            with open(args.output, "w", encoding="utf-8") as fh:\n                json.dump(payload, fh, ensure_ascii=False)\n        except Exception:\n            pass\n        return 2\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+    if (not helper_path.exists()) or (marker not in helper_path.read_text(encoding="utf-8", errors="ignore")):
+        helper_path.write_text(helper_code, encoding="utf-8")
+        try:
+            helper_path.chmod(0o755)
+        except Exception:
+            pass
+    return helper_path
+
+
+def _read_ifc_helper_payload_v17(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_ifc_drawings_v17(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
+    if _ifcopenshell_v13 is None:
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet. Legg den til i requirements for å bruke IFC som primærkilde.")
+        return []
+
+    helper_path = _ensure_ifc_subprocess_helper_v17()
+    tmp_ifc_path = None
+    tmp_payload_path = None
+    drawings: List[Dict[str, Any]] = []
+    try:
+        suffix_low = clean_pdf_text(suffix).lower() or ".ifc"
+        if suffix_low == ".ifczip":
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                members = [name for name in zf.namelist() if clean_pdf_text(name).lower().endswith('.ifc')]
+                if not members:
+                    _append_upload_warning_v13(f"IFCZIP-filen '{file_name}' inneholdt ingen .ifc-fil.")
+                    return []
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.ifc') as tmp:
+                    tmp.write(zf.read(members[0]))
+                    tmp.flush()
+                    tmp_ifc_path = tmp.name
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_low or '.ifc') as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                tmp_ifc_path = tmp.name
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp_payload:
+            tmp_payload_path = tmp_payload.name
+
+        command = [
+            sys.executable,
+            str(helper_path),
+            "--input", str(tmp_ifc_path),
+            "--output", str(tmp_payload_path),
+            "--max-storeys", "8",
+        ]
+        result = _subprocess_v13.run(
+            command,
+            stdout=_subprocess_v13.PIPE,
+            stderr=_subprocess_v13.PIPE,
+            text=True,
+            timeout=240,
+            env=os.environ.copy(),
+        )
+        payload = _read_ifc_helper_payload_v17(tmp_payload_path)
+        if int(result.returncode or 0) != 0 or not payload.get("ok"):
+            stderr = short_text(payload.get("error") or result.stderr or result.stdout or "ukjent IFC-feil", 220)
+            if payload.get("traceback"):
+                stderr = short_text(str(stderr) + " | " + clean_pdf_text(payload.get("traceback")), 220)
+            _append_upload_warning_v13(
+                f"IFC-prosessering feilet isolert for '{file_name}'. Appen fortsatte uten krasj, men IFC ble hoppet over: {stderr}"
+            )
+            if len(file_bytes or b"") <= 25 * 1024 * 1024:
+                return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+            return []
+
+        storeys = payload.get("storeys") if isinstance(payload.get("storeys"), list) else []
+        for storey in storeys:
+            if not isinstance(storey, dict):
+                continue
+            storey_label = clean_pdf_text(storey.get("label", "")) or f"Storey {len(drawings) + 1}"
+            objects = storey.get("objects") if isinstance(storey.get("objects"), list) else []
+            cleaned_objects: List[Dict[str, Any]] = []
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+                bbox_world_xy = obj.get("bbox_world_xy")
+                z_range = obj.get("z_range")
+                if not isinstance(bbox_world_xy, (list, tuple)) or len(bbox_world_xy) != 4:
+                    continue
+                if not isinstance(z_range, (list, tuple)) or len(z_range) != 2:
+                    z_range = (0.0, 0.0)
+                cleaned_objects.append(
+                    {
+                        "gid": clean_pdf_text(obj.get("gid", "")),
+                        "name": clean_pdf_text(obj.get("name", "")),
+                        "kind": clean_pdf_text(obj.get("kind", "")),
+                        "class_name": clean_pdf_text(obj.get("class_name", "")),
+                        "bbox_world_xy": tuple(float(v) for v in bbox_world_xy),
+                        "z_range": tuple(float(v) for v in z_range),
+                        "load_bearing": obj.get("load_bearing"),
+                    }
+                )
+            record = _render_ifc_storey_record_v13(file_name, storey_label, cleaned_objects)
+            if record is not None:
+                drawings.append(record)
+
+        if drawings:
+            stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+            object_count = stats.get("object_count")
+            _append_upload_info_v14(
+                f"IFC lest via isolert prosess: {len(drawings)} etasje-/planbilder generert fra '{file_name}'" +
+                (f" ({object_count} objekter med geometri)." if object_count else ".")
+            )
+        else:
+            _append_upload_warning_v13(
+                f"IFC-filen '{file_name}' ble lest i isolert prosess, men ingen brukbare planbilder ble generert fra modellen."
+            )
+        return drawings
+    except _subprocess_v13.TimeoutExpired:
+        _append_upload_warning_v13(
+            f"IFC-prosessering tidsavbrøt for '{file_name}' etter lang kjøring. Appen fortsatte uten krasj, men IFC ble hoppet over i denne runden."
+        )
+        if len(file_bytes or b"") <= 20 * 1024 * 1024:
+            return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+        return []
+    except Exception as exc:
+        _append_upload_warning_v13(
+            f"IFC-prosessering feilet før analyse for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}"
+        )
+        if len(file_bytes or b"") <= 20 * 1024 * 1024:
+            return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+        return []
+    finally:
+        for candidate in [tmp_ifc_path, tmp_payload_path]:
+            if candidate and os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except Exception:
+                    pass
+
+
+_load_ifc_drawings_v13 = _load_ifc_drawings_v17
+
+
 # Synliggjør eventuelle DWG/IFC-varsel i UI like før analyseknappene.
 _render_upload_warnings_v13()
 backend_status_parts = [
@@ -11334,9 +11492,11 @@ direct_pdf_clicked = action_col2.button(
 )
 
 if analyze_clicked or direct_pdf_clicked:
-    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=6) if files else []
+    with st.spinner("Laster og klargjør IFC/PDF/DXF/DWG/ZIP..."):
+        uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=6) if files else []
     _render_upload_warnings_v13()
-    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
+    analysis_limit = 6 if any(clean_pdf_text(record.get("drawing_format", "")).lower() == "ifc" for record in (saved_drawings + uploaded_drawings)) else 10
+    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=analysis_limit)
 
     if not all_drawings:
         st.error("Fant ingen tegninger å analysere. Last opp minst én plan eller hent tegninger fra Project Setup.")
