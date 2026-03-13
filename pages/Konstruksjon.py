@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import base64
 import importlib.util
@@ -701,9 +702,9 @@ def add_analysis_badge(img: Image.Image, idx: int, label: str) -> Image.Image:
     return out
 
 
-def prepare_ai_images(drawings: List[Dict[str, Any]]) -> List[Image.Image]:
+def prepare_ai_images(drawings: List[Dict[str, Any]], max_images: int = 5) -> List[Image.Image]:
     ai_images = []
-    for record in drawings:
+    for record in drawings[:max_images]:
         ai_images.append(add_analysis_badge(record["image"], record["page_index"], record["label"]))
     return ai_images
 
@@ -971,7 +972,11 @@ def optional_anthropic_client() -> Any:
         return None
     if _RUNTIME_ANTHROPIC_CLIENT is None:
         try:
-            _RUNTIME_ANTHROPIC_CLIENT = _anthropic_sdk.Anthropic(api_key=anthropic_key)
+            _RUNTIME_ANTHROPIC_CLIENT = _anthropic_sdk.Anthropic(
+                api_key=anthropic_key,
+                timeout=300.0,
+                max_retries=2,
+            )
         except Exception:
             _RUNTIME_ANTHROPIC_CLIENT = None
     return _RUNTIME_ANTHROPIC_CLIENT
@@ -1018,18 +1023,18 @@ def list_available_models() -> List[str]:
 
 def pick_model(valid_models: List[str]) -> Optional[str]:
     preferred: List[str] = []
-    preferred_claude = clean_pdf_text(os.environ.get("ANTHROPIC_MODEL") or "").strip()
-    if preferred_claude:
-        preferred.append(f"anthropic:{preferred_claude}")
     preferred_openai = clean_pdf_text(
         os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
     ).strip()
     if preferred_openai:
         preferred.append(f"openai:{preferred_openai}")
+    preferred_claude = clean_pdf_text(os.environ.get("ANTHROPIC_MODEL") or "").strip()
+    if preferred_claude:
+        preferred.append(f"anthropic:{preferred_claude}")
     preferred.extend([
-        "anthropic:claude-sonnet-4-20250514",
         "openai:gpt-4.1",
         "openai:gpt-4o",
+        "anthropic:claude-sonnet-4-20250514",
         "anthropic:claude-haiku-4-5-20251001",
         "openai:gpt-4.1-mini",
         "models/gemini-1.5-pro",
@@ -1068,18 +1073,34 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
     if isinstance(model, dict) and model.get("provider") == "anthropic":
         client = model.get("client") or optional_anthropic_client()
         if client is None:
-            raise RuntimeError("Anthropic-backend er valgt, men klienten kunne ikke initialiseres. Sjekk ANTHROPIC_API_KEY.")
+            # Claude ikke tilgjengelig — fall direkte til OpenAI
+            if HAS_OPENAI_BACKEND:
+                st.session_state["rib_ai_backend_warning"] = "Claude-klient ikke tilgjengelig, bruker OpenAI."
+                try:
+                    fallback = build_runtime_ai_model("openai:gpt-4.1")
+                    return generate_text(fallback, parts, temperature=temperature)
+                except Exception:
+                    pass
+            if HAS_GEMINI_BACKEND and genai is not None:
+                fallback_name = next((name for name in list_gemini_models() if name), None)
+                if fallback_name:
+                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+            raise RuntimeError("Ingen AI-backend tilgjengelig.")
 
         model_name = clean_pdf_text(model.get("model_name") or "claude-sonnet-4-20250514").strip() or "claude-sonnet-4-20250514"
         content_blocks: List[Dict[str, Any]] = []
         for part in parts:
             if isinstance(part, Image.Image):
-                b64 = base64.b64encode(png_bytes_from_image(copy_rgb(part))).decode("utf-8")
+                img_for_api = copy_rgb(part)
+                img_for_api.thumbnail((1200, 1200))
+                bio = io.BytesIO()
+                img_for_api.save(bio, format="JPEG", quality=85)
+                b64 = base64.b64encode(bio.getvalue()).decode("utf-8")
                 content_blocks.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": "image/jpeg",
                         "data": b64,
                     },
                 })
@@ -1094,28 +1115,33 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
                 max_tokens=8192,
                 temperature=float(temperature) if temperature is not None else 0.2,
                 messages=[{"role": "user", "content": content_blocks}],
+                timeout=120.0,
             )
             output_parts: List[str] = []
             for block in response.content:
                 if hasattr(block, "text"):
                     output_parts.append(clean_pdf_text(block.text))
-            return "\n".join(p for p in output_parts if p).strip()
+            result = "\n".join(p for p in output_parts if p).strip()
+            if result:
+                return result
 
         except Exception as exc:
-            if HAS_OPENAI_BACKEND:
-                st.session_state["rib_ai_backend_warning"] = short_text(
-                    f"Claude-feil ({type(exc).__name__}), falt tilbake til OpenAI.", 240,
-                )
+            pass  # Fall gjennom til fallback nedenfor
+
+        # Claude feilet eller returnerte tomt — fallback
+        if HAS_OPENAI_BACKEND:
+            st.session_state["rib_ai_backend_warning"] = "Claude-kall feilet, bruker OpenAI."
+            try:
                 fallback = build_runtime_ai_model("openai:gpt-4.1")
                 return generate_text(fallback, parts, temperature=temperature)
-            elif HAS_GEMINI_BACKEND and genai is not None:
-                fallback_name = next((name for name in list_gemini_models() if name), None)
-                if fallback_name:
-                    st.session_state["rib_ai_backend_warning"] = short_text(
-                        f"Claude-feil ({type(exc).__name__}), falt tilbake til Gemini.", 240,
-                    )
-                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
-            raise
+            except Exception:
+                pass
+        if HAS_GEMINI_BACKEND and genai is not None:
+            fallback_name = next((name for name in list_gemini_models() if name), None)
+            if fallback_name:
+                st.session_state["rib_ai_backend_warning"] = "Claude feilet, bruker Gemini."
+                return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+        return ""
 
     # --- OPENAI ---
     if isinstance(model, dict) and model.get("provider") == "openai":
@@ -1154,20 +1180,16 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
         try:
             response = client.responses.create(**request)
         except Exception as exc:
-            if HAS_ANTHROPIC_BACKEND:
-                st.session_state["rib_ai_backend_warning"] = short_text(
-                    f"OpenAI-feil ({type(exc).__name__}), falt tilbake til Claude.", 240,
-                )
-                fallback = build_runtime_ai_model("anthropic:claude-sonnet-4-20250514")
-                return generate_text(fallback, parts, temperature=temperature)
-            elif HAS_GEMINI_BACKEND and genai is not None:
+            if HAS_GEMINI_BACKEND and genai is not None:
                 fallback_name = next((name for name in list_gemini_models() if name), None)
                 if fallback_name:
                     st.session_state["rib_ai_backend_warning"] = short_text(
-                        f"OpenAI-feil, falt tilbake til Gemini: {type(exc).__name__}: {exc}",
-                        240,
+                        f"OpenAI-feil ({type(exc).__name__}), falt tilbake til Gemini.", 240,
                     )
-                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+                    try:
+                        return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+                    except Exception:
+                        pass
             raise
 
         output_text = clean_pdf_text(getattr(response, "output_text", "")).strip()
@@ -10428,6 +10450,16 @@ def _load_ifc_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> Li
         _append_upload_warning_v13("IFC-geometri kan ikke prosesseres i denne installasjonen. Last opp PDF-plantegninger i stedet for best mulig analyse.")
         return []
 
+    # Filstørrelsesgrense for å unngå at serveren krasjer (502)
+    max_ifc_mb = 50
+    file_mb = len(file_bytes) / (1024 * 1024)
+    if file_mb > max_ifc_mb:
+        _append_upload_warning_v13(
+            f"IFC-filen '{file_name}' er {file_mb:.0f} MB, som er for stor for denne serveren (maks {max_ifc_mb} MB). "
+            f"Eksporter plantegninger som PDF i stedet, eller filtrer IFC-modellen til kun relevante etasjer."
+        )
+        return []
+
     tmp_path = None
     drawings: List[Dict[str, Any]] = []
     try:
@@ -11484,59 +11516,76 @@ if analyze_clicked or direct_pdf_clicked:
         if backend_warning:
             st.caption(f"AI-backend: {backend_warning}")
 
-        with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
-            valid_models = list_available_models()
-            valgt_modell = pick_model(valid_models)
-            if not valgt_modell:
-                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
-                st.stop()
+        try:
+            with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
+                valid_models = list_available_models()
+                valgt_modell = pick_model(valid_models)
+                if not valgt_modell:
+                    st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini/Claude) i miljøet.")
+                    st.stop()
 
-            model = build_runtime_ai_model(valgt_modell)
-            candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
-            candidate_df = build_candidate_dataframe(candidates)
+                st.caption(f"Valgt modell: {valgt_modell}")
+                model = build_runtime_ai_model(valgt_modell)
+                candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
+                candidate_df = build_candidate_dataframe(candidates)
 
-            analysis_result = run_structured_drawing_analysis(
-                model=model,
-                drawings=all_drawings,
-                candidates=candidates,
-                project_data=pd_state,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-                safety_mode=safety_mode,
+                analysis_result = run_structured_drawing_analysis(
+                    model=model,
+                    drawings=all_drawings,
+                    candidates=candidates,
+                    project_data=pd_state,
+                    material_preference=material_valg,
+                    foundation_preference=fundamentering,
+                    optimization_mode=optimaliser_for,
+                    safety_mode=safety_mode,
+                )
+                analysis_result = replace_analysis_sketches_with_grounded(
+                    analysis_result=analysis_result,
+                    drawings=all_drawings,
+                    material_preference=material_valg,
+                )
+
+                report_text = run_report_writer(
+                    model=model,
+                    analysis_result=analysis_result,
+                    candidates=candidates,
+                    project_data=pd_state,
+                    material_preference=material_valg,
+                    foundation_preference=fundamentering,
+                    optimization_mode=optimaliser_for,
+                )
+
+                persist_rib_draft_to_session(
+                    analysis_result=analysis_result,
+                    report_text=report_text,
+                    candidate_df=candidate_df,
+                    candidates=candidates,
+                    drawings=all_drawings,
+                    material_preference=material_valg,
+                    foundation_preference=fundamentering,
+                    optimization_mode=optimaliser_for,
+                    safety_mode=safety_mode,
+                )
+
+            # Vis fallback-varsel etter spinner
+            post_warning = st.session_state.pop("rib_ai_backend_warning", None)
+            if post_warning:
+                st.warning(f"AI-backend: {post_warning}")
+
+            if direct_pdf_clicked:
+                with st.spinner("Låser auto-skissene og bygger PDF..."):
+                    finalize_rib_draft_to_pdf()
+            st.rerun()
+
+        except Exception as exc:
+            st.error(
+                f"Analysen feilet: {type(exc).__name__}: {str(exc)[:300]}\n\n"
+                "Tips: Prøv å laste opp færre/mindre filer (PDF i stedet for IFC), "
+                "eller kontroller at AI API-nøklene er gyldige i Render Environment Variables."
             )
-            analysis_result = replace_analysis_sketches_with_grounded(
-                analysis_result=analysis_result,
-                drawings=all_drawings,
-                material_preference=material_valg,
-            )
-
-            report_text = run_report_writer(
-                model=model,
-                analysis_result=analysis_result,
-                candidates=candidates,
-                project_data=pd_state,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-            )
-
-            persist_rib_draft_to_session(
-                analysis_result=analysis_result,
-                report_text=report_text,
-                candidate_df=candidate_df,
-                candidates=candidates,
-                drawings=all_drawings,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-                safety_mode=safety_mode,
-            )
-
-        if direct_pdf_clicked:
-            with st.spinner("Låser auto-skissene og bygger PDF..."):
-                finalize_rib_draft_to_pdf()
-        st.rerun()
+            post_warning = st.session_state.pop("rib_ai_backend_warning", None)
+            if post_warning:
+                st.caption(f"Backend-info: {post_warning}")
 
 
 # ============================================================
