@@ -22,3 +22,4 @@ streamlit-image-coordinates>=0.4.0
 ifcopenshell
 ezdxf
 numpy
+anthropic>=0.40.0
