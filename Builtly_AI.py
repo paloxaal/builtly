@@ -1,4 +1,6 @@
 import os
+import hashlib
+import hmac
 import base64
 import html
 import json
@@ -62,7 +64,107 @@ if "assistant_discipline_codes" not in st.session_state:
 if "assistant_dialog_open" not in st.session_state:
     st.session_state.assistant_dialog_open = False
 
+if "site_access_granted" not in st.session_state:
+    st.session_state.site_access_granted = False
+
+if "site_access_error" not in st.session_state:
+    st.session_state.site_access_error = ""
+
+if "site_access_input_nonce" not in st.session_state:
+    st.session_state.site_access_input_nonce = 0
+
 ASSISTANT_END_MARKER = "[[BUILTLY_DONE]]"
+
+ACCESS_GATE_COPY = {
+    "🇬🇧 English (UK)": {
+        "eyebrow": "Restricted access",
+        "title": "Enter code to open Builtly",
+        "subtitle": "This front page is protected. Enter the access code to continue.",
+        "label": "Access code",
+        "placeholder": "Enter code",
+        "button": "Open portal",
+        "error_invalid": "That code is not correct. Please try again.",
+        "info": "Language selection is kept when the portal opens.",
+        "admin_missing": "Access control is enabled, but no code is configured. Set BUILTLY_ACCESS_CODE or BUILTLY_ACCESS_CODES in Render.",
+        "admin_help": "Optional: use BUILTLY_ACCESS_CODE_SHA256 to store a SHA-256 hash instead of plain text.",
+    },
+    "🇺🇸 English (US)": {
+        "eyebrow": "Restricted access",
+        "title": "Enter code to open Builtly",
+        "subtitle": "This front page is protected. Enter the access code to continue.",
+        "label": "Access code",
+        "placeholder": "Enter code",
+        "button": "Open portal",
+        "error_invalid": "That code is not correct. Please try again.",
+        "info": "Language selection is kept when the portal opens.",
+        "admin_missing": "Access control is enabled, but no code is configured. Set BUILTLY_ACCESS_CODE or BUILTLY_ACCESS_CODES in Render.",
+        "admin_help": "Optional: use BUILTLY_ACCESS_CODE_SHA256 to store a SHA-256 hash instead of plain text.",
+    },
+    "🇳🇴 Norsk": {
+        "eyebrow": "Begrenset tilgang",
+        "title": "Angi kode for å åpne Builtly",
+        "subtitle": "Forsiden er låst. Skriv inn tilgangskoden for å åpne portalen.",
+        "label": "Tilgangskode",
+        "placeholder": "Skriv inn kode",
+        "button": "Åpne portal",
+        "error_invalid": "Koden er ikke riktig. Prøv igjen.",
+        "info": "Språkvalget beholdes når portalen åpnes.",
+        "admin_missing": "Tilgangskontroll er slått på, men ingen kode er konfigurert. Sett BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
+        "admin_help": "Valgfritt: bruk BUILTLY_ACCESS_CODE_SHA256 hvis du vil lagre hash i stedet for klartekst.",
+    },
+    "🇸🇪 Svenska": {
+        "eyebrow": "Begränsad åtkomst",
+        "title": "Ange kod för att öppna Builtly",
+        "subtitle": "Startsidan är låst. Skriv in åtkomstkoden för att fortsätta.",
+        "label": "Åtkomstkod",
+        "placeholder": "Skriv in kod",
+        "button": "Öppna portalen",
+        "error_invalid": "Koden är inte korrekt. Försök igen.",
+        "info": "Språkvalet behålls när portalen öppnas.",
+        "admin_missing": "Åtkomstkontroll är aktiverad, men ingen kod är konfigurerad. Sätt BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
+        "admin_help": "Valfritt: använd BUILTLY_ACCESS_CODE_SHA256 om du vill lagra hash i stället för klartext.",
+    },
+    "🇩🇰 Dansk": {
+        "eyebrow": "Begrænset adgang",
+        "title": "Indtast kode for at åbne Builtly",
+        "subtitle": "Forsiden er låst. Skriv adgangskoden for at fortsætte.",
+        "label": "Adgangskode",
+        "placeholder": "Skriv kode",
+        "button": "Åbn portal",
+        "error_invalid": "Koden er ikke korrekt. Prøv igen.",
+        "info": "Sprogvalget bevares, når portalen åbnes.",
+        "admin_missing": "Adgangskontrol er slået til, men ingen kode er konfigureret. Sæt BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
+        "admin_help": "Valgfrit: brug BUILTLY_ACCESS_CODE_SHA256, hvis du vil gemme hash i stedet for klartekst.",
+    },
+    "🇫🇮 Suomi": {
+        "eyebrow": "Rajoitettu käyttö",
+        "title": "Anna koodi avataksesi Builtlyn",
+        "subtitle": "Etusivu on suojattu. Syötä pääsykoodi jatkaaksesi.",
+        "label": "Pääsykoodi",
+        "placeholder": "Anna koodi",
+        "button": "Avaa portaali",
+        "error_invalid": "Koodi ei ole oikein. Yritä uudelleen.",
+        "info": "Kielivalinta säilyy, kun portaali avataan.",
+        "admin_missing": "Pääsynhallinta on käytössä, mutta koodia ei ole määritetty. Aseta BUILTLY_ACCESS_CODE tai BUILTLY_ACCESS_CODES Renderissä.",
+        "admin_help": "Valinnainen: käytä BUILTLY_ACCESS_CODE_SHA256, jos haluat tallentaa SHA-256-tiivisteen selväkielisen koodin sijaan.",
+    },
+    "🇩🇪 Deutsch": {
+        "eyebrow": "Geschützter Zugang",
+        "title": "Code eingeben, um Builtly zu öffnen",
+        "subtitle": "Die Startseite ist geschützt. Bitte den Zugangscode eingeben, um fortzufahren.",
+        "label": "Zugangscode",
+        "placeholder": "Code eingeben",
+        "button": "Portal öffnen",
+        "error_invalid": "Der Code ist nicht korrekt. Bitte erneut versuchen.",
+        "info": "Die Sprachauswahl bleibt beim Öffnen des Portals erhalten.",
+        "admin_missing": "Der Zugangsschutz ist aktiv, aber kein Code ist konfiguriert. Setzen Sie BUILTLY_ACCESS_CODE oder BUILTLY_ACCESS_CODES in Render.",
+        "admin_help": "Optional: Verwenden Sie BUILTLY_ACCESS_CODE_SHA256, um statt Klartext einen SHA-256-Hash zu speichern.",
+    },
+}
+
+
+def get_access_copy(lang_key: str) -> Dict:
+    return ACCESS_GATE_COPY.get(lang_key, ACCESS_GATE_COPY["🇬🇧 English (UK)"])
 
 # -------------------------------------------------
 # 3) LANGUAGE TEXTS & REGULATORY PROFILES
@@ -1544,6 +1646,144 @@ def sync_language_query_param(lang_key: str, keep_assistant: bool = False) -> No
     else:
         params.pop("assistant", None)
     set_query_params_dict(params)
+
+
+def _safe_secret_get(name: str) -> Optional[str]:
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        return None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _env_or_secret(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    return _safe_secret_get(name)
+
+
+def configured_access_codes() -> List[str]:
+    values: List[str] = []
+    for env_name in ("BUILTLY_ACCESS_CODES", "BUILTLY_ACCESS_CODE", "BUILTLY_ENTRY_CODE"):
+        raw_value = _env_or_secret(env_name)
+        if not raw_value:
+            continue
+        parts = [part.strip() for part in str(raw_value).split(",") if part.strip()]
+        for part in parts:
+            if part not in values:
+                values.append(part)
+    return values
+
+
+def configured_access_hashes() -> List[str]:
+    values: List[str] = []
+    for env_name in ("BUILTLY_ACCESS_CODE_SHA256S", "BUILTLY_ACCESS_CODE_SHA256"):
+        raw_value = _env_or_secret(env_name)
+        if not raw_value:
+            continue
+        parts = [part.strip().lower() for part in str(raw_value).split(",") if part.strip()]
+        for part in parts:
+            if part not in values:
+                values.append(part)
+    return values
+
+
+def access_gate_configured() -> bool:
+    return bool(configured_access_codes() or configured_access_hashes())
+
+
+def access_gate_enabled() -> bool:
+    explicit_flag = _env_or_secret("BUILTLY_REQUIRE_ACCESS_CODE")
+    if explicit_flag is not None:
+        return explicit_flag.strip().lower() not in {"0", "false", "no", "off"}
+    return access_gate_configured()
+
+
+def bump_site_access_nonce() -> None:
+    st.session_state.site_access_input_nonce = int(st.session_state.get("site_access_input_nonce", 0)) + 1
+
+
+def verify_site_access_code(candidate: str) -> bool:
+    value = (candidate or "").strip()
+    if not value:
+        return False
+
+    for configured in configured_access_codes():
+        if hmac.compare_digest(value, configured):
+            return True
+
+    candidate_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    for configured_hash in configured_access_hashes():
+        if hmac.compare_digest(candidate_hash, configured_hash):
+            return True
+
+    return False
+
+
+def render_site_access_gate(lang_key: str) -> None:
+    copy = get_access_copy(lang_key)
+    lang_bundle = get_text_bundle(lang_key)
+    locale_profile = get_locale_profile(lang_key)
+
+    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    with outer_center:
+        render_html(
+            f"""
+            <div class="access-gate-head">
+                <div class="assistant-kicker">{copy['eyebrow']}</div>
+                <div class="access-gate-title">{copy['title']}</div>
+                <div class="access-gate-subtitle">{copy['subtitle']}</div>
+                <div class="context-chips compact">
+                    <div class="context-chip"><span>{lang_bundle['assistant_label_country']}:</span> {locale_profile['country']}</div>
+                    <div class="context-chip"><span>{lang_bundle['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
+                </div>
+            </div>
+            """
+        )
+
+        if not access_gate_configured():
+            st.warning(copy["admin_missing"])
+            st.caption(copy["admin_help"])
+            return
+
+        input_key = f"site_access_code_{st.session_state.get('site_access_input_nonce', 0)}"
+        with st.form("builtly_site_access_gate"):
+            access_code = st.text_input(
+                copy["label"],
+                key=input_key,
+                type="password",
+                placeholder=copy["placeholder"],
+            )
+            submitted = st.form_submit_button(copy["button"], use_container_width=True)
+
+        if submitted:
+            if verify_site_access_code(access_code):
+                st.session_state.site_access_granted = True
+                st.session_state.site_access_error = ""
+                bump_site_access_nonce()
+                st.rerun()
+            else:
+                st.session_state.site_access_error = copy["error_invalid"]
+                bump_site_access_nonce()
+                st.rerun()
+
+        if st.session_state.get("site_access_error"):
+            st.error(st.session_state.site_access_error)
+
+        st.caption(copy["info"])
+
+
+def ensure_frontpage_access(lang_key: str) -> None:
+    if not access_gate_enabled():
+        return
+    if st.session_state.get("site_access_granted"):
+        return
+    render_site_access_gate(lang_key)
+    st.stop()
 
 
 def reference_base_dir() -> Path:
@@ -3346,6 +3586,49 @@ st.markdown(
         background: rgba(56,194,201,0.14) !important;
     }
 
+    div[data-testid="stTextInput"] > div {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(120,145,170,0.16);
+        border-radius: 14px;
+    }
+
+    div[data-testid="stTextInput"] input {
+        background: rgba(255,255,255,0.02) !important;
+        color: var(--text) !important;
+        -webkit-text-fill-color: var(--text) !important;
+        border-radius: 14px !important;
+    }
+
+    div[data-testid="stTextInput"] input::placeholder {
+        color: var(--muted) !important;
+        -webkit-text-fill-color: var(--muted) !important;
+    }
+
+    .access-gate-head {
+        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
+        border: 1px solid var(--stroke);
+        border-radius: 22px;
+        padding: 1.3rem 1.2rem 1.05rem 1.2rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
+    }
+
+    .access-gate-title {
+        font-size: 1.7rem;
+        font-weight: 760;
+        line-height: 1.12;
+        letter-spacing: -0.02em;
+        margin-bottom: 0.55rem;
+        color: var(--text);
+    }
+
+    .access-gate-subtitle {
+        color: var(--soft);
+        line-height: 1.72;
+        font-size: 0.98rem;
+        margin-bottom: 0.85rem;
+    }
+
     @media (max-width: 1100px) {
         .assistant-teaser-row {
             flex-direction: column;
@@ -3393,6 +3676,8 @@ lang = get_text_bundle(st.session_state.app_lang)
 locale_profile = get_locale_profile(st.session_state.app_lang)
 
 st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
+
+ensure_frontpage_access(st.session_state.app_lang)
 
 # -------------------------------------------------
 # 8) HERO + ASSISTANT ENTRYPOINT
