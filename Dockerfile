@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth=1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg && \
     cd /tmp/libredwg && \
     ./autogen.sh && \
-    ./configure --prefix=/usr/local && \
+    ./configure --prefix=/usr/local --disable-docs --disable-bindings && \
     make -j"$(nproc)" && \
     make install && \
     ldconfig && \
