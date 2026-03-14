@@ -22,16 +22,16 @@ from builtly_module_kit import (
     render_hero,
 )
 
-project = configure_page("Builtly | White-label API & Partnerprogram", "🔌")
+project = configure_page("Builtly | Partnerintegrasjon & API", "🔌")
 
 render_hero(
-    eyebrow="White-label API & Partnerprogram",
-    title="Skaleringsmotoren som lar Builtly vokse via partnere, ikke bare egne folk.",
+    eyebrow="Partnerintegrasjon & API",
+    title="Integrer Builtly-motoren i partnerens arbeidsflyt med deres brand i front.",
     subtitle=(
-        "Legg et tenant-basert API-lag over eksisterende plattform slik at Norconsult-, AECOM- eller bank-lignende partnere kan kalle Builtly med egne data, "
-        "få tilbake brandede leveranser og bruke egne fagpersoner til sign-off. Dette er workflow infrastructure – ikke bare enda en modul."
+        "Legg et tenant-basert API-lag over eksisterende plattform slik at rådgivere, banker og større aktører kan kalle Builtly med egne data, "
+        "få tilbake leveranser i eget format og bruke egne fagpersoner til review og sign-off. Dette er distribusjonslaget som gjør produktet integrerbart uten å eksponere intern partnerlogikk offentlig."
     ),
-    pills=["Multi-tenant", "OAuth / API keys", "Webhooks", "Own sign-off", "White-label"],
+    pills=["Multi-tenant", "OAuth / API keys", "Webhooks", "Own sign-off", "Partner brand"],
     badge="Scale engine",
 )
 
@@ -111,7 +111,7 @@ with left:
     render_metric_cards(
         [
             {"label": "Aktive moduler", "value": f"{len(primary_modules)}", "desc": "Alle moduler bør kalles via samme tenant- og QA-ryggrad."},
-            {"label": "API-kapasitet", "value": f"{monthly_calls:,}/mnd".replace(',', ' '), "desc": "Planlagt volum for batch-kjøring, partnerbruk og white-label-leveranser."},
+            {"label": "API-kapasitet", "value": f"{monthly_calls:,}/mnd".replace(',', ' '), "desc": "Planlagt volum for batch-kjoring, partnerbruk og branded leveranser."},
             {"label": "Rate limit", "value": f"{rate_limit}/min", "desc": "Bør styres tenant-vis med isolert ressursbruk og observability."},
             {"label": "Potensiell ARR", "value": f"{estimated_arr:,} NOK".replace(',', ' '), "desc": "Illustrativ kontraktsverdi for én større partner-tenant."},
         ]
@@ -157,7 +157,7 @@ with left:
             [
                 {"Tier": "Launch", "Månedlig pris": "45 000 NOK", "Typisk kunde": "Mindre partner som tester 1–2 moduler"},
                 {"Tier": "Growth", "Månedlig pris": "120 000 NOK", "Typisk kunde": "Rådgiver/entreprenør med flere prosjektteam"},
-                {"Tier": "Enterprise", "Månedlig pris": "280 000 NOK+", "Typisk kunde": "Stor enterprise med white-label, API og compliancekrav"},
+                {"Tier": "Enterprise", "Månedlig pris": "280 000 NOK+", "Typisk kunde": "Stor enterprise med partnerintegrasjon, API og compliancekrav"},
             ]
         )
         st.dataframe(pricing_df, use_container_width=True, hide_index=True)
@@ -165,7 +165,7 @@ with left:
 
     json_download(
         {
-            "module": "White-label API & Partnerprogram",
+            "module": "Partnerintegrasjon API & Partnerprogram",
             "partner_name": partner_name,
             "partner_type": partner_type,
             "tenant_tier": tenant_tier,
@@ -183,10 +183,10 @@ with left:
 with right:
     render_section(
         "Den egentlige skaleringsmotoren",
-        "Hvis målet er at store miljøer en dag skal kjøpe eller bygge Builtly inn i sine egne systemer, må plattformen tenkes som workflow infrastructure. White-label-laget gjør nettopp det.",
+        "Hvis store miljoer skal kunne bruke Builtly inne i egne systemer, maa plattformen tenkes som workflow infrastructure. Partnerlaget gjoer nettopp det uten at det frontes offentlig.",
         "Why it matters",
     )
-    render_project_snapshot(project, badge="White-label ready")
+    render_project_snapshot(project, badge="Partner-ready")
     render_panel(
         "Hvorfor dette er viktigere enn enda en isolert fagmodul",
         "Et partner- og API-lag lar dere vokse via eksisterende distribusjon, kundetillit og fagpersoner hos andre – uten å bygge full lokal leveranseorganisasjon i hvert marked.",
@@ -216,7 +216,7 @@ with right:
 
 render_section(
     "Anbefalt rekkefølge",
-    "Først utbyggere og entreprenører. Deretter rådgivere. Så enterprise/white-label. Dette partnerlaget er ikke første salgsprodukt i markedet – men det er laget som gjør at alt annet kan vokse globalt uten at dere bygger et nytt konsulentselskap hver gang.",
+    "Først utbyggere og entreprenører. Deretter rådgivere. Så enterprise/partnerintegrasjon. Dette partnerlaget er ikke første salgsprodukt i markedet – men det er laget som gjør at alt annet kan vokse globalt uten at dere bygger et nytt konsulentselskap hver gang.",
     "Go-to-market",
 )
 
@@ -224,11 +224,11 @@ c1, c2 = st.columns(2, gap="large")
 with c1:
     render_panel(
         "Designprinsipper",
-        "White-label må være leverandøruavhengig, sporbar og enkel å rulle ut til nye tenants.",
+        "Partnerintegrasjon må være leverandøruavhengig, sporbar og enkel å rulle ut til nye tenants.",
         [
             "Samme plattform, flere tenants",
             "Samme API-kontrakt, ulike brandpakker",
-            "Manuell overstyring og revisjonslogg må bevares også i white-label",
+            "Manuell overstyring og revisjonslogg må bevares også i partnerintegrasjon",
             "Partneren må kunne velge egne fagpersoner for sign-off",
         ],
         tone="green",
@@ -241,7 +241,7 @@ with c2:
         [
             "Launch: onboarding av pilotpartnere",
             "Growth: flerbrukere, flere moduler, høyere kallvolum",
-            "Enterprise: white-label, API, webhooks, SSO og avansert støtte",
+            "Enterprise: partnerintegrasjon, API, webhooks, SSO og avansert støtte",
             "Kan senere kombineres med partner marketplace og certification program",
         ],
         tone="blue",

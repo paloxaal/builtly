@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+import io
 import sys
 from pathlib import Path
 
@@ -11,26 +11,58 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from builtly_ai_fallback import generate_json_with_fallback
 from builtly_module_kit import (
     configure_page,
     dataframe_download,
     json_download,
+    render_attempt_log,
+    render_hero,
+    render_json_preview,
     render_metric_cards,
     render_panel,
     render_project_snapshot,
     render_section,
-    render_hero,
     tone_from_score,
 )
+from builtly_module_prompts import module_schema, module_system_prompt
+from builtly_public_data import adapter_status, gather_climate_snapshot, run_climate_portfolio_batch
 
-project = configure_page("Builtly | Klimarisiko", "🌊")
+
+def _load_portfolio(upload) -> list[dict]:
+    if upload is None:
+        return []
+    name = getattr(upload, "name", "").lower()
+    data = upload.getvalue()
+    try:
+        if name.endswith(".csv"):
+            df = pd.read_csv(io.BytesIO(data))
+        else:
+            df = pd.read_excel(io.BytesIO(data))
+    except Exception:
+        return []
+    df = df.fillna("")
+    rows = []
+    for _, row in df.head(5000).iterrows():
+        rows.append({
+            "id": row.get("id") or row.get("asset_id") or row.get("matrikkel_id") or row.get("address") or "asset",
+            "asset_id": row.get("asset_id") or row.get("id") or "",
+            "address": row.get("address") or row.get("adresse") or "",
+            "municipality": row.get("municipality") or row.get("kommune") or "",
+            "lat": row.get("lat") or row.get("latitude") or None,
+            "lon": row.get("lon") or row.get("longitude") or None,
+        })
+    return rows
+
+
+project = configure_page("Builtly | Klimarisiko", "B")
 
 render_hero(
     eyebrow="Climate Risk",
-    title="Porteføljevennlig klimarisiko som banker, forsikring og eiendom faktisk kan abonnere på.",
+    title="Portefoljevennlig klimarisiko som banker, forsikring og eiendom faktisk kan abonnere pa.",
     subtitle=(
-        "Klimarisikomodulen er bygget for offentlig tilgjengelige datasett og lav dataanskaffelseskostnad. "
-        "Kombiner eiendomskoordinater med flom, skred, havnivå og varmestress – og map resultatene til EU Taxonomy, SFDR og bankrapportering."
+        "Klimarisikomodulen er bygget for offentlige datasett og lave dataanskaffelseskostnader. "
+        "Kombiner koordinater med flom, skred, havniva og varmestress, og map resultatene til Taxonomy, SFDR og bankrapportering."
     ),
     pills=["Portfolio screening", "EU Taxonomy", "SFDR", "Bank API", "Public data first"],
     badge="Portfolio engine",
@@ -41,207 +73,141 @@ project_municipality = project.get("kommune", "")
 
 left, right = st.columns([1.2, 0.8], gap="large")
 with left:
-    render_section(
-        "Eiendom eller portefølje",
-        "Her starter dere med et enkelt men troverdig analyseoppsett. Senere kan samme motor brukes til maskinell screening av større bank- og eiendomsporteføljer via API.",
-        "Risk setup",
-    )
-
+    render_section("Eiendom eller portefolje", "Start med enkeltobjekt og skal er videre til batch og webhook-logikk.", "Risk setup")
     c1, c2 = st.columns(2)
     with c1:
-        analysis_mode = st.radio("Analysemodus", ["Enkeltobjekt", "Portefølje"], horizontal=True)
+        analysis_mode = st.radio("Analysemodus", ["Enkeltobjekt", "Portefolje"], horizontal=True)
         address = st.text_input("Adresse / lokasjon", value=project_address)
         municipality = st.text_input("Kommune", value=project_municipality)
         asset_class = st.selectbox("Aktivaklasse", ["Bolig", "Kontor", "Logistikk", "Hotell", "Mixed-use"], index=1)
         horizon = st.selectbox("Tidshorisont", ["2030", "2050", "2100"], index=1)
     with c2:
         climate_scenario = st.selectbox("Klimascenario", ["RCP 4.5", "RCP 8.5"], index=0)
-        portfolio_size = st.number_input("Antall eiendommer i portefølje", min_value=1, value=1 if analysis_mode == "Enkeltobjekt" else 240, step=1)
-        loan_exposure_mnok = st.number_input("Eksponering / verdi (MNOK)", min_value=1.0, value=85.0 if analysis_mode == "Enkeltobjekt" else 4200.0, step=5.0)
+        portfolio_size = st.number_input("Antall eiendommer i portefolje", min_value=1, value=1 if analysis_mode == "Enkeltobjekt" else 240, step=1)
         reporting_target = st.multiselect(
-            "Rapporteringsmål",
+            "Rapporteringsmal",
             ["EU Taxonomy / DNSH", "SFDR artikkel 8/9", "ECB Climate Stress Test", "Finanstilsynet klimarisiko", "Intern investeringspolicy"],
-            default=["EU Taxonomy / DNSH", "ECB Climate Stress Test"] if analysis_mode == "Portefølje" else ["EU Taxonomy / DNSH"],
+            default=["EU Taxonomy / DNSH", "ECB Climate Stress Test"] if analysis_mode == "Portefolje" else ["EU Taxonomy / DNSH"],
         )
 
-    st.markdown("### Geofaktorer og antatte forhold")
+    st.markdown("### Geofaktorer og vektsetting")
     g1, g2, g3, g4 = st.columns(4)
     with g1:
-        elevation_m = st.number_input("Høyde over havet (m)", min_value=0.0, value=14.0, step=1.0)
+        elevation_m = st.number_input("Hoyde over havet (m)", min_value=0.0, value=14.0, step=1.0)
         distance_coast_km = st.number_input("Avstand til kyst (km)", min_value=0.0, value=1.8, step=0.1)
     with g2:
         distance_river_km = st.number_input("Avstand til bekk/elv (km)", min_value=0.0, value=0.45, step=0.05)
-        flood_zone = st.toggle("I eller nær flomsone", value=True)
-    with g3:
         slope_deg = st.number_input("Terrenghelning (grader)", min_value=0.0, value=12.0, step=1.0)
-        landslide_zone = st.toggle("I eller nær skred-/rasfareområde", value=False)
-    with g4:
-        urban_heat = st.slider("Urban varmestress (0–10)", 0, 10, 6)
+    with g3:
+        urban_heat = st.slider("Urban varmestress (0-10)", 0, 10, 6)
         soil_type = st.selectbox("Jordsmonn / grunnforhold", ["Morene", "Leire", "Berg", "Marine avsetninger", "Fyllmasser"], index=1)
+    with g4:
+        weight_flood = st.slider("Vekt flom", 0.0, 1.0, 0.35, 0.05)
+        weight_landslide = st.slider("Vekt skred", 0.0, 1.0, 0.25, 0.05)
+        weight_sea = st.slider("Vekt havniva", 0.0, 1.0, 0.25, 0.05)
+        weight_heat = st.slider("Vekt varme", 0.0, 1.0, 0.15, 0.05)
 
-    flood_base = 4.5 if flood_zone else 1.8
-    flood_score = min(5.0, max(1.0, flood_base + max(0.0, 0.6 - distance_river_km) * 2 - elevation_m / 90))
-    landslide_base = 4.2 if landslide_zone else 1.6
-    soil_modifier = {"Leire": 0.7, "Marine avsetninger": 0.8, "Fyllmasser": 0.5, "Morene": 0.1, "Berg": -0.3}[soil_type]
-    landslide_score = min(5.0, max(1.0, landslide_base + slope_deg / 18 + soil_modifier))
-    sea_score = min(5.0, max(1.0, 4.2 - elevation_m / 22 - distance_coast_km / 1.8 + (0.35 if climate_scenario == "RCP 8.5" else 0.0)))
-    heat_score = min(5.0, max(1.0, 1.4 + urban_heat / 2 + (0.35 if horizon == "2100" else 0.1 if horizon == "2050" else 0.0)))
-    weighted_score = round(flood_score * 0.33 + landslide_score * 0.27 + sea_score * 0.20 + heat_score * 0.20, 2)
-    uncertainty = round(max(0.35, 1.4 - len(reporting_target) * 0.12 - (0.2 if analysis_mode == "Portefølje" else 0.0)), 2)
+    portfolio_upload = None
+    if analysis_mode == "Portefolje":
+        portfolio_upload = st.file_uploader("Last opp portefolje (CSV/XLSX med address, municipality, lat/lon eller id)", type=["csv", "xlsx", "xls"], key="climate_portfolio_upload")
 
-    risk_df = pd.DataFrame(
-        [
-            {"Faktor": "Flom", "Score (1–5)": round(flood_score, 2), "Kommentar": "Basert på flomsone, elvenærhet, høyde og valgt scenario."},
-            {"Faktor": "Skred / ras", "Score (1–5)": round(landslide_score, 2), "Kommentar": "Basert på skredstatus, helning og grunnforhold."},
-            {"Faktor": "Havnivåstigning", "Score (1–5)": round(sea_score, 2), "Kommentar": "Basert på avstand til kyst, høyde og valgt klimascenario."},
-            {"Faktor": "Varmestress / kjølebehov", "Score (1–5)": round(heat_score, 2), "Kommentar": "Basert på urban varmelast og horisont."},
-        ]
-    )
+weights = {"flood": weight_flood, "landslide": weight_landslide, "sea_level": weight_sea, "heat_stress": weight_heat}
+asset = {
+    "asset_id": project.get("p_name") or "asset-1",
+    "address": address,
+    "municipality": municipality,
+    "asset_class": asset_class,
+    "elevation_m": elevation_m,
+    "distance_coast_km": distance_coast_km,
+    "distance_river_km": distance_river_km,
+    "slope_deg": slope_deg,
+    "heat_index": float(urban_heat),
+    "soil_type": soil_type,
+}
+snapshot = gather_climate_snapshot(asset, scenario=climate_scenario, horizon=horizon, weights=weights)
+portfolio_rows = _load_portfolio(portfolio_upload)
+if analysis_mode == "Portefolje" and not portfolio_rows:
+    portfolio_rows = [{"id": f"asset-{i+1}", "address": address, "municipality": municipality} for i in range(int(portfolio_size))]
+portfolio_batch = run_climate_portfolio_batch(portfolio_rows, partner_id="demo-bank", scenario=climate_scenario, horizon=horizon, weights=weights) if analysis_mode == "Portefolje" else None
 
-    taxonomy_df = pd.DataFrame(
-        [
-            {"Kravområde": "Climate change adaptation", "Status": "Må dokumenteres", "Kommentar": "Vis at klimarisiko er kartlagt og tilpasningstiltak vurdert."},
-            {"Kravområde": "DNSH – flom/skred", "Status": "Foreløpig vurdering", "Kommentar": "Krever dokumentert aktsomhetsvurdering og eventuelle tiltak."},
-            {"Kravområde": "SFDR datapunkter", "Status": "Kan genereres", "Kommentar": "Strukturerte felt kan eksporteres videre til fond-/porteføljerapportering."},
-            {"Kravområde": "ECB / Finanstilsynet", "Status": "API-klart", "Kommentar": "Modulen kan levere porteføljeuttrekk med score per aktivum."},
-        ]
-    )
-
-    if analysis_mode == "Enkeltobjekt":
-        unit_price = 5500 if weighted_score < 3 else 7500
-        pricing_text = f"Anbefalt pris pr. eiendom: ca. {unit_price:,} NOK".replace(',', ' ')
-    else:
-        unit_price = min(500000, max(150000, int(portfolio_size * 900)))
-        pricing_text = f"Årlig API-/porteføljeabonnement: ca. {unit_price:,} NOK".replace(',', ' ')
-
-    estimated_damage = round(loan_exposure_mnok * 1_000_000 * (weighted_score / 5) * 0.025)
-
-    render_metric_cards(
-        [
-            {"label": "Klimarisikoscore", "value": f"{weighted_score}/5", "desc": "Aggregert score på tvers av flom, skred, havnivå og varmestress."},
-            {"label": "Usikkerhetsintervall", "value": f"± {uncertainty}", "desc": "Foreløpig spenn basert på datadekning og modenhet."},
-            {"label": "Estimert skadekost", "value": f"{estimated_damage:,} NOK".replace(',', ' '), "desc": "Illustrativ stresstest basert på eksponering og risikonivå."},
-            {"label": "Forretningsmodell", "value": pricing_text, "desc": "Sterkest potensial i API- og porteføljeabonnement mot banker/forsikring."},
-        ]
-    )
-
-    tabs = st.tabs(["Risikofaktorer", "Taxonomy / SFDR", "Portefølje", "API-felter"])
-    with tabs[0]:
-        st.dataframe(risk_df, use_container_width=True, hide_index=True)
-        dataframe_download(risk_df, "Last ned risikofaktorer (.csv)", "climate_risk_factors.csv")
-    with tabs[1]:
-        st.dataframe(taxonomy_df, use_container_width=True, hide_index=True)
-        dataframe_download(taxonomy_df, "Last ned taxonomy-mapping (.csv)", "climate_taxonomy_mapping.csv")
-    with tabs[2]:
-        portfolio_df = pd.DataFrame(
-            [
-                {"Segment": "Lav risiko", "Andel": "42%", "Tiltak": "Rutinemessig monitorering"},
-                {"Segment": "Middels risiko", "Andel": "37%", "Tiltak": "Tiltaksplan og følsomhetsanalyse"},
-                {"Segment": "Høy risiko", "Andel": "21%", "Tiltak": "Prioritert screening og tilpasningstiltak"},
-            ]
-        )
-        st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
-        st.markdown(f"**Porteføljescope:** {portfolio_size} eiendommer &nbsp; | &nbsp; **Eksponering:** {loan_exposure_mnok:,.0f} MNOK".replace(',', ' '))
-    with tabs[3]:
-        api_payload = {
-            "asset_id": "BN-TRD-001",
-            "address": address,
-            "municipality": municipality,
-            "scores": {
-                "flood": round(flood_score, 2),
-                "landslide": round(landslide_score, 2),
-                "sea_level": round(sea_score, 2),
-                "heat_stress": round(heat_score, 2),
-                "climate_risk_total": weighted_score,
-            },
-            "taxonomy_flags": {
-                "adaptation_screened": True,
-                "dnsh_review_needed": weighted_score >= 3.0,
-            },
-        }
-        st.code(api_payload, language="json")
-
-    json_download(
-        {
-            "module": "Climate Risk",
-            "analysis_mode": analysis_mode,
-            "address": address,
-            "municipality": municipality,
-            "asset_class": asset_class,
-            "horizon": horizon,
-            "climate_scenario": climate_scenario,
-            "risk_score": weighted_score,
-            "uncertainty": uncertainty,
-            "pricing_hint_nok": unit_price,
-        },
-        "Eksporter klimarisiko-sammendrag (.json)",
-        "builtly_climate_risk_summary.json",
-    )
-
-with right:
-    render_section(
-        "Hvorfor dette er en spesielt god softwaremodul",
-        "Klimarisiko har mye offentlig tilgjengelig data og lav dataanskaffelseskostnad. Det gjør dette til en av modulene som lettest kan bli et skalerbart produkt – særlig mot banker og forsikringsselskap.",
-        "Strategic fit",
-    )
-    render_project_snapshot(project, badge="Portfolio-ready")
-    render_panel(
-        "Datakilder som modulen bør orkestrere",
-        "Poenget er ikke at Builtly må være kilden til alt, men at plattformen blir laget som samler, normaliserer og eksporterer strukturerte datapunkter og rapporter.",
-        [
-            "NVE flomsonekart og skredfarekart",
-            "Kartverkets høydemodeller og terrengdata",
-            "Klimaatlas / havnivå og klimascenarioer",
-            "NGU / NIBIO for grunn- og jordsmonnforhold",
-        ],
-        tone=tone_from_score(weighted_score),
-        badge="Public data first",
-    )
-    render_panel(
-        "Kommersiell logikk",
-        "Enkeltobjekt kan selges som rapport. Den store oppsiden ligger i porteføljeabonnement og API-integrasjon i bankens eller forsikringsselskapets egne systemer.",
-        [
-            "3 000–8 000 NOK per eiendom ved enkeltrapport",
-            "50 000–200 000 NOK+ per år for porteføljescreening",
-            "150 000–500 000 NOK+ for større API-kunder med mange aktiva",
-            "Sterkt MRR-potensial fordi kunden trenger løpende screening, ikke bare engangsrapport",
-        ],
-        tone="gold",
-        badge="Pricing potential",
-    )
-    st.metric("Betalerklasse", "Bank / forsikring / større eiendom", "Ny kundetype utover klassiske prosjektaktører")
-    st.metric("Internasjonal skalerbarhet", "Høy", "Kan lokaliseres via datasett og API-lag")
-
-render_section(
-    "Hva som bør bygges i MVP",
-    "Fokuser på risikoscore, tydelig kildegrunnlag, strukturerte eksportfelt og portefølje-API før dere overbygger det med for mye fancy visualisering.",
-    "MVP scope",
+ai_context = {
+    "delivery_level": "auto",
+    "snapshot": snapshot,
+    "reporting_target": reporting_target,
+    "analysis_mode": analysis_mode,
+    "portfolio_batch": portfolio_batch,
+}
+ai_result = generate_json_with_fallback(
+    system_prompt=module_system_prompt("climate", "auto"),
+    user_prompt=json.dumps(ai_context, ensure_ascii=False, indent=2),
+    schema_hint=module_schema("climate"),
+    task="document_engine",
+    preferred_providers=["openai", "anthropic", "gemini"],
+    estimated_context_chars=len(json.dumps(ai_context, ensure_ascii=False)),
+    max_output_tokens=1400,
+    temperature=0.1,
 )
 
-c1, c2 = st.columns(2, gap="large")
-with c1:
-    render_panel(
-        "MVP",
-        "Den første versjonen bør være et robust screeningsverktøy, ikke en altomfattende klimamotor.",
-        [
-            "Eiendom til score per risikofaktor",
-            "Samlet klimarisikoscore med usikkerhet",
-            "Taxonomy / DNSH mapping",
-            "API-uttrekk for bank og portefølje",
-        ],
-        tone="green",
-        badge="Build",
-    )
-with c2:
-    render_panel(
-        "Neste utviklingssteg",
-        "Etter MVP kan modulen bli dypere og mer finmasket uten å endre den kommersielle logikken.",
-        [
-            "Batch-opplasting og automatisk porteføljesegmentering",
-            "Scenario- og skadekostsimulering per horisont",
-            "Webhooks og white-label-rapporter mot bank/partner",
-            "Kobling til finansiell rapportering og policy-motor",
-        ],
-        tone="blue",
-        badge="Expand",
-    )
+with right:
+    render_project_snapshot(project, badge="Portfolio-ready")
+    render_metric_cards([
+        {"label": "Klimarisikoscore", "value": f"{snapshot.get('aggregate_score', 0):.2f}", "desc": "Vektet score 1-5 pa tvers av flom, skred, havniva og varme."},
+        {"label": "Usikkerhet", "value": f"+/- {snapshot.get('uncertainty_interval', 0):.2f}", "desc": "Konfidensintervall basert pa datakvalitet og faresonetreff."},
+        {"label": "Scenario", "value": climate_scenario, "desc": f"Horisont {horizon}."},
+        {"label": "Portefolje", "value": str(len(portfolio_rows) if analysis_mode == 'Portefolje' else 1), "desc": "Antall objekter i batch-preview."},
+    ])
+    render_json_preview({"weights": weights, "targets": reporting_target, "batch_id": (portfolio_batch or {}).get("batch_id", "")}, "Bestillingspayload")
+
+render_section("Resultat og eksport", "Builtly holder datagrunnlag, regulatorisk mapping og AI-oppsummering atskilt.", "Output")
+
+tabs = st.tabs(["Risikofaktorer", "Datakilder", "Regulatorisk mapping", "Portefolje-API", "AI-utkast"])
+with tabs[0]:
+    factors = pd.DataFrame([
+        {"factor": "flood", "score": snapshot.get("flood_score"), "confidence": max(0.0, 1.0 - snapshot.get("uncertainty_interval", 0.5) / 2.0), "source": "NVE flom + asset profile", "note": "Flomrisiko"},
+        {"factor": "landslide", "score": snapshot.get("landslide_score"), "confidence": max(0.0, 1.0 - snapshot.get("uncertainty_interval", 0.5) / 2.0), "source": "NVE skred + terreng", "note": "Skred- og rasfare"},
+        {"factor": "sea_level", "score": snapshot.get("sea_level_score"), "confidence": max(0.0, 1.0 - snapshot.get("uncertainty_interval", 0.5) / 2.0), "source": "Hoyde + avstand til kyst", "note": "Stormflo og havniva"},
+        {"factor": "heat_stress", "score": snapshot.get("heat_stress_score"), "confidence": max(0.0, 1.0 - snapshot.get("uncertainty_interval", 0.5) / 2.0), "source": "Urban heat proxy", "note": "Varmestress"},
+    ])
+    st.dataframe(factors, use_container_width=True, hide_index=True)
+    dataframe_download(factors, "Last ned faktorscore (.csv)", "climate_factors.csv")
+    if snapshot.get("map_url"):
+        st.markdown(f"Kartlenke: {snapshot['map_url']}")
+
+with tabs[1]:
+    st.dataframe(pd.DataFrame(snapshot.get("source_rows", [])), use_container_width=True, hide_index=True)
+    st.markdown("### Adapterstatus")
+    st.dataframe(pd.DataFrame(adapter_status()), use_container_width=True, hide_index=True)
+
+with tabs[2]:
+    reg_df = pd.DataFrame(snapshot.get("regulatory_outputs", []))
+    st.dataframe(reg_df, use_container_width=True, hide_index=True)
+    json_download({"result": snapshot, "regulatory_outputs": snapshot.get("regulatory_outputs", [])}, "Last ned regulatorisk mapping (.json)", "climate_mapping.json")
+
+with tabs[3]:
+    if portfolio_batch:
+        st.metric("Batch-ID", portfolio_batch.get("batch_id", "-"))
+        st.metric("Estimert ferdig", f"{portfolio_batch.get('estimated_completion_hours', 0)} timer")
+        st.dataframe(pd.DataFrame(portfolio_batch.get("properties", [])[:200]), use_container_width=True, hide_index=True)
+        json_download(portfolio_batch, "Last ned batch-preview (.json)", "climate_portfolio_batch.json")
+    else:
+        st.info("Bytt til portefolje for a se batch-preview og webhook-metadata.")
+
+with tabs[4]:
+    if ai_result.get("ok") and ai_result.get("data"):
+        st.write((ai_result.get("data") or {}).get("executive_summary") or "Ingen AI-oppsummering tilgjengelig.")
+        st.dataframe(pd.DataFrame((ai_result.get("data") or {}).get("regulatory_outputs", [])), use_container_width=True, hide_index=True)
+    else:
+        st.info("AI-oppsummering er ikke tilgjengelig akkurat na.")
+    render_attempt_log(ai_result.get("attempt_log", []))
+
+render_panel(
+    "Pris- og produktlogikk",
+    "Klimarisiko er et Niva 1-dataprodukt som kan prises per eiendom eller som batch/API-abonnement mot bank og forsikring.",
+    [
+        "Enkeltobjekt: rapport per eiendom med PDF, JSON og maskinlesbar mapping.",
+        "Portefolje: batch-API med webhook, batch-ID og eksport mot bankens egne systemer.",
+        "Vekter kan styres per partner eller tenant for ulike risikoprofiler.",
+    ],
+    tone=tone_from_score(float(snapshot.get("aggregate_score", 0.0))),
+    badge="Dataprodukt",
+)
