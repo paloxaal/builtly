@@ -13,6 +13,8 @@ from urllib import request as urlrequest
 
 import streamlit as st
 
+from builtly_ai_fallback import ai_service_ready, generate_text_with_fallback
+
 # -------------------------------------------------
 # 1) PAGE CONFIG
 # -------------------------------------------------
@@ -1216,29 +1218,29 @@ LANGUAGE_PROFILES = {'🇬🇧 English (UK)': {'country': 'United Kingdom',
 
 MODULE_EXPANSION_TEXTS = {
     "🇬🇧 English (UK)": {
-        "mod_sec_title": "Specialized agents, commercial engines and scale layers in one platform",
-        "mod_sec_sub": "Builtly should combine vertical specialist modules with horizontal engines for tender, quantity, yield, climate risk and partner distribution. That is how the product scales without scaling like a consultancy.",
-        "mod_sec4": "Commercial & delivery intelligence",
-        "mod_sec4_sub": "Horizontal modules that reduce tender risk, quantify scope and improve project yield.",
-        "mod_sec5": "Climate, portfolio & partner scale",
-        "mod_sec5_sub": "Portfolio screening, climate risk and white-label/API distribution for enterprise growth.",
-        "m_tender_t": "TENDER CONTROL - Bid Package QA",
-        "m_tender_d": "Compare tender documents, drawings and bid inputs. Generates deviation matrix, missing-item log, ambiguity log and RFI suggestions.",
+        "mod_sec_title": "Modules for faster and safer project decisions",
+        "mod_sec_sub": "Choose the modules that help your project move faster: from feasibility and compliance to tender control, quantities, area efficiency and climate risk.",
+        "mod_sec4": "Control, quantities & project decisions",
+        "mod_sec4_sub": "Modules that help you control tender material, understand scope, improve area efficiency and document climate risk.",
+        "mod_sec5": "Climate & portfolio",
+        "mod_sec5_sub": "Climate and portfolio insight for property owners, lenders and project teams.",
+        "m_tender_t": "TENDER CONTROL - Safer tender packages",
+        "m_tender_d": "Compare tender documents, drawings and bid inputs to reveal gaps, inconsistencies and open questions before submission.",
         "m_tender_in": "Tender docs + drawings + IFC/PDF",
         "m_tender_out": "Deviation matrix, scope log, RFIs",
         "m_tender_btn": "Open Tender Control",
-        "m_quantity_t": "QUANTITY & SCOPE - Revision Intelligence",
-        "m_quantity_d": "Track quantities, areas, revision deltas and traceability between model, drawing and description.",
+        "m_quantity_t": "QUANTITY & SCOPE - Quantities with traceability",
+        "m_quantity_d": "Track quantities, areas and revision changes with clear traceability between model, drawing and description.",
         "m_quantity_in": "IFC / PDF / BOQ / room data",
         "m_quantity_out": "Quantity set, area log, delta report",
         "m_quantity_btn": "Open Quantity & Scope",
-        "m_yield_t": "AREA & YIELD - Development Optimizer",
-        "m_yield_d": "Analyze gross/net, saleable and lettable area, core ratio, technical rooms and scenario-based yield improvements.",
+        "m_yield_t": "AREA & YIELD - Better area efficiency",
+        "m_yield_d": "Analyze gross/net, saleable and lettable area and test realistic scenarios for better area efficiency and value.",
         "m_yield_in": "Plan basis + area program",
         "m_yield_out": "Yield note, scenarios, value uplift",
         "m_yield_btn": "Open Yield Optimizer",
-        "m_climate_t": "CLIMATE RISK - Asset & Portfolio Screening",
-        "m_climate_d": "Scores flood, landslide, sea-level and heat stress risk and maps outputs to Taxonomy, SFDR and banking workflows.",
+        "m_climate_t": "CLIMATE RISK - Property & portfolio",
+        "m_climate_d": "Maps flood, landslide, sea-level and heat-stress risk into a clear score that can be used in property and portfolio decisions.",
         "m_climate_in": "Address / coordinates + exposure",
         "m_climate_out": "Climate risk score, taxonomy mapping",
         "m_climate_btn": "Open Climate Risk",
@@ -1249,29 +1251,29 @@ MODULE_EXPANSION_TEXTS = {
         "m_partner_btn": "Open Partner API"
     },
     "🇳🇴 Norsk": {
-        "mod_sec_title": "Spesialiserte moduler, kommersielle motorer og skaleringslag i én plattform",
-        "mod_sec_sub": "Builtly bør kombinere vertikale fagmoduler med horisontale motorer for anbud, mengder, yield, klimarisiko og partnerdistribusjon. Det er slik plattformen kan skalere uten å vokse som et konsulentselskap.",
-        "mod_sec4": "Kommersiell & leveranseintelligens",
-        "mod_sec4_sub": "Horisontale moduler som reduserer anbudsrisiko, kvantifiserer scope og forbedrer areal/yield.",
-        "mod_sec5": "Klima, portefølje & partnerskala",
-        "mod_sec5_sub": "Porteføljescreening, klimarisiko og white-label/API-distribusjon for enterprise-vekst.",
-        "m_tender_t": "ANBUDSKONTROLL - Tilbudsgrunnlag & QA",
-        "m_tender_d": "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
+        "mod_sec_title": "Moduler for raskere og tryggere prosjektbeslutninger",
+        "mod_sec_sub": "Velg modulene som hjelper prosjektet videre – fra tidligfase og compliance til anbudskontroll, mengder, arealutnyttelse og klimarisiko.",
+        "mod_sec4": "Kontroll, mengder og prosjektbeslutninger",
+        "mod_sec4_sub": "Moduler som hjelper deg å kontrollere anbudsgrunnlag, forstå scope, forbedre arealutnyttelse og dokumentere klimarisiko.",
+        "mod_sec5": "Klima & portefølje",
+        "mod_sec5_sub": "Klimarisiko og porteføljeinnsikt for eiendom, bank og forsikring.",
+        "m_tender_t": "ANBUDSKONTROLL - Tryggere tilbudsgrunnlag",
+        "m_tender_d": "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput for å avdekke hull, avvik og spørsmål før innlevering.",
         "m_tender_in": "Anbudsgrunnlag + tegninger + IFC/PDF",
         "m_tender_out": "Avviksmatrise, scope-logg, RFIs",
         "m_tender_btn": "Åpne Tender Control",
-        "m_quantity_t": "MENGDE & SCOPE - Revisjon og sporbarhet",
-        "m_quantity_d": "Fanger mengder, arealer, revisjonsendringer og sporbarhet mellom modell, tegning og beskrivelse.",
+        "m_quantity_t": "MENGDE & SCOPE - Mengder med sporbarhet",
+        "m_quantity_d": "Samler mengder, arealer og revisjonsendringer med tydelig sporbarhet mellom modell, tegning og beskrivelse.",
         "m_quantity_in": "IFC / PDF / BOQ / romdata",
         "m_quantity_out": "Mengdeliste, areallogg, deltarapport",
         "m_quantity_btn": "Åpne Mengde & Scope",
-        "m_yield_t": "AREAL & YIELD - Utvikleroptimalisering",
-        "m_yield_d": "Analyserer brutto/netto, salgbart og utleibart areal, kjerneandel, tekniske rom og scenarioer for mer verdiskaping.",
+        "m_yield_t": "AREAL & YIELD - Bedre arealutnyttelse",
+        "m_yield_d": "Analyserer brutto/netto, salgbart og utleibart areal og viser realistiske scenarioer for bedre arealutnyttelse og verdi.",
         "m_yield_in": "Plangrunnlag + arealprogram",
         "m_yield_out": "Yield-notat, scenarioer, verdiøkning",
         "m_yield_btn": "Åpne Yield Optimizer",
         "m_climate_t": "KLIMARISIKO - Eiendom & portefølje",
-        "m_climate_d": "Skårer flom, skred, havnivå og varmestress og mapper output mot Taxonomy, SFDR og bankrapportering.",
+        "m_climate_d": "Samler flom, skred, havnivå og varmestress i en tydelig score som kan brukes i eiendoms- og porteføljevurderinger.",
         "m_climate_in": "Adresse / koordinater + eksponering",
         "m_climate_out": "Klimarisikoscore, taxonomy-mapping",
         "m_climate_btn": "Åpne Klimarisiko",
@@ -1417,18 +1419,6 @@ DISCIPLINE_CATALOG.extend([
             "🇩🇰 Dansk": "Klimarisiko",
             "🇫🇮 Suomi": "Ilmastoriski",
             "🇩🇪 Deutsch": "Klimarisiko",
-        },
-    },
-    {
-        "code": "partner_api",
-        "labels": {
-            "🇬🇧 English (UK)": "White-label API",
-            "🇺🇸 English (US)": "White-label API",
-            "🇳🇴 Norsk": "White-label API",
-            "🇸🇪 Svenska": "White-label API",
-            "🇩🇰 Dansk": "White-label API",
-            "🇫🇮 Suomi": "White-label API",
-            "🇩🇪 Deutsch": "White-label API",
         },
     },
 ])
@@ -2267,53 +2257,30 @@ def merge_assistant_continuation(answer: str, continuation: str) -> str:
 
 
 def request_builtly_answer(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
-    api_key = gemini_api_key()
     profile = get_locale_profile(lang_key)
     selected_labels = ", ".join(discipline_labels(selected_codes, lang_key))
-    if not api_key:
+    if not ai_service_ready():
         return (
             f"**{get_text_bundle(lang_key)['assistant_note_prefix']}:** "
-            f"Set the AI API key in Render to activate live answers. "
-            f"The front page is already wired to send the selected language ({profile['language_name']}), "
-            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI engine."
+            f"Set at least one of OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY in Render to activate live answers. "
+            f"The assistant already sends the selected language ({profile['language_name']}), "
+            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI stack."
         )
 
-    model_name = os.getenv("BUILTLY_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
     primary_prompt = build_builtly_prompt(question, selected_codes, lang_key, history)
-    answer, was_truncated = call_gemini_generate_content(
-        api_key=api_key,
-        model_name=model_name,
-        prompt_text=primary_prompt,
+    result = generate_text_with_fallback(
+        system_prompt="You are Builtly's multi-disciplinary engineering assistant. Follow the user prompt exactly and keep the answer compact, practical and project-oriented.",
+        user_prompt=primary_prompt,
+        task="assistant",
+        estimated_context_chars=len(primary_prompt),
         max_output_tokens=1800,
+        temperature=0.2,
     )
 
-    combined_answer = answer
-    continuation_rounds = 0
-    while continuation_rounds < 3 and (was_truncated or not answer_has_end_marker(combined_answer)):
-        continuation_rounds += 1
-        continuation_prompt = build_builtly_continuation_prompt(
-            question=question,
-            partial_answer=combined_answer,
-            selected_codes=selected_codes,
-            lang_key=lang_key,
-        )
-        try:
-            continuation, continuation_truncated = call_gemini_generate_content(
-                api_key=api_key,
-                model_name=model_name,
-                prompt_text=continuation_prompt,
-                max_output_tokens=900,
-            )
-        except Exception:
-            break
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error") or "No text returned from the AI stack.")
 
-        merged_answer = merge_assistant_continuation(combined_answer, continuation)
-        if merged_answer == combined_answer:
-            break
-
-        combined_answer = merged_answer
-        was_truncated = continuation_truncated
-
+    combined_answer = result.get("text", "")
     if not answer_has_end_marker(combined_answer):
         repair_prompt = build_builtly_repair_prompt(
             question=question,
@@ -2321,37 +2288,21 @@ def request_builtly_answer(question: str, selected_codes: List[str], lang_key: s
             selected_codes=selected_codes,
             lang_key=lang_key,
         )
-        try:
-            repaired_answer, repaired_truncated = call_gemini_generate_content(
-                api_key=api_key,
-                model_name=model_name,
-                prompt_text=repair_prompt,
-                max_output_tokens=1400,
-            )
-            combined_answer = repaired_answer
-            if repaired_truncated or not answer_has_end_marker(combined_answer):
-                final_continuation_prompt = build_builtly_continuation_prompt(
-                    question=question,
-                    partial_answer=combined_answer,
-                    selected_codes=selected_codes,
-                    lang_key=lang_key,
-                )
-                try:
-                    continuation, _ = call_gemini_generate_content(
-                        api_key=api_key,
-                        model_name=model_name,
-                        prompt_text=final_continuation_prompt,
-                        max_output_tokens=700,
-                    )
-                    combined_answer = merge_assistant_continuation(combined_answer, continuation)
-                except Exception:
-                    pass
-        except Exception:
-            combined_answer = trim_incomplete_tail(combined_answer)
+        repaired = generate_text_with_fallback(
+            system_prompt="You repair incomplete Builtly answers. Return one complete answer only.",
+            user_prompt=repair_prompt,
+            task="assistant",
+            preferred_providers=[result.get("provider")] if result.get("provider") else None,
+            estimated_context_chars=len(repair_prompt),
+            max_output_tokens=1400,
+            temperature=0.05,
+        )
+        if repaired.get("ok"):
+            combined_answer = repaired.get("text", combined_answer)
 
     final_answer = clean_ai_answer_text(combined_answer)
     if not final_answer:
-        raise RuntimeError("No text returned from the AI engine.")
+        raise RuntimeError("No text returned from the AI stack.")
 
     if not answer_has_end_marker(combined_answer):
         final_answer = trim_incomplete_tail(final_answer)
@@ -3271,6 +3222,14 @@ st.markdown(
         margin-top: 0.8rem;
     }
 
+    .module-grid-four {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1.2rem;
+        align-items: stretch;
+        margin-top: 0.8rem;
+    }
+
     .module-card {
         background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
         border: 1px solid var(--stroke);
@@ -3443,7 +3402,8 @@ st.markdown(
         .stats-row,
         .trust-grid,
         .loop-grid,
-        .module-grid {
+        .module-grid,
+        .module-grid-four {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
@@ -3474,7 +3434,8 @@ st.markdown(
         .stats-row,
         .trust-grid,
         .loop-grid,
-        .module-grid {
+        .module-grid,
+        .module-grid-four {
             grid-template-columns: 1fr;
         }
         .hero,
@@ -3937,14 +3898,10 @@ sustainability_cards = [
 ]
 
 commercial_cards = [
-    module_card("tender_control", "📑", "Commercial", "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
-    module_card("quantity_scope", "📏", "Core engine", "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
-    module_card("yield_optimizer", "🏙️", "Developer-first", "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
-]
-
-platform_cards = [
-    module_card("climate_risk", "🌊", "Portfolio", "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
-    module_card("partner_api", "🔌", "Scale", "badge-roadmap", lang["m_partner_t"], lang["m_partner_d"], lang["m_partner_in"], lang["m_partner_out"], lang["m_partner_btn"]),
+    module_card("tender_control", "📑", "Control", "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
+    module_card("quantity_scope", "📏", "Revision", "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
+    module_card("yield_optimizer", "🏙️", "Areal", "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
+    module_card("climate_risk", "🌊", "Klimarisiko", "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
 ]
 
 render_html(
@@ -3967,11 +3924,7 @@ render_html(
 
     <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec4']}</div>
     <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec4_sub']}</div>
-    <div class="module-grid">{''.join(commercial_cards)}</div>
-
-    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec5']}</div>
-    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec5_sub']}</div>
-    <div class="module-grid">{''.join(platform_cards)}</div>
+    <div class="module-grid-four">{''.join(commercial_cards)}</div>
     """
 )
 
