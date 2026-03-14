@@ -2156,6 +2156,36 @@ def verify_site_access_code(candidate: str) -> bool:
     return False
 
 
+def _generate_session_token(code: str) -> str:
+    """Genererer en kort token fra koden som lagres i URL for persistent innlogging."""
+    raw = hashlib.sha256(f"builtly-session-{code.strip()}".encode("utf-8")).hexdigest()
+    return raw[:16]
+
+
+def _verify_session_token(token: str) -> bool:
+    """Sjekker om en session-token matcher en av de konfigurerte kodene."""
+    if not token or len(token) < 8:
+        return False
+    for code in configured_access_codes():
+        if hmac.compare_digest(_generate_session_token(code), token):
+            return True
+    for code_hash in configured_access_hashes():
+        pass
+    return False
+
+
+def _restore_session_from_url() -> bool:
+    """Sjekker om URL-en inneholder en gyldig session-token og gjenoppretter tilgangen."""
+    try:
+        token = st.query_params.get("s", "")
+    except Exception:
+        return False
+    if token and _verify_session_token(token):
+        st.session_state.site_access_granted = True
+        return True
+    return False
+
+
 def render_site_access_gate(lang_key: str) -> None:
     copy = get_access_copy(lang_key)
     lang_bundle = get_text_bundle(lang_key)
@@ -2197,6 +2227,7 @@ def render_site_access_gate(lang_key: str) -> None:
                 st.session_state.site_access_granted = True
                 st.session_state.site_access_error = ""
                 bump_site_access_nonce()
+                st.query_params["s"] = _generate_session_token(access_code)
                 st.rerun()
             else:
                 st.session_state.site_access_error = copy["error_invalid"]
@@ -2213,6 +2244,8 @@ def ensure_frontpage_access(lang_key: str) -> None:
     if not access_gate_enabled():
         return
     if st.session_state.get("site_access_granted"):
+        return
+    if _restore_session_from_url():
         return
     render_site_access_gate(lang_key)
     st.stop()
@@ -4064,7 +4097,7 @@ st.markdown(
     }
 
     div[data-testid="stTextInput"] input {
-        background: rgba(255,255,255,0.02) !important;
+        background: transparent !important;
         color: var(--text) !important;
         -webkit-text-fill-color: var(--text) !important;
         border-radius: 14px !important;
@@ -4073,6 +4106,40 @@ st.markdown(
     div[data-testid="stTextInput"] input::placeholder {
         color: var(--muted) !important;
         -webkit-text-fill-color: var(--muted) !important;
+    }
+
+    div[data-testid="stTextInput"] div[data-baseweb="base-input"],
+    div[data-testid="stTextInput"] div[data-baseweb="input"] {
+        background-color: transparent !important;
+        background: transparent !important;
+    }
+
+    div[data-testid="stExpander"] div[data-testid="stTextInput"] > div,
+    div[data-testid="stForm"] div[data-testid="stTextInput"] > div {
+        background: rgba(255,255,255,0.04) !important;
+        border: 1px solid rgba(120,145,170,0.22) !important;
+    }
+
+    div[data-testid="stExpander"] div[data-testid="stTextInput"] input,
+    div[data-testid="stForm"] div[data-testid="stTextInput"] input {
+        background: transparent !important;
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+    }
+
+    div[data-testid="stExpander"] div[data-testid="stTextArea"] textarea,
+    div[data-testid="stForm"] div[data-testid="stTextArea"] textarea {
+        background: transparent !important;
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+    }
+
+    div[data-testid="stExpander"] div[data-baseweb="base-input"],
+    div[data-testid="stExpander"] div[data-baseweb="input"],
+    div[data-testid="stForm"] div[data-baseweb="base-input"],
+    div[data-testid="stForm"] div[data-baseweb="input"] {
+        background-color: transparent !important;
+        background: transparent !important;
     }
 
     .access-gate-head {
