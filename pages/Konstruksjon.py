@@ -1429,6 +1429,16 @@ def build_fallback_report(analysis_result: Dict[str, Any], project_data: Dict[st
     load_path = [f"- {x}" for x in rec.get("load_path", [])[:8]] or ["- Lastvei må dokumenteres tydelig i videre prosjektering."]
     next_steps = [f"- {x}" for x in analysis_result.get("next_steps", [])[:10]] or ["- Innhent mer tegningsunderlag."]
 
+    observation_text = "\n".join(observation_lines)
+    missing_text = "\n".join(missing_lines)
+    load_text = "\n".join(load_lines)
+    load_path_text = "\n".join(load_path)
+    buildability_text = "\n".join(buildability)
+    alt_text = "\n".join(alt_lines) if alt_lines else "- Ingen alternativer registrert."
+    foundation_text = "\n".join(foundation_lines)
+    risk_text = "\n".join(risk_lines) if risk_lines else "- Ingen eksplisitt maskinell risikoliste tilgjengelig."
+    next_steps_text = "\n".join(next_steps)
+
     return f"""
 # 1. SAMMENDRAG OG KONKLUSJON
 Datagrunnlaget er vurdert som **{analysis_result.get('grunnlag_status', 'DELVIS')}**.
@@ -1437,13 +1447,13 @@ Begrunnelse: {analysis_result.get('grunnlag_begrunnelse', '-')}
 
 # 2. VURDERING AV DATAGRUNNLAG
 ## Observerte forhold
-{'\n'.join(observation_lines)}
+{observation_text}
 
 ## Mangelpunkter
-{'\n'.join(missing_lines)}
+{missing_text}
 
 # 3. LASTER OG FORUTSETNINGER
-{'\n'.join(load_lines)}
+{load_text}
 
 # 4. KONSEPT FOR BÆRESYSTEM OG STABILITET
 ## Anbefalt system
@@ -1455,21 +1465,21 @@ Begrunnelse: {analysis_result.get('grunnlag_begrunnelse', '-')}
 - Sikkerhet: {rec.get('safety_reason', '-')}
 
 ## Lastvei og byggbarhet
-{'\n'.join(load_path)}
-{'\n'.join(buildability)}
+{load_path_text}
+{buildability_text}
 
 # 5. RASJONALITET, BYGGBARHET OG ALTERNATIVE SYSTEMER
-{'\n'.join(alt_lines) if alt_lines else "- Ingen alternativer registrert."}
+{alt_text}
 
 # 6. FUNDAMENTERING OG EKSISTERENDE KONSTRUKSJONER
-{'\n'.join(foundation_lines)}
+{foundation_text}
 
 # 7. RISIKO, SÅRBARHET OG NESTE STEG
 ## Risiko
-{'\n'.join(risk_lines) if risk_lines else "- Ingen eksplisitt maskinell risikoliste tilgjengelig."}
+{risk_text}
 
 ## Neste steg
-{'\n'.join(next_steps)}
+{next_steps_text}
 """.strip()
 
 
