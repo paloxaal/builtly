@@ -33,11 +33,6 @@ except Exception:
     OpenAI = None
 
 try:
-    import anthropic as _anthropic_sdk
-except Exception:
-    _anthropic_sdk = None
-
-try:
     import fitz
 except Exception:
     fitz = None
@@ -64,24 +59,19 @@ openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
 HAS_GEMINI_BACKEND = bool(google_key and genai is not None)
 HAS_OPENAI_BACKEND = bool(openai_key and OpenAI is not None)
 
-anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-HAS_ANTHROPIC_BACKEND = bool(anthropic_key and _anthropic_sdk is not None)
-
 if HAS_GEMINI_BACKEND:
     try:
         genai.configure(api_key=google_key)
     except Exception:
         HAS_GEMINI_BACKEND = False
 
-if not HAS_GEMINI_BACKEND and not HAS_OPENAI_BACKEND and not HAS_ANTHROPIC_BACKEND:
-    if anthropic_key and _anthropic_sdk is None:
-        st.error("Kritisk feil: ANTHROPIC_API_KEY er satt, men pakken 'anthropic' er ikke tilgjengelig i miljøet. Legg til 'anthropic' i requirements.txt.")
-    elif google_key and genai is None:
+if not HAS_GEMINI_BACKEND and not HAS_OPENAI_BACKEND:
+    if google_key and genai is None:
         st.error("Kritisk feil: GOOGLE_API_KEY er satt, men pakken 'google.generativeai' er ikke tilgjengelig i miljøet.")
     elif openai_key and OpenAI is None:
         st.error("Kritisk feil: OPENAI_API_KEY er satt, men pakken 'openai' er ikke tilgjengelig i miljøet.")
     else:
-        st.error("Kritisk feil: Fant verken en brukbar Gemini-backend, OpenAI-backend eller Claude-backend. Sjekk Environment Variables i Render.")
+        st.error("Kritisk feil: Fant verken en brukbar Gemini-backend eller en brukbar OpenAI-backend. Sjekk Environment Variables i Render.")
     st.stop()
 
 
@@ -702,9 +692,9 @@ def add_analysis_badge(img: Image.Image, idx: int, label: str) -> Image.Image:
     return out
 
 
-def prepare_ai_images(drawings: List[Dict[str, Any]], max_images: int = 5) -> List[Image.Image]:
+def prepare_ai_images(drawings: List[Dict[str, Any]]) -> List[Image.Image]:
     ai_images = []
-    for record in drawings[:max_images]:
+    for record in drawings:
         ai_images.append(add_analysis_badge(record["image"], record["page_index"], record["label"]))
     return ai_images
 
@@ -963,25 +953,6 @@ def optional_openai_client() -> Any:
     return _RUNTIME_OPENAI_CLIENT
 
 
-_RUNTIME_ANTHROPIC_CLIENT: Any = None
-
-
-def optional_anthropic_client() -> Any:
-    global _RUNTIME_ANTHROPIC_CLIENT
-    if not HAS_ANTHROPIC_BACKEND or _anthropic_sdk is None:
-        return None
-    if _RUNTIME_ANTHROPIC_CLIENT is None:
-        try:
-            _RUNTIME_ANTHROPIC_CLIENT = _anthropic_sdk.Anthropic(
-                api_key=anthropic_key,
-                timeout=300.0,
-                max_retries=2,
-            )
-        except Exception:
-            _RUNTIME_ANTHROPIC_CLIENT = None
-    return _RUNTIME_ANTHROPIC_CLIENT
-
-
 def list_gemini_models() -> List[str]:
     if not HAS_GEMINI_BACKEND or genai is None:
         return []
@@ -1007,14 +978,6 @@ def list_available_models() -> List[str]:
             tagged = f"openai:{candidate}"
             if tagged not in models:
                 models.append(tagged)
-    if HAS_ANTHROPIC_BACKEND:
-        preferred_claude = clean_pdf_text(os.environ.get("ANTHROPIC_MODEL") or "").strip()
-        if preferred_claude:
-            models.append(f"anthropic:{preferred_claude}")
-        for candidate in ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
-            tagged = f"anthropic:{candidate}"
-            if tagged not in models:
-                models.append(tagged)
     for gemini_name in list_gemini_models():
         if gemini_name not in models:
             models.append(gemini_name)
@@ -1028,14 +991,9 @@ def pick_model(valid_models: List[str]) -> Optional[str]:
     ).strip()
     if preferred_openai:
         preferred.append(f"openai:{preferred_openai}")
-    preferred_claude = clean_pdf_text(os.environ.get("ANTHROPIC_MODEL") or "").strip()
-    if preferred_claude:
-        preferred.append(f"anthropic:{preferred_claude}")
     preferred.extend([
         "openai:gpt-4.1",
         "openai:gpt-4o",
-        "anthropic:claude-sonnet-4-20250514",
-        "anthropic:claude-haiku-4-5-20251001",
         "openai:gpt-4.1-mini",
         "models/gemini-1.5-pro",
         "models/gemini-1.5-flash",
@@ -1051,9 +1009,6 @@ def build_runtime_ai_model(model_name: str) -> Any:
     if isinstance(model_name, dict):
         return model_name
     selected = clean_pdf_text(model_name or "").strip()
-    if selected.startswith("anthropic:"):
-        client = optional_anthropic_client()
-        return {"provider": "anthropic", "client": client, "model_name": selected.split(":", 1)[1]}
     if selected.startswith("openai:"):
         client = optional_openai_client()
         return {"provider": "openai", "client": client, "model_name": selected.split(":", 1)[1]}
@@ -1068,82 +1023,6 @@ def pil_image_to_data_uri_for_ai(img: Image.Image) -> str:
 
 
 def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
-
-    # --- ANTHROPIC / CLAUDE ---
-    if isinstance(model, dict) and model.get("provider") == "anthropic":
-        client = model.get("client") or optional_anthropic_client()
-        if client is None:
-            # Claude ikke tilgjengelig — fall direkte til OpenAI
-            if HAS_OPENAI_BACKEND:
-                st.session_state["rib_ai_backend_warning"] = "Claude-klient ikke tilgjengelig, bruker OpenAI."
-                try:
-                    fallback = build_runtime_ai_model("openai:gpt-4.1")
-                    return generate_text(fallback, parts, temperature=temperature)
-                except Exception:
-                    pass
-            if HAS_GEMINI_BACKEND and genai is not None:
-                fallback_name = next((name for name in list_gemini_models() if name), None)
-                if fallback_name:
-                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
-            raise RuntimeError("Ingen AI-backend tilgjengelig.")
-
-        model_name = clean_pdf_text(model.get("model_name") or "claude-sonnet-4-20250514").strip() or "claude-sonnet-4-20250514"
-        content_blocks: List[Dict[str, Any]] = []
-        for part in parts:
-            if isinstance(part, Image.Image):
-                img_for_api = copy_rgb(part)
-                img_for_api.thumbnail((1200, 1200))
-                bio = io.BytesIO()
-                img_for_api.save(bio, format="JPEG", quality=85)
-                b64 = base64.b64encode(bio.getvalue()).decode("utf-8")
-                content_blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": b64,
-                    },
-                })
-            else:
-                txt = clean_pdf_text(part)
-                if txt:
-                    content_blocks.append({"type": "text", "text": txt})
-
-        try:
-            response = client.messages.create(
-                model=model_name,
-                max_tokens=8192,
-                temperature=float(temperature) if temperature is not None else 0.2,
-                messages=[{"role": "user", "content": content_blocks}],
-                timeout=120.0,
-            )
-            output_parts: List[str] = []
-            for block in response.content:
-                if hasattr(block, "text"):
-                    output_parts.append(clean_pdf_text(block.text))
-            result = "\n".join(p for p in output_parts if p).strip()
-            if result:
-                return result
-
-        except Exception as exc:
-            pass  # Fall gjennom til fallback nedenfor
-
-        # Claude feilet eller returnerte tomt — fallback
-        if HAS_OPENAI_BACKEND:
-            st.session_state["rib_ai_backend_warning"] = "Claude-kall feilet, bruker OpenAI."
-            try:
-                fallback = build_runtime_ai_model("openai:gpt-4.1")
-                return generate_text(fallback, parts, temperature=temperature)
-            except Exception:
-                pass
-        if HAS_GEMINI_BACKEND and genai is not None:
-            fallback_name = next((name for name in list_gemini_models() if name), None)
-            if fallback_name:
-                st.session_state["rib_ai_backend_warning"] = "Claude feilet, bruker Gemini."
-                return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
-        return ""
-
-    # --- OPENAI ---
     if isinstance(model, dict) and model.get("provider") == "openai":
         client = model.get("client") or optional_openai_client()
         if client is None:
@@ -1184,12 +1063,10 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
                 fallback_name = next((name for name in list_gemini_models() if name), None)
                 if fallback_name:
                     st.session_state["rib_ai_backend_warning"] = short_text(
-                        f"OpenAI-feil ({type(exc).__name__}), falt tilbake til Gemini.", 240,
+                        f"OpenAI-feil, falt tilbake til Gemini: {type(exc).__name__}: {exc}",
+                        240,
                     )
-                    try:
-                        return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
-                    except Exception:
-                        pass
+                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
             raise
 
         output_text = clean_pdf_text(getattr(response, "output_text", "")).strip()
@@ -1207,7 +1084,6 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
         except Exception:
             return ""
 
-    # --- GEMINI (fallback) ---
     try:
         response = model.generate_content(parts, generation_config={"temperature": temperature})
     except Exception:
@@ -1451,24 +1327,17 @@ MASKINELL ALTERNATIVMATRISEN SOM STARTPUNKT:
 TEGNINGSMANIFEST I SAMME REKKEFØLGE SOM BILDENE SENDES:
 {manifest}
 
-KRITISKE FAGRUTINER:
-1. Skill TYDELIG mellom papirramme / titleblock / naboplan / situasjonsinnstikk og selve byggets plan. Papirkanter, tegningsrammer, tittelfelt, utsnittsbokser, terrasseomriss, nabobygg og cropkanter er IKKE bæresystem.
-2. Hvis en tegningsside inneholder flere planvarianter side om side, identifiser riktig planomrade og returner plan_bbox for hver skisse. plan_bbox skal avgrense selve planutsnittet, ikke hele siden.
-3. Yttervegg er IKKE automatisk bærende. Marker ALDRI hele byggets perimeter som bærevegger med mindre tegningen tydelig viser en kontinuerlig massiv yttervegg som faktisk er del av primær bærestruktur.
-4. For boligplaner i overetasjer: prioriter kjerner, korridorvegger og leilighetsskillevegger. Perimetervegger er nesten aldri primær bærestruktur i moderne norske leilighetsbygg.
-5. For P-kjeller / transfer-nivå: søyler skal BARE plasseres der det er sannsynlig lastnedføring fra overliggende vegger eller kjerner. Unngå generiske rutenett.
-6. Når du er usikker: returner FÆRRE elementer, ikke flere. Det er bedre å utelate enn å finne på.
-7. ALDRI tegn et fullstendig rektangel rundt hele planområdet som "bærevegger".
-8. Koordinater: normaliserte mellom 0 og 1 relativt til HELE siden.
+EKSTRA FAGRUTINER SOM MÅ FØLGES:
+1. Skill tydelig mellom papirramme / titleblock / naboplan / situasjonsinnstikk og selve byggets plan. Papirkanter, tegningsrammer, tittelfelt, utsnittsbokser, terrasseomriss, nabobygg og cropkanter er IKKE bæresystem.
+2. Hvis én tegningsside inneholder flere planvarianter side om side, skal du identifisere riktig planområde og returnere plan_bbox for hver skisse. plan_bbox skal avgrense selve planutsnittet, ikke hele siden.
+3. Yttervegg er ikke automatisk bærende. Ikke marker hele byggets perimeter som bærevegger med mindre tegningen tydelig viser en kontinuerlig massiv yttervegg som faktisk er del av primær bærestruktur.
+4. For boligplaner i overetasjer skal du prioritere kjerner, korridorvegger og leilighetsskillevegger før du eventuelt tar med perimetervegger.
+5. For P-kjeller / transfer-nivå skal søyler bare brukes der det er sannsynlig lastnedføring fra overliggende vegger eller kjerner. Unngå generiske rutenett som ikke er begrunnet i planen.
+6. Når du er usikker, skal du returnere færre elementer, ikke flere. Det er bedre å utelate enn å finne på.
+7. Aldri tegn et fullstendig rektangel rundt hele planområdet som "bærevegger" bare fordi konturen er tydelig.
+8. Koordinater skal være normaliserte mellom 0 og 1 relativt til HELE siden.
 9. Maks 3 sketch-sider. Maks 1 plan_bbox per skisse.
-10. Vær eksplisitt om usikkerhet.
-
-VIKTIG TILLEGG FOR NØYAKTIGHET:
-- Beskriv i "structural_description" feltet for hver tegning NØYAKTIG hva du ser: hvilke vegger er indre bærevegger, hvor er trapperom/heissjakt, hvilken retning spenner dekkene.
-- I "bearing_principle" feltet: angi om systemet baseres på vegger_og_kjerner, soyle_bjelke eller hybrid.
-- I "perimeter_bearing" feltet: angi true BARE hvis yttervegg er del av primærbæring.
-- I "core_count_estimate": angi antall kjerner du ser i tegningen (trapperom + heissjakt = 1 kjerne).
-- I "bearing_wall_count_estimate": angi antall separate indre bærevegger (ikke perimeter).
+10. Vær eksplisitt om usikkerhet i observasjoner og mangler.
 
 JSON-SKJEMA:
 {{
@@ -1482,8 +1351,6 @@ JSON-SKJEMA:
       "page_label": "kort navn",
       "drawing_role": "plan | section | facade | detail | unknown",
       "usable_for_overlay": true,
-      "level_type": "overetasje | kjeller | tak",
-      "structural_description": "Detaljert tekstlig beskrivelse av hva du ser av bærende elementer og hvor de befinner seg i planen",
       "observations": ["..."]
     }}
   ],
@@ -1498,11 +1365,7 @@ JSON-SKJEMA:
     "rationality_reason": "hvorfor dette er mest rasjonelt",
     "safety_reason": "hvorfor dette er robust og sikkert",
     "buildability_notes": ["..."],
-    "load_path": ["..."],
-    "bearing_principle": "vegger_og_kjerner | soyle_bjelke | hybrid",
-    "perimeter_bearing": false,
-    "core_count_estimate": 1,
-    "bearing_wall_count_estimate": 2
+    "load_path": ["..."]
   }},
   "alternatives": [
     {{
@@ -1543,27 +1406,6 @@ Returner kun JSON.
     raw_text = generate_text(model, [prompt] + ai_images, temperature=0.08)
     parsed = safe_json_loads(raw_text)
     normalized = normalize_analysis_result(parsed, candidates, drawings)
-
-    # Lagre faglige hints fra LLM-analysen slik at geometri-motoren
-    # kan bruke dem til bedre plassering av kjerner, vegger og søyler
-    rec = normalized.get("recommended_system", {})
-    normalized["_geometry_hints"] = {
-        "bearing_principle": clean_pdf_text(rec.get("bearing_principle", "vegger_og_kjerner")),
-        "perimeter_bearing": bool(rec.get("perimeter_bearing", False)),
-        "core_count_estimate": int(rec.get("core_count_estimate") or 1),
-        "bearing_wall_count_estimate": int(rec.get("bearing_wall_count_estimate") or 2),
-        "level_types": {
-            d.get("page_index"): clean_pdf_text(d.get("level_type", "overetasje"))
-            for d in normalized.get("drawings", [])
-            if isinstance(d, dict)
-        },
-        "structural_descriptions": {
-            d.get("page_index"): clean_pdf_text(d.get("structural_description", ""))
-            for d in normalized.get("drawings", [])
-            if isinstance(d, dict)
-        },
-    }
-
     return normalized
 
 
@@ -2811,7 +2653,7 @@ with st.expander("2. Strategi for bæresystem og sikkerhet", expanded=True):
 
 with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
     st.info(
-        "Last opp plan, snitt, fasader og gjerne IFC/DXF/DWG. Agenten prioriterer IFC der det finnes, bruker PDF/bilder som fallback og legger foreslått bæresystem som punkter, kjerner og spennretninger på de mest relevante sidene."
+        "Last opp plan, snitt, fasader og gjerne DWG/DXF eller PDF. Agenten prioriterer DWG/DXF der det kan leses, bruker PDF/bilder som hovedfallback, og lar IFC være en tyngre reservevei hvis de andre formatene ikke gir nok grunnlag."
     )
 
     saved_drawings = load_saved_project_drawings()
@@ -10444,20 +10286,10 @@ def _render_ifc_storey_record_v13(file_name: str, storey_label: str, objects: Li
 
 def _load_ifc_drawings_v13(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
     if _ifcopenshell_v13 is None:
-        _append_upload_warning_v13("IFC-støtte er ikke aktivert i denne installasjonen. Konverter til PDF (plantegninger) i Revit/ArchiCAD og last opp. For full IFC-støtte: kontakt Builtly support.")
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet. Legg den til i requirements for å bruke IFC som primærkilde.")
         return []
     if _ifc_geom_v13 is None:
-        _append_upload_warning_v13("IFC-geometri kan ikke prosesseres i denne installasjonen. Last opp PDF-plantegninger i stedet for best mulig analyse.")
-        return []
-
-    # Filstørrelsesgrense for å unngå at serveren krasjer (502)
-    max_ifc_mb = 50
-    file_mb = len(file_bytes) / (1024 * 1024)
-    if file_mb > max_ifc_mb:
-        _append_upload_warning_v13(
-            f"IFC-filen '{file_name}' er {file_mb:.0f} MB, som er for stor for denne serveren (maks {max_ifc_mb} MB). "
-            f"Eksporter plantegninger som PDF i stedet, eller filtrer IFC-modellen til kun relevante etasjer."
-        )
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men 'ifcopenshell.geom' er ikke tilgjengelig i miljøet. IFC kan ikke rasteriseres til planbilder i denne installasjonen.")
         return []
 
     tmp_path = None
@@ -10724,7 +10556,7 @@ def _load_dxf_or_dwg_drawings_v13(file_name: str, file_bytes: bytes, suffix: str
             dwgread = _shutil_v13.which("dwgread")
             if not dwgread:
                 _append_upload_warning_v13(
-                    f"DWG-filer støttes ikke direkte. Eksporter tegningen som DXF eller PDF fra AutoCAD/Revit og last opp på nytt. Alternativt: last opp IFC-filen for best mulig analyse. (Fil: '{file_name}')"
+                    f"DWG-filen '{file_name}' kan ikke leses direkte i denne installasjonen fordi 'dwgread' ikke er tilgjengelig. Last opp IFC/PDF eller eksporter DXF, eller installer LibreDWG på serveren."
                 )
                 return []
             with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as out_dxf:
@@ -10806,7 +10638,7 @@ def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 4) -
             else:
                 sample_names = ", ".join(name for _, name, _, _ in grouped["dwg"][:3])
                 _append_upload_warning_v13(
-                    f"{len(grouped['dwg'])} DWG-fil(er) støttes ikke direkte. Eksporter som DXF eller PDF fra AutoCAD/Revit og last opp på nytt. Eksempel: {sample_names}."
+                    f"{len(grouped['dwg'])} DWG-fil(er) kunne ikke leses direkte fordi 'dwgread' ikke er tilgjengelig i miljøet. Last opp IFC/PDF eller eksporter DXF. Eksempel: {sample_names}."
                 )
         else:
             before_dwg = len(drawings)
@@ -11480,15 +11312,264 @@ def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 6) -
 
 
 
+
+# ------------------------------------------------------------
+# 15C. V17 ROBUST IFC-INGEST MED ISOLERT SUBPROSESS OG BEDRE ANALYSE-FEEDBACK
+# ------------------------------------------------------------
+_LOAD_IFC_DRAWINGS_V13_INPROCESS = _load_ifc_drawings_v13
+
+
+def _ensure_ifc_subprocess_helper_v17() -> Path:
+    helper_dir = DB_DIR / "_ifc_helpers"
+    helper_dir.mkdir(parents=True, exist_ok=True)
+    helper_path = helper_dir / "ifc_subprocess_helper_v17.py"
+    marker = "Builtly IFC helper v17"
+    helper_code = '#!/usr/bin/env python3\n# Builtly IFC helper v17\nimport argparse\nimport json\nimport traceback\n\n\ndef _clean(value):\n    if value is None:\n        return ""\n    text = str(value)\n    replacements = {\n        "–": "-",\n        "—": "-",\n        "“": \'"\',\n        "”": \'"\',\n        "‘": "\'",\n        "’": "\'",\n        "…": "...",\n        "•": "-",\n    }\n    for old, new in replacements.items():\n        text = text.replace(old, new)\n    return text.strip()\n\n\ndef _safe_float(value, default=0.0):\n    try:\n        return float(value)\n    except Exception:\n        return float(default)\n\n\ndef _kind(product):\n    cls = _clean(product.is_a() if hasattr(product, "is_a") else "")\n    name_low = " ".join(\n        [\n            _clean(getattr(product, "Name", "")),\n            _clean(getattr(product, "ObjectType", "")),\n            _clean(getattr(product, "Description", "")),\n        ]\n    ).lower()\n    if cls in {"IfcWall", "IfcWallStandardCase", "IfcCurtainWall"}:\n        return "wall"\n    if cls in {"IfcColumn", "IfcPile"}:\n        return "column"\n    if cls in {"IfcSlab", "IfcRoof"}:\n        return "slab"\n    if cls in {"IfcBeam", "IfcMember"}:\n        return "beam"\n    if cls in {"IfcStair", "IfcStairFlight", "IfcRamp", "IfcRampFlight"} or any(word in name_low for word in ["trapp", "stair", "rampe"]):\n        return "stair"\n    if cls == "IfcTransportElement" or any(word in name_low for word in ["heis", "lift", "elevator"]):\n        return "transport"\n    if cls == "IfcSpace" and any(word in name_low for word in ["sjakt", "shaft", "heis", "lift", "trapp", "stair"]):\n        return "core_space"\n    return ""\n\n\ndef _storey_elements(storey):\n    elements = []\n    seen = set()\n    for rel in list(getattr(storey, "ContainsElements", []) or []):\n        for elem in list(getattr(rel, "RelatedElements", []) or []):\n            gid = _clean(getattr(elem, "GlobalId", "")) or str(id(elem))\n            if gid in seen:\n                continue\n            seen.add(gid)\n            elements.append(elem)\n    return elements\n\n\ndef _loadbearing(product):\n    try:\n        from ifcopenshell.util import element as ifc_element\n    except Exception:\n        return None\n    try:\n        psets = ifc_element.get_psets(product) or {}\n    except Exception:\n        return None\n    for pset_name in ["Pset_WallCommon", "Pset_ColumnCommon", "Pset_BeamCommon", "Pset_MemberCommon"]:\n        pset = psets.get(pset_name)\n        if isinstance(pset, dict) and "LoadBearing" in pset:\n            try:\n                return bool(pset.get("LoadBearing"))\n            except Exception:\n                return None\n    return None\n\n\ndef _bbox_from_verts(verts):\n    if not verts:\n        return None\n    try:\n        xs = verts[0::3]\n        ys = verts[1::3]\n        zs = verts[2::3]\n        if not xs or not ys or not zs:\n            return None\n        return [float(min(xs)), float(min(ys)), float(min(zs)), float(max(xs)), float(max(ys)), float(max(zs))]\n    except Exception:\n        return None\n\n\ndef _collect_bboxes(model, products):\n    import ifcopenshell.geom\n    settings = ifcopenshell.geom.settings()\n    for key, value in [("use-world-coords", True), ("apply-default-materials", False)]:\n        try:\n            settings.set(key, value)\n        except Exception:\n            try:\n                settings.set(getattr(settings, key.upper().replace("-", "_")), value)\n            except Exception:\n                pass\n\n    bbox_by_gid = {}\n    try:\n        iterator = ifcopenshell.geom.iterator(settings, model, 1, include=list(products))\n        ok = iterator.initialize()\n    except Exception:\n        ok = False\n\n    if ok:\n        while True:\n            shape = None\n            try:\n                shape = iterator.get()\n            except Exception:\n                shape = None\n            if shape is not None:\n                try:\n                    element = model.by_id(shape.id)\n                except Exception:\n                    element = None\n                if element is not None:\n                    gid = _clean(getattr(element, "GlobalId", "")) or str(id(element))\n                    verts = getattr(getattr(shape, "geometry", shape), "verts", None)\n                    bbox = _bbox_from_verts(verts)\n                    if bbox is not None:\n                        bbox_by_gid[gid] = bbox\n            try:\n                if not iterator.next():\n                    break\n            except Exception:\n                break\n\n    if bbox_by_gid:\n        return bbox_by_gid\n\n    for product in list(products)[:1200]:\n        gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n        try:\n            shape = ifcopenshell.geom.create_shape(settings, product)\n            verts = getattr(getattr(shape, "geometry", shape), "verts", None)\n            bbox = _bbox_from_verts(verts)\n            if bbox is not None:\n                bbox_by_gid[gid] = bbox\n        except Exception:\n            continue\n    return bbox_by_gid\n\n\ndef _serialize_storeys(model, max_storeys):\n    relevant_types = [\n        "IfcWall", "IfcWallStandardCase", "IfcCurtainWall",\n        "IfcColumn", "IfcPile", "IfcSlab", "IfcRoof",\n        "IfcBeam", "IfcMember", "IfcStair", "IfcStairFlight",\n        "IfcRamp", "IfcRampFlight", "IfcTransportElement", "IfcSpace",\n    ]\n    seen = set()\n    products = []\n    for type_name in relevant_types:\n        try:\n            iterable = list(model.by_type(type_name) or [])\n        except Exception:\n            iterable = []\n        for product in iterable:\n            gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n            if gid in seen:\n                continue\n            seen.add(gid)\n            products.append(product)\n\n    bbox_by_gid = _collect_bboxes(model, products)\n    meta_by_gid = {}\n    for product in products:\n        gid = _clean(getattr(product, "GlobalId", "")) or str(id(product))\n        bbox = bbox_by_gid.get(gid)\n        kind = _kind(product)\n        if not bbox or not kind:\n            continue\n        x0, y0, z0, x1, y1, z1 = bbox\n        if x1 - x0 <= 0 or y1 - y0 <= 0:\n            continue\n        contained = []\n        for rel in list(getattr(product, "ContainedInStructure", []) or []):\n            structure = getattr(rel, "RelatingStructure", None)\n            if structure is None:\n                continue\n            structure_gid = _clean(getattr(structure, "GlobalId", ""))\n            if structure_gid:\n                contained.append(structure_gid)\n        meta_by_gid[gid] = {\n            "gid": gid,\n            "name": _clean(getattr(product, "Name", "")),\n            "kind": kind,\n            "class_name": _clean(product.is_a() if hasattr(product, "is_a") else ""),\n            "bbox_world_xy": [float(x0), float(y0), float(x1), float(y1)],\n            "z_range": [float(z0), float(z1)],\n            "load_bearing": _loadbearing(product),\n            "contained_storeys": contained,\n        }\n\n    storeys = list(model.by_type("IfcBuildingStorey") or [])\n    storeys = sorted(storeys, key=lambda item: _safe_float(getattr(item, "Elevation", 0.0), 0.0))\n    payload_storeys = []\n    for idx, storey in enumerate(storeys[:max_storeys]):\n        storey_gid = _clean(getattr(storey, "GlobalId", "")) or str(id(storey))\n        storey_label = _clean(getattr(storey, "Name", "")) or f"Storey {idx + 1}"\n        elev = _safe_float(getattr(storey, "Elevation", 0.0), 0.0)\n        next_elev = None\n        for later in storeys[idx + 1:]:\n            later_elev = _safe_float(getattr(later, "Elevation", elev), elev)\n            if later_elev > elev + 0.01:\n                next_elev = later_elev\n                break\n        z_low = elev - 1.25\n        z_high = (next_elev + 1.25) if next_elev is not None else (elev + 6.0)\n\n        selected = []\n        selected_gids = set()\n        for elem in _storey_elements(storey):\n            gid = _clean(getattr(elem, "GlobalId", "")) or str(id(elem))\n            meta = meta_by_gid.get(gid)\n            if meta is not None and gid not in selected_gids:\n                selected.append(meta)\n                selected_gids.add(gid)\n\n        if len(selected) < 8:\n            for gid, meta in meta_by_gid.items():\n                if gid in selected_gids:\n                    continue\n                if storey_gid in list(meta.get("contained_storeys", []) or []):\n                    selected.append(meta)\n                    selected_gids.add(gid)\n\n        if len(selected) < 8:\n            for gid, meta in meta_by_gid.items():\n                if gid in selected_gids:\n                    continue\n                z0, z1 = meta.get("z_range", [0.0, 0.0])\n                overlap = min(float(z1), float(z_high)) - max(float(z0), float(z_low))\n                if overlap > max(0.15, (float(z1) - float(z0)) * 0.10):\n                    selected.append(meta)\n                    selected_gids.add(gid)\n\n        if not selected:\n            continue\n        payload_storeys.append({\n            "label": storey_label,\n            "elevation": elev,\n            "objects": selected,\n        })\n    return payload_storeys, len(meta_by_gid)\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument("--input", required=True)\n    parser.add_argument("--output", required=True)\n    parser.add_argument("--max-storeys", type=int, default=8)\n    args = parser.parse_args()\n\n    try:\n        import ifcopenshell\n        model = ifcopenshell.open(args.input)\n        storeys, object_count = _serialize_storeys(model, max(1, int(args.max_storeys or 8)))\n        payload = {\n            "ok": True,\n            "storeys": storeys,\n            "stats": {\n                "storey_count": len(storeys),\n                "object_count": int(object_count),\n            },\n        }\n        with open(args.output, "w", encoding="utf-8") as fh:\n            json.dump(payload, fh, ensure_ascii=False)\n        return 0\n    except Exception as exc:\n        payload = {\n            "ok": False,\n            "error": f"{type(exc).__name__}: {exc}",\n            "traceback": traceback.format_exc(limit=6),\n        }\n        try:\n            with open(args.output, "w", encoding="utf-8") as fh:\n                json.dump(payload, fh, ensure_ascii=False)\n        except Exception:\n            pass\n        return 2\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+    if (not helper_path.exists()) or (marker not in helper_path.read_text(encoding="utf-8", errors="ignore")):
+        helper_path.write_text(helper_code, encoding="utf-8")
+        try:
+            helper_path.chmod(0o755)
+        except Exception:
+            pass
+    return helper_path
+
+
+def _read_ifc_helper_payload_v17(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_ifc_drawings_v17(file_name: str, file_bytes: bytes, suffix: str) -> List[Dict[str, Any]]:
+    if _ifcopenshell_v13 is None:
+        _append_upload_warning_v13("IFC-fil ble lastet opp, men pakken 'ifcopenshell' er ikke installert i miljøet. Legg den til i requirements for å bruke IFC som primærkilde.")
+        return []
+
+    helper_path = _ensure_ifc_subprocess_helper_v17()
+    tmp_ifc_path = None
+    tmp_payload_path = None
+    drawings: List[Dict[str, Any]] = []
+    try:
+        suffix_low = clean_pdf_text(suffix).lower() or ".ifc"
+        if suffix_low == ".ifczip":
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                members = [name for name in zf.namelist() if clean_pdf_text(name).lower().endswith('.ifc')]
+                if not members:
+                    _append_upload_warning_v13(f"IFCZIP-filen '{file_name}' inneholdt ingen .ifc-fil.")
+                    return []
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.ifc') as tmp:
+                    tmp.write(zf.read(members[0]))
+                    tmp.flush()
+                    tmp_ifc_path = tmp.name
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_low or '.ifc') as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                tmp_ifc_path = tmp.name
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp_payload:
+            tmp_payload_path = tmp_payload.name
+
+        command = [
+            sys.executable,
+            str(helper_path),
+            "--input", str(tmp_ifc_path),
+            "--output", str(tmp_payload_path),
+            "--max-storeys", "8",
+        ]
+        result = _subprocess_v13.run(
+            command,
+            stdout=_subprocess_v13.PIPE,
+            stderr=_subprocess_v13.PIPE,
+            text=True,
+            timeout=240,
+            env=os.environ.copy(),
+        )
+        payload = _read_ifc_helper_payload_v17(tmp_payload_path)
+        if int(result.returncode or 0) != 0 or not payload.get("ok"):
+            stderr = short_text(payload.get("error") or result.stderr or result.stdout or "ukjent IFC-feil", 220)
+            if payload.get("traceback"):
+                stderr = short_text(str(stderr) + " | " + clean_pdf_text(payload.get("traceback")), 220)
+            _append_upload_warning_v13(
+                f"IFC-prosessering feilet isolert for '{file_name}'. Appen fortsatte uten krasj, men IFC ble hoppet over: {stderr}"
+            )
+            if len(file_bytes or b"") <= 25 * 1024 * 1024:
+                return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+            return []
+
+        storeys = payload.get("storeys") if isinstance(payload.get("storeys"), list) else []
+        for storey in storeys:
+            if not isinstance(storey, dict):
+                continue
+            storey_label = clean_pdf_text(storey.get("label", "")) or f"Storey {len(drawings) + 1}"
+            objects = storey.get("objects") if isinstance(storey.get("objects"), list) else []
+            cleaned_objects: List[Dict[str, Any]] = []
+            for obj in objects:
+                if not isinstance(obj, dict):
+                    continue
+                bbox_world_xy = obj.get("bbox_world_xy")
+                z_range = obj.get("z_range")
+                if not isinstance(bbox_world_xy, (list, tuple)) or len(bbox_world_xy) != 4:
+                    continue
+                if not isinstance(z_range, (list, tuple)) or len(z_range) != 2:
+                    z_range = (0.0, 0.0)
+                cleaned_objects.append(
+                    {
+                        "gid": clean_pdf_text(obj.get("gid", "")),
+                        "name": clean_pdf_text(obj.get("name", "")),
+                        "kind": clean_pdf_text(obj.get("kind", "")),
+                        "class_name": clean_pdf_text(obj.get("class_name", "")),
+                        "bbox_world_xy": tuple(float(v) for v in bbox_world_xy),
+                        "z_range": tuple(float(v) for v in z_range),
+                        "load_bearing": obj.get("load_bearing"),
+                    }
+                )
+            record = _render_ifc_storey_record_v13(file_name, storey_label, cleaned_objects)
+            if record is not None:
+                drawings.append(record)
+
+        if drawings:
+            stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+            object_count = stats.get("object_count")
+            _append_upload_info_v14(
+                f"IFC lest via isolert prosess: {len(drawings)} etasje-/planbilder generert fra '{file_name}'" +
+                (f" ({object_count} objekter med geometri)." if object_count else ".")
+            )
+        else:
+            _append_upload_warning_v13(
+                f"IFC-filen '{file_name}' ble lest i isolert prosess, men ingen brukbare planbilder ble generert fra modellen."
+            )
+        return drawings
+    except _subprocess_v13.TimeoutExpired:
+        _append_upload_warning_v13(
+            f"IFC-prosessering tidsavbrøt for '{file_name}' etter lang kjøring. Appen fortsatte uten krasj, men IFC ble hoppet over i denne runden."
+        )
+        if len(file_bytes or b"") <= 20 * 1024 * 1024:
+            return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+        return []
+    except Exception as exc:
+        _append_upload_warning_v13(
+            f"IFC-prosessering feilet før analyse for '{file_name}': {type(exc).__name__}: {short_text(exc, 180)}"
+        )
+        if len(file_bytes or b"") <= 20 * 1024 * 1024:
+            return _LOAD_IFC_DRAWINGS_V13_INPROCESS(file_name, file_bytes, suffix)
+        return []
+    finally:
+        for candidate in [tmp_ifc_path, tmp_payload_path]:
+            if candidate and os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except Exception:
+                    pass
+
+
+_load_ifc_drawings_v13 = _load_ifc_drawings_v17
+
+
+
+
+# ------------------------------------------------------------
+# 19A. V19 PDF/DWG-FIRST INGEST - IFC DEPRIORITERT FOR STORE PROSJEKTER
+# ------------------------------------------------------------
+_LOAD_UPLOADED_DRAWINGS_V18_BASE = load_uploaded_drawings
+
+
+def load_uploaded_drawings(files: Optional[List[Any]], max_pdf_pages: int = 6) -> List[Dict[str, Any]]:
+    """DWG/DXF og PDF prioriteres for raskere og mer målrettet analyse.
+    IFC brukes kun som reserve hvis de raskere kildene ikke gir brukbare tegninger.
+    """
+    st.session_state["rib_upload_warnings_v13"] = []
+    st.session_state["rib_upload_infos_v14"] = []
+    expanded_files = _expand_archives_v16(files)
+    drawings: List[Dict[str, Any]] = []
+    if not expanded_files:
+        return drawings
+
+    grouped: Dict[str, List[Tuple[Any, str, str, bytes]]] = {"ifc": [], "dxf": [], "dwg": [], "pdf": [], "image": [], "other": []}
+    for f in expanded_files:
+        name = clean_pdf_text(getattr(f, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        file_bytes = _safe_upload_bytes_v13(f)
+        if not file_bytes:
+            continue
+        bucket = "other"
+        if suffix in {".ifc", ".ifczip"}:
+            bucket = "ifc"
+        elif suffix == ".dxf":
+            bucket = "dxf"
+        elif suffix == ".dwg":
+            bucket = "dwg"
+        elif suffix == ".pdf":
+            bucket = "pdf"
+        elif suffix in SUPPORTED_IMAGE_EXTS:
+            bucket = "image"
+        grouped[bucket].append((f, name, suffix, file_bytes))
+
+    # CAD/PDF først
+    for f, name, suffix, file_bytes in grouped["dxf"]:
+        drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
+
+    if grouped["dwg"]:
+        dwgread = _shutil_v13.which("dwgread")
+        if not dwgread:
+            sample_names = ", ".join(name for _, name, _, _ in grouped["dwg"][:3])
+            _append_upload_warning_v13(
+                f"{len(grouped['dwg'])} DWG-fil(er) kunne ikke leses direkte fordi 'dwgread' ikke er tilgjengelig i miljøet. "
+                f"Last opp PDF/DXF sammen med DWG, eller aktiver server-side DWG-konvertering. Eksempel: {sample_names}."
+            )
+        else:
+            before_dwg = len(drawings)
+            for f, name, suffix, file_bytes in grouped["dwg"]:
+                drawings.extend(_load_dxf_or_dwg_drawings_v13(name, file_bytes, suffix))
+            loaded_dwg = max(0, len(drawings) - before_dwg)
+            if loaded_dwg > 0:
+                _append_upload_info_v14(f"DWG lest via server-side konvertering: {loaded_dwg} tegningsbilde(r) generert i denne kjøringen.")
+
+    for f, name, suffix, file_bytes in grouped["pdf"]:
+        drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+
+    for f, name, suffix, file_bytes in grouped["image"]:
+        drawings.extend(_LOAD_UPLOADED_DRAWINGS_V12_BASE([f], max_pdf_pages=max_pdf_pages))
+
+    # IFC kun som reserve hvis vi fortsatt ikke har brukbare tegninger.
+    fast_source_count = len(drawings)
+    if grouped["ifc"]:
+        if fast_source_count > 0:
+            _append_upload_info_v14(
+                f"{len(grouped['ifc'])} IFC-fil(er) ble ikke brukt i denne kjøringen. "
+                f"PDF/DWG/DXF prioriteres for raskere og mer treffsikker plananalyse."
+            )
+        else:
+            for f, name, suffix, file_bytes in grouped["ifc"]:
+                drawings.extend(_load_ifc_drawings_v13(name, file_bytes, suffix))
+
+    for _, name, suffix, _ in grouped["other"]:
+        _append_upload_warning_v13(f"Filtypen '{suffix or name}' støttes ikke i denne versjonen.")
+
+    drawings = prioritize_drawings(drawings, limit=18)
+    for idx, record in enumerate(drawings):
+        record["page_index"] = idx
+
+    if not drawings and expanded_files:
+        _append_upload_warning_v13(
+            "Ingen brukbare tegninger kunne genereres fra opplastingen. "
+            "For best resultat: bruk DWG/DXF eller PDF. IFC er nå en reservevei."
+        )
+    return drawings
+
+
 # Synliggjør eventuelle DWG/IFC-varsel i UI like før analyseknappene.
 _render_upload_warnings_v13()
 backend_status_parts = [
-    "AI=" + ("Claude" if HAS_ANTHROPIC_BACKEND else ("OpenAI" if HAS_OPENAI_BACKEND else ("Gemini" if HAS_GEMINI_BACKEND else "ingen"))),
-    "IFC=" + ("aktiv" if (_ifcopenshell_v13 is not None and _ifc_geom_v13 is not None) else "bruk PDF"),
+    "IFC=" + ("aktiv" if (_ifcopenshell_v13 is not None and _ifc_geom_v13 is not None) else "mangler pakke"),
     "DXF=" + ("aktiv" if _ezdxf_v13 is not None else "mangler pakke"),
-    "DWG=" + ("konvertering aktiv" if bool(_shutil_v13.which('dwgread')) else "bruk DXF/PDF"),
+    "DWG-konvertering=" + ("aktiv" if bool(_shutil_v13.which('dwgread')) else "ikke tilgjengelig"),
 ]
-st.caption("Backend: " + " | ".join(backend_status_parts))
+st.caption("CAD-backend: " + " | ".join(backend_status_parts) + " | Prioritet: DWG/DXF -> PDF -> IFC")
 
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
@@ -11503,9 +11584,11 @@ direct_pdf_clicked = action_col2.button(
 )
 
 if analyze_clicked or direct_pdf_clicked:
-    uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=6) if files else []
+    with st.spinner("Laster og klargjør DWG/DXF/PDF/ZIP (IFC kun ved behov)..."):
+        uploaded_drawings = load_uploaded_drawings(files, max_pdf_pages=6) if files else []
     _render_upload_warnings_v13()
-    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=10)
+    analysis_limit = 6 if any(clean_pdf_text(record.get("drawing_format", "")).lower() == "ifc" for record in (saved_drawings + uploaded_drawings)) else 10
+    all_drawings = prioritize_drawings(saved_drawings + uploaded_drawings, limit=analysis_limit)
 
     if not all_drawings:
         st.error("Fant ingen tegninger å analysere. Last opp minst én plan eller hent tegninger fra Project Setup.")
@@ -11516,650 +11599,61 @@ if analyze_clicked or direct_pdf_clicked:
         if backend_warning:
             st.caption(f"AI-backend: {backend_warning}")
 
-        try:
-            with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
-                valid_models = list_available_models()
-                valgt_modell = pick_model(valid_models)
-                if not valgt_modell:
-                    st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini/Claude) i miljøet.")
-                    st.stop()
+        with st.spinner("🤖 Analyserer tegninger, velger bæresystem og bygger geometri-forankrede konseptskisser..."):
+            valid_models = list_available_models()
+            valgt_modell = pick_model(valid_models)
+            if not valgt_modell:
+                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
+                st.stop()
 
-                st.caption(f"Valgt modell: {valgt_modell}")
-                model = build_runtime_ai_model(valgt_modell)
-                candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
-                candidate_df = build_candidate_dataframe(candidates)
+            model = build_runtime_ai_model(valgt_modell)
+            candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
+            candidate_df = build_candidate_dataframe(candidates)
 
-                analysis_result = run_structured_drawing_analysis(
-                    model=model,
-                    drawings=all_drawings,
-                    candidates=candidates,
-                    project_data=pd_state,
-                    material_preference=material_valg,
-                    foundation_preference=fundamentering,
-                    optimization_mode=optimaliser_for,
-                    safety_mode=safety_mode,
-                )
-                analysis_result = replace_analysis_sketches_with_grounded(
-                    analysis_result=analysis_result,
-                    drawings=all_drawings,
-                    material_preference=material_valg,
-                )
-
-                report_text = run_report_writer(
-                    model=model,
-                    analysis_result=analysis_result,
-                    candidates=candidates,
-                    project_data=pd_state,
-                    material_preference=material_valg,
-                    foundation_preference=fundamentering,
-                    optimization_mode=optimaliser_for,
-                )
-
-                persist_rib_draft_to_session(
-                    analysis_result=analysis_result,
-                    report_text=report_text,
-                    candidate_df=candidate_df,
-                    candidates=candidates,
-                    drawings=all_drawings,
-                    material_preference=material_valg,
-                    foundation_preference=fundamentering,
-                    optimization_mode=optimaliser_for,
-                    safety_mode=safety_mode,
-                )
-
-            # Vis fallback-varsel etter spinner
-            post_warning = st.session_state.pop("rib_ai_backend_warning", None)
-            if post_warning:
-                st.warning(f"AI-backend: {post_warning}")
-
-            if direct_pdf_clicked:
-                with st.spinner("Låser auto-skissene og bygger PDF..."):
-                    finalize_rib_draft_to_pdf()
-            st.rerun()
-
-        except Exception as exc:
-            st.error(
-                f"Analysen feilet: {type(exc).__name__}: {str(exc)[:300]}\n\n"
-                "Tips: Prøv å laste opp færre/mindre filer (PDF i stedet for IFC), "
-                "eller kontroller at AI API-nøklene er gyldige i Render Environment Variables."
+            analysis_result = run_structured_drawing_analysis(
+                model=model,
+                drawings=all_drawings,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
             )
-            post_warning = st.session_state.pop("rib_ai_backend_warning", None)
-            if post_warning:
-                st.caption(f"Backend-info: {post_warning}")
-
-
-# ============================================================
-# 14A. AKSEGRID-BASERT EDITOR (v18)
-# Erstatter klikkbasert editor med aksegrid-system.
-# Elementer snapper til aksekryss, aldri tilfeldig plassert.
-# ============================================================
-
-_GRID_COLORS_V18 = {
-    "bg": (255, 255, 255),
-    "grid": (200, 210, 220),
-    "grid_label_bg": (100, 116, 139),
-    "grid_label_text": (255, 255, 255),
-    "column": (14, 165, 233),
-    "column_stroke": (2, 132, 199),
-    "core_fill": (245, 158, 11, 38),
-    "core_stroke": (217, 119, 6),
-    "wall": (239, 68, 68),
-    "span": (34, 197, 94),
-    "text": (30, 41, 59),
-    "dim": (148, 163, 184),
-    "beam": (120, 220, 225),
-}
-
-
-def _default_grid_state_v18() -> Dict[str, Any]:
-    return {
-        "h_axes": [
-            {"label": "A", "distance": 0},
-            {"label": "B", "distance": 6000},
-            {"label": "C", "distance": 6000},
-        ],
-        "v_axes": [
-            {"label": "1", "distance": 0},
-            {"label": "2", "distance": 7000},
-            {"label": "3", "distance": 7000},
-        ],
-        "elements": [],
-    }
-
-
-def _compute_axis_positions_v18(axes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    pos = 0
-    result = []
-    for i, a in enumerate(axes):
-        if i > 0:
-            pos += int(a.get("distance") or 0)
-        result.append({"label": clean_pdf_text(a.get("label", "")), "pos": pos, "distance": int(a.get("distance") or 0)})
-    return result
-
-
-def _grid_to_screen_v18(
-    wx: float, wy: float,
-    max_x: float, max_y: float,
-    canvas_w: int, canvas_h: int,
-    pad: int,
-) -> Tuple[int, int]:
-    if max_x <= 0:
-        max_x = 1
-    if max_y <= 0:
-        max_y = 1
-    scale = min((canvas_w - pad * 2) / max_x, (canvas_h - pad * 2) / max_y)
-    sx = int(pad + wx * scale)
-    sy = int(pad + wy * scale)
-    return sx, sy
-
-
-def _render_grid_image_v18(
-    grid_state: Dict[str, Any],
-    canvas_w: int = 900,
-    canvas_h: int = 660,
-    project_name: str = "",
-) -> Image.Image:
-    pad = 90
-    h_axes = _compute_axis_positions_v18(grid_state.get("h_axes", []))
-    v_axes = _compute_axis_positions_v18(grid_state.get("v_axes", []))
-    elements = grid_state.get("elements", [])
-
-    max_x = max((a["pos"] for a in v_axes), default=1) or 1
-    max_y = max((a["pos"] for a in h_axes), default=1) or 1
-    scale = min((canvas_w - pad * 2) / max_x, (canvas_h - pad * 2) / max_y)
-
-    def to_s(wx, wy):
-        return int(pad + wx * scale), int(pad + wy * scale)
-
-    image = Image.new("RGB", (canvas_w, canvas_h), _GRID_COLORS_V18["bg"])
-    draw = ImageDraw.Draw(image, "RGBA")
-    font_label = get_font(14, bold=True)
-    font_dim = get_font(11, bold=False)
-    font_elem = get_font(10, bold=True)
-    font_title = get_font(13, bold=True)
-
-    # Grid lines - vertical (v_axes = x)
-    for v in v_axes:
-        sx, sy_top = to_s(v["pos"], 0)
-        _, sy_bot = to_s(0, max_y)
-        draw.line([(sx, sy_top - 25), (sx, sy_bot + 25)], fill=_GRID_COLORS_V18["grid"], width=1)
-        # Circle label top
-        r = 16
-        draw.ellipse((sx - r, sy_top - 50 - r, sx + r, sy_top - 50 + r), fill=_GRID_COLORS_V18["grid_label_bg"])
-        bbox = draw.textbbox((0, 0), v["label"], font=font_label)
-        tw = bbox[2] - bbox[0]
-        draw.text((sx - tw // 2, sy_top - 50 - 8), v["label"], font=font_label, fill=_GRID_COLORS_V18["grid_label_text"])
-
-    # Grid lines - horizontal (h_axes = y)
-    for h in h_axes:
-        sx_left, sy = to_s(0, h["pos"])
-        sx_right, _ = to_s(max_x, 0)
-        draw.line([(sx_left - 25, sy), (sx_right + 25, sy)], fill=_GRID_COLORS_V18["grid"], width=1)
-        # Circle label left
-        r = 16
-        draw.ellipse((sx_left - 50 - r, sy - r, sx_left - 50 + r, sy + r), fill=_GRID_COLORS_V18["grid_label_bg"])
-        bbox = draw.textbbox((0, 0), h["label"], font=font_label)
-        tw = bbox[2] - bbox[0]
-        draw.text((sx_left - 50 - tw // 2, sy - 8), h["label"], font=font_label, fill=_GRID_COLORS_V18["grid_label_text"])
-
-    # Dimension annotations along top
-    for i in range(1, len(v_axes)):
-        sx1, _ = to_s(v_axes[i - 1]["pos"], 0)
-        sx2, _ = to_s(v_axes[i]["pos"], 0)
-        _, sy_top = to_s(0, 0)
-        mid_x = (sx1 + sx2) // 2
-        dim_text = str(v_axes[i]["distance"])
-        draw.text((mid_x - 15, sy_top - 75), dim_text, font=font_dim, fill=_GRID_COLORS_V18["dim"])
-        draw.line([(sx1 + 18, sy_top - 68), (sx2 - 18, sy_top - 68)], fill=_GRID_COLORS_V18["dim"], width=1)
-
-    # Dimension annotations along left
-    for i in range(1, len(h_axes)):
-        _, sy1 = to_s(0, h_axes[i - 1]["pos"])
-        _, sy2 = to_s(0, h_axes[i]["pos"])
-        sx_left, _ = to_s(0, 0)
-        mid_y = (sy1 + sy2) // 2
-        dim_text = str(h_axes[i]["distance"])
-        draw.text((sx_left - 85, mid_y - 6), dim_text, font=font_dim, fill=_GRID_COLORS_V18["dim"])
-
-    # Draw elements
-    for el in elements:
-        el_type = clean_pdf_text(el.get("type", "")).lower()
-
-        if el_type == "column":
-            cx, cy = to_s(float(el.get("x", 0)), float(el.get("y", 0)))
-            r = 8
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=_GRID_COLORS_V18["column"], outline=_GRID_COLORS_V18["column_stroke"], width=2)
-            label = clean_pdf_text(el.get("label", ""))
-            if label:
-                draw.text((cx + r + 4, cy - 8), label, font=font_elem, fill=_GRID_COLORS_V18["text"])
-
-        elif el_type == "core":
-            cx, cy = to_s(float(el.get("x", 0)), float(el.get("y", 0)))
-            cw = int(float(el.get("w", 2000)) * scale)
-            ch = int(float(el.get("h", 2000)) * scale)
-            draw.rounded_rectangle((cx, cy, cx + cw, cy + ch), radius=4, fill=_GRID_COLORS_V18["core_fill"], outline=_GRID_COLORS_V18["core_stroke"], width=3)
-            # Hatch lines
-            for d in range(-max(cw, ch), max(cw, ch) * 2, 10):
-                draw.line([(cx + d, cy), (cx + d + ch, cy + ch)], fill=(217, 119, 6, 30), width=1)
-            label = clean_pdf_text(el.get("label", "Kjerne"))
-            draw.text((cx + 6, cy + 6), label, font=font_elem, fill=_GRID_COLORS_V18["core_stroke"])
-
-        elif el_type == "wall":
-            sx1, sy1 = to_s(float(el.get("x1", 0)), float(el.get("y1", 0)))
-            sx2, sy2 = to_s(float(el.get("x2", 0)), float(el.get("y2", 0)))
-            draw.line([(sx1, sy1), (sx2, sy2)], fill=_GRID_COLORS_V18["wall"], width=5)
-            label = clean_pdf_text(el.get("label", ""))
-            if label:
-                mx, my = (sx1 + sx2) // 2, (sy1 + sy2) // 2
-                draw.text((mx + 6, my - 12), label, font=font_elem, fill=_GRID_COLORS_V18["wall"])
-
-        elif el_type == "beam":
-            sx1, sy1 = to_s(float(el.get("x1", 0)), float(el.get("y1", 0)))
-            sx2, sy2 = to_s(float(el.get("x2", 0)), float(el.get("y2", 0)))
-            draw.line([(sx1, sy1), (sx2, sy2)], fill=_GRID_COLORS_V18["beam"], width=4)
-            label = clean_pdf_text(el.get("label", ""))
-            if label:
-                mx, my = (sx1 + sx2) // 2, (sy1 + sy2) // 2
-                draw.text((mx + 6, my - 12), label, font=font_elem, fill=(100, 200, 210))
-
-        elif el_type == "span_arrow":
-            sx1, sy1 = to_s(float(el.get("x1", 0)), float(el.get("y1", 0)))
-            sx2, sy2 = to_s(float(el.get("x2", 0)), float(el.get("y2", 0)))
-            draw_arrow(draw, (sx1, sy1), (sx2, sy2), _GRID_COLORS_V18["span"], width=3)
-            label = clean_pdf_text(el.get("label", ""))
-            if label:
-                mx, my = (sx1 + sx2) // 2, (sy1 + sy2) // 2
-                draw.text((mx - 20, my - 16), label, font=font_elem, fill=_GRID_COLORS_V18["span"])
-
-    # Title
-    title = clean_pdf_text(project_name or "Strukturplan")
-    draw.text((pad, canvas_h - 28), title, font=font_title, fill=_GRID_COLORS_V18["text"])
-    draw.text((pad + font_title.getbbox(title)[2] + 10, canvas_h - 26), "Aksegrid-konseptskisse", font=font_dim, fill=_GRID_COLORS_V18["dim"])
-
-    return image
-
-
-def _grid_elements_to_df_v18(elements: List[Dict[str, Any]]) -> pd.DataFrame:
-    rows = []
-    for i, el in enumerate(elements):
-        row = {
-            "nr": i + 1,
-            "type": clean_pdf_text(el.get("type", "")),
-            "label": clean_pdf_text(el.get("label", "")),
-            "x": el.get("x", el.get("x1", 0)),
-            "y": el.get("y", el.get("y1", 0)),
-        }
-        if el.get("type") in ("wall", "beam", "span_arrow"):
-            row["x2"] = el.get("x2", 0)
-            row["y2"] = el.get("y2", 0)
-        else:
-            row["x2"] = ""
-            row["y2"] = ""
-        if el.get("type") == "core":
-            row["w"] = el.get("w", 2000)
-            row["h"] = el.get("h", 2000)
-        else:
-            row["w"] = ""
-            row["h"] = ""
-        rows.append(row)
-    if not rows:
-        rows.append({"nr": 1, "type": "column", "label": "S1", "x": 0, "y": 0, "x2": "", "y2": "", "w": "", "h": ""})
-    return pd.DataFrame(rows)
-
-
-def _df_to_grid_elements_v18(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    elements = []
-    for _, row in df.iterrows():
-        el_type = clean_pdf_text(str(row.get("type", ""))).lower().strip()
-        if not el_type:
-            continue
-        label = clean_pdf_text(str(row.get("label", "")))
-        try:
-            x = float(row.get("x", 0) or 0)
-            y = float(row.get("y", 0) or 0)
-        except (ValueError, TypeError):
-            x, y = 0, 0
-
-        if el_type == "column":
-            elements.append({"type": "column", "x": x, "y": y, "label": label})
-        elif el_type == "core":
-            try:
-                w = float(row.get("w", 2000) or 2000)
-                h = float(row.get("h", 2000) or 2000)
-            except (ValueError, TypeError):
-                w, h = 2000, 2000
-            elements.append({"type": "core", "x": x, "y": y, "w": w, "h": h, "label": label})
-        elif el_type in ("wall", "beam", "span_arrow"):
-            try:
-                x2 = float(row.get("x2", 0) or 0)
-                y2 = float(row.get("y2", 0) or 0)
-            except (ValueError, TypeError):
-                x2, y2 = x, y
-            elements.append({"type": el_type, "x1": x, "y1": y, "x2": x2, "y2": y2, "label": label})
-    return elements
-
-
-def _generate_elements_on_grid_v18(
-    h_axes: List[Dict[str, Any]],
-    v_axes: List[Dict[str, Any]],
-    bearing_principle: str = "vegger_og_kjerner",
-) -> List[Dict[str, Any]]:
-    """Genererer et startforslag for elementer basert på aksegrid og bæreprinsipp."""
-    hp = _compute_axis_positions_v18(h_axes)
-    vp = _compute_axis_positions_v18(v_axes)
-    elements: List[Dict[str, Any]] = []
-
-    if bearing_principle == "soyle_bjelke":
-        # Søyle på hvert aksekryss
-        col_nr = 1
-        for v in vp:
-            for h in hp:
-                elements.append({"type": "column", "x": v["pos"], "y": h["pos"], "label": f"S{col_nr}"})
-                col_nr += 1
-    else:
-        # Vegger og kjerner
-        # Kjerne i midtre felt
-        if len(vp) >= 2 and len(hp) >= 2:
-            mid_v = vp[len(vp) // 2]["pos"]
-            mid_h = hp[len(hp) // 2]["pos"]
-            kw = min(3000, (vp[-1]["pos"] - vp[0]["pos"]) * 0.15) if len(vp) > 1 else 2000
-            kh = min(3500, (hp[-1]["pos"] - hp[0]["pos"]) * 0.2) if len(hp) > 1 else 2000
-            elements.append({"type": "core", "x": mid_v - kw / 2, "y": mid_h - kh / 2, "w": kw, "h": kh, "label": "Kjerne 1"})
-
-        # Bærevegger langs midtre vertikale akser
-        if len(vp) >= 3:
-            for v_idx in range(1, len(vp) - 1):
-                elements.append({
-                    "type": "wall",
-                    "x1": vp[v_idx]["pos"], "y1": hp[0]["pos"],
-                    "x2": vp[v_idx]["pos"], "y2": hp[-1]["pos"],
-                    "label": f"Bærevegg {v_idx}",
-                })
-        elif len(vp) >= 2:
-            mid_x = (vp[0]["pos"] + vp[-1]["pos"]) / 2
-            elements.append({
-                "type": "wall",
-                "x1": mid_x, "y1": hp[0]["pos"],
-                "x2": mid_x, "y2": hp[-1]["pos"],
-                "label": "Bærevegg 1",
-            })
-
-    # Spennpiler
-    if len(vp) >= 2:
-        below_y = hp[-1]["pos"] + max(500, hp[-1]["pos"] * 0.06)
-        for i in range(1, len(vp)):
-            dist = vp[i]["pos"] - vp[i - 1]["pos"]
-            elements.append({
-                "type": "span_arrow",
-                "x1": vp[i - 1]["pos"], "y1": below_y,
-                "x2": vp[i]["pos"], "y2": below_y,
-                "label": f"{int(dist)} mm",
-            })
-
-    return elements
-
-
-def _grid_elements_to_normalized_sketch_v18(
-    grid_state: Dict[str, Any],
-    page_index: int,
-    page_label: str,
-    image_size: Tuple[int, int],
-) -> Dict[str, Any]:
-    """Konverterer grid-elementer til normaliserte 0-1 koordinater for overlay-rendering."""
-    h_axes = _compute_axis_positions_v18(grid_state.get("h_axes", []))
-    v_axes = _compute_axis_positions_v18(grid_state.get("v_axes", []))
-    max_x = max((a["pos"] for a in v_axes), default=1) or 1
-    max_y = max((a["pos"] for a in h_axes), default=1) or 1
-
-    pad_frac = 0.08
-    draw_w = 1.0 - pad_frac * 2
-    draw_h = 1.0 - pad_frac * 2
-
-    def norm(wx, wy):
-        nx = pad_frac + (wx / max_x) * draw_w if max_x > 0 else 0.5
-        ny = pad_frac + (wy / max_y) * draw_h if max_y > 0 else 0.5
-        return clamp(nx, 0.02, 0.98), clamp(ny, 0.02, 0.98)
-
-    norm_elements = []
-    for el in grid_state.get("elements", []):
-        el_type = clean_pdf_text(el.get("type", "")).lower()
-        label = clean_pdf_text(el.get("label", ""))
-
-        if el_type == "column":
-            nx, ny = norm(float(el.get("x", 0)), float(el.get("y", 0)))
-            norm_elements.append({"type": "column", "x": nx, "y": ny, "label": label})
-
-        elif el_type == "core":
-            nx, ny = norm(float(el.get("x", 0)), float(el.get("y", 0)))
-            nw = (float(el.get("w", 2000)) / max_x) * draw_w if max_x > 0 else 0.1
-            nh = (float(el.get("h", 2000)) / max_y) * draw_h if max_y > 0 else 0.1
-            norm_elements.append({"type": "core", "x": nx, "y": ny, "w": nw, "h": nh, "label": label})
-
-        elif el_type in ("wall", "beam"):
-            nx1, ny1 = norm(float(el.get("x1", 0)), float(el.get("y1", 0)))
-            nx2, ny2 = norm(float(el.get("x2", 0)), float(el.get("y2", 0)))
-            norm_elements.append({"type": el_type, "x1": nx1, "y1": ny1, "x2": nx2, "y2": ny2, "label": label})
-
-        elif el_type == "span_arrow":
-            nx1, ny1 = norm(float(el.get("x1", 0)), float(el.get("y1", 0)))
-            nx2, ny2 = norm(float(el.get("x2", 0)), float(el.get("y2", 0)))
-            norm_elements.append({"type": "span_arrow", "x1": nx1, "y1": ny1, "x2": nx2, "y2": ny2, "label": label})
-
-    return {
-        "page_index": page_index,
-        "page_label": page_label,
-        "elements": norm_elements,
-        "notes": [
-            "Aksegrid-basert konseptskisse. Elementer er forankret til definerte akselinjer.",
-            f"Grid: {len(v_axes)} vertikale akser x {len(h_axes)} horisontale akser.",
-        ],
-    }
-
-
-def render_rib_draft_editor_ui() -> None:
-    """Aksegrid-basert editor for RIB konseptskisser (v18)."""
-    if not draft_sketch_bundle_exists():
-        return
-
-    analysis_result = st.session_state.get("rib_draft_analysis", {})
-    draft_sketches = st.session_state.get("rib_draft_sketches", [])
-    drawings = st.session_state.get("rib_draft_drawings", [])
-    if not isinstance(draft_sketches, list):
-        return
-
-    # Initialisere grid state fra analyse-hints hvis tilgjengelig
-    if "rib_grid_state_v18" not in st.session_state:
-        hints = analysis_result.get("_geometry_hints", {})
-        st.session_state.rib_grid_state_v18 = _default_grid_state_v18()
-        # Auto-generer elementer
-        gs = st.session_state.rib_grid_state_v18
-        gs["elements"] = _generate_elements_on_grid_v18(
-            gs["h_axes"], gs["v_axes"],
-            hints.get("bearing_principle", "vegger_og_kjerner"),
-        )
-
-    grid_state = st.session_state.rib_grid_state_v18
-
-    st.markdown("### RIB Aksegrid-editor")
-    st.info(
-        "Definer aksegridet med mål fra arkitekttegningene. "
-        "Søyler, vegger og kjerner plasseres på akselinjer, aldri tilfeldig. "
-        "Rediger elementene i tabellen under, eller bruk auto-generer."
-    )
-
-    top1, top2, top3, top4 = st.columns(4)
-    top1.metric("Skisser i utkast", str(len(draft_sketches)))
-    top2.metric("Datagrunnlag", clean_pdf_text(analysis_result.get("grunnlag_status", "-")))
-    rec_sys = analysis_result.get("recommended_system", {})
-    top3.metric("Anbefalt konsept", short_text(rec_sys.get("system_name", "-"), 24))
-    n_elems = len(grid_state.get("elements", []))
-    top4.metric("Elementer i grid", str(n_elems))
-
-    # --- AKSEGRID DEFINISJON ---
-    with st.expander("1. Definer aksegrid (mål i mm fra tegningen)", expanded=True):
-        col_h, col_v = st.columns(2)
-
-        with col_h:
-            st.markdown("**Horisontale akser** (A, B, C...)")
-            h_axes = list(grid_state.get("h_axes", []))
-            updated_h = []
-            for i, ax in enumerate(h_axes):
-                c1, c2, c3 = st.columns([1, 2, 0.5])
-                with c1:
-                    label = st.text_input(f"Akse", value=ax.get("label", ""), key=f"h_label_{i}", label_visibility="collapsed" if i > 0 else "visible")
-                with c2:
-                    if i == 0:
-                        dist = 0
-                        st.text_input("Avstand (mm)", value="Start", disabled=True, key=f"h_dist_{i}")
-                    else:
-                        dist = st.number_input("Avstand (mm)", value=int(ax.get("distance", 6000)), min_value=0, step=100, key=f"h_dist_{i}", label_visibility="collapsed" if i > 1 else "visible")
-                with c3:
-                    if i > 0 and st.button("✕", key=f"h_del_{i}"):
-                        continue
-                updated_h.append({"label": label, "distance": dist})
-            if st.button("+ Legg til horisontal akse", key="add_h_axis"):
-                next_label = chr(65 + len(updated_h))
-                updated_h.append({"label": next_label, "distance": 6000})
-            grid_state["h_axes"] = updated_h
-
-        with col_v:
-            st.markdown("**Vertikale akser** (1, 2, 3...)")
-            v_axes = list(grid_state.get("v_axes", []))
-            updated_v = []
-            for i, ax in enumerate(v_axes):
-                c1, c2, c3 = st.columns([1, 2, 0.5])
-                with c1:
-                    label = st.text_input(f"Akse", value=ax.get("label", ""), key=f"v_label_{i}", label_visibility="collapsed" if i > 0 else "visible")
-                with c2:
-                    if i == 0:
-                        dist = 0
-                        st.text_input("Avstand (mm)", value="Start", disabled=True, key=f"v_dist_{i}")
-                    else:
-                        dist = st.number_input("Avstand (mm)", value=int(ax.get("distance", 7000)), min_value=0, step=100, key=f"v_dist_{i}", label_visibility="collapsed" if i > 1 else "visible")
-                with c3:
-                    if i > 0 and st.button("✕", key=f"v_del_{i}"):
-                        continue
-                updated_v.append({"label": label, "distance": dist})
-            if st.button("+ Legg til vertikal akse", key="add_v_axis"):
-                next_label = str(len(updated_v) + 1)
-                updated_v.append({"label": next_label, "distance": 7000})
-            grid_state["v_axes"] = updated_v
-
-    # --- VISUALISERING ---
-    project_name = safe_session_state_get("project_data", {}).get("p_name", "")
-    grid_img = _render_grid_image_v18(grid_state, project_name=project_name)
-    st.image(grid_img, caption="Aksegrid med strukturelle elementer (mål i mm)", use_container_width=True)
-
-    # --- ELEMENT-REDIGERING ---
-    with st.expander("2. Rediger strukturelle elementer", expanded=True):
-        st.caption(
-            "**type**: column, core, wall, beam, span_arrow | "
-            "**x/y**: posisjon i mm (for column/core: øvre venstre hjørne; for wall/beam/span: startpunkt) | "
-            "**x2/y2**: sluttpunkt for wall/beam/span | "
-            "**w/h**: bredde/høyde for core"
-        )
-
-        elem_df = _grid_elements_to_df_v18(grid_state.get("elements", []))
-        edited_df = st.data_editor(
-            elem_df,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="rib_grid_element_editor_v18",
-            column_config={
-                "nr": st.column_config.NumberColumn("Nr", disabled=True, width=50),
-                "type": st.column_config.SelectboxColumn("Type", options=["column", "core", "wall", "beam", "span_arrow"], width=110),
-                "label": st.column_config.TextColumn("Label", width=110),
-                "x": st.column_config.NumberColumn("X (mm)", width=80),
-                "y": st.column_config.NumberColumn("Y (mm)", width=80),
-                "x2": st.column_config.NumberColumn("X2 (mm)", width=80),
-                "y2": st.column_config.NumberColumn("Y2 (mm)", width=80),
-                "w": st.column_config.NumberColumn("B (mm)", width=80),
-                "h": st.column_config.NumberColumn("H (mm)", width=80),
-            },
-        )
-        grid_state["elements"] = _df_to_grid_elements_v18(edited_df)
-
-    # --- HURTIGKNAPPER ---
-    with st.expander("3. Hurtigverktøy", expanded=False):
-        q1, q2, q3 = st.columns(3)
-        with q1:
-            bearing_mode = st.selectbox("Bæreprinsipp", ["vegger_og_kjerner", "soyle_bjelke", "hybrid"], key="rib_grid_bearing_v18")
-        with q2:
-            if st.button("Auto-generer elementer", type="primary", key="rib_grid_autogen_v18"):
-                grid_state["elements"] = _generate_elements_on_grid_v18(
-                    grid_state["h_axes"],
-                    grid_state["v_axes"],
-                    bearing_mode,
-                )
-                st.rerun()
-        with q3:
-            if st.button("Tøm alle elementer", key="rib_grid_clear_v18"):
-                grid_state["elements"] = []
-                st.rerun()
-
-        # Kjapp søyle-generator
-        st.markdown("**Søyler på aksekryss:**")
-        hp = _compute_axis_positions_v18(grid_state.get("h_axes", []))
-        vp = _compute_axis_positions_v18(grid_state.get("v_axes", []))
-        h_labels = [a["label"] for a in hp]
-        v_labels = [a["label"] for a in vp]
-        sel_h = st.multiselect("Velg horisontale akser for søyler", h_labels, default=h_labels, key="rib_grid_col_h_v18")
-        sel_v = st.multiselect("Velg vertikale akser for søyler", v_labels, default=v_labels, key="rib_grid_col_v_v18")
-        if st.button("Plasser søyler på valgte kryss", key="rib_grid_place_cols_v18"):
-            existing_non_columns = [el for el in grid_state["elements"] if el.get("type") != "column"]
-            new_cols = []
-            col_nr = 1
-            for v in vp:
-                if v["label"] in sel_v:
-                    for h in hp:
-                        if h["label"] in sel_h:
-                            new_cols.append({"type": "column", "x": v["pos"], "y": h["pos"], "label": f"S{col_nr}"})
-                            col_nr += 1
-            grid_state["elements"] = existing_non_columns + new_cols
-            st.rerun()
-
-    # --- OPPDATER SKISSER OG LÅS ---
-    st.markdown("---")
-    lock_col1, lock_col2 = st.columns(2)
-    with lock_col1:
-        if st.button("Oppdater konseptskisser fra grid", type="secondary", use_container_width=True, key="rib_grid_update_sketches_v18"):
-            # Konverter grid-elementer til normaliserte skisser for overlay
-            updated_sketches = []
-            for sketch in draft_sketches:
-                page_idx = sketch.get("page_index", 0)
-                page_label = sketch.get("page_label", "Konseptskisse")
-                drawing_record = lookup_record_by_page(drawings, int(page_idx))
-                img_size = drawing_record["image"].size if drawing_record else (1000, 800)
-                new_sketch = _grid_elements_to_normalized_sketch_v18(
-                    grid_state, page_idx, page_label, img_size,
-                )
-                new_sketch["confidence"] = 0.95
-                updated_sketches.append(new_sketch)
-            st.session_state.rib_draft_sketches = updated_sketches
-            st.session_state.rib_draft_updated_at = datetime.now().isoformat()
-            st.success(f"Oppdatert {len(updated_sketches)} konseptskisse(r) fra aksegrid.")
-            st.rerun()
-
-    with lock_col2:
-        if st.button("🔒 Lås rapport og generer PDF", type="primary", use_container_width=True, key="rib_lock_pdf_v18"):
-            # Sørg for at skissene er oppdatert fra grid
-            updated_sketches = []
-            for sketch in draft_sketches:
-                page_idx = sketch.get("page_index", 0)
-                page_label = sketch.get("page_label", "Konseptskisse")
-                drawing_record = lookup_record_by_page(drawings, int(page_idx))
-                img_size = drawing_record["image"].size if drawing_record else (1000, 800)
-                new_sketch = _grid_elements_to_normalized_sketch_v18(
-                    grid_state, page_idx, page_label, img_size,
-                )
-                new_sketch["confidence"] = 0.95
-                updated_sketches.append(new_sketch)
-            st.session_state.rib_draft_sketches = updated_sketches
-            with st.spinner("Låser rapport og bygger PDF..."):
+            analysis_result = replace_analysis_sketches_with_grounded(
+                analysis_result=analysis_result,
+                drawings=all_drawings,
+                material_preference=material_valg,
+            )
+
+            report_text = run_report_writer(
+                model=model,
+                analysis_result=analysis_result,
+                candidates=candidates,
+                project_data=pd_state,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+            )
+
+            persist_rib_draft_to_session(
+                analysis_result=analysis_result,
+                report_text=report_text,
+                candidate_df=candidate_df,
+                candidates=candidates,
+                drawings=all_drawings,
+                material_preference=material_valg,
+                foundation_preference=fundamentering,
+                optimization_mode=optimaliser_for,
+                safety_mode=safety_mode,
+            )
+
+        if direct_pdf_clicked:
+            with st.spinner("Låser auto-skissene og bygger PDF..."):
                 finalize_rib_draft_to_pdf()
-            st.rerun()
+        st.rerun()
 
-    st.session_state.rib_grid_state_v18 = grid_state
+
 
 
 if draft_sketch_bundle_exists():
@@ -12218,3 +11712,1656 @@ if "generated_rib_pdf" in st.session_state:
         if find_page("Review"):
             if st.button("🔍 Gå til QA for å godkjenne", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
+
+
+
+# ------------------------------------------------------------
+# 15D. V18 AKSEGRID-BASERT PRESISJONSMOTOR
+# ------------------------------------------------------------
+
+def _safe_float_v18(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _safe_int_v18(value: Any, default: int = 0) -> int:
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return int(default)
+
+
+def _suffix_sort_key_v18(label: str) -> Tuple[int, Any]:
+    raw = clean_pdf_text(label)
+    suffix = raw.split("-")[-1] if "-" in raw else raw
+    suffix = clean_pdf_text(suffix).strip().upper()
+    if suffix.isdigit():
+        return (0, int(suffix))
+    if re.fullmatch(r"[A-Z]+", suffix):
+        value = 0
+        for char in suffix:
+            value = value * 26 + (ord(char) - 64)
+        return (1, value)
+    return (2, suffix)
+
+
+def _extract_pdf_text_bundle_v18(file_name: str, file_bytes: bytes, max_pages: int = 3) -> Dict[str, Any]:
+    if fitz is None:
+        return {}
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception:
+        return {}
+    text_parts: List[str] = []
+    page_count = min(max_pages, len(doc))
+    for page_num in range(page_count):
+        try:
+            text_parts.append(doc.load_page(page_num).get_text("text"))
+        except Exception:
+            continue
+    try:
+        doc.close()
+    except Exception:
+        pass
+    return {
+        "name": clean_pdf_text(file_name),
+        "text": "\n".join(text_parts),
+    }
+
+
+def _grid_axis_tokens_from_text_v18(text: str) -> Dict[str, Dict[str, List[str]]]:
+    token_pattern = re.compile(r"\b([A-Z]-[A-Z0-9]{1,4})\b")
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for token in token_pattern.findall(clean_pdf_text(text).upper()):
+        if "-" not in token:
+            continue
+        prefix, suffix = token.split("-", 1)
+        group = out.setdefault(prefix, {"numeric": [], "alpha": [], "all": []})
+        if token not in group["all"]:
+            group["all"].append(token)
+        if suffix.isdigit():
+            if token not in group["numeric"]:
+                group["numeric"].append(token)
+        elif re.fullmatch(r"[A-Z]+", suffix):
+            if token not in group["alpha"]:
+                group["alpha"].append(token)
+    return out
+
+
+def _dimension_sequences_from_numbers_v18(numbers: List[int]) -> List[Tuple[int, ...]]:
+    sequences: List[Tuple[int, ...]] = []
+    nums = [int(n) for n in numbers if 90 <= int(n) <= 50000]
+    for idx in range(len(nums) - 2):
+        for seq_len in range(2, 6):
+            if idx + seq_len >= len(nums):
+                continue
+            seq = nums[idx:idx + seq_len]
+            total = nums[idx + seq_len]
+            if not all(1500 <= item <= 15000 for item in seq):
+                continue
+            if not (3000 <= total <= 50000):
+                continue
+            if sum(seq) == total:
+                sequences.append(tuple(int(item) for item in seq))
+    return sequences
+
+
+def _extract_grid_from_uploaded_files_v18(files: Optional[List[Any]]) -> Dict[str, Any]:
+    expanded_files = _expand_archives_v16(files) if "_expand_archives_v16" in globals() else list(files or [])
+    pdf_infos: List[Dict[str, Any]] = []
+    prefix_scores: Dict[str, Dict[str, Any]] = {}
+    sequence_counts: Dict[Tuple[int, ...], int] = {}
+
+    for file_obj in list(expanded_files or []):
+        name = clean_pdf_text(getattr(file_obj, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        if suffix != ".pdf":
+            continue
+        try:
+            file_bytes = _safe_upload_bytes_v13(file_obj)
+        except Exception:
+            file_bytes = b""
+        if not file_bytes:
+            continue
+        info = _extract_pdf_text_bundle_v18(name, file_bytes, max_pages=2)
+        if not info:
+            continue
+        pdf_infos.append(info)
+        grouped = _grid_axis_tokens_from_text_v18(info.get("text", ""))
+        for prefix, payload in grouped.items():
+            entry = prefix_scores.setdefault(prefix, {"numeric": set(), "alpha": set(), "hits": 0})
+            entry["hits"] += len(payload.get("all", []))
+            entry["numeric"].update(payload.get("numeric", []))
+            entry["alpha"].update(payload.get("alpha", []))
+        numbers = [int(n) for n in re.findall(r"\b\d{3,5}\b", clean_pdf_text(info.get("text", "")))]
+        for seq in _dimension_sequences_from_numbers_v18(numbers):
+            sequence_counts[seq] = sequence_counts.get(seq, 0) + 1
+
+    best_prefix = None
+    best_score = -1
+    for prefix, payload in prefix_scores.items():
+        score = payload.get("hits", 0) + len(payload.get("numeric", set())) * 20 + len(payload.get("alpha", set())) * 20
+        if len(payload.get("numeric", set())) >= 2 and len(payload.get("alpha", set())) >= 2 and score > best_score:
+            best_prefix = prefix
+            best_score = score
+
+    if not best_prefix:
+        return {}
+
+    x_labels = sorted(list(prefix_scores[best_prefix]["numeric"]), key=_suffix_sort_key_v18)
+    y_labels = sorted(list(prefix_scores[best_prefix]["alpha"]), key=_suffix_sort_key_v18)
+    if len(x_labels) < 2 or len(y_labels) < 2:
+        return {}
+
+    def choose_sequence(target_len: int) -> List[int]:
+        ranked = []
+        for seq, count in sequence_counts.items():
+            if len(seq) != target_len:
+                continue
+            score = count * 100 - abs(sum(seq)) * 0.0001
+            ranked.append((score, seq))
+        if ranked:
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            return [int(v) for v in ranked[0][1]]
+        return [6000 for _ in range(target_len)]
+
+    x_spans = choose_sequence(max(1, len(x_labels) - 1))
+    y_spans = choose_sequence(max(1, len(y_labels) - 1))
+
+    return {
+        "x_labels": x_labels,
+        "x_spans_mm": x_spans,
+        "y_labels": y_labels,
+        "y_spans_mm": y_spans,
+        "source": "Auto-detektert fra opplastede RIB-PDF-er",
+        "reference_files": [clean_pdf_text(item.get("name", "")) for item in pdf_infos][:6],
+        "confidence": round(clamp(best_score / 200.0, 0.25, 0.98), 2),
+    }
+
+
+def _default_grid_state_v18(sketch: Dict[str, Any], auto_grid: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    auto_grid = auto_grid or {}
+    x_labels = list(auto_grid.get("x_labels") or ["1", "2", "3"])
+    y_labels = list(auto_grid.get("y_labels") or ["A", "B", "C", "D"])
+    x_spans = list(auto_grid.get("x_spans_mm") or [6000 for _ in range(max(len(x_labels) - 1, 1))])
+    y_spans = list(auto_grid.get("y_spans_mm") or [6000 for _ in range(max(len(y_labels) - 1, 1))])
+    if len(x_spans) < max(len(x_labels) - 1, 1):
+        x_spans.extend([6000] * (len(x_labels) - 1 - len(x_spans)))
+    if len(y_spans) < max(len(y_labels) - 1, 1):
+        y_spans.extend([6000] * (len(y_labels) - 1 - len(y_spans)))
+    bbox = deep_copy_jsonable(sketch.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76})
+    strategy = "vegger_kjerne"
+    analysis_result = st.session_state.get("rib_draft_analysis", {})
+    rec_name = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "")).lower()
+    if "søyle" in rec_name and "vegg" not in rec_name:
+        strategy = "søyler_bjelker"
+    elif "hybrid" in rec_name:
+        strategy = "hybrid"
+    return {
+        "target_page_index": int(sketch.get("page_index", 0)),
+        "target_page_label": clean_pdf_text(sketch.get("page_label", "Valgt skisse")),
+        "plan_bbox": bbox,
+        "x_labels": x_labels,
+        "x_spans_mm": [int(max(1000, _safe_int_v18(v, 6000))) for v in x_spans[:max(len(x_labels) - 1, 1)]],
+        "y_labels": y_labels,
+        "y_spans_mm": [int(max(1000, _safe_int_v18(v, 6000))) for v in y_spans[:max(len(y_labels) - 1, 1)]],
+        "source": clean_pdf_text(auto_grid.get("source", "Manuell aksegrid")) or "Manuell aksegrid",
+        "reference_files": list(auto_grid.get("reference_files") or []),
+        "confidence": float(auto_grid.get("confidence", 0.0) or 0.0),
+        "strategy": strategy,
+        "show_grid_in_report": True,
+        "elements_mm": [],
+    }
+
+
+def _grid_positions_v18(labels: List[str], spans_mm: List[Any]) -> List[Dict[str, Any]]:
+    positions: List[Dict[str, Any]] = []
+    current = 0.0
+    cleaned_labels = [clean_pdf_text(item) for item in labels if clean_pdf_text(item)]
+    cleaned_spans = [_safe_float_v18(item, 6000.0) for item in spans_mm]
+    if len(cleaned_labels) < 2:
+        cleaned_labels = ["1", "2"]
+    if len(cleaned_spans) < len(cleaned_labels) - 1:
+        cleaned_spans.extend([6000.0] * (len(cleaned_labels) - 1 - len(cleaned_spans)))
+    for idx, label in enumerate(cleaned_labels):
+        positions.append({"label": label, "mm": float(current)})
+        if idx < len(cleaned_labels) - 1:
+            current += max(1000.0, float(cleaned_spans[idx]))
+    return positions
+
+
+def _grid_dimensions_v18(state: Dict[str, Any]) -> Dict[str, Any]:
+    x_positions = _grid_positions_v18(state.get("x_labels", []), state.get("x_spans_mm", []))
+    y_positions = _grid_positions_v18(state.get("y_labels", []), state.get("y_spans_mm", []))
+    return {
+        "x_positions": x_positions,
+        "y_positions": y_positions,
+        "width_mm": float(x_positions[-1]["mm"] if x_positions else 0.0),
+        "height_mm": float(y_positions[-1]["mm"] if y_positions else 0.0),
+    }
+
+
+def _nearest_axis_v18(value_mm: float, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best = None
+    best_dist = None
+    for item in positions:
+        dist = abs(float(item.get("mm", 0.0)) - float(value_mm))
+        if best is None or dist < best_dist:
+            best = item
+            best_dist = dist
+    return best or {"label": "?", "mm": float(value_mm)}
+
+
+def _nearest_bay_v18(value_mm: float, positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if len(positions) < 2:
+        return {
+            "label_1": clean_pdf_text(positions[0].get("label", "A")) if positions else "A",
+            "label_2": clean_pdf_text(positions[-1].get("label", "B")) if positions else "B",
+            "start_mm": 0.0,
+            "end_mm": max(float(value_mm), 1.0),
+            "center_mm": float(value_mm),
+        }
+    for idx in range(len(positions) - 1):
+        start = float(positions[idx].get("mm", 0.0))
+        end = float(positions[idx + 1].get("mm", 0.0))
+        if start <= value_mm <= end:
+            return {
+                "label_1": clean_pdf_text(positions[idx].get("label", "")),
+                "label_2": clean_pdf_text(positions[idx + 1].get("label", "")),
+                "start_mm": start,
+                "end_mm": end,
+                "center_mm": (start + end) / 2.0,
+            }
+    if value_mm < float(positions[0].get("mm", 0.0)):
+        return {
+            "label_1": clean_pdf_text(positions[0].get("label", "")),
+            "label_2": clean_pdf_text(positions[1].get("label", "")),
+            "start_mm": float(positions[0].get("mm", 0.0)),
+            "end_mm": float(positions[1].get("mm", 0.0)),
+            "center_mm": (float(positions[0].get("mm", 0.0)) + float(positions[1].get("mm", 0.0))) / 2.0,
+        }
+    return {
+        "label_1": clean_pdf_text(positions[-2].get("label", "")),
+        "label_2": clean_pdf_text(positions[-1].get("label", "")),
+        "start_mm": float(positions[-2].get("mm", 0.0)),
+        "end_mm": float(positions[-1].get("mm", 0.0)),
+        "center_mm": (float(positions[-2].get("mm", 0.0)) + float(positions[-1].get("mm", 0.0))) / 2.0,
+    }
+
+
+def _grid_mm_to_norm_v18(state: Dict[str, Any], x_mm: float, y_mm: float) -> Tuple[float, float]:
+    dims = _grid_dimensions_v18(state)
+    bbox = state.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76}
+    total_w = max(float(dims.get("width_mm", 1.0)), 1.0)
+    total_h = max(float(dims.get("height_mm", 1.0)), 1.0)
+    x_norm = float(bbox.get("x", 0.0)) + float(bbox.get("w", 1.0)) * (float(x_mm) / total_w)
+    y_norm = float(bbox.get("y", 0.0)) + float(bbox.get("h", 1.0)) * (1.0 - float(y_mm) / total_h)
+    return round(clamp(x_norm, 0.0, 1.0), 6), round(clamp(y_norm, 0.0, 1.0), 6)
+
+
+def _norm_to_grid_mm_v18(state: Dict[str, Any], x_norm: float, y_norm: float) -> Tuple[float, float]:
+    dims = _grid_dimensions_v18(state)
+    bbox = state.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76}
+    total_w = max(float(dims.get("width_mm", 1.0)), 1.0)
+    total_h = max(float(dims.get("height_mm", 1.0)), 1.0)
+    local_x = (float(x_norm) - float(bbox.get("x", 0.0))) / max(float(bbox.get("w", 1.0)), 1e-6)
+    local_y = (float(y_norm) - float(bbox.get("y", 0.0))) / max(float(bbox.get("h", 1.0)), 1e-6)
+    x_mm = clamp(local_x, 0.0, 1.0) * total_w
+    y_mm = (1.0 - clamp(local_y, 0.0, 1.0)) * total_h
+    return float(x_mm), float(y_mm)
+
+
+def _choose_core_bay_indices_v18(state: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    dims = _grid_dimensions_v18(state)
+    x_positions = dims["x_positions"]
+    y_positions = dims["y_positions"]
+    x_bays = max(len(x_positions) - 1, 1)
+    y_bays = max(len(y_positions) - 1, 1)
+    if x_bays >= 2:
+        left_idx = min(1, x_bays - 1)
+        right_idx = min(left_idx + 1, len(x_positions) - 1)
+    else:
+        left_idx, right_idx = 0, 1 if len(x_positions) > 1 else 0
+    lower_idx = max(0, min(y_bays - 2, max(0, y_bays // 2 - 1)))
+    upper_idx = min(lower_idx + 1, len(y_positions) - 1)
+    return left_idx, right_idx, lower_idx, upper_idx
+
+
+def _auto_generate_grid_elements_v18(state: Dict[str, Any], mode: str) -> List[Dict[str, Any]]:
+    dims = _grid_dimensions_v18(state)
+    x_positions = dims["x_positions"]
+    y_positions = dims["y_positions"]
+    if len(x_positions) < 2 or len(y_positions) < 2:
+        return []
+    mode_low = clean_pdf_text(mode).lower()
+    elements: List[Dict[str, Any]] = []
+
+    left_idx, right_idx, lower_idx, upper_idx = _choose_core_bay_indices_v18(state)
+    x0 = float(x_positions[left_idx]["mm"])
+    x1 = float(x_positions[right_idx]["mm"])
+    y0 = float(y_positions[lower_idx]["mm"])
+    y1 = float(y_positions[upper_idx]["mm"])
+    core_margin_x = (x1 - x0) * 0.12
+    core_margin_y = (y1 - y0) * 0.12
+    elements.append({
+        "type": "core",
+        "label": "Kjerne 1",
+        "x": round(x0 + core_margin_x, 1),
+        "y": round(y0 + core_margin_y, 1),
+        "w": round(max((x1 - x0) - 2 * core_margin_x, 1200.0), 1),
+        "h": round(max((y1 - y0) - 2 * core_margin_y, 1200.0), 1),
+    })
+
+    if "vegg" in mode_low or "kjerne" in mode_low or "plasstøpt" in mode_low or "hybrid" in mode_low:
+        wall_x_idx = min(max(1, len(x_positions) // 2), len(x_positions) - 2) if len(x_positions) > 2 else 0
+        wall_y_idx = min(max(1, len(y_positions) - 2), len(y_positions) - 1)
+        elements.append({
+            "type": "wall",
+            "label": f"Bærevegg {x_positions[wall_x_idx]['label']}",
+            "x1": round(float(x_positions[wall_x_idx]["mm"]), 1),
+            "y1": round(float(y_positions[0]["mm"]), 1),
+            "x2": round(float(x_positions[wall_x_idx]["mm"]), 1),
+            "y2": round(float(y_positions[-1]["mm"]), 1),
+        })
+        elements.append({
+            "type": "wall",
+            "label": f"Bærevegg {y_positions[wall_y_idx]['label']}",
+            "x1": round(float(x_positions[0]["mm"]), 1),
+            "y1": round(float(y_positions[wall_y_idx]["mm"]), 1),
+            "x2": round(float(x_positions[min(1, len(x_positions) - 1)]["mm"]), 1),
+            "y2": round(float(y_positions[wall_y_idx]["mm"]), 1),
+        })
+        elements.append({
+            "type": "span_arrow",
+            "label": f"ca {round((float(x_positions[min(1, len(x_positions) - 1)]["mm"]) - float(x_positions[0]["mm"])) / 1000.0, 1)} m",
+            "x1": round(float(x_positions[0]["mm"]), 1),
+            "y1": round(float(y_positions[max(0, lower_idx)]["mm"]), 1),
+            "x2": round(float(x_positions[min(1, len(x_positions) - 1)]["mm"]), 1),
+            "y2": round(float(y_positions[max(0, lower_idx)]["mm"]), 1),
+        })
+    if "søyle" in mode_low:
+        for xi in range(len(x_positions)):
+            for yi in range(len(y_positions)):
+                if xi in {0, len(x_positions) - 1} or yi in {0, len(y_positions) - 1} or (xi == 1 and yi in {1, len(y_positions) - 2}):
+                    label = f"S{xi + 1}-{yi + 1}"
+                    elements.append({
+                        "type": "column",
+                        "label": label,
+                        "x": round(float(x_positions[xi]["mm"]), 1),
+                        "y": round(float(y_positions[yi]["mm"]), 1),
+                    })
+    return elements
+
+
+def _grid_elements_to_df_v18(elements: List[Dict[str, Any]]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for item in elements:
+        e_type = clean_pdf_text(item.get("type", "")).lower()
+        row = {
+            "type": e_type,
+            "label": clean_pdf_text(item.get("label", "")),
+            "x": item.get("x"),
+            "y": item.get("y"),
+            "x2": item.get("x2"),
+            "y2": item.get("y2"),
+            "w": item.get("w"),
+            "h": item.get("h"),
+        }
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["type", "label", "x", "y", "x2", "y2", "w", "h"])
+
+
+def _grid_df_to_elements_v18(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    elements: List[Dict[str, Any]] = []
+    if df is None or df.empty:
+        return elements
+    for _, row in df.iterrows():
+        e_type = clean_pdf_text(row.get("type", "")).lower()
+        label = clean_pdf_text(row.get("label", ""))
+        if not e_type:
+            continue
+        if e_type == "column":
+            elements.append({
+                "type": "column",
+                "label": label or "Søyle",
+                "x": round(_safe_float_v18(row.get("x"), 0.0), 1),
+                "y": round(_safe_float_v18(row.get("y"), 0.0), 1),
+            })
+        elif e_type == "core":
+            elements.append({
+                "type": "core",
+                "label": label or "Kjerne",
+                "x": round(_safe_float_v18(row.get("x"), 0.0), 1),
+                "y": round(_safe_float_v18(row.get("y"), 0.0), 1),
+                "w": round(max(100.0, _safe_float_v18(row.get("w"), 1200.0)), 1),
+                "h": round(max(100.0, _safe_float_v18(row.get("h"), 1200.0)), 1),
+            })
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            elements.append({
+                "type": e_type,
+                "label": label or ("Bærevegg" if e_type == "wall" else "Element"),
+                "x1": round(_safe_float_v18(row.get("x"), 0.0), 1),
+                "y1": round(_safe_float_v18(row.get("y"), 0.0), 1),
+                "x2": round(_safe_float_v18(row.get("x2"), 0.0), 1),
+                "y2": round(_safe_float_v18(row.get("y2"), 0.0), 1),
+            })
+    return elements
+
+
+def _sketch_to_grid_elements_v18(state: Dict[str, Any], sketch: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dims = _grid_dimensions_v18(state)
+    x_positions = dims["x_positions"]
+    y_positions = dims["y_positions"]
+    if len(x_positions) < 2 or len(y_positions) < 2:
+        return []
+    elements: List[Dict[str, Any]] = []
+    for element in sketch.get("elements", []) if isinstance(sketch, dict) else []:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        label = clean_pdf_text(element.get("label", ""))
+        if e_type == "grid":
+            continue
+        if e_type == "column":
+            x_mm, y_mm = _norm_to_grid_mm_v18(state, _safe_float_v18(element.get("x"), 0.0), _safe_float_v18(element.get("y"), 0.0))
+            x_snap = _nearest_axis_v18(x_mm, x_positions)
+            y_snap = _nearest_axis_v18(y_mm, y_positions)
+            elements.append({"type": "column", "label": label or "Søyle", "x": round(float(x_snap["mm"]), 1), "y": round(float(y_snap["mm"]), 1)})
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1_mm, y1_mm = _norm_to_grid_mm_v18(state, _safe_float_v18(element.get("x1"), element.get("x")), _safe_float_v18(element.get("y1"), element.get("y")))
+            x2_mm, y2_mm = _norm_to_grid_mm_v18(state, _safe_float_v18(element.get("x2"), element.get("x")), _safe_float_v18(element.get("y2"), element.get("y")))
+            x1_snap = _nearest_axis_v18(x1_mm, x_positions)
+            x2_snap = _nearest_axis_v18(x2_mm, x_positions)
+            y1_snap = _nearest_axis_v18(y1_mm, y_positions)
+            y2_snap = _nearest_axis_v18(y2_mm, y_positions)
+            if abs(x1_mm - x2_mm) < abs(y1_mm - y2_mm):
+                x_val = round(float(_nearest_axis_v18((x1_mm + x2_mm) / 2.0, x_positions)["mm"]), 1)
+                elements.append({"type": e_type, "label": label, "x1": x_val, "y1": round(float(y1_snap["mm"]), 1), "x2": x_val, "y2": round(float(y2_snap["mm"]), 1)})
+            else:
+                y_val = round(float(_nearest_axis_v18((y1_mm + y2_mm) / 2.0, y_positions)["mm"]), 1)
+                elements.append({"type": e_type, "label": label, "x1": round(float(x1_snap["mm"]), 1), "y1": y_val, "x2": round(float(x2_snap["mm"]), 1), "y2": y_val})
+        elif e_type == "core":
+            x1_mm, y_top_mm = _norm_to_grid_mm_v18(state, _safe_float_v18(element.get("x"), 0.0), _safe_float_v18(element.get("y"), 0.0))
+            x2_mm, y_bottom_mm = _norm_to_grid_mm_v18(state, _safe_float_v18(element.get("x"), 0.0) + _safe_float_v18(element.get("w"), 0.0), _safe_float_v18(element.get("y"), 0.0) + _safe_float_v18(element.get("h"), 0.0))
+            x_lo = min(x1_mm, x2_mm)
+            x_hi = max(x1_mm, x2_mm)
+            y_lo = min(y_top_mm, y_bottom_mm)
+            y_hi = max(y_top_mm, y_bottom_mm)
+            x_start = _nearest_axis_v18(x_lo, x_positions)
+            x_end = _nearest_axis_v18(x_hi, x_positions)
+            y_start = _nearest_axis_v18(y_lo, y_positions)
+            y_end = _nearest_axis_v18(y_hi, y_positions)
+            if x_start["mm"] == x_end["mm"]:
+                bay_x = _nearest_bay_v18((x_lo + x_hi) / 2.0, x_positions)
+                x_start = {"label": bay_x["label_1"], "mm": bay_x["start_mm"]}
+                x_end = {"label": bay_x["label_2"], "mm": bay_x["end_mm"]}
+            if y_start["mm"] == y_end["mm"]:
+                bay_y = _nearest_bay_v18((y_lo + y_hi) / 2.0, y_positions)
+                y_start = {"label": bay_y["label_1"], "mm": bay_y["start_mm"]}
+                y_end = {"label": bay_y["label_2"], "mm": bay_y["end_mm"]}
+            elements.append({
+                "type": "core",
+                "label": label or "Kjerne",
+                "x": round(float(x_start["mm"]), 1),
+                "y": round(float(y_start["mm"]), 1),
+                "w": round(max(100.0, float(x_end["mm"]) - float(x_start["mm"])), 1),
+                "h": round(max(100.0, float(y_end["mm"]) - float(y_start["mm"])), 1),
+            })
+    return elements
+
+
+def _grid_elements_to_sketch_v18(state: Dict[str, Any], elements_mm: List[Dict[str, Any]], base_sketch: Dict[str, Any]) -> Dict[str, Any]:
+    sketch = deep_copy_jsonable(base_sketch)
+    out_elements: List[Dict[str, Any]] = []
+    dims = _grid_dimensions_v18(state)
+    x_positions = dims["x_positions"]
+    y_positions = dims["y_positions"]
+
+    if bool(state.get("show_grid_in_report", True)):
+        for item in x_positions:
+            x_norm, _ = _grid_mm_to_norm_v18(state, float(item.get("mm", 0.0)), 0.0)
+            out_elements.append({"type": "grid", "orientation": "vertical", "x": round(x_norm, 6), "label": clean_pdf_text(item.get("label", ""))})
+        for item in y_positions:
+            _, y_norm = _grid_mm_to_norm_v18(state, 0.0, float(item.get("mm", 0.0)))
+            out_elements.append({"type": "grid", "orientation": "horizontal", "y": round(y_norm, 6), "label": clean_pdf_text(item.get("label", ""))})
+
+    for item in elements_mm:
+        e_type = clean_pdf_text(item.get("type", "")).lower()
+        label = clean_pdf_text(item.get("label", ""))
+        if e_type == "column":
+            x_norm, y_norm = _grid_mm_to_norm_v18(state, _safe_float_v18(item.get("x"), 0.0), _safe_float_v18(item.get("y"), 0.0))
+            out_elements.append({"type": "column", "label": label or "Søyle", "x": x_norm, "y": y_norm})
+        elif e_type == "core":
+            x_mm = _safe_float_v18(item.get("x"), 0.0)
+            y_mm = _safe_float_v18(item.get("y"), 0.0)
+            w_mm = max(100.0, _safe_float_v18(item.get("w"), 1200.0))
+            h_mm = max(100.0, _safe_float_v18(item.get("h"), 1200.0))
+            x_norm, y_top_norm = _grid_mm_to_norm_v18(state, x_mm, y_mm + h_mm)
+            x2_norm, y_bottom_norm = _grid_mm_to_norm_v18(state, x_mm + w_mm, y_mm)
+            out_elements.append({
+                "type": "core",
+                "label": label or "Kjerne",
+                "x": round(min(x_norm, x2_norm), 6),
+                "y": round(min(y_top_norm, y_bottom_norm), 6),
+                "w": round(abs(x2_norm - x_norm), 6),
+                "h": round(abs(y_bottom_norm - y_top_norm), 6),
+            })
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1, y1 = _grid_mm_to_norm_v18(state, _safe_float_v18(item.get("x1"), item.get("x")), _safe_float_v18(item.get("y1"), item.get("y")))
+            x2, y2 = _grid_mm_to_norm_v18(state, _safe_float_v18(item.get("x2"), item.get("x2")), _safe_float_v18(item.get("y2"), item.get("y2")))
+            out_elements.append({"type": e_type, "label": label, "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+
+    sketch["elements"] = out_elements
+    sketch["plan_bbox"] = deep_copy_jsonable(state.get("plan_bbox") or sketch.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76})
+    notes = [clean_pdf_text(n) for n in sketch.get("notes", []) if clean_pdf_text(n)]
+    grid_note = "Aksegrid-basert presisjonsskisse (mm-styrt; elementer snapper til akser/bukter)."
+    if grid_note not in notes:
+        notes.insert(0, grid_note)
+    sketch["notes"] = notes[:8]
+    return sketch
+
+
+def _draw_centered_text_v18(draw: ImageDraw.ImageDraw, center: Tuple[float, float], text: str, font: ImageFont.FreeTypeFont, fill) -> None:
+    text = clean_pdf_text(text)
+    if not text:
+        return
+    bbox = font.getbbox(text)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    draw.text((center[0] - tw / 2.0, center[1] - th / 2.0), text, font=font, fill=fill)
+
+
+def _render_grid_preview_v18(state: Dict[str, Any], elements_mm: List[Dict[str, Any]]) -> Image.Image:
+    dims = _grid_dimensions_v18(state)
+    total_w = max(float(dims.get("width_mm", 1.0)), 1.0)
+    total_h = max(float(dims.get("height_mm", 1.0)), 1.0)
+    left_pad = 120
+    top_pad = 120
+    right_pad = 140
+    bottom_pad = 110
+    drawable_w = 980
+    drawable_h = 720
+    scale = min(drawable_w / total_w, drawable_h / total_h)
+    grid_w = int(round(total_w * scale))
+    grid_h = int(round(total_h * scale))
+    canvas_w = left_pad + grid_w + right_pad
+    canvas_h = top_pad + grid_h + bottom_pad
+
+    img = Image.new("RGB", (canvas_w, canvas_h), (250, 252, 255))
+    draw = ImageDraw.Draw(img, "RGBA")
+    origin_x = left_pad
+    origin_y = canvas_h - bottom_pad
+
+    font_axis = get_font(20, bold=True)
+    font_dim = get_font(16, bold=False)
+    font_elem = get_font(16, bold=True)
+    font_title = get_font(24, bold=True)
+    title = clean_pdf_text(state.get("target_page_label", "Aksegrid")) or "Aksegrid"
+    draw.text((left_pad, 24), f"Aksegrid editor - {title}", font=font_title, fill=(20, 30, 40))
+    source = clean_pdf_text(state.get("source", "Manuell aksegrid")) or "Manuell aksegrid"
+    draw.text((left_pad, 58), source, font=font_dim, fill=(80, 90, 100))
+
+    # Grid lines and labels
+    for item in dims["x_positions"]:
+        x_px = origin_x + int(round(float(item.get("mm", 0.0)) * scale))
+        draw_dashed_line(draw, (x_px, top_pad), (x_px, origin_y), fill=(140, 150, 165, 255), width=2, dash_length=10, gap_length=7)
+        draw.ellipse((x_px - 20, top_pad - 58, x_px + 20, top_pad - 18), fill=(255, 255, 255, 255), outline=(90, 100, 115, 255), width=2)
+        _draw_centered_text_v18(draw, (x_px, top_pad - 38), clean_pdf_text(item.get("label", "")), font_axis, (20, 30, 40))
+    for item in dims["y_positions"]:
+        y_px = origin_y - int(round(float(item.get("mm", 0.0)) * scale))
+        draw_dashed_line(draw, (left_pad, y_px), (left_pad + grid_w, y_px), fill=(140, 150, 165, 255), width=2, dash_length=10, gap_length=7)
+        draw.ellipse((left_pad + grid_w + 18, y_px - 20, left_pad + grid_w + 58, y_px + 20), fill=(255, 255, 255, 255), outline=(90, 100, 115, 255), width=2)
+        _draw_centered_text_v18(draw, (left_pad + grid_w + 38, y_px), clean_pdf_text(item.get("label", "")), font_axis, (20, 30, 40))
+
+    # Dimension strings
+    for idx in range(len(dims["x_positions"]) - 1):
+        x0 = origin_x + int(round(float(dims["x_positions"][idx]["mm"]) * scale))
+        x1 = origin_x + int(round(float(dims["x_positions"][idx + 1]["mm"]) * scale))
+        y = top_pad - 82
+        draw.line((x0, y, x1, y), fill=(80, 90, 100, 255), width=2)
+        draw.line((x0, y - 6, x0, y + 6), fill=(80, 90, 100, 255), width=2)
+        draw.line((x1, y - 6, x1, y + 6), fill=(80, 90, 100, 255), width=2)
+        _draw_centered_text_v18(draw, ((x0 + x1) / 2.0, y - 14), str(_safe_int_v18(state.get("x_spans_mm", [])[idx], 0)), font_dim, (60, 70, 80))
+    for idx in range(len(dims["y_positions"]) - 1):
+        y0 = origin_y - int(round(float(dims["y_positions"][idx]["mm"]) * scale))
+        y1 = origin_y - int(round(float(dims["y_positions"][idx + 1]["mm"]) * scale))
+        x = left_pad + grid_w + 86
+        draw.line((x, y0, x, y1), fill=(80, 90, 100, 255), width=2)
+        draw.line((x - 6, y0, x + 6, y0), fill=(80, 90, 100, 255), width=2)
+        draw.line((x - 6, y1, x + 6, y1), fill=(80, 90, 100, 255), width=2)
+        _draw_centered_text_v18(draw, (x + 28, (y0 + y1) / 2.0), str(_safe_int_v18(state.get("y_spans_mm", [])[idx], 0)), font_dim, (60, 70, 80))
+
+    # Border
+    draw.rectangle((left_pad, top_pad, left_pad + grid_w, origin_y), outline=(55, 65, 78, 255), width=2)
+
+    def mm_to_px(x_mm: float, y_mm: float) -> Tuple[float, float]:
+        return origin_x + float(x_mm) * scale, origin_y - float(y_mm) * scale
+
+    for element in elements_mm:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        label = clean_pdf_text(element.get("label", ""))
+        if e_type == "column":
+            x_px, y_px = mm_to_px(_safe_float_v18(element.get("x"), 0.0), _safe_float_v18(element.get("y"), 0.0))
+            r = 10
+            draw.ellipse((x_px - r, y_px - r, x_px + r, y_px + r), fill=OVERLAY_COLORS["column"], outline=(255, 255, 255, 255), width=2)
+            if label:
+                draw_label(draw, (int(x_px + 14), int(y_px - 24)), label, font_elem, (10, 22, 35, 220), (255, 255, 255, 255))
+        elif e_type == "core":
+            x = _safe_float_v18(element.get("x"), 0.0)
+            y = _safe_float_v18(element.get("y"), 0.0)
+            w_mm = max(100.0, _safe_float_v18(element.get("w"), 1200.0))
+            h_mm = max(100.0, _safe_float_v18(element.get("h"), 1200.0))
+            x1_px, y1_px = mm_to_px(x, y)
+            x2_px, y2_px = mm_to_px(x + w_mm, y + h_mm)
+            left = min(x1_px, x2_px)
+            right = max(x1_px, x2_px)
+            top = min(y1_px, y2_px)
+            bottom = max(y1_px, y2_px)
+            draw.rounded_rectangle((left, top, right, bottom), radius=10, fill=OVERLAY_COLORS["core_fill"], outline=OVERLAY_COLORS["core_stroke"], width=3)
+            draw_label(draw, (int(left + 8), int(top + 8)), label or "Kjerne", font_elem, (255, 196, 64, 230), (35, 35, 35, 255))
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1_px, y1_px = mm_to_px(_safe_float_v18(element.get("x1"), 0.0), _safe_float_v18(element.get("y1"), 0.0))
+            x2_px, y2_px = mm_to_px(_safe_float_v18(element.get("x2"), 0.0), _safe_float_v18(element.get("y2"), 0.0))
+            if e_type == "wall":
+                draw.line((x1_px, y1_px, x2_px, y2_px), fill=OVERLAY_COLORS["wall"], width=8)
+                draw_label(draw, (int(min(x1_px, x2_px) + 8), int(min(y1_px, y2_px) - 26)), label or "Bærevegg", font_elem, (255, 153, 153, 230), (35, 35, 35, 255))
+            elif e_type == "beam":
+                draw.line((x1_px, y1_px, x2_px, y2_px), fill=OVERLAY_COLORS["beam"], width=6)
+                draw_label(draw, (int((x1_px + x2_px) / 2.0 + 8), int((y1_px + y2_px) / 2.0 - 24)), label or "Bjelke", font_elem, (10, 22, 35, 220), (255, 255, 255, 255))
+            else:
+                draw_arrow(draw, (int(x1_px), int(y1_px)), (int(x2_px), int(y2_px)), OVERLAY_COLORS["span"], width=5)
+                draw_label(draw, (int((x1_px + x2_px) / 2.0 - 24), int((y1_px + y2_px) / 2.0 - 28)), label or "Spenn", font_elem, (196, 235, 176, 235), (30, 30, 30, 255))
+
+    return img
+
+
+def _normalize_axis_rows_v18(df: pd.DataFrame, axis_prefix: str = "A") -> Tuple[List[str], List[int]]:
+    labels: List[str] = []
+    spans: List[int] = []
+    if df is None or df.empty:
+        return [axis_prefix + "1", axis_prefix + "2"], [6000]
+    for idx, row in df.iterrows():
+        label = clean_pdf_text(row.get("akse", "")) or clean_pdf_text(row.get("label", ""))
+        if not label:
+            continue
+        labels.append(label)
+        next_mm = row.get("til_neste_mm")
+        if idx < len(df.index) - 1:
+            spans.append(max(1000, _safe_int_v18(next_mm, 6000)))
+    if len(labels) < 2:
+        labels = [axis_prefix + "1", axis_prefix + "2"]
+        spans = [6000]
+    while len(spans) < len(labels) - 1:
+        spans.append(6000)
+    return labels, spans[:len(labels) - 1]
+
+
+def _grid_ai_prompt_v18(state: Dict[str, Any], analysis_result: Dict[str, Any], page_label: str) -> str:
+    dims = _grid_dimensions_v18(state)
+    x_lines = [f"- {item['label']}: {int(round(item['mm']))} mm" for item in dims["x_positions"]]
+    y_lines = [f"- {item['label']}: {int(round(item['mm']))} mm" for item in dims["y_positions"]]
+    rec = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"))
+    obs = [clean_pdf_text(x) for x in analysis_result.get("observasjoner", []) if clean_pdf_text(x)]
+    return f"""
+Du er Builtly RIB AI. Du skal IKKE gjette pikselkoordinater.
+Du skal kun foreslå bæresystem ved å referere til akser og aksefelt.
+
+MÅL:
+- Returner KUN gyldig JSON.
+- Elementer skal referere til akselabels eller aksefelt, aldri (x,y)-verdier.
+- Ikke legg bæring i yttervegg uten tydelig grunn.
+- Kjerne skal ligge i en logisk indre sjakt-/trappesone.
+- Vegger skal følge hele akser eller klare delstrekninger mellom akser.
+- Søyler skal ligge på aksekryss.
+
+VALGT TEGNING/SKISSE:
+- {clean_pdf_text(page_label)}
+
+ANBEFALT SYSTEM FRA HOVEDANALYSEN:
+- {rec}
+
+OBSERVASJONER:
+{chr(10).join('- ' + item for item in obs[:8]) if obs else '- Ingen særskilte observasjoner.'}
+
+AKSER X (venstre mot høyre):
+{chr(10).join(x_lines)}
+AKSER Y (bunn mot topp):
+{chr(10).join(y_lines)}
+
+RETURNER DETTE JSON-SKJEMAET:
+{{
+  "placements": [
+    {{"type": "column", "label": "C1", "x_axis": "B-02", "y_axis": "B-B"}},
+    {{"type": "wall", "label": "V1", "x_axis": "B-02", "y_from": "B-A", "y_to": "B-D"}},
+    {{"type": "wall", "label": "V2", "y_axis": "B-C", "x_from": "B-01", "x_to": "B-02"}},
+    {{"type": "core", "label": "K1", "x_from": "B-02", "x_to": "B-03", "y_from": "B-B", "y_to": "B-C"}},
+    {{"type": "span_arrow", "label": "ca 6,9 m", "x_from": "B-01", "x_to": "B-02", "y_axis": "B-B"}}
+  ]
+}}
+""".strip()
+
+
+def _grid_ai_to_elements_v18(state: Dict[str, Any], raw_json: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dims = _grid_dimensions_v18(state)
+    x_lookup = {clean_pdf_text(item["label"]): float(item["mm"]) for item in dims["x_positions"]}
+    y_lookup = {clean_pdf_text(item["label"]): float(item["mm"] ) for item in dims["y_positions"]}
+    out: List[Dict[str, Any]] = []
+    for item in raw_json.get("placements", []) if isinstance(raw_json, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        e_type = clean_pdf_text(item.get("type", "")).lower()
+        label = clean_pdf_text(item.get("label", ""))
+        try:
+            if e_type == "column":
+                x = x_lookup[clean_pdf_text(item.get("x_axis", ""))]
+                y = y_lookup[clean_pdf_text(item.get("y_axis", ""))]
+                out.append({"type": "column", "label": label or "Søyle", "x": round(x, 1), "y": round(y, 1)})
+            elif e_type == "wall":
+                if clean_pdf_text(item.get("x_axis", "")) in x_lookup:
+                    x = x_lookup[clean_pdf_text(item.get("x_axis", ""))]
+                    y1 = y_lookup[clean_pdf_text(item.get("y_from", ""))]
+                    y2 = y_lookup[clean_pdf_text(item.get("y_to", ""))]
+                    out.append({"type": "wall", "label": label or "Bærevegg", "x1": round(x, 1), "y1": round(y1, 1), "x2": round(x, 1), "y2": round(y2, 1)})
+                else:
+                    y = y_lookup[clean_pdf_text(item.get("y_axis", ""))]
+                    x1 = x_lookup[clean_pdf_text(item.get("x_from", ""))]
+                    x2 = x_lookup[clean_pdf_text(item.get("x_to", ""))]
+                    out.append({"type": "wall", "label": label or "Bærevegg", "x1": round(x1, 1), "y1": round(y, 1), "x2": round(x2, 1), "y2": round(y, 1)})
+            elif e_type == "core":
+                x1 = x_lookup[clean_pdf_text(item.get("x_from", ""))]
+                x2 = x_lookup[clean_pdf_text(item.get("x_to", ""))]
+                y1 = y_lookup[clean_pdf_text(item.get("y_from", ""))]
+                y2 = y_lookup[clean_pdf_text(item.get("y_to", ""))]
+                out.append({"type": "core", "label": label or "Kjerne", "x": round(min(x1, x2), 1), "y": round(min(y1, y2), 1), "w": round(abs(x2 - x1), 1), "h": round(abs(y2 - y1), 1)})
+            elif e_type == "span_arrow":
+                y = y_lookup[clean_pdf_text(item.get("y_axis", ""))]
+                x1 = x_lookup[clean_pdf_text(item.get("x_from", ""))]
+                x2 = x_lookup[clean_pdf_text(item.get("x_to", ""))]
+                out.append({"type": "span_arrow", "label": label or "Spenn", "x1": round(x1, 1), "y1": round(y, 1), "x2": round(x2, 1), "y2": round(y, 1)})
+        except Exception:
+            continue
+    return out
+
+
+def _run_grid_ai_layout_v18(state: Dict[str, Any], drawing_record: Optional[Dict[str, Any]], analysis_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    valid_models = list_available_models()
+    valgt_modell = pick_model(valid_models)
+    if not valgt_modell:
+        return []
+    try:
+        model = build_runtime_ai_model(valgt_modell)
+    except Exception:
+        return []
+    prompt = _grid_ai_prompt_v18(state, analysis_result, clean_pdf_text(state.get("target_page_label", "Valgt plan")))
+    parts: List[Any] = [prompt]
+    if drawing_record is not None and isinstance(drawing_record.get("image"), Image.Image):
+        parts.append(add_analysis_badge(drawing_record["image"], int(drawing_record.get("page_index", 0)), drawing_record.get("label", "Plan")))
+    try:
+        raw_text = generate_text(model, parts, temperature=0.08)
+        parsed = safe_json_loads(raw_text)
+        return _grid_ai_to_elements_v18(state, parsed)
+    except Exception:
+        return []
+
+
+def _update_grid_state_in_session_v18(sketch_uid_value: str, state: Dict[str, Any]) -> None:
+    bundle = deep_copy_jsonable(st.session_state.get("rib_grid_states_v18", {}))
+    bundle[sketch_uid_value] = state
+    st.session_state.rib_grid_states_v18 = bundle
+
+
+def _get_or_init_grid_state_v18(sketch: Dict[str, Any], drawings: List[Dict[str, Any]], files: Optional[List[Any]]) -> Dict[str, Any]:
+    sketch_uid_value = sketch_uid(sketch)
+    bundle = st.session_state.get("rib_grid_states_v18", {})
+    existing = deep_copy_jsonable(bundle.get(sketch_uid_value)) if isinstance(bundle, dict) else None
+    if isinstance(existing, dict) and existing.get("x_labels") and existing.get("y_labels"):
+        return existing
+    auto_grid = _extract_grid_from_uploaded_files_v18(files)
+    state = _default_grid_state_v18(sketch, auto_grid)
+    mm_elements = _sketch_to_grid_elements_v18(state, sketch)
+    if not mm_elements:
+        mm_elements = _auto_generate_grid_elements_v18(state, state.get("strategy", "vegger_kjerne"))
+    state["elements_mm"] = mm_elements
+    _update_grid_state_in_session_v18(sketch_uid_value, state)
+    return deep_copy_jsonable(state)
+
+
+def _apply_grid_to_selected_sketch_v18(sketch_idx: int, sketch: Dict[str, Any], state: Dict[str, Any]) -> None:
+    draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_sketches", []))
+    if sketch_idx < 0 or sketch_idx >= len(draft_sketches):
+        return
+    rebuilt = _grid_elements_to_sketch_v18(state, state.get("elements_mm", []), sketch)
+    draft_sketches[sketch_idx] = rebuilt
+    st.session_state.rib_draft_sketches = draft_sketches
+    analysis_copy = deep_copy_jsonable(st.session_state.get("rib_draft_analysis", {}))
+    analysis_copy["sketches"] = draft_sketches
+    observations = [clean_pdf_text(x) for x in analysis_copy.get("observasjoner", []) if clean_pdf_text(x)]
+    note = f"Skissen '{clean_pdf_text(sketch.get('page_label', 'Plan'))}' ble rekonstruert på aksegrid med mm-styrt plassering."
+    if note not in observations:
+        observations.insert(0, note)
+    analysis_copy["observasjoner"] = observations
+    st.session_state.rib_draft_analysis = analysis_copy
+    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+
+
+def render_rib_grid_precision_editor_v18() -> None:
+    if not draft_sketch_bundle_exists():
+        return
+
+    draft_sketches = st.session_state.get("rib_draft_sketches", [])
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    analysis_result = st.session_state.get("rib_draft_analysis", {})
+    if not draft_sketches:
+        return
+
+    st.markdown("---")
+    st.markdown("### Aksegrid-basert presisjonseditor")
+    st.info(
+        "Denne editoren bytter ut pikselgjetting med akser og millimeter. "
+        "Elementene legges på akser/aksefelt, og konseptskissen oppdateres først når du trykker 'Oppdater konseptskisser fra grid'."
+    )
+
+    sketch_options = {f"Tegning {int(item.get('page_index', 0))}: {clean_pdf_text(item.get('page_label', 'Skisse'))}": idx for idx, item in enumerate(draft_sketches)}
+    default_idx = 0
+    selected_uid = st.session_state.get("rib_draft_selected_sketch", "")
+    for idx, item in enumerate(draft_sketches):
+        if sketch_uid(item) == selected_uid:
+            default_idx = idx
+            break
+    labels = list(sketch_options.keys())
+    chosen_label = st.selectbox("Velg skisse som skal grid-forankres", labels, index=default_idx, key="rib_grid_target_v18")
+    sketch_idx = sketch_options[chosen_label]
+    selected_sketch = draft_sketches[sketch_idx]
+    selected_uid = sketch_uid(selected_sketch)
+    state = _get_or_init_grid_state_v18(selected_sketch, drawings, globals().get("files"))
+    dims = _grid_dimensions_v18(state)
+    selected_record = lookup_record_by_page(drawings, int(selected_sketch.get("page_index", -1)))
+
+    ref_files = ", ".join(state.get("reference_files", [])[:4]) if state.get("reference_files") else "Ingen PDF-grid funnet - bruker manuell/default grid."
+    st.caption(
+        f"Gridkilde: {clean_pdf_text(state.get('source', 'Manuell'))} | Referanser: {ref_files} | "
+        f"X={', '.join(state.get('x_labels', []))} | Y={', '.join(state.get('y_labels', []))}"
+    )
+
+    bbox = state.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76}
+    bbox_cols = st.columns(5)
+    bbox_x = bbox_cols[0].number_input("Venstre %", min_value=0.0, max_value=95.0, value=round(_safe_float_v18(bbox.get("x"), 0.08) * 100.0, 1), step=0.5, key=f"rib_bbox_x_{selected_uid}")
+    bbox_y = bbox_cols[1].number_input("Topp %", min_value=0.0, max_value=95.0, value=round(_safe_float_v18(bbox.get("y"), 0.10) * 100.0, 1), step=0.5, key=f"rib_bbox_y_{selected_uid}")
+    bbox_w = bbox_cols[2].number_input("Bredde %", min_value=5.0, max_value=100.0, value=round(_safe_float_v18(bbox.get("w"), 0.82) * 100.0, 1), step=0.5, key=f"rib_bbox_w_{selected_uid}")
+    bbox_h = bbox_cols[3].number_input("Høyde %", min_value=5.0, max_value=100.0, value=round(_safe_float_v18(bbox.get("h"), 0.76) * 100.0, 1), step=0.5, key=f"rib_bbox_h_{selected_uid}")
+    show_grid = bbox_cols[4].checkbox("Vis grid i rapport", value=bool(state.get("show_grid_in_report", True)), key=f"rib_show_grid_{selected_uid}")
+    bbox_update = {
+        "x": round(clamp(bbox_x / 100.0, 0.0, 0.95), 6),
+        "y": round(clamp(bbox_y / 100.0, 0.0, 0.95), 6),
+        "w": round(clamp(bbox_w / 100.0, 0.05, 1.0), 6),
+        "h": round(clamp(bbox_h / 100.0, 0.05, 1.0), 6),
+    }
+    bbox_update["w"] = round(min(bbox_update["w"], 1.0 - bbox_update["x"]), 6)
+    bbox_update["h"] = round(min(bbox_update["h"], 1.0 - bbox_update["y"]), 6)
+    state["plan_bbox"] = bbox_update
+    state["show_grid_in_report"] = bool(show_grid)
+
+    axis_left, axis_right = st.columns(2)
+    x_rows = []
+    for idx, label in enumerate(state.get("x_labels", [])):
+        x_rows.append({"akse": label, "til_neste_mm": state.get("x_spans_mm", [None] * max(len(state.get("x_labels", [])) - 1, 1))[idx] if idx < len(state.get("x_labels", [])) - 1 else None})
+    y_rows = []
+    for idx, label in enumerate(state.get("y_labels", [])):
+        y_rows.append({"akse": label, "til_neste_mm": state.get("y_spans_mm", [None] * max(len(state.get("y_labels", [])) - 1, 1))[idx] if idx < len(state.get("y_labels", [])) - 1 else None})
+
+    with axis_left:
+        st.markdown("#### X-akser (venstre til høyre)")
+        x_df = st.data_editor(pd.DataFrame(x_rows), hide_index=True, num_rows="dynamic", use_container_width=True, key=f"rib_grid_x_editor_{selected_uid}")
+    with axis_right:
+        st.markdown("#### Y-akser (bunn til topp)")
+        y_df = st.data_editor(pd.DataFrame(y_rows), hide_index=True, num_rows="dynamic", use_container_width=True, key=f"rib_grid_y_editor_{selected_uid}")
+
+    apply_axis_changes = st.button("Bruk akseendringer", use_container_width=True, key=f"rib_grid_apply_axes_{selected_uid}")
+    if apply_axis_changes:
+        new_x_labels, new_x_spans = _normalize_axis_rows_v18(x_df, axis_prefix="X")
+        new_y_labels, new_y_spans = _normalize_axis_rows_v18(y_df, axis_prefix="Y")
+        state["x_labels"] = new_x_labels
+        state["x_spans_mm"] = new_x_spans
+        state["y_labels"] = new_y_labels
+        state["y_spans_mm"] = new_y_spans
+        current_elements = _grid_df_to_elements_v18(_grid_elements_to_df_v18(state.get("elements_mm", [])))
+        state["elements_mm"] = current_elements
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Aksegrid er oppdatert.")
+        st.rerun()
+
+    state = _get_or_init_grid_state_v18(selected_sketch, drawings, globals().get("files"))
+    state["plan_bbox"] = bbox_update
+    state["show_grid_in_report"] = bool(show_grid)
+
+    quick_cols = st.columns([1.2, 1.2, 1.2, 1.4])
+    strategy = quick_cols[0].selectbox("Auto-generer", ["vegger_kjerne", "søyler_bjelker", "hybrid"], index=["vegger_kjerne", "søyler_bjelker", "hybrid"].index(clean_pdf_text(state.get("strategy", "vegger_kjerne")).lower()) if clean_pdf_text(state.get("strategy", "vegger_kjerne")).lower() in {"vegger_kjerne", "søyler_bjelker", "hybrid"} else 0, key=f"rib_grid_strategy_{selected_uid}")
+    add_cols_x = quick_cols[1].multiselect("Søyleakser X", state.get("x_labels", []), default=state.get("x_labels", []), key=f"rib_grid_colx_{selected_uid}")
+    add_cols_y = quick_cols[2].multiselect("Søyleakser Y", state.get("y_labels", []), default=state.get("y_labels", []), key=f"rib_grid_coly_{selected_uid}")
+    state["strategy"] = strategy
+    ai_enabled = quick_cols[3].button("AI foreslå på akser", use_container_width=True, key=f"rib_grid_ai_{selected_uid}")
+
+    action_a, action_b, action_c = st.columns(3)
+    if action_a.button("Auto-generer fra grid", use_container_width=True, key=f"rib_grid_autogen_{selected_uid}"):
+        state["elements_mm"] = _auto_generate_grid_elements_v18(state, strategy)
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Gridforslaget er generert på akser.")
+        st.rerun()
+    if action_b.button("Søyler på valgte aksekryss", use_container_width=True, key=f"rib_grid_add_cols_{selected_uid}"):
+        dims_now = _grid_dimensions_v18(state)
+        x_lookup = {clean_pdf_text(item['label']): float(item['mm']) for item in dims_now['x_positions']}
+        y_lookup = {clean_pdf_text(item['label']): float(item['mm']) for item in dims_now['y_positions']}
+        elements_now = [item for item in state.get("elements_mm", []) if clean_pdf_text(item.get("type", "")).lower() != "column"]
+        counter = 1
+        for x_label in add_cols_x:
+            for y_label in add_cols_y:
+                elements_now.append({"type": "column", "label": f"C{counter}", "x": round(x_lookup.get(clean_pdf_text(x_label), 0.0), 1), "y": round(y_lookup.get(clean_pdf_text(y_label), 0.0), 1)})
+                counter += 1
+        state["elements_mm"] = elements_now
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Søyler er lagt på valgte aksekryss.")
+        st.rerun()
+    if action_c.button("Tøm alle grid-elementer", use_container_width=True, key=f"rib_grid_clear_{selected_uid}"):
+        state["elements_mm"] = []
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.warning("Alle grid-elementer er fjernet.")
+        st.rerun()
+
+    if ai_enabled:
+        ai_elements = _run_grid_ai_layout_v18(state, selected_record, analysis_result)
+        if ai_elements:
+            state["elements_mm"] = ai_elements
+            _update_grid_state_in_session_v18(selected_uid, state)
+            st.success("AI-forslaget er lagt på akser (aksereferanser, ikke pikselkoordinater).")
+            st.rerun()
+        else:
+            st.warning("AI klarte ikke å returnere et gyldig aksebasert forslag akkurat nå. Bruk Auto-generer eller manuell gridredigering.")
+
+    st.markdown(f"**Gridmål**: bredde {int(round(dims['width_mm']))} mm, høyde {int(round(dims['height_mm']))} mm")
+    preview_img = _render_grid_preview_v18(state, state.get("elements_mm", []))
+    st.image(preview_img, caption="Aksegrid med presise elementer i mm", use_container_width=True)
+
+    element_df = _grid_elements_to_df_v18(state.get("elements_mm", []))
+    edited_grid_df = st.data_editor(
+        element_df,
+        hide_index=True,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"rib_grid_elements_editor_{selected_uid}",
+    )
+
+    selection_col1, selection_col2, selection_col3, selection_col4 = st.columns(4)
+    dims_now = _grid_dimensions_v18(state)
+    x_labels = [item["label"] for item in dims_now["x_positions"]]
+    y_labels = [item["label"] for item in dims_now["y_positions"]]
+    bay_x_options = [f"{x_labels[idx]}->{x_labels[idx+1]}" for idx in range(len(x_labels)-1)] if len(x_labels) >= 2 else []
+    bay_y_options = [f"{y_labels[idx]}->{y_labels[idx+1]}" for idx in range(len(y_labels)-1)] if len(y_labels) >= 2 else []
+    quick_type = selection_col1.selectbox("Legg til elementtype", ["column", "wall", "beam", "core", "span_arrow"], key=f"rib_grid_quick_type_{selected_uid}")
+    quick_x = selection_col2.selectbox("X-akse / fra", x_labels, key=f"rib_grid_quick_x_{selected_uid}") if x_labels else None
+    quick_y = selection_col3.selectbox("Y-akse / fra", y_labels, key=f"rib_grid_quick_y_{selected_uid}") if y_labels else None
+    quick_to = selection_col4.selectbox("Til-akser / felt", bay_x_options + bay_y_options, index=0 if (bay_x_options + bay_y_options) else None, key=f"rib_grid_quick_to_{selected_uid}") if (bay_x_options or bay_y_options) else None
+
+    if st.button("Legg til via aksevalg", use_container_width=True, key=f"rib_grid_quick_add_{selected_uid}"):
+        current = _grid_df_to_elements_v18(edited_grid_df)
+        x_lookup = {clean_pdf_text(item['label']): float(item['mm']) for item in dims_now['x_positions']}
+        y_lookup = {clean_pdf_text(item['label']): float(item['mm']) for item in dims_now['y_positions']}
+        next_label = f"E{len(current)+1}"
+        if quick_type == "column" and quick_x and quick_y:
+            current.append({"type": "column", "label": next_label, "x": round(x_lookup.get(clean_pdf_text(quick_x), 0.0), 1), "y": round(y_lookup.get(clean_pdf_text(quick_y), 0.0), 1)})
+        elif quick_type == "core" and quick_to and "->" in quick_to and quick_x and quick_y:
+            x_from = clean_pdf_text(quick_x)
+            y_from = clean_pdf_text(quick_y)
+            bay_label = clean_pdf_text(quick_to)
+            if bay_label in bay_x_options:
+                x_to = bay_label.split("->", 1)[1]
+                y_to = y_labels[min(y_labels.index(y_from) + 1, len(y_labels) - 1)]
+            else:
+                y_to = bay_label.split("->", 1)[1]
+                x_to = x_labels[min(x_labels.index(x_from) + 1, len(x_labels) - 1)]
+            current.append({"type": "core", "label": next_label, "x": round(x_lookup.get(x_from, 0.0), 1), "y": round(y_lookup.get(y_from, 0.0), 1), "w": round(abs(x_lookup.get(clean_pdf_text(x_to), 0.0) - x_lookup.get(x_from, 0.0)), 1), "h": round(abs(y_lookup.get(clean_pdf_text(y_to), 0.0) - y_lookup.get(y_from, 0.0)), 1)})
+        elif quick_type in {"wall", "beam", "span_arrow"} and quick_to and "->" in quick_to and quick_x and quick_y:
+            to_a, to_b = [clean_pdf_text(part) for part in quick_to.split("->", 1)]
+            if quick_type == "wall" and to_a in x_lookup and quick_y in y_lookup:
+                current.append({"type": quick_type, "label": next_label, "x1": round(x_lookup.get(clean_pdf_text(quick_x), 0.0), 1), "y1": round(y_lookup.get(clean_pdf_text(quick_y), 0.0), 1), "x2": round(x_lookup.get(to_b, x_lookup.get(clean_pdf_text(quick_x), 0.0)), 1), "y2": round(y_lookup.get(clean_pdf_text(quick_y), 0.0), 1)})
+            else:
+                current.append({"type": quick_type, "label": next_label, "x1": round(x_lookup.get(clean_pdf_text(quick_x), 0.0), 1), "y1": round(y_lookup.get(clean_pdf_text(quick_y), 0.0), 1), "x2": round(x_lookup.get(clean_pdf_text(quick_x), 0.0), 1), "y2": round(y_lookup.get(to_b, y_lookup.get(clean_pdf_text(quick_y), 0.0)), 1)})
+        state["elements_mm"] = current
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Elementet er lagt til på aksegrid.")
+        st.rerun()
+
+    bottom1, bottom2 = st.columns(2)
+    if bottom1.button("Bruk gridtabellendringer", use_container_width=True, key=f"rib_grid_apply_table_{selected_uid}"):
+        state["elements_mm"] = _grid_df_to_elements_v18(edited_grid_df)
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Gridtabellen er lagret.")
+        st.rerun()
+    if bottom2.button("Oppdater konseptskisser fra grid", type="primary", use_container_width=True, key=f"rib_grid_apply_sketch_{selected_uid}"):
+        state["elements_mm"] = _grid_df_to_elements_v18(edited_grid_df)
+        _update_grid_state_in_session_v18(selected_uid, state)
+        _apply_grid_to_selected_sketch_v18(sketch_idx, selected_sketch, state)
+        st.success("Valgt konseptskisse er nå rekonstruert fra aksegrid og vil brukes videre i rapporten.")
+        st.rerun()
+
+
+# ------------------------------------------------------------
+# 19B. V19 AKSEGRID: VERIFISERT GRID ELLER TOMT STARTGRID
+#      PDF-ORD, RIB-PDF OG DWG/DXF-TEXT PRIORITERES. INGEN GENERISK AUTOFYLL.
+# ------------------------------------------------------------
+def _grid_token_regex_v19() -> re.Pattern[str]:
+    return re.compile(r"\b([A-Z]-\d{1,3}|[A-Z]-[A-Z]{1,3})\b")
+
+
+def _grid_number_regex_v19() -> re.Pattern[str]:
+    return re.compile(r"\b\d{3,5}\b")
+
+
+def _grid_collect_pdf_word_tokens_v19(file_name: str, file_bytes: bytes, max_pages: int = 4) -> Dict[str, Any]:
+    if fitz is None:
+        return {}
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    except Exception:
+        return {}
+    token_re = _grid_token_regex_v19()
+    number_re = _grid_number_regex_v19()
+    token_items: List[Dict[str, Any]] = []
+    numbers: List[int] = []
+    page_names: List[str] = []
+    try:
+        for page_num in range(min(max_pages, len(doc))):
+            page = doc.load_page(page_num)
+            words = page.get_text("words")
+            page_names.append(f"{clean_pdf_text(file_name)} side {page_num + 1}")
+            for word in words:
+                raw = clean_pdf_text(word[4]).upper()
+                if not raw:
+                    continue
+                if token_re.fullmatch(raw):
+                    token_items.append(
+                        {
+                            "token": raw,
+                            "page": page_num,
+                            "x": float(word[0] + word[2]) / 2.0,
+                            "y": float(word[1] + word[3]) / 2.0,
+                        }
+                    )
+                if number_re.fullmatch(raw):
+                    try:
+                        numbers.append(int(raw))
+                    except Exception:
+                        continue
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return {
+        "source_type": "pdf",
+        "name": clean_pdf_text(file_name),
+        "token_items": token_items,
+        "numbers": numbers,
+        "page_names": page_names,
+    }
+
+
+def _grid_collect_cad_text_tokens_v19(file_name: str, file_bytes: bytes, suffix: str) -> Dict[str, Any]:
+    if _ezdxf_v13 is None:
+        return {}
+    token_re = _grid_token_regex_v19()
+    number_re = _grid_number_regex_v19()
+    token_items: List[Dict[str, Any]] = []
+    numbers: List[int] = []
+    tmp_in = None
+    tmp_dxf = None
+    parse_path = None
+    try:
+        suffix_low = clean_pdf_text(suffix).lower() or ".dxf"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_low or ".dxf") as fh:
+            fh.write(file_bytes)
+            tmp_in = fh.name
+        if suffix_low == ".dwg":
+            dwgread = _shutil_v13.which("dwgread")
+            if not dwgread:
+                return {}
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as out_dxf:
+                tmp_dxf = out_dxf.name
+            result = _subprocess_v13.run([dwgread, "-O", "DXF", "-o", tmp_dxf, tmp_in], capture_output=True, text=True, timeout=90)
+            if int(result.returncode or 0) != 0 or (not os.path.exists(tmp_dxf)) or os.path.getsize(tmp_dxf) <= 0:
+                return {}
+            parse_path = tmp_dxf
+        else:
+            parse_path = tmp_in
+        doc = _ezdxf_v13.readfile(parse_path)
+        try:
+            msp = doc.modelspace()
+        except Exception:
+            return {}
+        for entity in msp:
+            try:
+                etype = clean_pdf_text(entity.dxftype()).upper()
+            except Exception:
+                continue
+            text_value = ""
+            x = y = None
+            try:
+                if etype == "TEXT":
+                    text_value = clean_pdf_text(entity.dxf.text)
+                    x = float(entity.dxf.insert.x)
+                    y = float(entity.dxf.insert.y)
+                elif etype == "MTEXT":
+                    text_value = clean_pdf_text(entity.plain_text())
+                    x = float(entity.dxf.insert.x)
+                    y = float(entity.dxf.insert.y)
+                elif etype == "DIMENSION":
+                    dim_text = clean_pdf_text(getattr(entity.dxf, "text", ""))
+                    if dim_text and dim_text != "<>":
+                        text_value = dim_text
+                    else:
+                        try:
+                            text_value = str(int(round(float(entity.get_measurement()))))
+                        except Exception:
+                            text_value = ""
+                    x = float(getattr(entity.dxf, "text_midpoint").x) if hasattr(entity.dxf, "text_midpoint") else 0.0
+                    y = float(getattr(entity.dxf, "text_midpoint").y) if hasattr(entity.dxf, "text_midpoint") else 0.0
+            except Exception:
+                continue
+            if not text_value:
+                continue
+            normalized = clean_pdf_text(text_value).upper()
+            if token_re.fullmatch(normalized):
+                token_items.append({"token": normalized, "page": 0, "x": float(x or 0.0), "y": float(y or 0.0)})
+            elif number_re.fullmatch(normalized):
+                try:
+                    numbers.append(int(normalized))
+                except Exception:
+                    pass
+        return {
+            "source_type": "dwg" if suffix_low == ".dwg" else "dxf",
+            "name": clean_pdf_text(file_name),
+            "token_items": token_items,
+            "numbers": numbers,
+            "page_names": [clean_pdf_text(file_name)],
+        }
+    except Exception:
+        return {}
+    finally:
+        for candidate in [tmp_in, tmp_dxf]:
+            if candidate and os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                except Exception:
+                    pass
+
+
+def _group_grid_tokens_v19(token_items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for item in token_items:
+        token = clean_pdf_text(item.get("token", "")).upper()
+        if "-" not in token:
+            continue
+        prefix, suffix = token.split("-", 1)
+        entry = grouped.setdefault(prefix, {"numeric": {}, "alpha": {}, "all": []})
+        entry["all"].append(item)
+        target = entry["numeric"] if suffix.isdigit() else (entry["alpha"] if re.fullmatch(r"[A-Z]+", suffix or "") else None)
+        if target is None:
+            continue
+        bucket = target.setdefault(token, [])
+        bucket.append(item)
+    return grouped
+
+
+def _sort_token_labels_by_positions_v19(token_map: Dict[str, List[Dict[str, Any]]], axis_kind: str) -> List[str]:
+    scored: List[Tuple[float, str]] = []
+    if not token_map:
+        return []
+    x_spread = 0.0
+    y_spread = 0.0
+    centers = []
+    for token, items in token_map.items():
+        if not items:
+            continue
+        cx = sum(float(obj.get("x", 0.0)) for obj in items) / max(len(items), 1)
+        cy = sum(float(obj.get("y", 0.0)) for obj in items) / max(len(items), 1)
+        centers.append((token, cx, cy))
+    if centers:
+        xs = [item[1] for item in centers]
+        ys = [item[2] for item in centers]
+        x_spread = max(xs) - min(xs)
+        y_spread = max(ys) - min(ys)
+    for token, cx, cy in centers:
+        if axis_kind == "numeric":
+            primary = cx if x_spread >= y_spread else cy
+        else:
+            primary = (-cy) if y_spread >= x_spread else cx
+        scored.append((float(primary), token))
+    scored.sort(key=lambda item: item[0])
+    ordered = [token for _, token in scored]
+    natural = sorted(list(token_map.keys()), key=_suffix_sort_key_v18)
+    if ordered:
+        forward_score = sum(1 for idx, token in enumerate(ordered) if idx < len(natural) and token == natural[idx])
+        reversed_order = list(reversed(ordered))
+        reversed_score = sum(1 for idx, token in enumerate(reversed_order) if idx < len(natural) and token == natural[idx])
+        if reversed_score > forward_score:
+            ordered = reversed_order
+        return ordered
+    return natural
+
+
+def _choose_best_grid_prefix_v19(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best: Dict[str, Any] = {}
+    best_score = -1.0
+    for candidate in candidates:
+        grouped = _group_grid_tokens_v19(candidate.get("token_items", []))
+        for prefix, payload in grouped.items():
+            numeric_map = payload.get("numeric", {}) or {}
+            alpha_map = payload.get("alpha", {}) or {}
+            if len(numeric_map) < 2 or len(alpha_map) < 2:
+                continue
+            x_labels = _sort_token_labels_by_positions_v19(numeric_map, "numeric")
+            y_labels = _sort_token_labels_by_positions_v19(alpha_map, "alpha")
+            if len(x_labels) < 2 or len(y_labels) < 2:
+                continue
+            hits = len(payload.get("all", []))
+            diversity = len(x_labels) * 18 + len(y_labels) * 18
+            source_bonus = 35 if candidate.get("source_type") in {"dwg", "dxf"} else 18
+            score = float(hits + diversity + source_bonus)
+            if score > best_score:
+                best = {
+                    "prefix": prefix,
+                    "x_labels": x_labels,
+                    "y_labels": y_labels,
+                    "numbers": list(candidate.get("numbers", [])),
+                    "source_name": clean_pdf_text(candidate.get("name", "")),
+                    "source_type": clean_pdf_text(candidate.get("source_type", "")),
+                    "score": score,
+                }
+                best_score = score
+    return best
+
+
+def _extract_grid_from_uploaded_files_v18(files: Optional[List[Any]]) -> Dict[str, Any]:
+    expanded_files = _expand_archives_v16(files) if "_expand_archives_v16" in globals() else list(files or [])
+    candidates: List[Dict[str, Any]] = []
+    sequence_counts: Dict[Tuple[int, ...], int] = {}
+
+    for file_obj in list(expanded_files or []):
+        name = clean_pdf_text(getattr(file_obj, "name", "ukjent_fil"))
+        suffix = Path(name).suffix.lower()
+        try:
+            file_bytes = _safe_upload_bytes_v13(file_obj)
+        except Exception:
+            file_bytes = b""
+        if not file_bytes:
+            continue
+        candidate: Dict[str, Any] = {}
+        if suffix == ".pdf":
+            candidate = _grid_collect_pdf_word_tokens_v19(name, file_bytes, max_pages=4)
+        elif suffix in {".dxf", ".dwg"}:
+            candidate = _grid_collect_cad_text_tokens_v19(name, file_bytes, suffix)
+        else:
+            continue
+        if not candidate:
+            continue
+        candidates.append(candidate)
+        for seq in _dimension_sequences_from_numbers_v18(candidate.get("numbers", [])):
+            sequence_counts[seq] = sequence_counts.get(seq, 0) + 1
+
+    best = _choose_best_grid_prefix_v19(candidates)
+    if not best:
+        return {}
+
+    x_labels = best.get("x_labels", [])
+    y_labels = best.get("y_labels", [])
+    if len(x_labels) < 2 or len(y_labels) < 2:
+        return {}
+
+    def choose_sequence(target_len: int) -> List[int]:
+        ranked = []
+        for seq, count in sequence_counts.items():
+            if len(seq) != target_len:
+                continue
+            # premier gjentatte og realistiske spenn, uten å la gigantiske totalsummer dominere
+            realism_penalty = abs(sum(seq) - (target_len * 6500.0)) * 0.0002
+            score = count * 100.0 - realism_penalty
+            ranked.append((score, seq))
+        if ranked:
+            ranked.sort(key=lambda item: item[0], reverse=True)
+            return [int(v) for v in ranked[0][1]]
+        return [6000 for _ in range(target_len)]
+
+    x_spans = choose_sequence(max(1, len(x_labels) - 1))
+    y_spans = choose_sequence(max(1, len(y_labels) - 1))
+
+    confidence = clamp((float(best.get("score", 0.0)) / 220.0), 0.35, 0.99)
+    source_type = clean_pdf_text(best.get("source_type", "")).lower()
+    if source_type in {"dwg", "dxf"}:
+        source_text = f"Auto-detektert fra {source_type.upper()}-tekst og aksetokens"
+        confidence = max(confidence, 0.82)
+    else:
+        source_text = "Auto-detektert fra opplastede RIB-PDF-er"
+        if len(x_labels) >= 3 and len(y_labels) >= 3:
+            confidence = max(confidence, 0.76)
+
+    return {
+        "x_labels": x_labels,
+        "x_spans_mm": x_spans,
+        "y_labels": y_labels,
+        "y_spans_mm": y_spans,
+        "source": source_text,
+        "reference_files": [clean_pdf_text(best.get("source_name", ""))],
+        "confidence": round(float(confidence), 2),
+        "verified": bool(confidence >= 0.72),
+    }
+
+
+def _grid_is_verified_v19(state: Dict[str, Any]) -> bool:
+    if not isinstance(state, dict):
+        return False
+    if bool(state.get("manual_confirmed")):
+        return True
+    try:
+        confidence = float(state.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    source = clean_pdf_text(state.get("source", "")).lower()
+    if confidence >= 0.72:
+        return True
+    if "verifisert" in source:
+        return True
+    return False
+
+
+def _default_grid_state_v18(sketch: Dict[str, Any], auto_grid: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    auto_grid = auto_grid or {}
+    has_auto = bool(auto_grid.get("x_labels")) and bool(auto_grid.get("y_labels"))
+    if has_auto:
+        x_labels = list(auto_grid.get("x_labels") or ["1", "2"])
+        y_labels = list(auto_grid.get("y_labels") or ["A", "B"])
+        x_spans = list(auto_grid.get("x_spans_mm") or [6000 for _ in range(max(len(x_labels) - 1, 1))])
+        y_spans = list(auto_grid.get("y_spans_mm") or [6000 for _ in range(max(len(y_labels) - 1, 1))])
+        source = clean_pdf_text(auto_grid.get("source", "Auto-detektert aksegrid")) or "Auto-detektert aksegrid"
+        confidence = float(auto_grid.get("confidence", 0.0) or 0.0)
+        verified = bool(auto_grid.get("verified")) or confidence >= 0.72
+    else:
+        x_labels = ["1", "2"]
+        y_labels = ["A", "B"]
+        x_spans = [6000]
+        y_spans = [6000]
+        source = "Manuell startgrid - ingen verifisert aksegrid funnet ennå"
+        confidence = 0.0
+        verified = False
+
+    if len(x_spans) < max(len(x_labels) - 1, 1):
+        x_spans.extend([6000] * (len(x_labels) - 1 - len(x_spans)))
+    if len(y_spans) < max(len(y_labels) - 1, 1):
+        y_spans.extend([6000] * (len(y_labels) - 1 - len(y_spans)))
+
+    bbox = deep_copy_jsonable(sketch.get("plan_bbox") or {"x": 0.08, "y": 0.10, "w": 0.82, "h": 0.76})
+    strategy = "vegger_kjerne"
+    analysis_result = st.session_state.get("rib_draft_analysis", {})
+    rec_name = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "")).lower()
+    if "søyle" in rec_name and "vegg" not in rec_name:
+        strategy = "søyler_bjelker"
+    elif "hybrid" in rec_name:
+        strategy = "hybrid"
+
+    return {
+        "target_page_index": int(sketch.get("page_index", 0)),
+        "target_page_label": clean_pdf_text(sketch.get("page_label", "Valgt skisse")),
+        "plan_bbox": bbox,
+        "x_labels": x_labels,
+        "x_spans_mm": [int(max(1000, _safe_int_v18(v, 6000))) for v in x_spans[:max(len(x_labels) - 1, 1)]],
+        "y_labels": y_labels,
+        "y_spans_mm": [int(max(1000, _safe_int_v18(v, 6000))) for v in y_spans[:max(len(y_labels) - 1, 1)]],
+        "source": source,
+        "reference_files": list(auto_grid.get("reference_files") or []),
+        "confidence": float(confidence),
+        "strategy": strategy,
+        "show_grid_in_report": True,
+        "elements_mm": [],
+        "manual_confirmed": bool(verified),
+    }
+
+
+def _auto_generate_grid_elements_v18(state: Dict[str, Any], mode: str) -> List[Dict[str, Any]]:
+    if not _grid_is_verified_v19(state):
+        return []
+    dims = _grid_dimensions_v18(state)
+    x_positions = dims["x_positions"]
+    y_positions = dims["y_positions"]
+    if len(x_positions) < 2 or len(y_positions) < 2:
+        return []
+
+    mode_low = clean_pdf_text(mode).lower()
+    elements: List[Dict[str, Any]] = []
+
+    x_bays = len(x_positions) - 1
+    y_bays = len(y_positions) - 1
+    center_x_bay = max(0, min(x_bays - 1, x_bays // 2))
+    center_y_bay = max(0, min(y_bays - 1, y_bays // 2))
+    x0 = float(x_positions[center_x_bay]["mm"])
+    x1 = float(x_positions[min(center_x_bay + 1, len(x_positions) - 1)]["mm"])
+    y0 = float(y_positions[center_y_bay]["mm"])
+    y1 = float(y_positions[min(center_y_bay + 1, len(y_positions) - 1)]["mm"])
+
+    # Konservativ start: kjerne kun i indre bay, aldri på perimeter.
+    if x_bays >= 1 and y_bays >= 1 and ("vegg" in mode_low or "kjerne" in mode_low or "hybrid" in mode_low or "plasstøpt" in mode_low):
+        core_margin_x = max((x1 - x0) * 0.15, 450.0)
+        core_margin_y = max((y1 - y0) * 0.15, 450.0)
+        elements.append({
+            "type": "core",
+            "label": "Kjerne 1",
+            "x": round(x0 + core_margin_x, 1),
+            "y": round(y0 + core_margin_y, 1),
+            "w": round(max((x1 - x0) - 2 * core_margin_x, 1200.0), 1),
+            "h": round(max((y1 - y0) - 2 * core_margin_y, 1200.0), 1),
+        })
+
+    if "vegg" in mode_low or "kjerne" in mode_low or "plasstøpt" in mode_low or "hybrid" in mode_low:
+        if len(x_positions) >= 3:
+            x_idx = max(1, min(len(x_positions) - 2, center_x_bay))
+            elements.append({
+                "type": "wall",
+                "label": f"Bærevegg {x_positions[x_idx]['label']}",
+                "x1": round(float(x_positions[x_idx]["mm"]), 1),
+                "y1": round(float(y_positions[max(0, center_y_bay)]["mm"]), 1),
+                "x2": round(float(x_positions[x_idx]["mm"]), 1),
+                "y2": round(float(y_positions[min(len(y_positions) - 1, center_y_bay + 1)]["mm"]), 1),
+            })
+        if len(y_positions) >= 3:
+            y_idx = max(1, min(len(y_positions) - 2, center_y_bay))
+            elements.append({
+                "type": "wall",
+                "label": f"Bærevegg {y_positions[y_idx]['label']}",
+                "x1": round(float(x_positions[max(0, center_x_bay)]["mm"]), 1),
+                "y1": round(float(y_positions[y_idx]["mm"]), 1),
+                "x2": round(float(x_positions[min(len(x_positions) - 1, center_x_bay + 1)]["mm"]), 1),
+                "y2": round(float(y_positions[y_idx]["mm"]), 1),
+            })
+        span_len_m = round(abs(x1 - x0) / 1000.0, 1)
+        elements.append({
+            "type": "span_arrow",
+            "label": f"ca {span_len_m} m",
+            "x1": round(x0, 1),
+            "y1": round((y0 + y1) / 2.0, 1),
+            "x2": round(x1, 1),
+            "y2": round((y0 + y1) / 2.0, 1),
+        })
+
+    if "søyle" in mode_low:
+        interior_x = x_positions[1:-1] if len(x_positions) > 2 else x_positions
+        interior_y = y_positions[1:-1] if len(y_positions) > 2 else y_positions
+        counter = 1
+        for x_item in interior_x:
+            for y_item in interior_y:
+                elements.append({
+                    "type": "column",
+                    "label": f"S{counter}",
+                    "x": round(float(x_item["mm"]), 1),
+                    "y": round(float(y_item["mm"]), 1),
+                })
+                counter += 1
+
+    return elements
+
+
+def _grid_ai_prompt_v18(state: Dict[str, Any], analysis_result: Dict[str, Any], page_label: str) -> str:
+    dims = _grid_dimensions_v18(state)
+    x_lines = [f"- {item['label']}: {int(round(item['mm']))} mm" for item in dims["x_positions"]]
+    y_lines = [f"- {item['label']}: {int(round(item['mm']))} mm" for item in dims["y_positions"]]
+    rec = clean_pdf_text(analysis_result.get("recommended_system", {}).get("system_name", "Anbefalt system"))
+    obs = [clean_pdf_text(x) for x in analysis_result.get("observasjoner", []) if clean_pdf_text(x)]
+    return f"""
+Du er Builtly RIB AI. Du skal IKKE gjette pikselkoordinater.
+Du skal kun foreslå bæresystem ved å referere til akser og aksefelt.
+
+VIKTIGE REGLER:
+- Returner KUN gyldig JSON.
+- Hvis grunnlaget er for svakt eller gridet ser manuelt/ufullstendig ut, returner {{ "placements": [] }}.
+- Elementer skal referere til akselabels eller aksefelt, aldri (x,y)-verdier.
+- Hvis arket inneholder flere planpaneler, foreslå kun elementer for valgt skisse/utsnitt - ikke for hele siden.
+- Ikke legg bæring i yttervegg eller perimeter uten tydelig grunn.
+- Kjerne skal ligge ved trapp/heis/sjakt hvis dette fremgår av tegningen.
+- Vegger skal følge hele akser eller klare delstrekninger mellom akser.
+- Søyler skal ligge på aksekryss.
+
+VALGT TEGNING/SKISSE:
+- {clean_pdf_text(page_label)}
+
+ANBEFALT SYSTEM FRA HOVEDANALYSEN:
+- {rec}
+
+OBSERVASJONER:
+{chr(10).join('- ' + item for item in obs[:8]) if obs else '- Ingen særskilte observasjoner.'}
+
+AKSER X (venstre mot høyre):
+{chr(10).join(x_lines)}
+AKSER Y (bunn mot topp):
+{chr(10).join(y_lines)}
+
+RETURNER DETTE JSON-SKJEMAET:
+{{
+  "placements": [
+    {{"type": "column", "label": "C1", "x_axis": "B-02", "y_axis": "B-B"}},
+    {{"type": "wall", "label": "V1", "x_axis": "B-02", "y_from": "B-B", "y_to": "B-C"}},
+    {{"type": "wall", "label": "V2", "y_axis": "B-B", "x_from": "B-01", "x_to": "B-02"}},
+    {{"type": "core", "label": "K1", "x_from": "B-02", "x_to": "B-03", "y_from": "B-B", "y_to": "B-C"}},
+    {{"type": "span_arrow", "label": "ca 6,9 m", "x_from": "B-01", "x_to": "B-02", "y_axis": "B-B"}}
+  ]
+}}
+""".strip()
+
+
+def _get_or_init_grid_state_v18(sketch: Dict[str, Any], drawings: List[Dict[str, Any]], files: Optional[List[Any]]) -> Dict[str, Any]:
+    sketch_uid_value = sketch_uid(sketch)
+    bundle = st.session_state.get("rib_grid_states_v18", {})
+    existing = deep_copy_jsonable(bundle.get(sketch_uid_value)) if isinstance(bundle, dict) else None
+    if isinstance(existing, dict) and existing.get("x_labels") and existing.get("y_labels"):
+        return existing
+
+    auto_grid = _extract_grid_from_uploaded_files_v18(files)
+    state = _default_grid_state_v18(sketch, auto_grid)
+    state["elements_mm"] = []
+
+    # Importer kun eksisterende skisseelementer hvis gridet faktisk er verifisert.
+    if _grid_is_verified_v19(state):
+        imported_elements = _sketch_to_grid_elements_v18(state, sketch)
+        if imported_elements:
+            state["elements_mm"] = imported_elements
+
+    _update_grid_state_in_session_v18(sketch_uid_value, state)
+    return deep_copy_jsonable(state)
+
+
+_RENDER_GRID_PREVIEW_V18_BASE = _render_grid_preview_v18
+
+
+def _render_grid_preview_v18(state: Dict[str, Any], elements_mm: List[Dict[str, Any]]) -> Image.Image:
+    img = _RENDER_GRID_PREVIEW_V18_BASE(state, elements_mm)
+    if _grid_is_verified_v19(state) and elements_mm:
+        return img
+    draw = ImageDraw.Draw(img, "RGBA")
+    banner_h = 58
+    draw.rounded_rectangle((18, 18, img.size[0] - 18, 18 + banner_h), radius=16, fill=(255, 244, 210, 235), outline=(215, 176, 76, 255), width=2)
+    font = get_font(20, bold=True)
+    subfont = get_font(15, bold=False)
+    draw.text((38, 29), "Manuelt startgrid - ikke prosjektverifisert forslag", font=font, fill=(80, 55, 10, 255))
+    draw.text((38, 52), "Legg inn akser fra PDF/DWG eller bekreft manuell grid før autogenerering/AI-forslag.", font=subfont, fill=(96, 72, 18, 255))
+    return img
+
+
+_RENDER_RIB_GRID_EDITOR_V18_BASE = render_rib_grid_precision_editor_v18
+
+
+def render_rib_grid_precision_editor_v18() -> None:
+    if not draft_sketch_bundle_exists():
+        return
+
+    draft_sketches = st.session_state.get("rib_draft_sketches", [])
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    if not draft_sketches:
+        return
+
+    sketch_idx = 0
+    selected_uid_state = st.session_state.get("rib_draft_selected_sketch", "")
+    for idx, item in enumerate(draft_sketches):
+        if sketch_uid(item) == selected_uid_state:
+            sketch_idx = idx
+            break
+    selected_sketch = draft_sketches[sketch_idx]
+    selected_uid = sketch_uid(selected_sketch)
+    state = _get_or_init_grid_state_v18(selected_sketch, drawings, globals().get("files"))
+    verified = _grid_is_verified_v19(state)
+
+    ref_files = ", ".join(state.get("reference_files", [])[:4]) if state.get("reference_files") else "Ingen CAD/RIB-PDF-grid funnet automatisk."
+    confidence_txt = f"{round(float(state.get('confidence', 0.0) or 0.0) * 100)} %"
+    if verified:
+        st.success(
+            f"Verifisert gridgrunnlag: {clean_pdf_text(state.get('source', 'Aksegrid'))}. "
+            f"Referanser: {ref_files}. Konfidens: {confidence_txt}."
+        )
+    else:
+        st.warning(
+            f"Ingen sikker gridtolkning funnet i PDF/DWG. Referanser: {ref_files}. "
+            "Editoren starter derfor som manuelt startgrid uten foreslått bæresystem. "
+            "Fyll inn akser/mål og bekreft gridet før du bruker autogenerering eller AI."
+        )
+
+    confirm_cols = st.columns([1.2, 1.1, 1.0, 1.0, 1.2])
+    if confirm_cols[0].button("Bekreft manuelt grid som aktivt prosjektgrid", use_container_width=True, key=f"rib_grid_confirm_{selected_uid}"):
+        state["manual_confirmed"] = True
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.success("Manuelt grid er nå aktivt og kan brukes til autogenerering og AI-forslag.")
+        st.rerun()
+    if confirm_cols[1].button("Nullstill til tomt startgrid", use_container_width=True, key=f"rib_grid_reset_manual_{selected_uid}"):
+        reset_state = _default_grid_state_v18(selected_sketch, auto_grid={})
+        _update_grid_state_in_session_v18(selected_uid, reset_state)
+        st.warning("Grid-editoren er nullstilt til tomt manuelt startgrid.")
+        st.rerun()
+    if confirm_cols[2].button("Bytt X/Y", use_container_width=True, key=f"rib_grid_swap_xy_{selected_uid}"):
+        state["x_labels"], state["y_labels"] = list(state.get("y_labels", [])), list(state.get("x_labels", []))
+        state["x_spans_mm"], state["y_spans_mm"] = list(state.get("y_spans_mm", [])), list(state.get("x_spans_mm", []))
+        state["elements_mm"] = []
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.info("X- og Y-aksene er byttet. Grid-elementer ble tømt for å unngå feilplassering.")
+        st.rerun()
+    if confirm_cols[3].button("Vend Y-rekkefølge", use_container_width=True, key=f"rib_grid_reverse_y_{selected_uid}"):
+        state["y_labels"] = list(reversed(list(state.get("y_labels", []))))
+        state["y_spans_mm"] = list(reversed(list(state.get("y_spans_mm", []))))
+        state["elements_mm"] = []
+        _update_grid_state_in_session_v18(selected_uid, state)
+        st.info("Y-aksene er snudd. Grid-elementer ble tømt for å unngå feilplassering.")
+        st.rerun()
+    confirm_cols[4].caption(
+        "Grid bekreftes automatisk hvis det er trygt lest fra RIB-PDF/DWG. "
+        "Hvis ikke, må du bekrefte det manuelt før systemet foreslår bæring."
+    )
+
+    # Resten av editoren kjøres via original implementasjon, men med v19-hjelpere over.
+    return _RENDER_RIB_GRID_EDITOR_V18_BASE()
+
+
+
+if draft_sketch_bundle_exists() and "generated_rib_pdf" not in st.session_state:
+    render_rib_grid_precision_editor_v18()
