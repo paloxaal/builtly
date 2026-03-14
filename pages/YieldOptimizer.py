@@ -21,17 +21,17 @@ from builtly_module_kit import (
     render_hero,
 )
 
-project = configure_page("Builtly | Areal & Yield Optimizer", "🏙️")
+project = configure_page("Builtly | Areal & Yield", "🏙️")
 
 render_hero(
-    eyebrow="Areal & Yield Optimizer",
-    title="Beslutningsmotor for mer salgbart, mer utleibart og mer effektivt areal.",
+    eyebrow="Areal & Yield",
+    title="Se hvor arealet går, hva som kan optimaliseres og hva det er verdt.",
     subtitle=(
-        "Start med analyse av brutto/netto, salgbart areal, utleibart areal, kjerneandel, tekniske rom og kommunikasjon. "
-        "Først en trygg og sporbar beslutningsmotor – senere kan samme motor drive mer generative scenarier."
+        "Analyser fordelingen mellom brutto, netto, kjerne, teknikk og fellesareal. "
+        "Sammenlign scenarioer for å finne realistiske grep som gir mer salgbart eller utleibart areal."
     ),
-    pills=["Brutto/netto", "Yield", "Scenarioforslag", "Developer-first", "No black box"],
-    badge="Decision engine",
+    pills=["Brutto/netto", "Yield", "Scenarioer", "Arealfordeling", "Verdipotensial"],
+    badge="Areal & Yield",
 )
 
 base_bta = float(project.get("bta", 2500) or 2500)
@@ -40,9 +40,9 @@ use_case = project.get("b_type") or "Næring / Kontor"
 left, right = st.columns([1.25, 0.75], gap="large")
 with left:
     render_section(
-        "Baseline og scenarioparametere",
-        "Modulen er laget for å hjelpe utbyggere og beslutningstagere med å se hvor arealet lekker – og hva som realistisk kan optimaliseres uten å love magisk planløsnings-AI fra dag én.",
-        "Yield setup",
+        "Arealfordeling og scenarioer",
+        "Legg inn dagens arealfordeling og se hva som skjer med ulike optimaliseringsgrep.",
+        "Oppsett",
     )
 
     a1, a2, a3 = st.columns(3)
@@ -120,14 +120,14 @@ with left:
 
     render_metric_cards(
         [
-            {"label": "Yield baseline", "value": f"{efficiency_ratio * 100:.1f}%", "desc": "Andel salgbart/utleibart areal av brutto i dagens løsning."},
-            {"label": "Service ratio", "value": f"{service_ratio * 100:.1f}%", "desc": "Kjerne, teknikk og kommunikasjon samlet som andel av bruttoareal."},
-            {"label": "Beste scenario", "value": f"{best_row['Ekstra areal (m²)']} m²", "desc": "Foreløpig identifisert ekstra areal i beste scenario."},
-            {"label": "Potensiell verdi", "value": f"{int(best_row['Potensiell verdi (NOK)']):,} NOK".replace(',', ' '), "desc": "Illustrativ verdiøkning gitt valgt kvadratmeterverdi."},
+            {"label": "Yield baseline", "value": f"{efficiency_ratio * 100:.1f}%", "desc": "Andel salgbart/utleibart areal av bruttoarealet i dag."},
+            {"label": "Serviceandel", "value": f"{service_ratio * 100:.1f}%", "desc": "Kjerne, teknikk og kommunikasjon samlet som andel av brutto."},
+            {"label": "Beste scenario", "value": f"{best_row['Ekstra areal (m²)']} m²", "desc": "Estimert ekstra areal i det mest ambisiøse scenarioet."},
+            {"label": "Verdipotensial", "value": f"{int(best_row['Potensiell verdi (NOK)']):,} NOK".replace(',', ' '), "desc": "Estimert verdiøkning basert på valgt kvadratmeterpris."},
         ]
     )
 
-    tabs = st.tabs(["Baseline", "Scenarioer", "Tiltak", "Beslutningslogg"])
+    tabs = st.tabs(["Arealfordeling", "Scenarioer", "Tiltak", "Merknader"])
     baseline_df = pd.DataFrame(
         [
             {"Kategori": "Bruttoareal", "m²": round(gross_area, 1), "Andel": "100%"},
@@ -150,14 +150,14 @@ with left:
         dataframe_download(opportunities, "Last ned tiltaksliste (.csv)", "yield_opportunities.csv")
     with tabs[3]:
         st.markdown(
-            "- Legg inn manuell faglig vurdering før scenarier brukes eksternt.\n"
-            "- Koble etter hvert til brann, akustikk, bærende struktur og teknikk for å justere realisme.\n"
-            "- Dette er en beslutningsmotor, ikke automatisk planløsning fra første dag."
+            "- Scenarioene er beregnet ut fra arealfordelingen du har lagt inn og bør faglig vurderes før de brukes i beslutninger.\n"
+            "- For mer presise resultater kan analysen kobles mot brann, akustikk, bæresystem og teknisk prosjektering.\n"
+            "- Alle innstillinger og resultater kan eksporteres for deling med prosjektteamet."
         )
 
     json_download(
         {
-            "module": "Areal & Yield Optimizer",
+            "module": "Areal & Yield",
             "building_use": building_use,
             "optimization_target": optimization_target,
             "scenario_mode": scenario_mode,
@@ -168,73 +168,71 @@ with left:
             "circulation_area": circulation_area,
             "common_area": common_area,
         },
-        "Eksporter scenariooppsett (.json)",
+        "Eksporter analysegrunnlag (.json)",
         "yield_optimizer_summary.json",
     )
 
 with right:
     render_section(
-        "Utbyggernært og høyverdig",
-        "Dette er modulen som kan gjøre Builtly attraktiv tidlig i utviklingsløpet: ikke som AI som tegner alt for deg, men som verktøyet som viser hvor verdien faktisk ligger.",
-        "Market fit",
+        "Om analysen",
+        "Arealanalysen viser hvor det er potensial for å øke verdien av prosjektet gjennom smartere arealfordeling.",
+        "Info",
     )
     render_project_snapshot(project)
     render_panel(
-        "Hva modulen bør love i fase 1",
-        "Bygg tillit med en robust beslutningsmotor. Unngå å overselge full automatisert designoptimalisering før datagrunnlag og regelmotor er modne nok.",
+        "Hva du får",
+        "En oversikt over dagens arealfordeling med scenarioer for optimalisering og estimert verdipotensial.",
         [
-            "Analyse av brutto/netto og arealfordeling",
-            "Yield- og verdipotensial per scenario",
-            "Forslag til grep for kjerne, teknikk, kommunikasjon og fellesareal",
-            "Eksport av scenarioer til prosjektteam og investeringsbeslutning",
+            "Analyse av brutto/netto og fordeling mellom kjerne, teknikk og fellesareal",
+            "Tre scenarioer med estimert ekstra areal og verdipotensial",
+            "Konkrete grep for kjerne, tekniske rom, kommunikasjon og fellesareal",
+            "Eksport av scenarioer og arealdata for videre bruk",
         ],
         tone="blue",
-        badge="Phase 1 promise",
+        badge="Arealanalyse",
     )
     render_panel(
-        "Hvordan dette kan kobles videre",
-        "Når motoren er pålitelig kan den kobles på vertikale fagmoduler og generativ design senere.",
+        "Slik bruker du modulen",
+        "Legg inn arealfordelingen fra prosjektet og juster parameterne for å se effekten.",
         [
-            "Koble mot Mengde & Scope for bedre areal- og objektdisiplin",
-            "Bruk brann, akustikk og RIB som begrensninger i senere scenarioer",
-            "La Tender Control bruke yield-data i kommersielle vurderinger",
-            "Gi enterprise-kunder porteføljevis yield-screening over flere prosjekter",
+            "Fyll inn brutto, netto, kjerne, teknikk og fellesareal",
+            "Velg optimeringsmål og scenariomodus",
+            "Se scenarioer med estimert areal og verdiøkning",
+            "Last ned resultater som CSV eller JSON",
         ],
         tone="gold",
-        badge="Next layer",
+        badge="Kom i gang",
     )
-    st.metric("Primær kjøper", "Utbygger / developer", "Høy verdi i tidligfase og investeringsbeslutninger")
-    st.metric("Strategisk rolle", "Decision engine", "Ikke bare rapport – men beslutningsgrunnlag")
 
 render_section(
-    "Hvorfor dette passer Builtly",
-    "Builtly skal ikke være et konsulentselskap som skalerer med mennesker i hvert marked. Denne modulen er et godt eksempel på software som kan selges på abonnement på tvers av landegrenser, fordi effekten handler om areal, beslutning og økonomi – ikke bare lokal fagrådgivning.",
-    "Strategy",
+    "Tips for bedre resultat",
+    "Jo mer presise arealdata du legger inn, desto mer pålitelige blir scenarioene.",
+    "Tips",
 )
 
 c1, c2 = st.columns(2, gap="large")
 with c1:
     render_panel(
-        "Kundeverdi i ett bilde",
-        "Målet er at brukeren skal forstå tre ting raskt: hvor arealet lekker, hvilke grep som er realistiske, og hva det kan være verdt.",
+        "Slik får du mest ut av analysen",
+        "Presisjonen avhenger av hvor godt du kjenner arealfordelingen i prosjektet.",
         [
-            "Mer salgbart eller utleibart areal",
-            "Mindre tekniske og ikke-verdiskapende soner",
-            "Mer konsistent tidligfasebeslutning på tvers av team",
+            "Bruk faktiske arealtall fra modell eller tegninger, ikke bare grovt estimat",
+            "Juster markedsbarhetsfriksjonen etter hvor realistisk det er å selge/leie ut ekstra areal",
+            "Sammenlign alle tre scenarioer for å finne riktig ambisjonsnivå",
         ],
         tone="green",
-        badge="Value",
+        badge="Anbefalt",
     )
 with c2:
     render_panel(
-        "Neste utviklingssteg",
-        "Etter MVP kan modulen modnes videre uten å miste tillit i markedet.",
+        "Eksportmuligheter",
+        "Alle resultater kan lastes ned for bruk i egne verktøy og presentasjoner.",
         [
-            "Regelsett for typologier og arealeffektivitet",
-            "Scenarioer per plan og etasje, ikke bare aggregert prosjekt",
-            "Kobling til klimagass, teknikk og kostnad",
-            "Senere generativ planløsningsstøtte med menneskelig overstyring",
+            "Arealfordeling som CSV for import i regneark eller kalkyle",
+            "Scenarioer med ekstra areal og verdipotensial",
+            "Tiltaksliste med tillit og kommentarer",
+            "Samlet analysegrunnlag som JSON",
         ],
         tone="blue",
-        badge="Roadmap",
+        badge="Eksport",
     )
