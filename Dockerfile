@@ -1,39 +1,27 @@
 FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PATH="/usr/local/bin:${PATH}"
-
 WORKDIR /app
 
-# System packages needed for Streamlit + building LibreDWG
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    wget \
-    git \
+RUN apt-get update && apt-get install -y \
     build-essential \
-    pkg-config \
+    git \
+    wget \
+    curl \
     autoconf \
     automake \
     libtool \
+    pkg-config \
     bison \
     flex \
-    m4 \
     swig \
     python3-dev \
     libxml2-dev \
     libpcre2-dev \
-    zlib1g-dev \
-    xz-utils \
-    texinfo \
-    perl \
+    ca-certificates \
+    patch \
  && rm -rf /var/lib/apt/lists/*
 
-# Build and install LibreDWG (provides dwgread)
+# Build and install LibreDWG (provides dwgread / dwg2dxf)
 RUN git clone --depth=1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg && \
     cd /tmp/libredwg && \
     ./autogen.sh && \
@@ -44,15 +32,12 @@ RUN git clone --depth=1 https://github.com/LibreDWG/libredwg.git /tmp/libredwg &
     dwgread --version && \
     rm -rf /tmp/libredwg
 
-# Copy requirements first for better Docker layer caching
-COPY requirements.txt /app/requirements.txt
+ENV PATH="/usr/local/bin:${PATH}"
 
-# Install Python deps
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install -r /app/requirements.txt
-
-# Copy the rest of the app
 COPY . /app
+
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
 
 EXPOSE 8501
 
