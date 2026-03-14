@@ -29,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpcre2-dev \
     zlib1g-dev \
     xz-utils \
+    texinfo \
+    perl \
  && rm -rf /var/lib/apt/lists/*
 
 # Build and install LibreDWG (provides dwgread)
@@ -54,5 +56,4 @@ COPY . /app
 
 EXPOSE 8501
 
-# Starts the main Streamlit app
 CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0"]
