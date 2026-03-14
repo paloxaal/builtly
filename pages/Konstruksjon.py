@@ -11570,6 +11570,8 @@ backend_status_parts = [
     "DWG-konvertering=" + ("aktiv" if bool(_shutil_v13.which('dwgread')) else "ikke tilgjengelig"),
 ]
 st.caption("CAD-backend: " + " | ".join(backend_status_parts) + " | Prioritet: DWG/DXF -> PDF -> IFC")
+if not _shutil_v13.which('dwgread'):
+    st.caption("Merk: 'dwgread' er et OS-niva-program fra LibreDWG. Det kommer ikke fra requirements.txt, men fra Docker/systempakker pa serveren.")
 
 action_col1, action_col2 = st.columns(2)
 analyze_clicked = action_col1.button(
@@ -11721,16 +11723,22 @@ if "generated_rib_pdf" in st.session_state:
 
 def _safe_float_v18(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
+        result = float(value)
     except Exception:
+        result = float(default)
+    if not math.isfinite(result):
         return float(default)
+    return result
 
 
 def _safe_int_v18(value: Any, default: int = 0) -> int:
     try:
-        return int(round(float(value)))
+        result = float(value)
     except Exception:
         return int(default)
+    if not math.isfinite(result):
+        return int(default)
+    return int(round(result))
 
 
 def _suffix_sort_key_v18(label: str) -> Tuple[int, Any]:
@@ -12099,15 +12107,21 @@ def _grid_elements_to_df_v18(elements: List[Dict[str, Any]]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     for item in elements:
         e_type = clean_pdf_text(item.get("type", "")).lower()
+        if e_type in {"wall", "beam", "span_arrow"}:
+            x_val = item.get("x1", item.get("x"))
+            y_val = item.get("y1", item.get("y"))
+        else:
+            x_val = item.get("x")
+            y_val = item.get("y")
         row = {
             "type": e_type,
             "label": clean_pdf_text(item.get("label", "")),
-            "x": item.get("x"),
-            "y": item.get("y"),
-            "x2": item.get("x2"),
-            "y2": item.get("y2"),
-            "w": item.get("w"),
-            "h": item.get("h"),
+            "x": None if x_val is None else _safe_float_v18(x_val, float("nan")),
+            "y": None if y_val is None else _safe_float_v18(y_val, float("nan")),
+            "x2": None if item.get("x2") is None else _safe_float_v18(item.get("x2"), float("nan")),
+            "y2": None if item.get("y2") is None else _safe_float_v18(item.get("y2"), float("nan")),
+            "w": None if item.get("w") is None else _safe_float_v18(item.get("w"), float("nan")),
+            "h": None if item.get("h") is None else _safe_float_v18(item.get("h"), float("nan")),
         }
         rows.append(row)
     return pd.DataFrame(rows, columns=["type", "label", "x", "y", "x2", "y2", "w", "h"])
@@ -12123,29 +12137,45 @@ def _grid_df_to_elements_v18(df: pd.DataFrame) -> List[Dict[str, Any]]:
         if not e_type:
             continue
         if e_type == "column":
+            x_val = _safe_float_v18(row.get("x"), float("nan"))
+            y_val = _safe_float_v18(row.get("y"), float("nan"))
+            if not (math.isfinite(x_val) and math.isfinite(y_val)):
+                continue
             elements.append({
                 "type": "column",
                 "label": label or "Søyle",
-                "x": round(_safe_float_v18(row.get("x"), 0.0), 1),
-                "y": round(_safe_float_v18(row.get("y"), 0.0), 1),
+                "x": round(x_val, 1),
+                "y": round(y_val, 1),
             })
         elif e_type == "core":
+            x_val = _safe_float_v18(row.get("x"), float("nan"))
+            y_val = _safe_float_v18(row.get("y"), float("nan"))
+            if not (math.isfinite(x_val) and math.isfinite(y_val)):
+                continue
+            w_val = max(100.0, _safe_float_v18(row.get("w"), 1200.0))
+            h_val = max(100.0, _safe_float_v18(row.get("h"), 1200.0))
             elements.append({
                 "type": "core",
                 "label": label or "Kjerne",
-                "x": round(_safe_float_v18(row.get("x"), 0.0), 1),
-                "y": round(_safe_float_v18(row.get("y"), 0.0), 1),
-                "w": round(max(100.0, _safe_float_v18(row.get("w"), 1200.0)), 1),
-                "h": round(max(100.0, _safe_float_v18(row.get("h"), 1200.0)), 1),
+                "x": round(x_val, 1),
+                "y": round(y_val, 1),
+                "w": round(w_val, 1),
+                "h": round(h_val, 1),
             })
         elif e_type in {"wall", "beam", "span_arrow"}:
+            x1_val = _safe_float_v18(row.get("x"), float("nan"))
+            y1_val = _safe_float_v18(row.get("y"), float("nan"))
+            x2_val = _safe_float_v18(row.get("x2"), float("nan"))
+            y2_val = _safe_float_v18(row.get("y2"), float("nan"))
+            if not all(math.isfinite(v) for v in [x1_val, y1_val, x2_val, y2_val]):
+                continue
             elements.append({
                 "type": e_type,
                 "label": label or ("Bærevegg" if e_type == "wall" else "Element"),
-                "x1": round(_safe_float_v18(row.get("x"), 0.0), 1),
-                "y1": round(_safe_float_v18(row.get("y"), 0.0), 1),
-                "x2": round(_safe_float_v18(row.get("x2"), 0.0), 1),
-                "y2": round(_safe_float_v18(row.get("y2"), 0.0), 1),
+                "x1": round(x1_val, 1),
+                "y1": round(y1_val, 1),
+                "x2": round(x2_val, 1),
+                "y2": round(y2_val, 1),
             })
     return elements
 
@@ -12271,6 +12301,62 @@ def _draw_centered_text_v18(draw: ImageDraw.ImageDraw, center: Tuple[float, floa
     draw.text((center[0] - tw / 2.0, center[1] - th / 2.0), text, font=font, fill=fill)
 
 
+def _finite_float_or_none_v21(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(result):
+        return None
+    return float(result)
+
+
+def _sanitize_grid_elements_v21(elements_mm: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for raw in list(elements_mm or []):
+        if not isinstance(raw, dict):
+            continue
+        e_type = clean_pdf_text(raw.get("type", "")).lower()
+        label = clean_pdf_text(raw.get("label", ""))
+        if e_type == "column":
+            x = _finite_float_or_none_v21(raw.get("x"))
+            y = _finite_float_or_none_v21(raw.get("y"))
+            if x is None or y is None:
+                continue
+            cleaned.append({"type": "column", "label": label or "Søyle", "x": round(x, 1), "y": round(y, 1)})
+        elif e_type == "core":
+            x = _finite_float_or_none_v21(raw.get("x"))
+            y = _finite_float_or_none_v21(raw.get("y"))
+            w = _finite_float_or_none_v21(raw.get("w"))
+            h = _finite_float_or_none_v21(raw.get("h"))
+            if x is None or y is None or w is None or h is None:
+                continue
+            cleaned.append({
+                "type": "core",
+                "label": label or "Kjerne",
+                "x": round(x, 1),
+                "y": round(y, 1),
+                "w": round(max(100.0, w), 1),
+                "h": round(max(100.0, h), 1),
+            })
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            x1 = _finite_float_or_none_v21(raw.get("x1", raw.get("x")))
+            y1 = _finite_float_or_none_v21(raw.get("y1", raw.get("y")))
+            x2 = _finite_float_or_none_v21(raw.get("x2"))
+            y2 = _finite_float_or_none_v21(raw.get("y2"))
+            if x1 is None or y1 is None or x2 is None or y2 is None:
+                continue
+            cleaned.append({
+                "type": e_type,
+                "label": label or ("Bærevegg" if e_type == "wall" else "Element"),
+                "x1": round(x1, 1),
+                "y1": round(y1, 1),
+                "x2": round(x2, 1),
+                "y2": round(y2, 1),
+            })
+    return cleaned
+
+
 def _render_grid_preview_v18(state: Dict[str, Any], elements_mm: List[Dict[str, Any]]) -> Image.Image:
     dims = _grid_dimensions_v18(state)
     total_w = max(float(dims.get("width_mm", 1.0)), 1.0)
@@ -12337,7 +12423,7 @@ def _render_grid_preview_v18(state: Dict[str, Any], elements_mm: List[Dict[str, 
     def mm_to_px(x_mm: float, y_mm: float) -> Tuple[float, float]:
         return origin_x + float(x_mm) * scale, origin_y - float(y_mm) * scale
 
-    for element in elements_mm:
+    for element in _sanitize_grid_elements_v21(elements_mm):
         e_type = clean_pdf_text(element.get("type", "")).lower()
         label = clean_pdf_text(element.get("label", ""))
         if e_type == "column":
@@ -13361,6 +13447,45 @@ def render_rib_grid_precision_editor_v18() -> None:
     # Resten av editoren kjøres via original implementasjon, men med v19-hjelpere over.
     return _RENDER_RIB_GRID_EDITOR_V18_BASE()
 
+
+
+# ------------------------------------------------------------
+# 20A. V21 STABILISERING: SANITISER GRID-ELEMENTER FOR PREVIEW
+#      OG SKISSEOPPDATERING, SLIK AT NaN/inf IKKE KNEKKER EDITOREN.
+# ------------------------------------------------------------
+_RENDER_RIB_GRID_EDITOR_V21_BASE = render_rib_grid_precision_editor_v18
+_APPLY_GRID_TO_SELECTED_SKETCH_V21_BASE = _apply_grid_to_selected_sketch_v18
+
+
+def _apply_grid_to_selected_sketch_v18(sketch_idx: int, selected_sketch: Dict[str, Any], state: Dict[str, Any]) -> None:
+    state = deep_copy_jsonable(state)
+    state["elements_mm"] = _sanitize_grid_elements_v21(state.get("elements_mm", []))
+    return _APPLY_GRID_TO_SELECTED_SKETCH_V21_BASE(sketch_idx, selected_sketch, state)
+
+
+def render_rib_grid_precision_editor_v18() -> None:
+    if not draft_sketch_bundle_exists():
+        return
+    draft_sketches = st.session_state.get("rib_draft_sketches", [])
+    drawings = st.session_state.get("rib_draft_drawings", [])
+    if not draft_sketches:
+        return
+
+    sketch_idx = 0
+    selected_uid_state = st.session_state.get("rib_draft_selected_sketch", "")
+    for idx, item in enumerate(draft_sketches):
+        if sketch_uid(item) == selected_uid_state:
+            sketch_idx = idx
+            break
+    selected_sketch = draft_sketches[sketch_idx]
+    selected_uid = sketch_uid(selected_sketch)
+    state = _get_or_init_grid_state_v18(selected_sketch, drawings, globals().get("files"))
+    cleaned = _sanitize_grid_elements_v21(state.get("elements_mm", []))
+    if cleaned != list(state.get("elements_mm", [])):
+        state["elements_mm"] = cleaned
+        _update_grid_state_in_session_v18(selected_uid, state)
+
+    return _RENDER_RIB_GRID_EDITOR_V21_BASE()
 
 
 if draft_sketch_bundle_exists() and "generated_rib_pdf" not in st.session_state:
