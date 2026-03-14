@@ -5,6 +5,9 @@ import base64
 import html
 import json
 import re
+import smtplib
+import ssl
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib import error as urlerror
@@ -1465,7 +1468,22 @@ MODULE_COPY_OVERRIDES = {
         "m_tdd_in": "Drawings + certificates + condition docs",
         "m_tdd_out": "TDD draft, risk matrix, remediation overview",
         "m_tdd_btn": "Open TDD",
-        "partner_line": "Are you a consulting engineering firm or system supplier? We have a separate integration program. Contact us.",
+        "partner_line": "Are you a consulting engineering firm or system supplier? Contact us about integration.",
+        "contact_form_title": "Contact us about integration",
+        "contact_form_sub": "Tell us briefly what you want to connect, automate or deliver through Builtly. We will route your request to the right team.",
+        "contact_name": "Name",
+        "contact_email": "Work email",
+        "contact_company": "Company",
+        "contact_message": "How can we help?",
+        "contact_send": "Send request",
+        "contact_close": "Close form",
+        "contact_missing_fields": "Please complete name, work email and message before sending.",
+        "contact_invalid_email": "Please enter a valid work email address.",
+        "contact_success": "Thanks — your message has been sent to Builtly.",
+        "contact_fallback": "The server is not set up to send email directly yet. Open the prefilled email below and send it to continue.",
+        "contact_fallback_button": "Open prefilled email",
+        "contact_direct_email": "Or contact us directly at {email}.",
+        "contact_subject_prefix": "Builtly integration inquiry",
         "badge_geo": "Ground",
         "badge_acoustics": "Sound",
         "badge_fire": "Fire",
@@ -1517,7 +1535,22 @@ MODULE_COPY_OVERRIDES = {
         "m_tdd_in": "Tegninger + attester + tilstandsgrunnlag",
         "m_tdd_out": "TDD-utkast, risikomatrise, kostnadsoversikt",
         "m_tdd_btn": "Åpne TDD",
-        "partner_line": "Er du et rådgivende ingeniørfirma eller systemleverandør? Vi har et eget program for integrering. Ta kontakt.",
+        "partner_line": "Er du et rådgivende ingeniørfirma eller systemleverandør? Ta kontakt om integrering.",
+        "contact_form_title": "Kontakt oss om integrering",
+        "contact_form_sub": "Fortell kort hva du ønsker å koble på, automatisere eller levere gjennom Builtly, så sender vi henvendelsen til riktig team.",
+        "contact_name": "Navn",
+        "contact_email": "Jobb-e-post",
+        "contact_company": "Firma",
+        "contact_message": "Hva ønsker du hjelp med?",
+        "contact_send": "Send henvendelse",
+        "contact_close": "Lukk skjema",
+        "contact_missing_fields": "Fyll ut navn, jobb-e-post og melding før du sender.",
+        "contact_invalid_email": "Skriv inn en gyldig jobb-e-postadresse.",
+        "contact_success": "Takk — meldingen din er sendt til Builtly.",
+        "contact_fallback": "Serveren er ikke satt opp for direkte e-postsending ennå. Åpne e-posten under og send den videre derfra.",
+        "contact_fallback_button": "Åpne ferdig utfylt e-post",
+        "contact_direct_email": "Du kan også kontakte oss direkte på {email}.",
+        "contact_subject_prefix": "Builtly integreringshenvendelse",
         "badge_geo": "Grunnlag",
         "badge_acoustics": "Lyd",
         "badge_fire": "Brann",
@@ -1549,7 +1582,22 @@ MODULE_COPY_OVERRIDES = {
         "m_tdd_in": "Drawings + certificates + condition docs",
         "m_tdd_out": "TDD draft, risk matrix, remediation overview",
         "m_tdd_btn": "Open TDD",
-        "partner_line": "Are you a consulting engineering firm or system supplier? We have a separate integration program. Get in touch.",
+        "partner_line": "Are you a consulting engineering firm or system supplier? Contact us about integration.",
+        "contact_form_title": "Contact us about integration",
+        "contact_form_sub": "Tell us briefly what you want to connect, automate or deliver through Builtly. We will route your request to the right team.",
+        "contact_name": "Name",
+        "contact_email": "Work email",
+        "contact_company": "Company",
+        "contact_message": "How can we help?",
+        "contact_send": "Send request",
+        "contact_close": "Close form",
+        "contact_missing_fields": "Please complete name, work email and message before sending.",
+        "contact_invalid_email": "Please enter a valid work email address.",
+        "contact_success": "Thanks — your message has been sent to Builtly.",
+        "contact_fallback": "The server is not set up to send email directly yet. Open the prefilled email below and send it to continue.",
+        "contact_fallback_button": "Open prefilled email",
+        "contact_direct_email": "Or contact us directly at {email}.",
+        "contact_subject_prefix": "Builtly integration inquiry",
         "badge_geo": "Ground",
         "badge_acoustics": "Sound",
         "badge_fire": "Fire",
@@ -1903,6 +1951,32 @@ def assistant_href(lang_key: str) -> str:
     return "?" + urlparse.urlencode({"assistant": "open", "lang": language_slug(lang_key)})
 
 
+def contact_query_requested() -> bool:
+    value = str(get_query_params_dict().get("contact", "")).strip().lower()
+    return value in {"1", "true", "open", "yes"}
+
+
+def clear_contact_query_param() -> None:
+    params = get_query_params_dict()
+    if "contact" in params:
+        params.pop("contact", None)
+        set_query_params_dict(params)
+
+
+def contact_href(lang_key: str) -> str:
+    params = {"contact": "open", "lang": language_slug(lang_key)}
+    if assistant_query_requested() or st.session_state.get("assistant_dialog_open"):
+        params["assistant"] = "open"
+    return "?" + urlparse.urlencode(params)
+
+
+def contact_close_href(lang_key: str) -> str:
+    params = {"lang": language_slug(lang_key)}
+    if assistant_query_requested() or st.session_state.get("assistant_dialog_open"):
+        params["assistant"] = "open"
+    return "?" + urlparse.urlencode(params)
+
+
 def sync_language_query_param(lang_key: str, keep_assistant: bool = False) -> None:
     params = get_query_params_dict()
     params["lang"] = language_slug(lang_key)
@@ -1910,6 +1984,10 @@ def sync_language_query_param(lang_key: str, keep_assistant: bool = False) -> No
         params["assistant"] = "open"
     else:
         params.pop("assistant", None)
+    if contact_query_requested():
+        params["contact"] = "open"
+    else:
+        params.pop("contact", None)
     set_query_params_dict(params)
 
 
@@ -1929,6 +2007,95 @@ def _env_or_secret(name: str) -> Optional[str]:
     if value is not None and str(value).strip():
         return str(value).strip()
     return _safe_secret_get(name)
+
+
+def _truthy_env(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def contact_recipient() -> str:
+    return _env_or_secret("BUILTLY_CONTACT_TO") or "kontakt@builtly.ai"
+
+
+def contact_mailto_url(*, name: str, email: str, company: str, message: str, lang_bundle: Dict) -> str:
+    subject = f"{lang_bundle['contact_subject_prefix']} — {company or name}".strip()
+    body_lines = [
+        f"Name: {name}",
+        f"Company: {company}",
+        f"Email: {email}",
+        "",
+        "Message:",
+        message.strip(),
+        "",
+        "Source: Builtly front page integration form",
+    ]
+    query = urlparse.urlencode({
+        "subject": subject,
+        "body": "\n".join(body_lines).strip(),
+    })
+    recipient = contact_recipient()
+    return f"mailto:{recipient}?{query}"
+
+
+def send_contact_email(*, name: str, email: str, company: str, message: str, lang_bundle: Dict) -> tuple[bool, Optional[str]]:
+    host = _env_or_secret("BUILTLY_SMTP_HOST") or _env_or_secret("SMTP_HOST")
+    username = _env_or_secret("BUILTLY_SMTP_USER") or _env_or_secret("SMTP_USER")
+    password = _env_or_secret("BUILTLY_SMTP_PASSWORD") or _env_or_secret("SMTP_PASSWORD")
+    from_address = _env_or_secret("BUILTLY_CONTACT_FROM") or _env_or_secret("SMTP_FROM") or username or contact_recipient()
+    port_raw = _env_or_secret("BUILTLY_SMTP_PORT") or _env_or_secret("SMTP_PORT") or "587"
+    use_ssl = _truthy_env(_env_or_secret("BUILTLY_SMTP_USE_SSL") or _env_or_secret("SMTP_USE_SSL"), default=False)
+    use_tls = _truthy_env(_env_or_secret("BUILTLY_SMTP_USE_TLS") or _env_or_secret("SMTP_USE_TLS"), default=not use_ssl)
+
+    try:
+        port = int(str(port_raw).strip())
+    except Exception:
+        port = 587
+
+    mailto_url = contact_mailto_url(name=name, email=email, company=company, message=message, lang_bundle=lang_bundle)
+
+    if not host:
+        return False, mailto_url
+
+    msg = EmailMessage()
+    msg["To"] = contact_recipient()
+    msg["From"] = from_address
+    msg["Reply-To"] = email
+    msg["Subject"] = f"{lang_bundle['contact_subject_prefix']} — {company or name}".strip()
+    msg.set_content(
+        "\n".join(
+            [
+                f"Name: {name}",
+                f"Company: {company}",
+                f"Email: {email}",
+                "",
+                "Message:",
+                message.strip(),
+                "",
+                "Source: Builtly front page integration form",
+            ]
+        ).strip()
+    )
+
+    try:
+        if use_ssl:
+            with smtplib.SMTP_SSL(host, port, timeout=25, context=ssl.create_default_context()) as server:
+                if username and password:
+                    server.login(username, password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=25) as server:
+                server.ehlo()
+                if use_tls:
+                    server.starttls(context=ssl.create_default_context())
+                    server.ehlo()
+                if username and password:
+                    server.login(username, password)
+                server.send_message(msg)
+        return True, None
+    except Exception:
+        return False, mailto_url
 
 
 def configured_access_codes() -> List[str]:
@@ -3543,9 +3710,42 @@ st.markdown(
         flex-shrink: 0;
     }
 
+    .integration-footer-callout {
+        margin-top: 1.35rem;
+        text-align: center;
+    }
+
+    .integration-footer-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        color: rgba(192, 206, 223, 0.78) !important;
+        font-size: 0.92rem;
+        text-decoration: none !important;
+        border-bottom: 1px solid rgba(112, 214, 220, 0.18);
+        padding-bottom: 0.1rem;
+        transition: color 0.18s ease, border-color 0.18s ease;
+    }
+
+    .integration-footer-link:hover {
+        color: #f5f7fb !important;
+        border-color: rgba(112, 214, 220, 0.36);
+    }
+
+    .integration-close-link {
+        color: rgba(159,176,195,0.82) !important;
+        font-size: 0.85rem;
+        text-decoration: none !important;
+    }
+
+    .integration-close-link:hover {
+        color: #f5f7fb !important;
+    }
+
     .footer-block {
         text-align: center;
-        margin-top: 2.5rem;
+        margin-top: 2.1rem;
         padding-top: 1.5rem;
         padding-bottom: 1rem;
         border-top: 1px solid rgba(120,145,170,0.15);
@@ -4128,7 +4328,68 @@ render_html(
 )
 
 # -------------------------------------------------
-# 13) FOOTER
+# 13) CONTACT LINK + CONTACT FORM
+# -------------------------------------------------
+render_html(
+    f"""
+    <div class="integration-footer-callout">
+        <a href="{contact_href(st.session_state.app_lang)}" target="_self" class="integration-footer-link">{lang['partner_line']}</a>
+    </div>
+    """
+)
+
+if contact_query_requested():
+    with st.expander(lang["contact_form_title"], expanded=True):
+        col_info, col_close = st.columns([0.82, 0.18], gap="small")
+        with col_info:
+            st.caption(lang["contact_form_sub"])
+            st.caption(lang["contact_direct_email"].format(email=contact_recipient()))
+        with col_close:
+            render_html(
+                f'<div style="text-align:right; padding-top: 0.4rem;"><a href="{contact_close_href(st.session_state.app_lang)}" target="_self" class="integration-close-link">{lang["contact_close"]}</a></div>'
+            )
+
+        fallback_mailto = None
+        with st.form("builtly_integration_contact_form", clear_on_submit=True):
+            col_a, col_b = st.columns(2, gap="medium")
+            with col_a:
+                contact_name = st.text_input(lang["contact_name"])
+                contact_company = st.text_input(lang["contact_company"])
+            with col_b:
+                contact_email = st.text_input(lang["contact_email"])
+            contact_message = st.text_area(lang["contact_message"], height=160)
+            contact_submit = st.form_submit_button(lang["contact_send"], use_container_width=True)
+
+        if contact_submit:
+            stripped_name = contact_name.strip()
+            stripped_company = contact_company.strip()
+            stripped_email = contact_email.strip()
+            stripped_message = contact_message.strip()
+            email_ok = bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", stripped_email))
+
+            if not stripped_name or not stripped_email or not stripped_message:
+                st.error(lang["contact_missing_fields"])
+            elif not email_ok:
+                st.error(lang["contact_invalid_email"])
+            else:
+                sent, fallback_mailto = send_contact_email(
+                    name=stripped_name,
+                    email=stripped_email,
+                    company=stripped_company,
+                    message=stripped_message,
+                    lang_bundle=lang,
+                )
+                if sent:
+                    st.success(lang["contact_success"])
+                else:
+                    st.info(lang["contact_fallback"])
+                    if fallback_mailto:
+                        render_html(
+                            f'<div style="margin-top:0.5rem; margin-bottom:0.25rem;"><a href="{html.escape(fallback_mailto, quote=True)}" class="module-cta">{lang["contact_fallback_button"]}</a></div>'
+                        )
+
+# -------------------------------------------------
+# 14) FOOTER
 # -------------------------------------------------
 render_html(
     f"""
