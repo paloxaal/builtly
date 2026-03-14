@@ -6,12 +6,20 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     wget \
+    curl \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config \
+    bison \
+    flex \
+    swig \
+    python3-dev \
     libxml2-dev \
     libpcre2-dev \
-    swig \
-    python3-dev
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install LibreDWG
 RUN git clone https://github.com/LibreDWG/libredwg.git && \
     cd libredwg && \
     ./autogen.sh && \
@@ -21,10 +29,10 @@ RUN git clone https://github.com/LibreDWG/libredwg.git && \
 
 ENV PATH="/usr/local/bin:${PATH}"
 
-COPY . .
+COPY . /app
 
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
 
 EXPOSE 8501
 
