@@ -1214,6 +1214,78 @@ LANGUAGE_PROFILES = {'🇬🇧 English (UK)': {'country': 'United Kingdom',
                 'project_land_label': 'Deutschland (Landesbauordnungen / MBO / MVV TB)',
                 'jurisdiction_short': 'LBO + MBO baseline'}}
 
+MODULE_EXPANSION_TEXTS = {
+    "🇬🇧 English (UK)": {
+        "mod_sec_title": "Specialized agents, commercial engines and scale layers in one platform",
+        "mod_sec_sub": "Builtly should combine vertical specialist modules with horizontal engines for tender, quantity, yield, climate risk and partner distribution. That is how the product scales without scaling like a consultancy.",
+        "mod_sec4": "Commercial & delivery intelligence",
+        "mod_sec4_sub": "Horizontal modules that reduce tender risk, quantify scope and improve project yield.",
+        "mod_sec5": "Climate, portfolio & partner scale",
+        "mod_sec5_sub": "Portfolio screening, climate risk and white-label/API distribution for enterprise growth.",
+        "m_tender_t": "TENDER CONTROL - Bid Package QA",
+        "m_tender_d": "Compare tender documents, drawings and bid inputs. Generates deviation matrix, missing-item log, ambiguity log and RFI suggestions.",
+        "m_tender_in": "Tender docs + drawings + IFC/PDF",
+        "m_tender_out": "Deviation matrix, scope log, RFIs",
+        "m_tender_btn": "Open Tender Control",
+        "m_quantity_t": "QUANTITY & SCOPE - Revision Intelligence",
+        "m_quantity_d": "Track quantities, areas, revision deltas and traceability between model, drawing and description.",
+        "m_quantity_in": "IFC / PDF / BOQ / room data",
+        "m_quantity_out": "Quantity set, area log, delta report",
+        "m_quantity_btn": "Open Quantity & Scope",
+        "m_yield_t": "AREA & YIELD - Development Optimizer",
+        "m_yield_d": "Analyze gross/net, saleable and lettable area, core ratio, technical rooms and scenario-based yield improvements.",
+        "m_yield_in": "Plan basis + area program",
+        "m_yield_out": "Yield note, scenarios, value uplift",
+        "m_yield_btn": "Open Yield Optimizer",
+        "m_climate_t": "CLIMATE RISK - Asset & Portfolio Screening",
+        "m_climate_d": "Scores flood, landslide, sea-level and heat stress risk and maps outputs to Taxonomy, SFDR and banking workflows.",
+        "m_climate_in": "Address / coordinates + exposure",
+        "m_climate_out": "Climate risk score, taxonomy mapping",
+        "m_climate_btn": "Open Climate Risk",
+        "m_partner_t": "WHITE-LABEL API - Partner Program",
+        "m_partner_d": "Tenant architecture, API access, webhooks and branded report delivery so partners can run Builtly inside their own systems.",
+        "m_partner_in": "Partner config + API setup",
+        "m_partner_out": "Tenant blueprint, API package",
+        "m_partner_btn": "Open Partner API"
+    },
+    "🇳🇴 Norsk": {
+        "mod_sec_title": "Spesialiserte moduler, kommersielle motorer og skaleringslag i én plattform",
+        "mod_sec_sub": "Builtly bør kombinere vertikale fagmoduler med horisontale motorer for anbud, mengder, yield, klimarisiko og partnerdistribusjon. Det er slik plattformen kan skalere uten å vokse som et konsulentselskap.",
+        "mod_sec4": "Kommersiell & leveranseintelligens",
+        "mod_sec4_sub": "Horisontale moduler som reduserer anbudsrisiko, kvantifiserer scope og forbedrer areal/yield.",
+        "mod_sec5": "Klima, portefølje & partnerskala",
+        "mod_sec5_sub": "Porteføljescreening, klimarisiko og white-label/API-distribusjon for enterprise-vekst.",
+        "m_tender_t": "ANBUDSKONTROLL - Tilbudsgrunnlag & QA",
+        "m_tender_d": "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
+        "m_tender_in": "Anbudsgrunnlag + tegninger + IFC/PDF",
+        "m_tender_out": "Avviksmatrise, scope-logg, RFIs",
+        "m_tender_btn": "Åpne Tender Control",
+        "m_quantity_t": "MENGDE & SCOPE - Revisjon og sporbarhet",
+        "m_quantity_d": "Fanger mengder, arealer, revisjonsendringer og sporbarhet mellom modell, tegning og beskrivelse.",
+        "m_quantity_in": "IFC / PDF / BOQ / romdata",
+        "m_quantity_out": "Mengdeliste, areallogg, deltarapport",
+        "m_quantity_btn": "Åpne Mengde & Scope",
+        "m_yield_t": "AREAL & YIELD - Utvikleroptimalisering",
+        "m_yield_d": "Analyserer brutto/netto, salgbart og utleibart areal, kjerneandel, tekniske rom og scenarioer for mer verdiskaping.",
+        "m_yield_in": "Plangrunnlag + arealprogram",
+        "m_yield_out": "Yield-notat, scenarioer, verdiøkning",
+        "m_yield_btn": "Åpne Yield Optimizer",
+        "m_climate_t": "KLIMARISIKO - Eiendom & portefølje",
+        "m_climate_d": "Skårer flom, skred, havnivå og varmestress og mapper output mot Taxonomy, SFDR og bankrapportering.",
+        "m_climate_in": "Adresse / koordinater + eksponering",
+        "m_climate_out": "Klimarisikoscore, taxonomy-mapping",
+        "m_climate_btn": "Åpne Klimarisiko",
+        "m_partner_t": "WHITE-LABEL API - Partnerprogram",
+        "m_partner_d": "Tenant-arkitektur, API-tilgang, webhooks og brandede rapporter slik at partnere kan kjøre Builtly i egne systemer.",
+        "m_partner_in": "Partneroppsett + API-konfig",
+        "m_partner_out": "Tenant-blueprint, API-pakke",
+        "m_partner_btn": "Åpne Partner API"
+    }
+}
+
+for _lang_key, _payload in MODULE_EXPANSION_TEXTS.items():
+    TEXTS.setdefault(_lang_key, {}).update(_payload)
+
 DISCIPLINE_CATALOG = [{'code': 'geo',
   'labels': {'🇬🇧 English (UK)': 'GEO / Ground',
              '🇺🇸 English (US)': 'GEO / Ground',
@@ -1298,6 +1370,70 @@ DISCIPLINE_CATALOG = [{'code': 'geo',
 DEFAULT_DISCIPLINES = ['geo', 'rib', 'fire', 'sha', 'breeam']
 DISCIPLINE_LABELS = {item["code"]: item["labels"] for item in DISCIPLINE_CATALOG}
 
+DISCIPLINE_CATALOG.extend([
+    {
+        "code": "tender",
+        "labels": {
+            "🇬🇧 English (UK)": "Tender control",
+            "🇺🇸 English (US)": "Tender control",
+            "🇳🇴 Norsk": "Anbudskontroll",
+            "🇸🇪 Svenska": "Anbudskontroll",
+            "🇩🇰 Dansk": "Anbudskontrol",
+            "🇫🇮 Suomi": "Tarjouskontrolli",
+            "🇩🇪 Deutsch": "Ausschreibungskontrolle",
+        },
+    },
+    {
+        "code": "quantity",
+        "labels": {
+            "🇬🇧 English (UK)": "Quantity & scope",
+            "🇺🇸 English (US)": "Quantity & scope",
+            "🇳🇴 Norsk": "Mengde & scope",
+            "🇸🇪 Svenska": "Mängd & scope",
+            "🇩🇰 Dansk": "Mængde & scope",
+            "🇫🇮 Suomi": "Määrä & scope",
+            "🇩🇪 Deutsch": "Mengen & Scope",
+        },
+    },
+    {
+        "code": "yield",
+        "labels": {
+            "🇬🇧 English (UK)": "Area & yield",
+            "🇺🇸 English (US)": "Area & yield",
+            "🇳🇴 Norsk": "Areal & yield",
+            "🇸🇪 Svenska": "Area & yield",
+            "🇩🇰 Dansk": "Areal & yield",
+            "🇫🇮 Suomi": "Alue & yield",
+            "🇩🇪 Deutsch": "Fläche & Yield",
+        },
+    },
+    {
+        "code": "climate",
+        "labels": {
+            "🇬🇧 English (UK)": "Climate risk",
+            "🇺🇸 English (US)": "Climate risk",
+            "🇳🇴 Norsk": "Klimarisiko",
+            "🇸🇪 Svenska": "Klimatrisk",
+            "🇩🇰 Dansk": "Klimarisiko",
+            "🇫🇮 Suomi": "Ilmastoriski",
+            "🇩🇪 Deutsch": "Klimarisiko",
+        },
+    },
+    {
+        "code": "partner_api",
+        "labels": {
+            "🇬🇧 English (UK)": "White-label API",
+            "🇺🇸 English (US)": "White-label API",
+            "🇳🇴 Norsk": "White-label API",
+            "🇸🇪 Svenska": "White-label API",
+            "🇩🇰 Dansk": "White-label API",
+            "🇫🇮 Suomi": "White-label API",
+            "🇩🇪 Deutsch": "White-label API",
+        },
+    },
+])
+DISCIPLINE_LABELS.update({item["code"]: item["labels"] for item in DISCIPLINE_CATALOG})
+
 
 def get_text_bundle(lang_key: str) -> Dict:
     base = dict(TEXTS["🇬🇧 English (UK)"])
@@ -1335,6 +1471,11 @@ PAGES = {
     "sha": find_page("SHA"),
     "breeam": find_page("BREEAM"),
     "mop": find_page("MOP"),
+    "tender_control": find_page("TenderControl"),
+    "quantity_scope": find_page("QuantityScope"),
+    "yield_optimizer": find_page("YieldOptimizer"),
+    "climate_risk": find_page("ClimateRisk"),
+    "partner_api": find_page("PartnerAPI"),
     "project": find_page("Project"),
     "review": find_page("Review"),
 }
@@ -3795,6 +3936,17 @@ sustainability_cards = [
     module_card("mop", "♻️", "Environment", "badge-roadmap", lang["m_mop_t"], lang["m_mop_d"], lang["m_mop_in"], lang["m_mop_out"], lang["m_mop_btn"]),
 ]
 
+commercial_cards = [
+    module_card("tender_control", "📑", "Commercial", "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
+    module_card("quantity_scope", "📏", "Core engine", "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
+    module_card("yield_optimizer", "🏙️", "Developer-first", "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
+]
+
+platform_cards = [
+    module_card("climate_risk", "🌊", "Portfolio", "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
+    module_card("partner_api", "🔌", "Scale", "badge-roadmap", lang["m_partner_t"], lang["m_partner_d"], lang["m_partner_in"], lang["m_partner_out"], lang["m_partner_btn"]),
+]
+
 render_html(
     f"""
     <div class="section-head">
@@ -3812,6 +3964,14 @@ render_html(
     <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec3']}</div>
     <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec3_sub']}</div>
     <div class="module-grid">{''.join(sustainability_cards)}</div>
+
+    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec4']}</div>
+    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec4_sub']}</div>
+    <div class="module-grid">{''.join(commercial_cards)}</div>
+
+    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec5']}</div>
+    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec5_sub']}</div>
+    <div class="module-grid">{''.join(platform_cards)}</div>
     """
 )
 
