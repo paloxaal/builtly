@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import sys
 from pathlib import Path
 
@@ -11,177 +10,153 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from builtly_document_engine import (
+    audit_log_dataframe,
+    build_markdown_report,
+    default_delivery_level,
+    disclaimer_for_level,
+    manifest_dataframe,
+    normalize_uploaded_files,
+    revision_dataframe,
+    run_module_analysis,
+    tdd_rules_payload,
+)
 from builtly_module_kit import (
     configure_page,
     dataframe_download,
     json_download,
+    list_to_dataframe,
+    markdown_download,
+    render_attempt_log,
+    render_disclaimer_banner,
     render_hero,
     render_json_preview,
     render_metric_cards,
-    render_panel,
+    render_project_snapshot,
     render_section,
 )
-from builtly_public_data import (
-    adapter_status,
-    gather_climate_snapshot,
-    gather_tdd_public_snapshot,
-    geocode_address,
-    run_climate_portfolio_batch,
-    run_tdd_portfolio_batch,
-)
-from builtly_api_surface import build_openapi_preview
+from builtly_public_data import adapter_status
 
-project = configure_page("Builtly | System adapters", "🛰️")
+project = configure_page("Builtly | Teknisk Due Diligence", "B")
+module_key = "tdd"
+levels = ["auto", "reviewed", "attested"]
+default_level = default_delivery_level(module_key)
 
 render_hero(
-    eyebrow="Internal setup",
-    title="Test offentlige adapters, proxyer og batch-endepunkter.",
+    eyebrow="Teknisk Due Diligence",
+    title="Få oversikt over teknisk tilstand, risiko og vedlikeholdsbehov før du kjøper.",
     subtitle=(
-        "Bruk denne siden internt for aa verifisere at adresseoppslag, planoppslag, Matrikkel-proxy, energidata og batchflyter er koblet korrekt. "
-        "Siden er ment for oppsett, feilsoking og demo av de nye integrasjonene."
+        "Last opp tegninger, ferdigattest, tilstandsrapport, energimerke og FDV. "
+        "Du får en strukturert gjennomgang med tilstandsgrader, TEK17-avvik, estimert utbedringskost og komplett dokumentoversikt."
     ),
-    pills=["Kartverket", "NVE", "DiBK plan", "Matrikkel proxy", "Energy proxy", "Batch APIs"],
-    badge="Internal",
+    pills=["NS 3600/3424", "TEK17", "TG0-3", "Portefølje", "Sporbarhet"],
+    badge="Teknisk Due Diligence",
 )
 
-status_rows = adapter_status()
-configured = sum(1 for row in status_rows if row.get("configured"))
-render_metric_cards(
-    [
-        {"label": "Koblede kilder", "value": f"{configured}/{len(status_rows)}", "desc": "Miljostyrte adapters og proxyer funnet via env-vars."},
-        {"label": "NVE / GIS", "value": "Klar" if any("NVE" in row.get("source", "") and row.get("configured") for row in status_rows) else "Trenger oppsett", "desc": "Brukes for klimarisiko og faresoner."},
-        {"label": "TDD offentlige data", "value": "Klar" if any("Matrikkel" in row.get("source", "") and row.get("configured") for row in status_rows) else "Delvis", "desc": "Matrikkel, plan og energidata for TDD."},
-        {"label": "API surface", "value": "Preview ready", "desc": "OpenAPI-lignende overflate for interne tester og partnerarbeid."},
-    ]
-)
-
-render_section(
-    "Adapterstatus",
-    "Oversikt over hvilke offentlige og private endepunkter som er konfigurert i miljoet akkurat naa.",
-    "Status",
-)
-status_df = pd.DataFrame(status_rows)
-st.dataframe(status_df, use_container_width=True, hide_index=True)
-dataframe_download(status_df, "Last ned adapterstatus (.csv)", "builtly_adapter_status.csv")
-
-left, right = st.columns([1.15, 0.85], gap="large")
+left, right = st.columns([1.35, 0.65], gap="large")
 with left:
-    render_section(
-        "Enkeltoppslag",
-        "Test geokoding, klimarisiko og TDD-data med en adresse eller et matrikkeloppslag.",
-        "Live checks",
-    )
-    address = st.text_input("Adresse", value=project.get("adresse") or "Kjopmannsgata 34, Trondheim")
-    municipality = st.text_input("Kommune", value=project.get("kommune") or "Trondheim")
-    gnr = st.text_input("Gnr", value=str(project.get("gnr") or "") )
-    bnr = st.text_input("Bnr", value=str(project.get("bnr") or "") )
-    scenario = st.selectbox("Klimascenario", ["RCP 4.5", "RCP 8.5"], index=0)
-    horizon = st.selectbox("Horisont", ["2050", "2100"], index=0)
-
-    c1, c2, c3 = st.columns(3)
+    render_section("1. Last opp dokumentasjon", "Last opp alt tilgjengelig underlag for eiendommen. Jo mer dokumentasjon, desto bedre analyse.", "Input")
+    c1, c2 = st.columns(2)
     with c1:
-        run_geo = st.button("Test geokoding", use_container_width=True)
+        delivery_level = st.selectbox("Leveransenivå", levels, index=levels.index(default_level))
+        transaction_stage = st.selectbox("Brukssituasjon", ["Screening", "Transaksjon", "Bank / kreditt", "Portefølje"], index=1)
+        property_type = st.selectbox("Eiendomstype", ["Bolig", "Kontor", "Retail", "Logistikk", "Mixed-use"], index=1)
     with c2:
-        run_climate = st.button("Test klimarisiko", use_container_width=True)
-    with c3:
-        run_tdd = st.button("Test TDD-oppslag", use_container_width=True)
-
-    if run_geo:
-        geo = geocode_address(address, municipality=municipality)
-        render_json_preview(geo, "Geokoding")
-        json_download(geo, "Eksporter geokoding (.json)", "builtly_geocoding.json")
-
-    if run_climate:
-        climate = gather_climate_snapshot(
-            {
-                "asset_id": f"{gnr}-{bnr}" if gnr and bnr else address,
-                "address": address,
-                "municipality": municipality,
-                "scenario": scenario,
-                "horizon": horizon,
-            },
-            scenario=scenario,
-            horizon=horizon,
-        )
-        render_json_preview(climate, "Klimarisiko - enkeltanalyse")
-        json_download(climate, "Eksporter klimarisiko (.json)", "builtly_climate_single.json")
-
-    if run_tdd:
-        snap = gather_tdd_public_snapshot(
-            {
-                "address": address,
-                "municipality": municipality,
-                "gnr": gnr,
-                "bnr": bnr,
-                "matrikkel_id": f"{gnr}/{bnr}" if gnr and bnr else "",
-            }
-        )
-        render_json_preview(snap, "TDD offentlig datasnapshot")
-        json_download(snap, "Eksporter TDD-snapshot (.json)", "builtly_tdd_snapshot.json")
-
-    render_section(
-        "Batchtester",
-        "Simuler bank- og portefoljelop for TDD og klimarisiko basert paa en enkel CSV/XLSX med adresse, kommune, gnr, bnr eller koordinater.",
-        "Portfolio",
+        build_year = st.number_input("Byggeår", min_value=1850, max_value=2100, value=2008, step=1)
+        market_value_mnok = st.number_input("Estimert markedsverdi (MNOK)", min_value=1.0, value=145.0, step=1.0)
+        include_portfolio = st.toggle("Inkluder i porteføljeanalyse", value=transaction_stage in {"Bank / kreditt", "Portefølje"})
+    notes = st.text_area(
+        "Er det noe spesielt du ønsker at analysen skal fokusere på?",
+        value="Jeg ønsker vurdering av tilstandsgrad per bygningsdel, eventuelle TEK17-avvik, estimert utbedringskostnad og en oversikt over hva som mangler av dokumentasjon.",
+        height=120,
     )
-    upload = st.file_uploader("Last opp portefoljefil", type=["csv", "xlsx"])
-    batch_type = st.radio("Batchtype", ["Klimarisiko", "TDD"], horizontal=True)
-    partner_id = st.text_input("Partner / kunde-ID", value="pilot-bank-001")
-    if upload is not None:
-        if upload.name.lower().endswith(".csv"):
-            batch_df = pd.read_csv(upload)
-        else:
-            batch_df = pd.read_excel(upload)
-        st.dataframe(batch_df.head(25), use_container_width=True, hide_index=True)
-        props = batch_df.fillna("").to_dict(orient="records")
-        if st.button("Kjor batchtest", use_container_width=True):
-            if batch_type == "Klimarisiko":
-                result = run_climate_portfolio_batch(props, partner_id=partner_id, scenario=scenario, horizon=horizon)
-            else:
-                result = run_tdd_portfolio_batch(props, partner_id=partner_id)
-            render_json_preview(result, f"{batch_type} - batchresultat")
-            json_download(result, f"Eksporter {batch_type.lower()} batch (.json)", f"builtly_{batch_type.lower()}_batch.json")
+    uploads = st.file_uploader(
+        "Last opp tegninger, ferdigattest, tilstandsrapport, energimerke, FDV og tidligere rapporter",
+        type=["pdf", "docx", "xlsx", "xls", "csv", "ifc", "dwg", "dxf", "zip"],
+        accept_multiple_files=True,
+        key="tdd_uploads_real",
+    )
+
+records = normalize_uploaded_files(uploads)
+rules = tdd_rules_payload(
+    project,
+    records,
+    {
+        "transaction_stage": transaction_stage,
+        "property_type": property_type,
+        "build_year": build_year,
+        "market_value_mnok": market_value_mnok,
+        "include_portfolio": include_portfolio,
+        "notes": notes,
+        "matrikkel_id": f"{project.get('gnr','')}/{project.get('bnr','')}",
+    },
+)
+ai_result = run_module_analysis(module_key, project, records, rules, delivery_level)
+report_markdown = build_markdown_report(
+    module_title="Teknisk Due Diligence",
+    project=project,
+    manifest_records=records,
+    revision_records=revision_dataframe(records).to_dict(orient="records"),
+    ai_payload=ai_result,
+)
+render_disclaimer_banner(delivery_level, disclaimer_for_level(delivery_level))
 
 with right:
-    render_panel(
-        "Hva denne siden er for",
-        "Denne siden er et internt oppsettspunkt. Den skal hjelpe dere aa koble private nøkler og proxyer uten at dette ma frontes i den offentlige opplevelsen.",
-        [
-            "Verifiser DiBK plan-endepunkt og app key",
-            "Test Matrikkel-proxy uten aa eksponere private nøkler i Streamlit-koden",
-            "Bekreft energidata- eller EPC-proxy for TDD",
-            "Kjor batchtester for bank- og portefoljekunder",
-            "Kontroller hvilke kilder som mangler før demo eller produksjon",
-        ],
-        tone="blue",
-        badge="Internal only",
-    )
-    render_panel(
-        "Anbefalt oppsett",
-        "Hold API-nøkler og partnerspesifikke URL-er i miljovariabler. Da kan samme kodebase brukes i demo, staging og produksjon.",
-        [
-            "BUILTLY_PLAN_API_URL og BUILTLY_PLAN_API_KEY",
-            "BUILTLY_MATRIKKEL_PROXY_URL og token",
-            "BUILTLY_ENERGY_PROXY_URL og token",
-            "BUILTLY_NVE_FLOOD_SERVICE_URL og BUILTLY_NVE_LANDSLIDE_SERVICE_URL",
-            "Filer med pre-indekserte snapshots for klima ved behov",
-        ],
-        tone="gold",
-        badge="Ops",
-    )
-    render_json_preview(build_openapi_preview(), "API surface preview")
+    render_project_snapshot(project, badge="TDD context")
+    risk_matrix = (ai_result.get("data") or {}).get("risk_matrix") or rules.get("risk_matrix", {})
+    render_metric_cards([
+        {"label": "Datakompletthet", "value": f"{int(rules.get('data_completeness_score', 0) * 100)}%", "desc": "Andel av nødvendig TDD-underlag som er identifisert."},
+        {"label": "Samlet klasse", "value": risk_matrix.get("overall_class", "-"), "desc": "Foreløpig risikoklassifisering basert på tilgjengelig underlag."},
+        {"label": "Utbedringskost", "value": f"{int(risk_matrix.get('remediation_cost_total_nok', 0)):,.0f} NOK".replace(',', ' '), "desc": "Estimert samlet kostnad for utbedring av identifiserte forhold."},
+        {"label": "Dokumenter", "value": str(len(records)), "desc": "Antall opplastede filer i analysen."},
+    ])
+    render_json_preview({"delivery_level": delivery_level, "risk_matrix": risk_matrix, "completeness": rules.get("data_completeness_score", 0)}, "Analysegrunnlag")
 
-st.divider()
-render_section(
-    "Eksempel paa portefoljefil",
-    "Bruk kolonner som adresse, kommune, gnr, bnr, matrikkel_id, lat, lon eller label. Batchmotoren er tolerant for manglende felt og markerer dem i output i stedet for aa stoppe hele jobben.",
-    "Template",
-)
-example_df = pd.DataFrame(
-    [
-        {"label": "Eiendom A", "address": "Kjopmannsgata 34", "municipality": "Trondheim", "gnr": "410", "bnr": "22", "lat": 63.4305, "lon": 10.3951},
-        {"label": "Eiendom B", "address": "Dronning Eufemias gate 16", "municipality": "Oslo", "gnr": "230", "bnr": "15", "lat": 59.9074, "lon": 10.7610},
-    ]
-)
-st.dataframe(example_df, use_container_width=True, hide_index=True)
-dataframe_download(example_df, "Last ned eksempel (.csv)", "builtly_portfolio_example.csv")
+render_section("2. Analyse og resultater", "Gjennomgang av tilstand, risiko, dokumentasjon og offentlig data for eiendommen.", "Review")
+
+tabs = st.tabs(["Sammendrag", "Dokumentoversikt", "Offentlige data", "Bygningsdeler", "Risikomatrise", "Portefølje", "Endringslogg"])
+
+with tabs[0]:
+    st.markdown("### Sammendrag")
+    st.write((ai_result.get("data") or {}).get("executive_summary") or "Sammendrag genereres når du laster opp dokumentasjon.")
+    st.markdown("### Anbefalte neste steg")
+    st.dataframe(list_to_dataframe((ai_result.get("data") or {}).get("next_actions", []), ["action", "owner", "priority", "why"]), use_container_width=True, hide_index=True)
+    st.markdown("### Identifiserte mangler i underlaget")
+    st.dataframe(list_to_dataframe((ai_result.get("data") or {}).get("gaps", []), ["value"]), use_container_width=True, hide_index=True)
+    markdown_download(report_markdown, "Last ned TDD-rapport (.md)", "tdd_report.md")
+    json_download(ai_result.get("data") or {}, "Last ned strukturert resultat (.json)", "tdd_result.json")
+    render_attempt_log(ai_result.get("attempt_log", []))
+
+with tabs[1]:
+    st.dataframe(manifest_dataframe(records), use_container_width=True, hide_index=True)
+    st.dataframe(revision_dataframe(records), use_container_width=True, hide_index=True)
+    dataframe_download(manifest_dataframe(records), "Last ned dokumentoversikt (.csv)", "tdd_manifest.csv")
+
+with tabs[2]:
+    st.dataframe(list_to_dataframe(rules.get("public_data_snapshot", []), ["source", "status", "note", "version"]), use_container_width=True, hide_index=True)
+    st.markdown("### Adapterstatus")
+    st.dataframe(pd.DataFrame(adapter_status()), use_container_width=True, hide_index=True)
+    resolved = rules.get("public_snapshot_resolved", {})
+    if resolved.get("map_url"):
+        st.markdown(f"Kartlenke: {resolved['map_url']}")
+
+with tabs[3]:
+    st.dataframe(list_to_dataframe((ai_result.get("data") or {}).get("building_parts") or rules.get("building_parts", []), ["part", "tg", "remaining_life_years", "remediation_cost_range_nok", "reason", "source"]), use_container_width=True, hide_index=True)
+    dataframe_download(list_to_dataframe((ai_result.get("data") or {}).get("building_parts") or rules.get("building_parts", []), ["part", "tg", "remaining_life_years", "remediation_cost_range_nok", "reason", "source"]), "Last ned bygningsdeler (.csv)", "tdd_building_parts.csv")
+
+with tabs[4]:
+    st.dataframe(list_to_dataframe([risk_matrix], ["technical_risk", "financial_risk", "regulatory_risk", "overall_class", "remediation_cost_total_nok"]), use_container_width=True, hide_index=True)
+    st.dataframe(list_to_dataframe((ai_result.get("data") or {}).get("tek17_deviations") or rules.get("tek17_deviations", []), ["title", "category", "recommendation", "source"]), use_container_width=True, hide_index=True)
+
+with tabs[5]:
+    portfolio_preview = rules.get("portfolio_preview") or {}
+    if portfolio_preview:
+        st.metric("Referanse-ID", portfolio_preview.get("batch_id", "-"))
+        st.metric("Estimert behandlingstid", f"{portfolio_preview.get('estimated_completion_hours', 0)} timer")
+        st.dataframe(pd.DataFrame(portfolio_preview.get("properties", [])), use_container_width=True, hide_index=True)
+        json_download(portfolio_preview, "Last ned porteføljeoversikt (.json)", "tdd_portfolio_batch.json")
+    else:
+        st.info("Aktivér porteføljeflyt ovenfor for å se samlet oversikt over flere eiendommer.")
+
+with tabs[6]:
+    st.dataframe(audit_log_dataframe(module_key, delivery_level, records, ai_result), use_container_width=True, hide_index=True)
