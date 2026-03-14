@@ -431,3 +431,342 @@ def tone_from_score(score: float) -> str:
     if score >= 2.0:
         return "blue"
     return "green"
+
+
+def _default_analysis_schema() -> dict:
+    return {
+        "executive_summary": "",
+        "confidence": "Lav | Middels | Høy",
+        "recommended_status": "Draft | Review Needed | Ready for Human Review",
+        "key_findings": [
+            {
+                "topic": "",
+                "severity": "Lav | Middels | Høy",
+                "detail": "",
+                "source_refs": ["filename.ext"],
+            }
+        ],
+        "gaps": [
+            {"item": "", "impact": "", "recommended_action": ""}
+        ],
+        "questions": [
+            {"priority": "1", "question": "", "owner": ""}
+        ],
+        "next_actions": [
+            {"action": "", "owner": "", "timing": ""}
+        ],
+        "export_recommendations": [
+            {"artifact": "", "purpose": "", "status": ""}
+        ],
+    }
+
+
+
+def _items_to_dataframe(items) -> pd.DataFrame:
+    if not items:
+        return pd.DataFrame()
+    if isinstance(items, list):
+        rows = []
+        for item in items:
+            rows.append(item if isinstance(item, dict) else {"value": str(item)})
+        return pd.DataFrame(rows)
+    if isinstance(items, dict):
+        return pd.DataFrame([items])
+    return pd.DataFrame([{"value": str(items)}])
+
+
+
+def _render_ai_result(ai_payload: dict) -> None:
+    data = ai_payload.get("data") or {}
+    summary = data.get("executive_summary") or "Ingen AI-oppsummering generert ennå."
+    provider = ai_payload.get("provider") or "-"
+    model = ai_payload.get("model") or "-"
+    render_panel(
+        "AI-utkast",
+        summary,
+        [
+            f"Anbefalt status: {data.get('recommended_status', '-')}",
+            f"Faglig trygghet: {data.get('confidence', '-')}",
+            f"Generert med: {provider} / {model}",
+        ],
+        tone="green",
+        badge="Draft ready",
+    )
+
+    section_map = [
+        ("key_findings", "Nøkkelfunn"),
+        ("gaps", "Mangler"),
+        ("questions", "Spørsmål"),
+        ("next_actions", "Neste steg"),
+        ("export_recommendations", "Eksportpakke"),
+    ]
+    tabs = st.tabs([label for _, label in section_map])
+    for tab, (section_key, label) in zip(tabs, section_map):
+        with tab:
+            df = _items_to_dataframe(data.get(section_key) or [])
+            if df.empty:
+                st.info("Ingen punkter generert i denne seksjonen ennå.")
+            else:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+    attempt_log = ai_payload.get("attempt_log") or []
+    if attempt_log:
+        with st.expander("Vis AI-fallback-logg"):
+            st.dataframe(pd.DataFrame(attempt_log), use_container_width=True, hide_index=True)
+
+
+
+def render_shared_document_engine(
+    *,
+    module_key: str,
+    module_title: str,
+    objective: str,
+    focus_points: Sequence[str],
+    desired_outputs: Sequence[str],
+    task: str = "document_engine",
+    default_notes: str = "",
+    extra_instruction: str = "",
+) -> dict:
+    from builtly_ai_fallback import (
+        ai_service_ready,
+        generate_json_with_fallback,
+        provider_labels,
+        provider_order_for_task,
+    )
+    from builtly_document_engine import (
+        build_markdown_report,
+        documents_to_ai_context,
+        estimate_context_chars,
+        manifest_dataframe,
+        normalize_uploaded_files,
+        revision_dataframe,
+    )
+
+    state_key = f"{module_key}_shared_doc_engine"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = {
+            "records": [],
+            "notes": default_notes,
+            "compare_mode": "Standard",
+            "ai_payload": None,
+        }
+    state = st.session_state[state_key]
+    project = ensure_project_state()
+
+    render_section(
+        "Felles dokumentmotor",
+        "Én delt motor for opplasting, manifest, revisjonssammenligning, AI-utkast og eksport. Dette gjør at nye moduler kan bruke samme dataflyt i stedet for å bygge alt på nytt.",
+        "Shared engine",
+    )
+
+    tabs = st.tabs(["Inntak", "Manifest", "Revisjoner", "AI-utkast", "Eksport"])
+
+    with tabs[0]:
+        c1, c2 = st.columns([1.2, 0.8], gap="large")
+        with c1:
+            uploaded_files = st.file_uploader(
+                "Last opp dokumentgrunnlag for denne modulen",
+                type=["pdf", "docx", "xlsx", "xls", "csv", "txt", "ifc", "json", "md", "png", "jpg", "jpeg", "zip"],
+                accept_multiple_files=True,
+                key=f"{module_key}_shared_files",
+            )
+            notes = st.text_area(
+                "Notater til AI-motoren",
+                value=state.get("notes", default_notes),
+                height=120,
+                key=f"{module_key}_shared_notes",
+            )
+            compare_mode = st.selectbox(
+                "Revisjonsmodus",
+                ["Standard", "Revisjon mot revisjon", "Scope-sjekk", "Eksportpakke"],
+                index=["Standard", "Revisjon mot revisjon", "Scope-sjekk", "Eksportpakke"].index(state.get("compare_mode", "Standard")),
+                key=f"{module_key}_shared_compare_mode",
+            )
+            if st.button("Indekser dokumenter", key=f"{module_key}_shared_index"):
+                state["records"] = normalize_uploaded_files(uploaded_files)
+                state["notes"] = notes
+                state["compare_mode"] = compare_mode
+                state["ai_payload"] = state.get("ai_payload")
+        with c2:
+            records = state.get("records", [])
+            unique_stems = len({record.get("canonical_stem") for record in records}) if records else 0
+            revision_groups = sum(1 for stem in {record.get("canonical_stem") for record in records} if sum(1 for r in records if r.get("canonical_stem") == stem) > 1)
+            preview_chars = estimate_context_chars(records)
+            render_metric_cards(
+                [
+                    {"label": "Dokumenter", "value": f"{len(records)}", "desc": "Indeksert i felles document engine."},
+                    {"label": "Dokumentfamilier", "value": f"{unique_stems}", "desc": "Unike dokumentstammer for versjon og sporbarhet."},
+                    {"label": "Revisjonskjeder", "value": f"{revision_groups}", "desc": "Familier med flere versjoner eller endrede hashes."},
+                    {"label": "AI-kontekst", "value": f"{preview_chars:,} tegn".replace(',', ' '), "desc": "Tekstgrunnlag tilgjengelig for førsteutkast og QA."},
+                ]
+            )
+            render_panel(
+                "Hva denne motoren gjør",
+                "Den samler dokumentgrunnlag, lager manifest, oppdager revisjoner, sender et strukturert sammendrag til AI og pakker resultatet klart for eksport.",
+                [
+                    "Tydelig kildegrunnlag",
+                    "Manuell overstyring og nye runder når grunnlaget endres",
+                    "Revisjonslogg og sammenligning",
+                    "Samme eksportlogikk på tvers av moduler",
+                ],
+                tone="blue",
+                badge="Backbone",
+            )
+
+    with tabs[1]:
+        records = state.get("records", [])
+        manifest_df = manifest_dataframe(records)
+        if manifest_df.empty:
+            st.info("Ingen dokumenter indeksert ennå.")
+        else:
+            st.dataframe(manifest_df, use_container_width=True, hide_index=True)
+            dataframe_download(manifest_df, "Last ned manifest (.csv)", f"{module_key}_manifest.csv")
+            for record in records[:6]:
+                with st.expander(record.get("filename", "Dokument")):
+                    warning = record.get("preview_warning") or ""
+                    if warning:
+                        st.warning(warning)
+                    preview = record.get("text_preview") or "Ingen tekstpreview tilgjengelig i denne versjonen."
+                    st.code(preview[:2500], language="text")
+
+    with tabs[2]:
+        records = state.get("records", [])
+        revisions_df = revision_dataframe(records)
+        if revisions_df.empty:
+            st.info("Ingen revisjonsdata tilgjengelig ennå.")
+        else:
+            st.dataframe(revisions_df, use_container_width=True, hide_index=True)
+            dataframe_download(revisions_df, "Last ned revisjonslogg (.csv)", f"{module_key}_revisions.csv")
+
+    with tabs[3]:
+        records = state.get("records", [])
+        context_chars = estimate_context_chars(records)
+        providers = provider_order_for_task(task, context_chars)
+        st.caption(
+            "AI-stack: " + (" → ".join(provider_labels(providers)) if providers else "Ingen leverandører konfigurert")
+        )
+        analysis_angle = st.selectbox(
+            "Analyseprofil",
+            ["Teknisk QA", "Beslutningsnotat", "Ledelsesoppsummering"],
+            index=0,
+            key=f"{module_key}_analysis_angle",
+        )
+        extra_questions = st.text_area(
+            "Ekstra spørsmål eller fokusområder",
+            value="",
+            height=90,
+            key=f"{module_key}_extra_questions",
+        )
+
+        if st.button("Kjør AI-utkast", key=f"{module_key}_run_ai"):
+            if not records:
+                st.warning("Last opp og indekser minst ett dokument først.")
+            elif not ai_service_ready():
+                st.error("Sett minst én av OPENAI_API_KEY, ANTHROPIC_API_KEY eller GEMINI_API_KEY i miljøet før AI-utkast kan kjøres.")
+            else:
+                schema_hint = _default_analysis_schema()
+                focus_text = "\n".join(f"- {item}" for item in focus_points)
+                output_text = "\n".join(f"- {item}" for item in desired_outputs)
+                system_prompt = f"""
+Du er Builtlys modulmotor for {module_title}.
+Mål: {objective}
+
+Viktige arbeidsregler:
+- Skriv som en erfaren faglig assistent som hjelper kunden raskere frem, ikke som intern forretningsutvikling.
+- Skill mellom bekreftede forhold, antakelser og åpne spørsmål.
+- Ikke påstå at noe er godkjent eller endelig signert.
+- Hold tonen konkret, tillitsvekkende og egnet for deling med kunde eller prosjektteam.
+- Prioriter praktiske anbefalinger som kan gjennomføres i prosjektet.
+
+Fokuser spesielt på:
+{focus_text}
+
+Ønskede leveranser:
+{output_text}
+
+{extra_instruction.strip()}
+                """.strip()
+                user_prompt = f"""
+Prosjekt-SSOT:
+{json.dumps(project, ensure_ascii=False, indent=2)}
+
+Analyseprofil: {analysis_angle}
+Revisjonsmodus: {state.get('compare_mode', 'Standard')}
+Notater fra bruker:
+{state.get('notes', '') or '-'}
+
+Ekstra spørsmål:
+{extra_questions or '-'}
+
+Dokumentgrunnlag:
+{documents_to_ai_context(records)}
+                """.strip()
+                state["ai_payload"] = generate_json_with_fallback(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    schema_hint=schema_hint,
+                    task=task,
+                    estimated_context_chars=context_chars,
+                    max_output_tokens=1800,
+                )
+
+        ai_payload = state.get("ai_payload")
+        if ai_payload:
+            if ai_payload.get("ok") and ai_payload.get("data") is not None:
+                _render_ai_result(ai_payload)
+            else:
+                st.error(ai_payload.get("error") or "AI-motoren klarte ikke å generere et gyldig utkast.")
+                attempt_log = ai_payload.get("attempt_log") or []
+                if attempt_log:
+                    st.dataframe(pd.DataFrame(attempt_log), use_container_width=True, hide_index=True)
+        else:
+            render_panel(
+                "Klar for AI-utkast",
+                "Når dokumentene er indeksert kan Builtly lage et førsteutkast som samler nøkkelfunn, mangler, spørsmål, neste steg og anbefalt eksportpakke.",
+                [
+                    "Best leverandør velges automatisk",
+                    "Fallback kjøres hvis første leverandør feiler",
+                    "Samme outputstruktur på tvers av moduler",
+                ],
+                tone="gold",
+                badge="AI fallback",
+            )
+
+    with tabs[4]:
+        records = state.get("records", [])
+        ai_payload = state.get("ai_payload") or {}
+        manifest_df = manifest_dataframe(records)
+        revisions_df = revision_dataframe(records)
+        export_bundle = {
+            "module": module_title,
+            "project": project,
+            "records": records,
+            "revisions": revisions_df.to_dict("records") if not revisions_df.empty else [],
+            "ai": ai_payload.get("data") or {},
+            "provider_meta": {
+                "provider": ai_payload.get("provider"),
+                "model": ai_payload.get("model"),
+                "attempt_log": ai_payload.get("attempt_log") or [],
+            },
+        }
+        markdown_report = build_markdown_report(
+            module_title=module_title,
+            project=project,
+            manifest_records=records,
+            revision_records=revisions_df.to_dict("records") if not revisions_df.empty else [],
+            ai_payload=ai_payload,
+        )
+        if not manifest_df.empty:
+            dataframe_download(manifest_df, "Eksporter manifest (.csv)", f"{module_key}_manifest_export.csv")
+        if not revisions_df.empty:
+            dataframe_download(revisions_df, "Eksporter revisjoner (.csv)", f"{module_key}_revisions_export.csv")
+        json_download(export_bundle, "Eksporter samlet pakke (.json)", f"{module_key}_bundle.json")
+        st.download_button(
+            "Eksporter AI-notat (.md)",
+            markdown_report.encode("utf-8"),
+            file_name=f"{module_key}_note.md",
+            mime="text/markdown",
+        )
+        st.code(markdown_report[:4000], language="markdown")
+
+    return state
