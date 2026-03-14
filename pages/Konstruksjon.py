@@ -12091,9 +12091,12 @@ def _auto_generate_grid_elements_v18(state: Dict[str, Any], mode: str) -> List[D
             "x2": round(float(x_positions[min(1, len(x_positions) - 1)]["mm"]), 1),
             "y2": round(float(y_positions[wall_y_idx]["mm"]), 1),
         })
+        _span_x0 = float(x_positions[0]["mm"])
+        _span_x1 = float(x_positions[min(1, len(x_positions) - 1)]["mm"])
+        _span_label = f"ca {round((_span_x1 - _span_x0) / 1000.0, 1)} m"
         elements.append({
             "type": "span_arrow",
-            "label": f"ca {round((float(x_positions[min(1, len(x_positions) - 1)]["mm"]) - float(x_positions[0]["mm"])) / 1000.0, 1)} m",
+            "label": _span_label,
             "x1": round(float(x_positions[0]["mm"]), 1),
             "y1": round(float(y_positions[max(0, lower_idx)]["mm"]), 1),
             "x2": round(float(x_positions[min(1, len(x_positions) - 1)]["mm"]), 1),
