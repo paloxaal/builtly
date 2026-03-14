@@ -1217,11 +1217,11 @@ LANGUAGE_PROFILES = {'🇬🇧 English (UK)': {'country': 'United Kingdom',
 MODULE_EXPANSION_TEXTS = {
     "🇬🇧 English (UK)": {
         "mod_sec_title": "Specialized agents, commercial engines and scale layers in one platform",
-        "mod_sec_sub": "Builtly combines vertical specialist modules with horizontal engines for bid review, quantity control, area optimisation and climate screening. That gives customers one traceable workflow instead of more manual coordination.",
-        "mod_sec4": "Bid, quantity & portfolio intelligence",
-        "mod_sec4_sub": "Customer-facing modules for bid review, scope control, area optimisation and portfolio screening.",
-        "mod_sec5": "Internal partner layer",
-        "mod_sec5_sub": "Held outside the public front page and only discussed in partner meetings.",
+        "mod_sec_sub": "Builtly should combine vertical specialist modules with horizontal engines for tender, quantity, yield, climate risk and partner distribution. That is how the product scales without scaling like a consultancy.",
+        "mod_sec4": "Commercial & delivery intelligence",
+        "mod_sec4_sub": "Horizontal modules that reduce tender risk, quantify scope and improve project yield.",
+        "mod_sec5": "Climate, portfolio & partner scale",
+        "mod_sec5_sub": "Portfolio screening, climate risk and white-label/API distribution for enterprise growth.",
         "m_tender_t": "TENDER CONTROL - Bid Package QA",
         "m_tender_d": "Compare tender documents, drawings and bid inputs. Generates deviation matrix, missing-item log, ambiguity log and RFI suggestions.",
         "m_tender_in": "Tender docs + drawings + IFC/PDF",
@@ -1250,11 +1250,11 @@ MODULE_EXPANSION_TEXTS = {
     },
     "🇳🇴 Norsk": {
         "mod_sec_title": "Spesialiserte moduler, kommersielle motorer og skaleringslag i én plattform",
-        "mod_sec_sub": "Builtly kombinerer vertikale fagmoduler med horisontale motorer for anbudskontroll, mengdestyring, arealoptimalisering og klimarisiko. Det gir kunden én sporbar arbeidsflyt i stedet for mer manuell koordinering.",
-        "mod_sec4": "Anbud, mengde & portefølje",
-        "mod_sec4_sub": "Kundevendte moduler for anbudskontroll, scope, arealoptimalisering og porteføljescreening.",
-        "mod_sec5": "Internt partnerlag",
-        "mod_sec5_sub": "Holdes utenfor offentlig frontside og tas kun i partnermøter.",
+        "mod_sec_sub": "Builtly bør kombinere vertikale fagmoduler med horisontale motorer for anbud, mengder, yield, klimarisiko og partnerdistribusjon. Det er slik plattformen kan skalere uten å vokse som et konsulentselskap.",
+        "mod_sec4": "Kommersiell & leveranseintelligens",
+        "mod_sec4_sub": "Horisontale moduler som reduserer anbudsrisiko, kvantifiserer scope og forbedrer areal/yield.",
+        "mod_sec5": "Klima, portefølje & partnerskala",
+        "mod_sec5_sub": "Porteføljescreening, klimarisiko og white-label/API-distribusjon for enterprise-vekst.",
         "m_tender_t": "ANBUDSKONTROLL - Tilbudsgrunnlag & QA",
         "m_tender_d": "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
         "m_tender_in": "Anbudsgrunnlag + tegninger + IFC/PDF",
@@ -1419,6 +1419,18 @@ DISCIPLINE_CATALOG.extend([
             "🇩🇪 Deutsch": "Klimarisiko",
         },
     },
+    {
+        "code": "partner_api",
+        "labels": {
+            "🇬🇧 English (UK)": "White-label API",
+            "🇺🇸 English (US)": "White-label API",
+            "🇳🇴 Norsk": "White-label API",
+            "🇸🇪 Svenska": "White-label API",
+            "🇩🇰 Dansk": "White-label API",
+            "🇫🇮 Suomi": "White-label API",
+            "🇩🇪 Deutsch": "White-label API",
+        },
+    },
 ])
 DISCIPLINE_LABELS.update({item["code"]: item["labels"] for item in DISCIPLINE_CATALOG})
 
@@ -1435,6 +1447,129 @@ def get_locale_profile(lang_key: str) -> Dict:
 
 lang = get_text_bundle(st.session_state.app_lang)
 locale_profile = get_locale_profile(st.session_state.app_lang)
+
+MODULE_COPY_OVERRIDES = {
+    "default": {
+        "mod_sec_title": "Modules for analysis, documentation and decisions",
+        "mod_sec_sub": "Choose the workflow that fits your project. Every module uses the same project data, traceability and quality-controlled delivery flow inside Builtly.",
+        "mod_sec1": "Ground, sound & fire",
+        "mod_sec2": "Early phase, structure & mobility",
+        "mod_sec3": "Sustainability, safety & certification",
+        "mod_sec3_sub": "Modules for environmental follow-up, safety planning and certification support in one workflow.",
+        "mod_sec4": "Tender, quantities & area",
+        "mod_sec4_sub": "Workflows that help you control tender material, track quantities and improve area efficiency before decisions are locked.",
+        "mod_sec5": "Property & portfolio",
+        "mod_sec5_sub": "Workflows for climate screening and technical due diligence across single assets and portfolios.",
+        "m_tdd_t": "TDD - Technical Due Diligence",
+        "m_tdd_d": "Turn drawings, certificates and condition data into a structured TDD draft for transactions, financing and portfolio reviews.",
+        "m_tdd_in": "Drawings + certificates + condition docs",
+        "m_tdd_out": "TDD draft, risk matrix, remediation overview",
+        "m_tdd_btn": "Open TDD",
+        "partner_line": "Are you a consulting engineering firm or system supplier? We have a separate integration program. Contact us.",
+        "badge_geo": "Ground",
+        "badge_acoustics": "Sound",
+        "badge_fire": "Fire",
+        "badge_feasibility": "Early phase",
+        "badge_structural": "Structure",
+        "badge_traffic": "Mobility",
+        "badge_sha": "Safety",
+        "badge_breeam": "Certification",
+        "badge_mop": "Environment",
+        "badge_tender": "Bid",
+        "badge_quantity": "Quantities",
+        "badge_yield": "Area",
+        "badge_climate": "Portfolio",
+        "badge_tdd": "Due diligence",
+    },
+    "🇳🇴 Norsk": {
+        "mod_sec_title": "Moduler for analyse, dokumentasjon og beslutningsstøtte",
+        "mod_sec_sub": "Velg arbeidsflaten som passer prosjektet ditt. Alle modulene bruker samme prosjektdata, sporbarhet og kvalitetssikrede leveranseflyt i Builtly.",
+        "mod_sec1": "Grunnforhold, lyd & brann",
+        "mod_sec2": "Tidligfase, konstruksjon & mobilitet",
+        "mod_sec3": "Bærekraft, sikkerhet & sertifisering",
+        "mod_sec3_sub": "Moduler for miljøoppfølging, sikkerhetsplaner og sertifiseringsstøtte samlet i én arbeidsflyt.",
+        "mod_sec4": "Anbud, mengder & areal",
+        "mod_sec4_sub": "Arbeidsflater som hjelper deg å kontrollere konkurransegrunnlag, følge mengder og forbedre arealeffektivitet før viktige beslutninger tas.",
+        "mod_sec5": "Eiendom & portefølje",
+        "mod_sec5_sub": "Arbeidsflater for klimarisiko og teknisk due diligence i eiendom, transaksjon og porteføljearbeid.",
+        "m_tender_t": "ANBUD - Kontroll før innlevering",
+        "m_tender_d": "Last opp konkurransegrunnlaget og få risikopunkter, mangelliste, spørsmål og tilbudsstruktur samlet i én arbeidsflate.",
+        "m_tender_in": "Konkurransegrunnlag + tegninger + IFC/PDF",
+        "m_tender_out": "Avviksmatrise, risikorapport, RFI-utkast",
+        "m_tender_btn": "Åpne Anbudsmodul",
+        "m_quantity_t": "MENGDE & SCOPE - Kontrollmotor",
+        "m_quantity_d": "Samle mengder, arealer og revisjonsendringer i ett sporingsbart grunnlag for kalkyle, prosjektering og anbud.",
+        "m_quantity_in": "IFC / tegninger / beskrivelser",
+        "m_quantity_out": "Mengdeliste, areallogg, revisjonsdelta",
+        "m_quantity_btn": "Åpne Mengde & Scope",
+        "m_yield_t": "AREAL & YIELD - Beslutningsmotor",
+        "m_yield_d": "Se hvor prosjektet taper eller vinner arealeffektivitet, og test scenarioer for mer salgbart eller utleibart areal.",
+        "m_yield_in": "Planløsning + arealoppsett",
+        "m_yield_out": "Yield-notat, scenarioer, forbedringsgrep",
+        "m_yield_btn": "Åpne Areal & Yield",
+        "m_climate_t": "KLIMARISIKO - Eiendom & portefølje",
+        "m_climate_d": "Screen eiendommer og porteføljer for flom, skred, havnivå og varmestress med eksport til videre rapportering.",
+        "m_climate_in": "Adresse / koordinat + eiendomsliste",
+        "m_climate_out": "Klimarisikoscore, datapunkter, porteføljeuttrekk",
+        "m_climate_btn": "Åpne Klimarisiko",
+        "m_tdd_t": "TDD - Teknisk Due Diligence",
+        "m_tdd_d": "Bygg et strukturert TDD-utkast for transaksjoner, finansiering og eiendomsvurdering fra dokumentasjon og prosjektdata.",
+        "m_tdd_in": "Tegninger + attester + tilstandsgrunnlag",
+        "m_tdd_out": "TDD-utkast, risikomatrise, kostnadsoversikt",
+        "m_tdd_btn": "Åpne TDD",
+        "partner_line": "Er du et rådgivende ingeniørfirma eller systemleverandør? Vi har et eget program for integrering. Ta kontakt.",
+        "badge_geo": "Grunnlag",
+        "badge_acoustics": "Lyd",
+        "badge_fire": "Brann",
+        "badge_feasibility": "Tidligfase",
+        "badge_structural": "Konstruksjon",
+        "badge_traffic": "Mobilitet",
+        "badge_sha": "Sikkerhet",
+        "badge_breeam": "Sertifisering",
+        "badge_mop": "Miljø",
+        "badge_tender": "Tilbud",
+        "badge_quantity": "Mengder",
+        "badge_yield": "Areal",
+        "badge_climate": "Portefølje",
+        "badge_tdd": "Due diligence",
+    },
+    "🇬🇧 English (UK)": {
+        "mod_sec_title": "Modules for analysis, documentation and decision support",
+        "mod_sec_sub": "Choose the workflow that fits your project. Every module uses the same project data, traceability and quality-controlled delivery flow inside Builtly.",
+        "mod_sec1": "Ground, sound & fire",
+        "mod_sec2": "Early phase, structure & mobility",
+        "mod_sec3": "Sustainability, safety & certification",
+        "mod_sec3_sub": "Modules for environmental follow-up, safety planning and certification support in one workflow.",
+        "mod_sec4": "Tender, quantities & area",
+        "mod_sec4_sub": "Workflows that help you control tender material, track quantities and improve area efficiency before key decisions are locked.",
+        "mod_sec5": "Property & portfolio",
+        "mod_sec5_sub": "Workflows for climate screening and technical due diligence across single assets and portfolios.",
+        "m_tdd_t": "TDD - Technical Due Diligence",
+        "m_tdd_d": "Turn drawings, certificates and condition data into a structured TDD draft for transactions, financing and portfolio reviews.",
+        "m_tdd_in": "Drawings + certificates + condition docs",
+        "m_tdd_out": "TDD draft, risk matrix, remediation overview",
+        "m_tdd_btn": "Open TDD",
+        "partner_line": "Are you a consulting engineering firm or system supplier? We have a separate integration program. Get in touch.",
+        "badge_geo": "Ground",
+        "badge_acoustics": "Sound",
+        "badge_fire": "Fire",
+        "badge_feasibility": "Early phase",
+        "badge_structural": "Structure",
+        "badge_traffic": "Mobility",
+        "badge_sha": "Safety",
+        "badge_breeam": "Certification",
+        "badge_mop": "Environment",
+        "badge_tender": "Bid",
+        "badge_quantity": "Quantities",
+        "badge_yield": "Area",
+        "badge_climate": "Portfolio",
+        "badge_tdd": "Due diligence",
+    },
+}
+for key, value in MODULE_COPY_OVERRIDES.get("default", {}).items():
+    lang.setdefault(key, value)
+for key, value in MODULE_COPY_OVERRIDES.get(st.session_state.app_lang, {}).items():
+    lang[key] = value
 st.session_state.project_data["land"] = locale_profile["project_land_label"]
 
 
@@ -1463,6 +1598,7 @@ PAGES = {
     "quantity_scope": find_page("QuantityScope"),
     "yield_optimizer": find_page("YieldOptimizer"),
     "climate_risk": find_page("ClimateRisk"),
+    "tdd": find_page("TDD"),
     "partner_api": find_page("PartnerAPI"),
     "project": find_page("Project"),
     "review": find_page("Review"),
@@ -3259,6 +3395,10 @@ st.markdown(
         margin-top: 0.8rem;
     }
 
+    .module-grid-two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .module-card {
         background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
         border: 1px solid var(--stroke);
@@ -3431,7 +3571,8 @@ st.markdown(
         .stats-row,
         .trust-grid,
         .loop-grid,
-        .module-grid {
+        .module-grid,
+        .module-grid-two {
             grid-template-columns: repeat(2, minmax(0, 1fr));
         }
     }
@@ -3462,7 +3603,8 @@ st.markdown(
         .stats-row,
         .trust-grid,
         .loop-grid,
-        .module-grid {
+        .module-grid,
+        .module-grid-two {
             grid-template-columns: 1fr;
         }
         .hero,
@@ -3803,6 +3945,10 @@ with top_r:
 
 lang = get_text_bundle(st.session_state.app_lang)
 locale_profile = get_locale_profile(st.session_state.app_lang)
+for key, value in MODULE_COPY_OVERRIDES.get("default", {}).items():
+    lang.setdefault(key, value)
+for key, value in MODULE_COPY_OVERRIDES.get(st.session_state.app_lang, {}).items():
+    lang[key] = value
 
 st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 
@@ -3907,28 +4053,32 @@ render_html(
 # 11) MODULES
 # -------------------------------------------------
 available_cards = [
-    module_card("geo", "🌍", "Phase 1 - Priority", "badge-priority", lang["m_geo_t"], lang["m_geo_d"], lang["m_geo_in"], lang["m_geo_out"], lang["m_geo_btn"]),
-    module_card("akustikk", "🔊", "Phase 2", "badge-phase2", lang["m_aku_t"], lang["m_aku_d"], lang["m_aku_in"], lang["m_aku_out"], lang["m_aku_btn"]),
-    module_card("brann", "🔥", "Phase 2", "badge-phase2", lang["m_brann_t"], lang["m_brann_d"], lang["m_brann_in"], lang["m_brann_out"], lang["m_brann_btn"]),
+    module_card("geo", "🌍", lang["badge_geo"], "badge-priority", lang["m_geo_t"], lang["m_geo_d"], lang["m_geo_in"], lang["m_geo_out"], lang["m_geo_btn"]),
+    module_card("akustikk", "🔊", lang["badge_acoustics"], "badge-phase2", lang["m_aku_t"], lang["m_aku_d"], lang["m_aku_in"], lang["m_aku_out"], lang["m_aku_btn"]),
+    module_card("brann", "🔥", lang["badge_fire"], "badge-phase2", lang["m_brann_t"], lang["m_brann_d"], lang["m_brann_in"], lang["m_brann_out"], lang["m_brann_btn"]),
 ]
 
 roadmap_cards = [
-    module_card("mulighetsstudie", "📐", "Early phase", "badge-early", lang["m_ark_t"], lang["m_ark_d"], lang["m_ark_in"], lang["m_ark_out"], lang["m_ark_btn"]),
-    module_card("konstruksjon", "🏢", "Roadmap", "badge-roadmap", lang["m_rib_t"], lang["m_rib_d"], lang["m_rib_in"], lang["m_rib_out"], lang["m_rib_btn"]),
-    module_card("trafikk", "🚦", "Roadmap", "badge-roadmap", lang["m_tra_t"], lang["m_tra_d"], lang["m_tra_in"], lang["m_tra_out"], lang["m_tra_btn"]),
+    module_card("mulighetsstudie", "📐", lang["badge_feasibility"], "badge-early", lang["m_ark_t"], lang["m_ark_d"], lang["m_ark_in"], lang["m_ark_out"], lang["m_ark_btn"]),
+    module_card("konstruksjon", "🏢", lang["badge_structural"], "badge-roadmap", lang["m_rib_t"], lang["m_rib_d"], lang["m_rib_in"], lang["m_rib_out"], lang["m_rib_btn"]),
+    module_card("trafikk", "🚦", lang["badge_traffic"], "badge-roadmap", lang["m_tra_t"], lang["m_tra_d"], lang["m_tra_in"], lang["m_tra_out"], lang["m_tra_btn"]),
 ]
 
 sustainability_cards = [
-    module_card("sha", "🦺", "Compliance", "badge-priority", lang["m_sha_t"], lang["m_sha_d"], lang["m_sha_in"], lang["m_sha_out"], lang["m_sha_btn"]),
-    module_card("breeam", "🌿", "Certification", "badge-phase2", lang["m_breeam_t"], lang["m_breeam_d"], lang["m_breeam_in"], lang["m_breeam_out"], lang["m_breeam_btn"]),
-    module_card("mop", "♻️", "Environment", "badge-roadmap", lang["m_mop_t"], lang["m_mop_d"], lang["m_mop_in"], lang["m_mop_out"], lang["m_mop_btn"]),
+    module_card("sha", "🦺", lang["badge_sha"], "badge-priority", lang["m_sha_t"], lang["m_sha_d"], lang["m_sha_in"], lang["m_sha_out"], lang["m_sha_btn"]),
+    module_card("breeam", "🌿", lang["badge_breeam"], "badge-phase2", lang["m_breeam_t"], lang["m_breeam_d"], lang["m_breeam_in"], lang["m_breeam_out"], lang["m_breeam_btn"]),
+    module_card("mop", "♻️", lang["badge_mop"], "badge-roadmap", lang["m_mop_t"], lang["m_mop_d"], lang["m_mop_in"], lang["m_mop_out"], lang["m_mop_btn"]),
 ]
 
 commercial_cards = [
-    module_card("tender_control", "📑", "Bid review", "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
-    module_card("quantity_scope", "📏", "Scope control", "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
-    module_card("yield_optimizer", "🏙️", "Scenario analysis", "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
-    module_card("climate_risk", "🌊", "Portfolio screening", "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
+    module_card("tender_control", "📑", lang["badge_tender"], "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
+    module_card("quantity_scope", "📏", lang["badge_quantity"], "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
+    module_card("yield_optimizer", "🏙️", lang["badge_yield"], "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
+]
+
+platform_cards = [
+    module_card("climate_risk", "🌊", lang["badge_climate"], "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
+    module_card("tdd", "🏦", lang["badge_tdd"], "badge-phase2", lang["m_tdd_t"], lang["m_tdd_d"], lang["m_tdd_in"], lang["m_tdd_out"], lang["m_tdd_btn"]),
 ]
 
 render_html(
@@ -3953,6 +4103,9 @@ render_html(
     <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec4_sub']}</div>
     <div class="module-grid">{''.join(commercial_cards)}</div>
 
+    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec5']}</div>
+    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec5_sub']}</div>
+    <div class="module-grid module-grid-two">{''.join(platform_cards)}</div>
     """
 )
 
