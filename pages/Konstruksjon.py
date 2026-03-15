@@ -65,6 +65,19 @@ SSOT_FILE = DB_DIR / "ssot.json"
 DB_DIR.mkdir(exist_ok=True)
 IMG_DIR.mkdir(exist_ok=True)
 
+
+def _is_docker_environment() -> bool:
+    """Detect if running inside Docker."""
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r") as f:
+            return "docker" in f.read()
+    except Exception:
+        pass
+    return os.environ.get("DOCKER_CONTAINER", "") == "1"
+
+
 google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
 openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
 
@@ -3256,6 +3269,8 @@ def load_inline_component_bridge_module() -> Any:
 
 def get_inline_click_canvas_component():
     if components is None:
+        return None
+    if _is_docker_environment():
         return None
     component_dir = ensure_inline_click_canvas_component_dir()
     if component_dir is None:
@@ -8662,6 +8677,8 @@ def optional_components_v2_v7() -> Any:
 
 
 def get_click_canvas_component_v2_v7() -> Any:
+    if _is_docker_environment():
+        return None
     components_v2 = optional_components_v2_v7()
     if components_v2 is None:
         return None
@@ -9198,9 +9215,20 @@ _RENDER_INLINE_CLICK_CANVAS_EDITOR_V8_ORIG = render_inline_click_canvas_editor
 def _optional_streamlit_image_coordinates_v9():
     try:
         from streamlit_image_coordinates import streamlit_image_coordinates as sic
+        # Test that the component actually works (not just importable)
         return sic
     except Exception:
         return None
+
+
+def _check_sic_available_v9() -> bool:
+    """Check if streamlit_image_coordinates actually renders (not just importable)."""
+    if st.session_state.get("_sic_known_broken"):
+        return False
+    if _is_docker_environment():
+        return False
+    sic = _optional_streamlit_image_coordinates_v9()
+    return sic is not None
 
 
 def _render_with_streamlit_image_coordinates_v9(
@@ -9234,6 +9262,11 @@ def _render_with_streamlit_image_coordinates_v9(
             last_exc = exc
             break
 
+    if last_exc is not None:
+        # Mark as broken so we don't try again this session
+        st.session_state["_sic_known_broken"] = True
+        return None
+
     st.caption("Klikk-editor kjører i bildekoordinat-modus. Ett museklikk skal registrere et punkt direkte i planutsnittet.")
 
     if isinstance(value, dict) and "x" in value and "y" in value:
@@ -9250,13 +9283,33 @@ def _render_with_streamlit_image_coordinates_v9(
         st.session_state.pop("rib_click_canvas_error", None)
         return click
 
-    if last_exc is not None:
-        st.session_state["rib_click_canvas_error"] = short_text(f"{type(last_exc).__name__}: {last_exc}", 220)
-
     last_click = st.session_state.get(marker_key)
     if isinstance(last_click, dict) and "x" in last_click and "y" in last_click:
         st.caption(f"Sist lagrede klikk: x={round(float(last_click['x']), 1)}, y={round(float(last_click['y']), 1)}")
     return None
+
+
+def _check_bridge_component_available_v9() -> bool:
+    """Check if the bridge/canvas component is available."""
+    if st.session_state.get("_bridge_known_broken"):
+        return False
+    if _is_docker_environment():
+        return False
+    return True
+
+
+def _render_static_fallback_editor_v9(
+    drawing_record: Dict[str, Any],
+    sketch: Dict[str, Any],
+) -> None:
+    """Show a static overlay image when interactive editors are unavailable."""
+    try:
+        show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
+        editor_img, _ = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
+        st.image(editor_img, use_container_width=True)
+    except Exception:
+        st.info("Kunne ikke vise plansnitt-preview.")
+    st.caption("Interaktiv klikk-redigering er ikke tilgjengelig i dette miljøet. Bruk tabellredigering under «Avansert tabellredigering / fallback» for å justere elementer.")
 
 
 def render_inline_click_canvas_editor(
@@ -9264,10 +9317,25 @@ def render_inline_click_canvas_editor(
     sketch: Dict[str, Any],
     editor_key: str,
 ) -> Optional[Dict[str, float]]:
-    click = _render_with_streamlit_image_coordinates_v9(drawing_record, sketch, editor_key)
-    if click is not None:
-        return click
-    return _RENDER_INLINE_CLICK_CANVAS_EDITOR_V8_ORIG(drawing_record, sketch, editor_key)
+    # 1. Try streamlit_image_coordinates
+    if _check_sic_available_v9():
+        click = _render_with_streamlit_image_coordinates_v9(drawing_record, sketch, editor_key)
+        if click is not None:
+            return click
+        # If sic was marked broken during the attempt, fall through
+
+    # 2. Try bridge/canvas component
+    if _check_bridge_component_available_v9():
+        try:
+            click = _RENDER_INLINE_CLICK_CANVAS_EDITOR_V8_ORIG(drawing_record, sketch, editor_key)
+            if isinstance(click, dict) and "x" in click and "y" in click:
+                return click
+        except Exception:
+            st.session_state["_bridge_known_broken"] = True
+
+    # 3. Static fallback — no error messages
+    _render_static_fallback_editor_v9(drawing_record, sketch)
+    return None
 
 
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
