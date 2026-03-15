@@ -20,3 +20,4 @@ Matplotlib
 streamlit-image-coordinates>=0.4.0
 ifcopenshell
 ezdxf
+reportlab>=4.0.0
