@@ -36,9 +36,13 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 COPY . /app
 
+# Streamlit config — fixes upload size limit and headless mode
+RUN mkdir -p /root/.streamlit && \
+    printf '[server]\nmaxUploadSize = 200\nenableCORS = false\nheadless = true\nmaxMessageSize = 200\n\n[browser]\ngatherUsageStats = false\n' > /root/.streamlit/config.toml
+
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.maxUploadSize=200", "--server.maxMessageSize=200"]
