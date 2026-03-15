@@ -835,12 +835,15 @@ def build_structural_system_candidates(
             if "prefabrikkert betong" in system["material"].lower():
                 rationality += 8
         if matches_any(["bolig", "leilighet", "student", "hotel", "hotell"]):
-            if "massivtre" in system["material"].lower():
+            if "massivtre" in system["material"].lower() and floors <= 8:
                 rationality += 10
             if "prefabrikkert betong" in system["material"].lower():
                 rationality += 12
+            if floors >= 8:
+                if "plasstøpt" in system["material"].lower() or "prefabrikkert" in system["material"].lower():
+                    rationality += 6
         if matches_any(["skole", "barnehage"]):
-            if "massivtre" in system["material"].lower():
+            if "massivtre" in system["material"].lower() and floors <= 6:
                 rationality += 10
             if "hybrid" in system["material"].lower():
                 rationality += 8
@@ -853,14 +856,25 @@ def build_structural_system_candidates(
 
         # Størrelse og etasjer
         if floors > system["max_floors_soft"]:
-            rationality -= min(24, (floors - system["max_floors_soft"]) * 4)
-            notes.append("Får trekk fordi bygget virker høyere enn systemet normalt er mest rasjonelt for.")
+            overshoot = floors - system["max_floors_soft"]
+            penalty = min(40, overshoot * 6)
+            rationality -= penalty
+            robustness -= min(20, overshoot * 3)
+            notes.append(f"Trekk: {floors} etasjer overstiger systemets typiske grense ({system['max_floors_soft']} etg).")
+            if overshoot > 4:
+                notes.append("STERKT FRARÅDET for denne høyden.")
         else:
             robustness += 4
 
         if floors >= 7:
             if "betong" in system["material"].lower() or "hybrid" in system["material"].lower():
                 robustness += 12
+            if floors >= 10 and "plasstøpt" in system["material"].lower():
+                rationality += 10
+                robustness += 8
+            if floors >= 10 and "prefabrikkert betong" in system["material"].lower():
+                rationality += 8
+                robustness += 6
         if floors <= 3 and system["weight"] == "Lav":
             rationality += 6
 
@@ -1350,6 +1364,14 @@ EKSTRA FAGRUTINER SOM MÅ FØLGES:
 8. Koordinater skal være normaliserte mellom 0 og 1 relativt til HELE siden.
 9. Maks 3 sketch-sider. Maks 1 plan_bbox per skisse.
 10. Vær eksplisitt om usikkerhet i observasjoner og mangler.
+
+OBLIGATORISKE MATERIALREGLER (norsk praksis / TEK17):
+11. recommended_system SKAL være systemet med høyest total_score i alternativmatrisen, MED MINDRE du har konkret faglig grunn fra tegningene til å avvike (begrunn i så fall tydelig).
+12. ALDRI anbefal massivtre/CLT som hovedsystem for bygg over 8 etasjer. Over 8 etasjer krever plasstøpt betong, prefabrikkert betong eller hybrid med betongkjerne.
+13. For bygg over 10 etasjer: kun plasstøpt betong eller prefab betong er realistisk i Norge.
+14. For boligblokk 5-8 etasjer: prefab betong eller plasstøpt betong er normen. Massivtre KAN vurderes for 5-6 etasjer med betongkjerne, men er ikke standard.
+15. For kontor/næring med store åpne arealer: stålrammer med hulldekker eller prefab betong.
+16. Materialvalg skal begrunnes med etasjer, spennvidder og bygningstype — ikke generelle trender.
 
 JSON-SKJEMA:
 {{
@@ -8346,6 +8368,14 @@ VIKTIG:
 - For kjeller/parkering/transfer: bruk søyler bare der page_cues eller planen tilsier lastnedføring fra overliggende vegger/kjerner.
 - Når du er usikker: færre elementer.
 - Koordinater i sketches skal være normaliserte 0-1 relativt til HELE siden.
+
+OBLIGATORISKE MATERIALREGLER (norsk praksis / TEK17):
+- recommended_system SKAL være systemet med høyest total_score i alternativmatrisen, MED MINDRE du har konkret faglig grunn fra tegningene til å avvike (begrunn i så fall tydelig).
+- ALDRI anbefal massivtre/CLT som hovedsystem for bygg over 8 etasjer. Over 8 etasjer krever plasstøpt betong, prefabrikkert betong eller hybrid med betongkjerne.
+- For bygg over 10 etasjer: kun plasstøpt betong eller prefab betong er realistisk i Norge.
+- For boligblokk 5-8 etasjer: prefab betong eller plasstøpt betong er normen. Massivtre KAN vurderes for 5-6 etasjer med betongkjerne, men er ikke standard.
+- For kontor/næring med store åpne arealer: stålrammer med hulldekker eller prefab betong.
+- Materialvalg skal begrunnes med etasjer, spennvidder og bygningstype — ikke generelle trender.
 
 PROSJEKT:
 - Navn: {clean_pdf_text(project_data.get('p_name'))}
