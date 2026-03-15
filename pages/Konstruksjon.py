@@ -37,6 +37,18 @@ try:
 except Exception:
     fitz = None
 
+try:
+    from builtly_structural_parser import parse_structural_model, format_model_for_llm
+    from builtly_rib_integration import (
+        run_structural_analysis_v2,
+        build_llm_assessment_prompt,
+        structural_model_to_sketch_elements,
+        sketch_elements_to_normalized,
+    )
+    HAS_STRUCTURAL_PARSER = True
+except ImportError:
+    HAS_STRUCTURAL_PARSER = False
+
 
 # ------------------------------------------------------------
 # 1. TEKNISK OPPSETT
@@ -8463,6 +8475,154 @@ _REFINE_SKETCH_WITH_GEOMETRY_V6_BASE = refine_sketch_with_geometry_v6
 _V7_COMPONENT_CACHE: Dict[str, Any] = {}
 
 
+# ---- STRUKTURELL PARSER INTEGRASJON (ny arkitektur) ----
+
+def _try_structural_parser_analysis(
+    model: Any,
+    drawings: List[Dict[str, Any]],
+    project_data: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+    material_preference: str = "Automatisk",
+    foundation_preference: str = "Automatisk",
+    optimization_mode: str = "Rasjonalitet",
+    safety_mode: str = "Normal",
+) -> Optional[Dict[str, Any]]:
+    """
+    Prøver strukturell parser FØR bildebasert analyse.
+    Returnerer analysis_result i forventet format, eller None hvis parseren
+    ikke finner nok data (fallback til bildebasert).
+    """
+    if not HAS_STRUCTURAL_PARSER:
+        return None
+
+    try:
+        struct_result = run_structural_analysis_v2(drawings, project_data)
+    except Exception:
+        return None
+
+    combined = struct_result.get("combined")
+    if not combined:
+        return None
+
+    # Sjekk om vi fant nok til å gi en god vurdering
+    confidence = combined.get("confidence", {})
+    material_conf = confidence.get("material", "lav")
+    if material_conf == "lav":
+        return None  # For lite data — bruk bildebasert
+
+    # Bygg LLM-prompt med strukturert data (ikke bilder)
+    try:
+        prompt = build_llm_assessment_prompt(
+            struct_result, project_data,
+            material_preference=material_preference,
+            foundation_preference=foundation_preference,
+            optimization_mode=optimization_mode,
+        )
+    except Exception:
+        return None
+
+    # Send til LLM for faglig vurdering
+    try:
+        raw_response = generate_text(model, [prompt], temperature=0.2)
+    except Exception:
+        return None
+
+    if not raw_response:
+        return None
+
+    # Parse JSON fra LLM-respons
+    analysis_result = _parse_structural_llm_response(raw_response, struct_result, drawings)
+    if analysis_result is None:
+        return None
+
+    # Legg til metadata
+    analysis_result["_structural_parser_used"] = True
+    analysis_result["_structural_confidence"] = confidence
+    analysis_result["_structural_material"] = combined.get("primary_material", "ukjent")
+    analysis_result["_structural_bearing"] = combined.get("bearing_system", "ukjent")
+
+    return analysis_result
+
+
+def _parse_structural_llm_response(
+    raw_response: str,
+    struct_result: Dict[str, Any],
+    drawings: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Parser LLM-responsen og bygger analysis_result i forventet format."""
+    # Ekstraher JSON fra respons
+    text = raw_response.strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+
+    # Prøv å finne JSON-blokk
+    brace_start = text.find("{")
+    brace_end = text.rfind("}")
+    if brace_start >= 0 and brace_end > brace_start:
+        text = text[brace_start:brace_end + 1]
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    # Generer skisse-elementer fra strukturell modell (ikke LLM-gjetting)
+    combined = struct_result.get("combined", {})
+    try:
+        elements = structural_model_to_sketch_elements(struct_result)
+        norm_elements = sketch_elements_to_normalized(
+            elements, combined.get("axis_system", {})
+        )
+    except Exception:
+        norm_elements = []
+
+    # Bygg sketches med elementer plassert fra aksesystemet
+    sketches = []
+    for i, drawing in enumerate(drawings[:3]):
+        sketches.append({
+            "page_index": i,
+            "page_label": clean_pdf_text(drawing.get("page_label", drawing.get("name", f"Plan {i+1}"))),
+            "plan_bbox": {"x": 0.05, "y": 0.05, "w": 0.90, "h": 0.90},
+            "confidence": 0.85,
+            "notes": [f"Elementer plassert fra aksesystem ({combined.get('primary_material', 'ukjent')})"],
+            "elements": norm_elements,
+        })
+        if sketches:
+            break  # Én skisse er nok med korrekte data
+
+    # Fyll inn manglende felter med defaults
+    result = {
+        "grunnlag_status": data.get("grunnlag_status", "FULLSTENDIG"),
+        "grunnlag_begrunnelse": data.get("grunnlag_begrunnelse", "Strukturell data ekstrahert programmatisk."),
+        "observasjoner": data.get("observasjoner", []),
+        "mangler": data.get("mangler", []),
+        "drawings": [
+            {
+                "page_index": i,
+                "page_label": clean_pdf_text(d.get("page_label", d.get("name", ""))),
+                "drawing_role": "plan",
+                "usable_for_overlay": True,
+                "observations": [],
+            }
+            for i, d in enumerate(drawings[:6])
+        ],
+        "recommended_system": data.get("recommended_system", {
+            "system_name": combined.get("bearing_system", "ukjent"),
+            "material": combined.get("primary_material", "ukjent"),
+        }),
+        "alternatives": data.get("alternatives", []),
+        "sketches": sketches,
+        "risk_register": data.get("risk_register", []),
+        "load_assumptions": data.get("load_assumptions", []),
+        "foundation_assumptions": data.get("foundation_assumptions", []),
+        "next_steps": data.get("next_steps", []),
+    }
+
+    return result
+
+
 def optional_components_v2_v7() -> Any:
     try:
         import streamlit.components.v2 as components_v2  # type: ignore
@@ -11622,16 +11782,32 @@ if analyze_clicked or direct_pdf_clicked:
             candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
             candidate_df = build_candidate_dataframe(candidates)
 
-            analysis_result = run_structured_drawing_analysis(
-                model=model,
-                drawings=all_drawings,
-                candidates=candidates,
-                project_data=pd_state,
-                material_preference=material_valg,
-                foundation_preference=fundamentering,
-                optimization_mode=optimaliser_for,
-                safety_mode=safety_mode,
-            )
+            # --- NY: Prøv strukturell parser først ---
+            analysis_result = None
+            if HAS_STRUCTURAL_PARSER:
+                analysis_result = _try_structural_parser_analysis(
+                    model=model,
+                    drawings=all_drawings,
+                    project_data=pd_state,
+                    candidates=candidates,
+                    material_preference=material_valg,
+                    foundation_preference=fundamentering,
+                    optimization_mode=optimaliser_for,
+                    safety_mode=safety_mode,
+                )
+
+            # --- Fallback: eksisterende bildebasert analyse ---
+            if analysis_result is None:
+                analysis_result = run_structured_drawing_analysis(
+                    model=model,
+                    drawings=all_drawings,
+                    candidates=candidates,
+                    project_data=pd_state,
+                    material_preference=material_valg,
+                    foundation_preference=fundamentering,
+                    optimization_mode=optimaliser_for,
+                    safety_mode=safety_mode,
+                )
             analysis_result = replace_analysis_sketches_with_grounded(
                 analysis_result=analysis_result,
                 drawings=all_drawings,
