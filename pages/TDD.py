@@ -43,6 +43,7 @@ except Exception:
 st.set_page_config(page_title="Builtly | Technical Due Diligence", layout="wide", initial_sidebar_state="collapsed")
 
 DB_DIR = Path("qa_database")
+FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
 
 
@@ -511,6 +512,23 @@ def normalize_uploaded_files(files) -> List[Dict[str, Any]]:
         })
     return records
 
+
+def load_project_files() -> List[Dict[str, Any]]:
+    """Load files saved in Project Setup (qa_database/project_files/)."""
+    records = []
+    if not FILES_DIR.exists():
+        return records
+    for p in sorted(FILES_DIR.iterdir()):
+        if p.is_file():
+            records.append({
+                "filename": p.name, "safe_name": sanitize_filename(p.name),
+                "category": classify_tdd_file(p.name), "extension": p.suffix.lower(),
+                "size_kb": round(p.stat().st_size / 1024, 1),
+                "timestamp": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "source": "Project Setup",
+            })
+    return records
+
 def build_tdd_rules(records: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
     build_year = config.get("build_year", 2000)
     market_value = config.get("market_value_mnok", 100)
@@ -910,6 +928,13 @@ with left:
 
 # ── Analysis ──
 records = normalize_uploaded_files(uploads or [])
+project_records = load_project_files()
+if project_records:
+    existing_names = {r["filename"] for r in records}
+    for pr in project_records:
+        if pr["filename"] not in existing_names:
+            records.append(pr)
+    st.success(f"{len(project_records)} fil(er) hentet automatisk fra prosjektoppsettet.")
 config = {"transaction_stage": transaction_stage, "property_type": property_type, "build_year": build_year, "market_value_mnok": market_value_mnok, "include_portfolio": include_portfolio, "notes": notes, "delivery_level": delivery_level}
 rules = build_tdd_rules(records, config)
 
