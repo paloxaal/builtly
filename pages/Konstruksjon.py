@@ -49,6 +49,12 @@ try:
 except ImportError:
     HAS_STRUCTURAL_PARSER = False
 
+try:
+    from builtly_click_editor import render_click_editor as _docker_click_editor
+    HAS_DOCKER_EDITOR = True
+except ImportError:
+    HAS_DOCKER_EDITOR = False
+
 
 # ------------------------------------------------------------
 # 1. TEKNISK OPPSETT
@@ -2726,7 +2732,8 @@ with st.expander("3. Tegningsgrunnlag og opplasting", expanded=True):
     files = st.file_uploader(
         "Last opp arkitekttegninger / snitt / PDF-er / IFC / DXF / DWG / ZIP",
         accept_multiple_files=True,
-        type=["png", "jpg", "jpeg", "webp", "pdf", "ifc", "ifczip", "dxf", "dwg", "zip"],
+        type=["png", "jpg", "jpeg", "webp", "pdf", "ifc", "dxf", "dwg", "zip"],
+        key="rib_file_uploader_v1",
     )
     st.caption("Tips ved 400-feil i Streamlit/Render: bruk ASCII-filnavn uten æ/ø/å og last gjerne opp IFC/DWG samlet i en ZIP med enkelt navn, f.eks. prosjekt_upload.zip.")
 
@@ -9301,15 +9308,33 @@ def _check_bridge_component_available_v9() -> bool:
 def _render_static_fallback_editor_v9(
     drawing_record: Dict[str, Any],
     sketch: Dict[str, Any],
-) -> None:
-    """Show a static overlay image when interactive editors are unavailable."""
+) -> Optional[Dict[str, float]]:
+    """Docker-compatible editor: uses builtly_click_editor if available, else static image."""
     try:
         show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
         editor_img, _ = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
-        st.image(editor_img, use_container_width=True)
     except Exception:
-        st.info("Kunne ikke vise plansnitt-preview.")
+        st.info("Kunne ikke bygge plansnitt-preview.")
+        return None
+
+    # Try Docker-compatible click editor
+    if HAS_DOCKER_EDITOR:
+        try:
+            click = _docker_click_editor(
+                editor_img,
+                key=f"docker_editor_{sketch.get('page_index', 0)}_{st.session_state.get('rib_draft_updated_at', '')}",
+                status_text="Klikk i planutsnittet for å plassere eller flytte elementer.",
+            )
+            if click is not None:
+                return click
+            return None
+        except Exception:
+            pass
+
+    # Ultimate fallback: static image
+    st.image(editor_img, use_container_width=True)
     st.caption("Interaktiv klikk-redigering er ikke tilgjengelig i dette miljøet. Bruk tabellredigering under «Avansert tabellredigering / fallback» for å justere elementer.")
+    return None
 
 
 def render_inline_click_canvas_editor(
@@ -9333,9 +9358,8 @@ def render_inline_click_canvas_editor(
         except Exception:
             st.session_state["_bridge_known_broken"] = True
 
-    # 3. Static fallback — no error messages
-    _render_static_fallback_editor_v9(drawing_record, sketch)
-    return None
+    # 3. Docker-compatible editor or static fallback
+    return _render_static_fallback_editor_v9(drawing_record, sketch)
 
 
 def render_plotly_sketch_editor(drawing_record: Dict[str, Any], sketch: Dict[str, Any], editor_key: str) -> Optional[Dict[str, float]]:
