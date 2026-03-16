@@ -1,1834 +1,1858 @@
+# -*- coding: utf-8 -*-
+"""
+Builtly | Anbudskontroll (Tender Control)
+Self-contained Streamlit module – no external builtly_* dependencies.
+Design language matches Konstruksjon (RIB) module.
+"""
 from __future__ import annotations
 
+import base64
 import io
 import json
-import math
-import sys
-import uuid
-from datetime import datetime, timezone
+import os
+import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
-import xml.etree.ElementTree as ET
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.append(str(ROOT))
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None  # type: ignore[assignment, misc]
 
 try:
-    from builtly_ai_fallback import generate_json_with_fallback
-except Exception:
-    generate_json_with_fallback = None
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = None  # type: ignore[assignment, misc]
 
-from builtly_module_kit import (
-    configure_page,
-    dataframe_download,
-    json_download,
-    render_hero,
-    render_metric_cards,
-    render_panel,
-    render_project_snapshot,
-    render_section,
-    tone_from_score,
+try:
+    import fitz  # PyMuPDF
+except ImportError:
+    fitz = None
+
+# AI backends (optional)
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+
+# ────────────────────────────────────────────────────────────────
+# 1. PAGE CONFIG
+# ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Builtly | Anbudskontroll",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-try:
-    from builtly_public_data import geocode_address
-except Exception:
-    def geocode_address(address: str, municipality: str = "") -> Dict[str, Any]:
-        return {"status": "missing", "source": "Address resolver", "note": "No live geocoder configured"}
-
-try:
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-except Exception:
-    Document = None
-    WD_ALIGN_PARAGRAPH = None
-
-try:
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-    REPORTLAB_READY = True
-except Exception:
-    REPORTLAB_READY = False
-
-# ---------------------------------------------------------
-# Localisation
-# ---------------------------------------------------------
-
-LANG = {
-    "no": {
-        "page_title": "Builtly | Klimarisiko",
-        "eyebrow": "Klimarisiko",
-        "title": "Screen klimarisiko for eiendommer og porteføljer.",
-        "subtitle": "Vurder flom, skred, havnivå og varmestress i én arbeidsflyt, og generer rapportpakker som kan deles videre med investorer, banker og prosjektteam.",
-        "setup_kicker": "Oppsett",
-        "setup_title": "Hva skal analyseres?",
-        "setup_sub": "Velg språk og marked først. Deretter kan du analysere én eiendom eller laste opp en portefølje.",
-        "lang_label": "Språk",
-        "market_label": "Marked / jurisdiksjon",
-        "mode_label": "Analysemodus",
-        "mode_single": "Enkeltobjekt",
-        "mode_portfolio": "Portefølje",
-        "property_name": "Eiendomsnavn",
-        "address": "Adresse / lokasjon",
-        "municipality": "Kommune / by",
-        "region": "Region / delstat / county",
-        "asset_class": "Eiendomstype",
-        "year_built": "Byggeår",
-        "area": "Areal (m²)",
-        "value": "Anslått eiendomsverdi",
-        "currency_hint": "Valuta",
-        "analysis_settings": "Scenarier og risikoparametre",
-        "scenario": "Klimascenario",
-        "horizon": "Tidshorisont",
-        "elevation": "Høyde over havet (m)",
-        "coast": "Avstand til kyst (km)",
-        "river": "Avstand til elv/bekk (km)",
-        "slope": "Terrenghelning (grader)",
-        "soil": "Grunnforhold",
-        "heat": "Urban varmestress (0–10)",
-        "flood_zone": "Ligger i eller nær flomsone",
-        "landslide_zone": "Ligger i eller nær skred-/rasområde",
-        "basement": "Bygget har kjeller / underetasje",
-        "upload_portfolio": "Last opp portefølje (CSV/XLSX)",
-        "weights_title": "Vektsetting for risikofaktorer",
-        "weights_help": "Vektene styrer den samlede klimarisikoscoren. Standardvektene følger produktspesifikasjonen.",
-        "generate": "Generer klimarisikorapport",
-        "rerun": "Kjør analysen på nytt",
-        "need_inputs": "Legg inn adresse eller koordinater, eller last opp en portefølje, før du genererer rapport.",
-        "results_kicker": "Resultater",
-        "results_title": "Resultater og sporbarhet",
-        "results_sub": "Du får både menneskelesbar rapport, maskinlesbar eksport og regulatorisk mapping.",
-        "metrics_score": "Klimarisikoscore",
-        "metrics_uncertainty": "Usikkerhet",
-        "metrics_assets": "Eiendommer",
-        "metrics_framework": "Primært rapporteringsspor",
-        "tab_overview": "Oversikt",
-        "tab_factors": "Risikofaktorer",
-        "tab_mapping": "Regulatorisk mapping",
-        "tab_sources": "Datakilder",
-        "tab_package": "Rapportpakke",
-        "tab_portfolio": "Portefølje",
-        "summary_title": "Kort oppsummering",
-        "drivers_title": "Hva som driver risikoen",
-        "actions_title": "Anbefalte neste steg",
-        "factors_title": "Faktorscore",
-        "sources_title": "Kilder og datadekning",
-        "mapping_title": "Regulatorisk mapping",
-        "report_title": "Rapportpakke",
-        "report_sub": "Når rapporten er generert kan du laste ned PDF, DOCX, JSON, XML og CSV.",
-        "disclaimer_ack": "Jeg forstår at dette er et AI-generert dataprodukt og ikke en faglig attestasjon.",
-        "downloads_locked": "Bekreft forståelsen av disclaimere før du laster ned rapportpakken.",
-        "download_pdf": "Last ned PDF-rapport",
-        "download_docx": "Last ned DOCX-rapport",
-        "download_json": "Last ned JSON",
-        "download_xml": "Last ned XML-mapping",
-        "download_csv": "Last ned CSV med faktorscore",
-        "download_portfolio": "Last ned portefølje-CSV",
-        "portfolio_summary": "Porteføljesammendrag",
-        "portfolio_placeholder": "Bytt til portefølje for å analysere mange eiendommer samtidig.",
-        "live_data_title": "Markedstilpasning",
-        "live_data_sub": "Systemet bruker valgt land til å vise riktig regelverk, disclaimer og datakilder. Der live API ikke er koblet, brukes strukturerte input og predefinert datakatalog.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Rapportpakke generert.",
-        "ai_unavailable": "AI-sammendrag er ikke tilgjengelig akkurat nå. Builtly viser en strukturert standardoppsummering i stedet.",
-        "map_hint": "Kartbilde kan legges til når markedets GIS-kilde er koblet live eller når koordinater og faresoner er tilgjengelige i tenant-oppsettet.",
-        "top_risk": "Høyest risikofaktor",
-        "risk_band": "Risikoklasse",
-        "country_note_label": "Juridisk/jurisdiksjonell merknad",
-    },
-    "sv": {
-        "page_title": "Builtly | Klimatrisk",
-        "eyebrow": "Klimatrisk",
-        "title": "Screena klimatrisk för enstaka fastigheter och hela portföljer.",
-        "subtitle": "Bedöm översvämning, skred, havsnivå och värmestress i ett arbetsflöde och generera rapportpaket som kan delas med investerare, banker och projektteam.",
-        "setup_kicker": "Inställning",
-        "setup_title": "Vad ska analyseras?",
-        "setup_sub": "Välj språk och marknad först. Därefter kan du analysera en fastighet eller ladda upp en portfölj.",
-        "lang_label": "Språk",
-        "market_label": "Marknad / jurisdiktion",
-        "mode_label": "Analysläge",
-        "mode_single": "Enskild fastighet",
-        "mode_portfolio": "Portfölj",
-        "property_name": "Fastighetsnamn",
-        "address": "Adress / plats",
-        "municipality": "Kommun / stad",
-        "region": "Region / delstat / county",
-        "asset_class": "Fastighetstyp",
-        "year_built": "Byggår",
-        "area": "Area (m²)",
-        "value": "Uppskattat fastighetsvärde",
-        "currency_hint": "Valuta",
-        "analysis_settings": "Scenarier och riskparametrar",
-        "scenario": "Klimatscenario",
-        "horizon": "Tidshorisont",
-        "elevation": "Höjd över havet (m)",
-        "coast": "Avstånd till kust (km)",
-        "river": "Avstånd till älv/bäck (km)",
-        "slope": "Marklutning (grader)",
-        "soil": "Markförhållanden",
-        "heat": "Urban värmestress (0–10)",
-        "flood_zone": "Ligger i eller nära översvämningszon",
-        "landslide_zone": "Ligger i eller nära ras-/skredområde",
-        "basement": "Byggnaden har källare / underplan",
-        "upload_portfolio": "Ladda upp portfölj (CSV/XLSX)",
-        "weights_title": "Viktning av riskfaktorer",
-        "weights_help": "Vikterna styr den sammanlagda klimatriskpoängen. Standardvikterna följer produktspecifikationen.",
-        "generate": "Generera klimatriskrapport",
-        "rerun": "Kör analysen igen",
-        "need_inputs": "Fyll i adress eller koordinater, eller ladda upp en portfölj, innan rapporten genereras.",
-        "results_kicker": "Resultat",
-        "results_title": "Resultat och spårbarhet",
-        "results_sub": "Du får både människoläsbar rapport, maskinläsbar export och regulatorisk mapping.",
-        "metrics_score": "Klimatriskpoäng",
-        "metrics_uncertainty": "Osäkerhet",
-        "metrics_assets": "Fastigheter",
-        "metrics_framework": "Primär rapporteringsram",
-        "tab_overview": "Översikt",
-        "tab_factors": "Riskfaktorer",
-        "tab_mapping": "Regulatorisk mapping",
-        "tab_sources": "Datakällor",
-        "tab_package": "Rapportpaket",
-        "tab_portfolio": "Portfölj",
-        "summary_title": "Kort sammanfattning",
-        "drivers_title": "Vad driver risken",
-        "actions_title": "Rekommenderade nästa steg",
-        "factors_title": "Faktorscore",
-        "sources_title": "Källor och datatäckning",
-        "mapping_title": "Regulatorisk mapping",
-        "report_title": "Rapportpaket",
-        "report_sub": "När rapporten är genererad kan du ladda ned PDF, DOCX, JSON, XML och CSV.",
-        "disclaimer_ack": "Jag förstår att detta är en AI-genererad dataprodukt och inte en fackmässig attest.",
-        "downloads_locked": "Bekräfta disclaimern innan du laddar ned rapportpaketet.",
-        "download_pdf": "Ladda ned PDF-rapport",
-        "download_docx": "Ladda ned DOCX-rapport",
-        "download_json": "Ladda ned JSON",
-        "download_xml": "Ladda ned XML-mapping",
-        "download_csv": "Ladda ned CSV med faktorscore",
-        "download_portfolio": "Ladda ned portfölj-CSV",
-        "portfolio_summary": "Portföljsammanfattning",
-        "portfolio_placeholder": "Byt till portfölj för att analysera många fastigheter samtidigt.",
-        "live_data_title": "Marknadsanpassning",
-        "live_data_sub": "Systemet använder valt land för rätt regelverk, disclaimer och datakällor. Där live-API saknas används strukturerade indata och definierad datakatalog.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Rapportpaket genererat.",
-        "ai_unavailable": "AI-sammanfattning är inte tillgänglig just nu. Builtly visar en strukturerad standardsammanfattning i stället.",
-        "map_hint": "Kartbild kan läggas till när marknadens GIS-källa är kopplad live eller när koordinater och farozoner finns i tenant-konfigurationen.",
-        "top_risk": "Högsta riskfaktor",
-        "risk_band": "Riskklass",
-        "country_note_label": "Juridisk/jurisdiktionell kommentar",
-    },
-    "da": {
-        "page_title": "Builtly | Klimarisiko",
-        "eyebrow": "Klimarisiko",
-        "title": "Screen klimarisiko for enkelte ejendomme og hele porteføljer.",
-        "subtitle": "Vurder oversvømmelse, skred, havniveau og varmestress i ét workflow og generér rapportpakker, som kan deles med investorer, banker og projektteams.",
-        "setup_kicker": "Opsætning",
-        "setup_title": "Hvad skal analyseres?",
-        "setup_sub": "Vælg først sprog og marked. Derefter kan du analysere én ejendom eller uploade en portefølje.",
-        "lang_label": "Sprog",
-        "market_label": "Marked / jurisdiktion",
-        "mode_label": "Analysemodus",
-        "mode_single": "Enkelt ejendom",
-        "mode_portfolio": "Portefølje",
-        "property_name": "Ejendomsnavn",
-        "address": "Adresse / lokation",
-        "municipality": "Kommune / by",
-        "region": "Region / delstat / county",
-        "asset_class": "Ejendomstype",
-        "year_built": "Byggeår",
-        "area": "Areal (m²)",
-        "value": "Anslået ejendomsværdi",
-        "currency_hint": "Valuta",
-        "analysis_settings": "Scenarier og risikoparametre",
-        "scenario": "Klimascenarie",
-        "horizon": "Tidshorisont",
-        "elevation": "Højde over havet (m)",
-        "coast": "Afstand til kyst (km)",
-        "river": "Afstand til å / vandløb (km)",
-        "slope": "Terrænhældning (grader)",
-        "soil": "Jordbundsforhold",
-        "heat": "Urban varmestress (0–10)",
-        "flood_zone": "Ligger i eller nær oversvømmelseszone",
-        "landslide_zone": "Ligger i eller nær skred-/rasområde",
-        "basement": "Bygningen har kælder / underetage",
-        "upload_portfolio": "Upload portefølje (CSV/XLSX)",
-        "weights_title": "Vægtning af risikofaktorer",
-        "weights_help": "Vægtene styrer den samlede klimarisikoscore. Standardvægtene følger produktspecifikationen.",
-        "generate": "Generér klimarisikorapport",
-        "rerun": "Kør analysen igen",
-        "need_inputs": "Indtast adresse eller koordinater, eller upload en portefølje, før rapporten genereres.",
-        "results_kicker": "Resultater",
-        "results_title": "Resultater og sporbarhed",
-        "results_sub": "Du får både menneskelæselig rapport, maskinlæsbar eksport og regulatorisk mapping.",
-        "metrics_score": "Klimarisikoscore",
-        "metrics_uncertainty": "Usikkerhed",
-        "metrics_assets": "Ejendomme",
-        "metrics_framework": "Primær rapporteringsramme",
-        "tab_overview": "Overblik",
-        "tab_factors": "Risikofaktorer",
-        "tab_mapping": "Regulatorisk mapping",
-        "tab_sources": "Datakilder",
-        "tab_package": "Rapportpakke",
-        "tab_portfolio": "Portefølje",
-        "summary_title": "Kort opsummering",
-        "drivers_title": "Hvad driver risikoen",
-        "actions_title": "Anbefalede næste skridt",
-        "factors_title": "Faktorscore",
-        "sources_title": "Kilder og datadækning",
-        "mapping_title": "Regulatorisk mapping",
-        "report_title": "Rapportpakke",
-        "report_sub": "Når rapporten er genereret kan du downloade PDF, DOCX, JSON, XML og CSV.",
-        "disclaimer_ack": "Jeg forstår, at dette er et AI-genereret dataprodukt og ikke en faglig attestering.",
-        "downloads_locked": "Bekræft disclaimern før du downloader rapportpakken.",
-        "download_pdf": "Download PDF-rapport",
-        "download_docx": "Download DOCX-rapport",
-        "download_json": "Download JSON",
-        "download_xml": "Download XML-mapping",
-        "download_csv": "Download CSV med faktorscore",
-        "download_portfolio": "Download portefølje-CSV",
-        "portfolio_summary": "Porteføljesammendrag",
-        "portfolio_placeholder": "Skift til portefølje for at analysere mange ejendomme samtidigt.",
-        "live_data_title": "Markedstilpasning",
-        "live_data_sub": "Systemet bruger valgt land til korrekt regelsæt, disclaimer og datakilder. Hvor live-API ikke er koblet, bruges strukturerede input og en defineret datakatalog.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Rapportpakke genereret.",
-        "ai_unavailable": "AI-opsummering er ikke tilgængelig lige nu. Builtly viser i stedet en struktureret standardopsummering.",
-        "map_hint": "Kortbillede kan tilføjes, når markedets GIS-kilde er koblet live, eller når koordinater og farezoner findes i tenant-konfigurationen.",
-        "top_risk": "Højeste risikofaktor",
-        "risk_band": "Risikoklasse",
-        "country_note_label": "Juridisk/jurisdiktionel note",
-    },
-    "en-GB": {
-        "page_title": "Builtly | Climate Risk",
-        "eyebrow": "Climate Risk",
-        "title": "Screen climate risk for single assets and full portfolios.",
-        "subtitle": "Assess flood, landslide, sea-level and heat stress in one workflow and generate report packs you can share with investors, banks and project teams.",
-        "setup_kicker": "Setup",
-        "setup_title": "What should be analysed?",
-        "setup_sub": "Select language and market first. Then analyse one asset or upload a full portfolio.",
-        "lang_label": "Language",
-        "market_label": "Market / jurisdiction",
-        "mode_label": "Analysis mode",
-        "mode_single": "Single asset",
-        "mode_portfolio": "Portfolio",
-        "property_name": "Asset name",
-        "address": "Address / location",
-        "municipality": "City / municipality",
-        "region": "Region / state / county",
-        "asset_class": "Asset class",
-        "year_built": "Year built",
-        "area": "Area (m²)",
-        "value": "Estimated asset value",
-        "currency_hint": "Currency",
-        "analysis_settings": "Scenarios and risk parameters",
-        "scenario": "Climate scenario",
-        "horizon": "Time horizon",
-        "elevation": "Elevation above sea level (m)",
-        "coast": "Distance to coast (km)",
-        "river": "Distance to river/stream (km)",
-        "slope": "Slope (degrees)",
-        "soil": "Ground conditions",
-        "heat": "Urban heat stress (0–10)",
-        "flood_zone": "Located in or near flood zone",
-        "landslide_zone": "Located in or near landslide zone",
-        "basement": "Building has basement / lower ground floor",
-        "upload_portfolio": "Upload portfolio (CSV/XLSX)",
-        "weights_title": "Risk-factor weighting",
-        "weights_help": "The weights drive the total climate-risk score. Default weights follow the product specification.",
-        "generate": "Generate climate risk report",
-        "rerun": "Run analysis again",
-        "need_inputs": "Enter an address or coordinates, or upload a portfolio, before generating the report.",
-        "results_kicker": "Results",
-        "results_title": "Results and traceability",
-        "results_sub": "You get a human-readable report, machine-readable exports and jurisdiction-aware regulatory mapping.",
-        "metrics_score": "Climate risk score",
-        "metrics_uncertainty": "Uncertainty",
-        "metrics_assets": "Assets",
-        "metrics_framework": "Primary reporting track",
-        "tab_overview": "Overview",
-        "tab_factors": "Risk factors",
-        "tab_mapping": "Regulatory mapping",
-        "tab_sources": "Data sources",
-        "tab_package": "Report pack",
-        "tab_portfolio": "Portfolio",
-        "summary_title": "Short summary",
-        "drivers_title": "Main risk drivers",
-        "actions_title": "Recommended next steps",
-        "factors_title": "Factor scores",
-        "sources_title": "Sources and data coverage",
-        "mapping_title": "Regulatory mapping",
-        "report_title": "Report pack",
-        "report_sub": "Once the report has been generated you can download PDF, DOCX, JSON, XML and CSV.",
-        "disclaimer_ack": "I understand that this is an AI-generated data product and not a professional attestation.",
-        "downloads_locked": "Confirm the disclaimer before downloading the report pack.",
-        "download_pdf": "Download PDF report",
-        "download_docx": "Download DOCX report",
-        "download_json": "Download JSON",
-        "download_xml": "Download XML mapping",
-        "download_csv": "Download CSV with factor scores",
-        "download_portfolio": "Download portfolio CSV",
-        "portfolio_summary": "Portfolio summary",
-        "portfolio_placeholder": "Switch to portfolio mode to analyse many assets at once.",
-        "live_data_title": "Market adaptation",
-        "live_data_sub": "The system uses your selected market to apply the right rule set, disclaimer and source catalogue. Where live APIs are not connected yet, Builtly falls back to structured inputs and the configured source register.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Report pack generated.",
-        "ai_unavailable": "AI summary is not available right now. Builtly is showing a structured default summary instead.",
-        "map_hint": "A static map can be added when the market-specific GIS source is connected live or when coordinates and hazard layers are available in tenant configuration.",
-        "top_risk": "Highest risk factor",
-        "risk_band": "Risk band",
-        "country_note_label": "Jurisdiction note",
-    },
-    "en-US": {
-        "page_title": "Builtly | Climate Risk",
-        "eyebrow": "Climate Risk",
-        "title": "Screen climate risk for individual assets and full portfolios.",
-        "subtitle": "Assess flood, landslide, sea-level, and heat stress in one workflow and generate report packages you can share with lenders, investors, and project teams.",
-        "setup_kicker": "Setup",
-        "setup_title": "What should be analyzed?",
-        "setup_sub": "Select language and market first. Then analyze one asset or upload a full portfolio.",
-        "lang_label": "Language",
-        "market_label": "Market / jurisdiction",
-        "mode_label": "Analysis mode",
-        "mode_single": "Single asset",
-        "mode_portfolio": "Portfolio",
-        "property_name": "Asset name",
-        "address": "Address / location",
-        "municipality": "City / municipality",
-        "region": "Region / state / county",
-        "asset_class": "Asset class",
-        "year_built": "Year built",
-        "area": "Area (m²)",
-        "value": "Estimated asset value",
-        "currency_hint": "Currency",
-        "analysis_settings": "Scenarios and risk parameters",
-        "scenario": "Climate scenario",
-        "horizon": "Time horizon",
-        "elevation": "Elevation above sea level (m)",
-        "coast": "Distance to coast (km)",
-        "river": "Distance to river/stream (km)",
-        "slope": "Slope (degrees)",
-        "soil": "Ground conditions",
-        "heat": "Urban heat stress (0–10)",
-        "flood_zone": "Located in or near flood zone",
-        "landslide_zone": "Located in or near landslide zone",
-        "basement": "Building has basement / lower level",
-        "upload_portfolio": "Upload portfolio (CSV/XLSX)",
-        "weights_title": "Risk-factor weighting",
-        "weights_help": "The weights drive the total climate-risk score. Default weights follow the product specification.",
-        "generate": "Generate climate risk report",
-        "rerun": "Run analysis again",
-        "need_inputs": "Enter an address or coordinates, or upload a portfolio, before generating the report.",
-        "results_kicker": "Results",
-        "results_title": "Results and traceability",
-        "results_sub": "You get a human-readable report, machine-readable exports, and jurisdiction-aware regulatory mapping.",
-        "metrics_score": "Climate risk score",
-        "metrics_uncertainty": "Uncertainty",
-        "metrics_assets": "Assets",
-        "metrics_framework": "Primary reporting track",
-        "tab_overview": "Overview",
-        "tab_factors": "Risk factors",
-        "tab_mapping": "Regulatory mapping",
-        "tab_sources": "Data sources",
-        "tab_package": "Report package",
-        "tab_portfolio": "Portfolio",
-        "summary_title": "Short summary",
-        "drivers_title": "Main risk drivers",
-        "actions_title": "Recommended next steps",
-        "factors_title": "Factor scores",
-        "sources_title": "Sources and data coverage",
-        "mapping_title": "Regulatory mapping",
-        "report_title": "Report package",
-        "report_sub": "Once the report has been generated you can download PDF, DOCX, JSON, XML, and CSV.",
-        "disclaimer_ack": "I understand that this is an AI-generated data product and not a professional attestation.",
-        "downloads_locked": "Confirm the disclaimer before downloading the report package.",
-        "download_pdf": "Download PDF report",
-        "download_docx": "Download DOCX report",
-        "download_json": "Download JSON",
-        "download_xml": "Download XML mapping",
-        "download_csv": "Download CSV with factor scores",
-        "download_portfolio": "Download portfolio CSV",
-        "portfolio_summary": "Portfolio summary",
-        "portfolio_placeholder": "Switch to portfolio mode to analyze many assets at once.",
-        "live_data_title": "Market adaptation",
-        "live_data_sub": "The system uses your selected market to apply the right rule set, disclaimer, and source catalog. Where live APIs are not connected yet, Builtly falls back to structured inputs and the configured source register.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Report package generated.",
-        "ai_unavailable": "AI summary is not available right now. Builtly is showing a structured default summary instead.",
-        "map_hint": "A static map can be added when the market-specific GIS source is connected live or when coordinates and hazard layers are available in tenant configuration.",
-        "top_risk": "Highest risk factor",
-        "risk_band": "Risk band",
-        "country_note_label": "Jurisdiction note",
-    },
-    "de": {
-        "page_title": "Builtly | Klimarisiko",
-        "eyebrow": "Klimarisiko",
-        "title": "Prüfen Sie Klimarisiken für Einzelobjekte und ganze Portfolios.",
-        "subtitle": "Bewerten Sie Hochwasser, Rutschung, Meeresspiegel und Hitzestress in einem Workflow und erzeugen Sie Berichtspakete für Investoren, Banken und Projektteams.",
-        "setup_kicker": "Setup",
-        "setup_title": "Was soll analysiert werden?",
-        "setup_sub": "Wählen Sie zuerst Sprache und Markt. Danach können Sie ein Objekt analysieren oder ein Portfolio hochladen.",
-        "lang_label": "Sprache",
-        "market_label": "Markt / Jurisdiktion",
-        "mode_label": "Analysemodus",
-        "mode_single": "Einzelobjekt",
-        "mode_portfolio": "Portfolio",
-        "property_name": "Objektname",
-        "address": "Adresse / Standort",
-        "municipality": "Gemeinde / Stadt",
-        "region": "Region / Bundesland / County",
-        "asset_class": "Objektart",
-        "year_built": "Baujahr",
-        "area": "Fläche (m²)",
-        "value": "Geschätzter Immobilienwert",
-        "currency_hint": "Währung",
-        "analysis_settings": "Szenarien und Risikoparameter",
-        "scenario": "Klimaszenario",
-        "horizon": "Zeithorizont",
-        "elevation": "Höhe über Meeresspiegel (m)",
-        "coast": "Entfernung zur Küste (km)",
-        "river": "Entfernung zu Fluss/Bach (km)",
-        "slope": "Hangneigung (Grad)",
-        "soil": "Bodenverhältnisse",
-        "heat": "Urbaner Hitzestress (0–10)",
-        "flood_zone": "Liegt in oder nahe einer Hochwasserzone",
-        "landslide_zone": "Liegt in oder nahe einer Rutschungs-/Gefahrenzone",
-        "basement": "Gebäude hat Keller / Untergeschoss",
-        "upload_portfolio": "Portfolio hochladen (CSV/XLSX)",
-        "weights_title": "Gewichtung der Risikofaktoren",
-        "weights_help": "Die Gewichte steuern den Gesamtscore. Die Standardgewichte folgen der Produktspezifikation.",
-        "generate": "Klimarisikobericht generieren",
-        "rerun": "Analyse erneut starten",
-        "need_inputs": "Geben Sie Adresse oder Koordinaten ein oder laden Sie ein Portfolio hoch, bevor der Bericht erzeugt wird.",
-        "results_kicker": "Ergebnisse",
-        "results_title": "Ergebnisse und Nachvollziehbarkeit",
-        "results_sub": "Sie erhalten einen lesbaren Bericht, maschinenlesbare Exporte und ein marktbezogenes regulatorisches Mapping.",
-        "metrics_score": "Klimarisikoscore",
-        "metrics_uncertainty": "Unsicherheit",
-        "metrics_assets": "Objekte",
-        "metrics_framework": "Primärer Reporting-Pfad",
-        "tab_overview": "Überblick",
-        "tab_factors": "Risikofaktoren",
-        "tab_mapping": "Regulatorisches Mapping",
-        "tab_sources": "Datenquellen",
-        "tab_package": "Berichtspaket",
-        "tab_portfolio": "Portfolio",
-        "summary_title": "Kurze Zusammenfassung",
-        "drivers_title": "Haupttreiber des Risikos",
-        "actions_title": "Empfohlene nächste Schritte",
-        "factors_title": "Faktorscores",
-        "sources_title": "Quellen und Datenabdeckung",
-        "mapping_title": "Regulatorisches Mapping",
-        "report_title": "Berichtspaket",
-        "report_sub": "Nach der Generierung können Sie PDF, DOCX, JSON, XML und CSV herunterladen.",
-        "disclaimer_ack": "Ich verstehe, dass dies ein KI-generiertes Datenprodukt und keine fachliche Attestierung ist.",
-        "downloads_locked": "Bestätigen Sie den Disclaimer, bevor Sie das Berichtspaket herunterladen.",
-        "download_pdf": "PDF-Bericht herunterladen",
-        "download_docx": "DOCX-Bericht herunterladen",
-        "download_json": "JSON herunterladen",
-        "download_xml": "XML-Mapping herunterladen",
-        "download_csv": "CSV mit Faktorscores herunterladen",
-        "download_portfolio": "Portfolio-CSV herunterladen",
-        "portfolio_summary": "Portfolio-Zusammenfassung",
-        "portfolio_placeholder": "Wechseln Sie in den Portfoliomodus, um viele Objekte gleichzeitig zu analysieren.",
-        "live_data_title": "Marktanpassung",
-        "live_data_sub": "Das System nutzt den gewählten Markt für das richtige Regelwerk, den passenden Disclaimer und die Quellenkataloge. Wo Live-APIs noch nicht verbunden sind, arbeitet Builtly mit strukturierten Eingaben und dem konfigurierten Quellenregister.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit Trail",
-        "analysis_ready": "Berichtspaket generiert.",
-        "ai_unavailable": "Die KI-Zusammenfassung ist derzeit nicht verfügbar. Builtly zeigt stattdessen eine strukturierte Standardzusammenfassung an.",
-        "map_hint": "Eine statische Karte kann ergänzt werden, sobald die marktbezogene GIS-Quelle live verbunden ist oder Koordinaten und Gefahrenlayer in der Tenant-Konfiguration vorliegen.",
-        "top_risk": "Höchster Risikofaktor",
-        "risk_band": "Risikoklasse",
-        "country_note_label": "Jurisdiktionshinweis",
-    },
-    "fi": {
-        "page_title": "Builtly | Ilmastoriski",
-        "eyebrow": "Ilmastoriski",
-        "title": "Arvioi ilmastoriski yksittäisille kohteille ja kokonaisille portfolioille.",
-        "subtitle": "Arvioi tulva-, maanvyöry-, merenpinta- ja kuumuusriskit yhdessä työnkulussa ja luo raporttipaketteja sijoittajille, pankeille ja projektitiimeille.",
-        "setup_kicker": "Asetukset",
-        "setup_title": "Mitä analysoidaan?",
-        "setup_sub": "Valitse ensin kieli ja markkina. Sen jälkeen voit analysoida yhden kohteen tai ladata portfolion.",
-        "lang_label": "Kieli",
-        "market_label": "Markkina / toimivalta",
-        "mode_label": "Analyysitila",
-        "mode_single": "Yksittäinen kohde",
-        "mode_portfolio": "Portfolio",
-        "property_name": "Kohteen nimi",
-        "address": "Osoite / sijainti",
-        "municipality": "Kunta / kaupunki",
-        "region": "Alue / osavaltio / county",
-        "asset_class": "Kohdetyyppi",
-        "year_built": "Rakennusvuosi",
-        "area": "Pinta-ala (m²)",
-        "value": "Arvioitu kohteen arvo",
-        "currency_hint": "Valuutta",
-        "analysis_settings": "Skenaariot ja riskiparametrit",
-        "scenario": "Ilmastoskenaario",
-        "horizon": "Aikahorisontti",
-        "elevation": "Korkeus merenpinnasta (m)",
-        "coast": "Etäisyys rannikosta (km)",
-        "river": "Etäisyys jokeen/puroon (km)",
-        "slope": "Maaston kaltevuus (astetta)",
-        "soil": "Maaperäolosuhteet",
-        "heat": "Kaupunkilämpöstressi (0–10)",
-        "flood_zone": "Sijaitsee tulvavyöhykkeellä tai sen lähellä",
-        "landslide_zone": "Sijaitsee sortuma-/maanvyöryriskialueella tai sen lähellä",
-        "basement": "Rakennuksessa on kellari / alakerros",
-        "upload_portfolio": "Lataa portfolio (CSV/XLSX)",
-        "weights_title": "Riskitekijöiden painotus",
-        "weights_help": "Painot ohjaavat kokonaisilmastoriskipistettä. Oletuspainot seuraavat tuotespesifikaatiota.",
-        "generate": "Luo ilmastoriskiraportti",
-        "rerun": "Suorita analyysi uudelleen",
-        "need_inputs": "Anna osoite tai koordinaatit tai lataa portfolio ennen raportin luontia.",
-        "results_kicker": "Tulokset",
-        "results_title": "Tulokset ja jäljitettävyys",
-        "results_sub": "Saat ihmisen luettavan raportin, koneellisesti luettavat viennit ja markkinakohtaisen sääntelykartoituksen.",
-        "metrics_score": "Ilmastoriskipiste",
-        "metrics_uncertainty": "Epävarmuus",
-        "metrics_assets": "Kohteet",
-        "metrics_framework": "Ensisijainen raportointikehys",
-        "tab_overview": "Yleiskuva",
-        "tab_factors": "Riskitekijät",
-        "tab_mapping": "Sääntelykartoitus",
-        "tab_sources": "Tietolähteet",
-        "tab_package": "Raporttipaketti",
-        "tab_portfolio": "Portfolio",
-        "summary_title": "Lyhyt yhteenveto",
-        "drivers_title": "Riskin pääajurit",
-        "actions_title": "Suositellut seuraavat vaiheet",
-        "factors_title": "Tekijäpisteet",
-        "sources_title": "Lähteet ja kattavuus",
-        "mapping_title": "Sääntelykartoitus",
-        "report_title": "Raporttipaketti",
-        "report_sub": "Kun raportti on luotu, voit ladata PDF-, DOCX-, JSON-, XML- ja CSV-tiedostot.",
-        "disclaimer_ack": "Ymmärrän, että tämä on tekoälyn tuottama datapohjainen tuote eikä ammatillinen todistus.",
-        "downloads_locked": "Vahvista vastuuvapauslauseke ennen raporttipaketin lataamista.",
-        "download_pdf": "Lataa PDF-raportti",
-        "download_docx": "Lataa DOCX-raportti",
-        "download_json": "Lataa JSON",
-        "download_xml": "Lataa XML-kartoitus",
-        "download_csv": "Lataa CSV riskitekijäpisteillä",
-        "download_portfolio": "Lataa portfolio-CSV",
-        "portfolio_summary": "Portfolioyhteenveto",
-        "portfolio_placeholder": "Vaihda portfoliotilaan analysoidaksesi useita kohteita kerralla.",
-        "live_data_title": "Markkinakohtainen sovitus",
-        "live_data_sub": "Järjestelmä käyttää valittua markkinaa oikeaan sääntöpohjaan, disclaimeriin ja tietolähdeluetteloon. Jos live-API ei ole vielä käytössä, Builtly käyttää rakenteistettua syötettä ja määriteltyä lähderekisteriä.",
-        "disclaimer_title": "Disclaimer",
-        "audit_title": "Audit trail",
-        "analysis_ready": "Raporttipaketti luotu.",
-        "ai_unavailable": "Tekoäly-yhteenveto ei ole juuri nyt saatavilla. Builtly näyttää sen sijaan rakenteisen oletusyhteenvedon.",
-        "map_hint": "Staattinen kartta voidaan lisätä, kun markkinakohtainen GIS-lähde on kytketty tai kun koordinaatit ja vaaratasot ovat tenant-konfiguraatiossa.",
-        "top_risk": "Korkein riskitekijä",
-        "risk_band": "Riskiluokka",
-        "country_note_label": "Jurisdiktiohuomio",
-    },
-}
-
-SOIL_OPTIONS = {
-    "no": ["Morene", "Leire", "Berg", "Marine avsetninger", "Fyllmasser"],
-    "sv": ["Morän", "Lera", "Berg", "Marina sediment", "Fyllnadsmassor"],
-    "da": ["Moræne", "Ler", "Berg", "Marine aflejringer", "Fyldmasser"],
-    "en-GB": ["Moraine", "Clay", "Bedrock", "Marine sediments", "Made ground"],
-    "en-US": ["Moraine", "Clay", "Bedrock", "Marine sediments", "Made ground"],
-    "de": ["Moräne", "Lehm", "Fels", "Marine Sedimente", "Auffüllung"],
-    "fi": ["Moreeni", "Savi", "Kallio", "Meri­sedimentti", "Täyttömaa"],
-}
-
-ASSET_CLASSES = {
-    "no": ["Bolig", "Kontor", "Logistikk", "Hotell", "Mixed-use", "Industri"],
-    "sv": ["Bostad", "Kontor", "Logistik", "Hotell", "Mixed-use", "Industri"],
-    "da": ["Bolig", "Kontor", "Logistik", "Hotel", "Mixed-use", "Industri"],
-    "en-GB": ["Residential", "Office", "Logistics", "Hotel", "Mixed-use", "Industrial"],
-    "en-US": ["Residential", "Office", "Logistics", "Hotel", "Mixed-use", "Industrial"],
-    "de": ["Wohnen", "Büro", "Logistik", "Hotel", "Mixed-use", "Industrie"],
-    "fi": ["Asuminen", "Toimisto", "Logistiikka", "Hotelli", "Mixed-use", "Teollisuus"],
-}
-
-LANG_LABELS = {
-    "Norsk": "no",
-    "Svenska": "sv",
-    "Dansk": "da",
-    "English (UK)": "en-GB",
-    "English (US)": "en-US",
-    "Deutsch": "de",
-    "Suomi": "fi",
-}
-
-MARKETS: Dict[str, Dict[str, Any]] = {
-    "NO": {
-        "label": "Norge",
-        "currency": "NOK",
-        "vat": "25%",
-        "rule_set": "TEK17 / EU Taxonomy / SFDR / ECB / Finanstilsynet",
-        "jurisdiction_note": {
-            "no": "Bruk TEK17 og norske offentlige datakilder som hovedramme. Kommunale krav og lokale planbestemmelser kan påvirke tolkning og tiltak.",
-            "sv": "Använd TEK17 och norska offentliga datakällor som huvudram. Kommunala krav och lokala planbestämmelser kan påverka tolkning och åtgärder.",
-            "da": "Brug TEK17 og norske offentlige datakilder som hovedramme. Kommunale krav og lokale planbestemmelser kan påvirke vurderingen.",
-            "en-GB": "Use TEK17 and Norwegian public data as the baseline. Municipal requirements and local planning conditions may affect the final interpretation.",
-            "en-US": "Use TEK17 and Norwegian public data as the baseline. Municipal requirements and local planning conditions may affect the final interpretation.",
-            "de": "TEK17 und norwegische öffentliche Daten bilden die Grundlage. Kommunale Anforderungen und lokale Planvorgaben können die Bewertung beeinflussen.",
-            "fi": "TEK17 ja norjalaiset julkiset tietolähteet muodostavat lähtökohdan. Kunnalliset vaatimukset ja paikalliset kaavamääräykset voivat vaikuttaa tulkintaan.",
-        },
-        "frameworks": [
-            {"framework": "EU Taxonomy DNSH", "status": "ready", "format": "XML", "note": "Dokumenterer physical climate adaptation screening."},
-            {"framework": "SFDR PAI", "status": "ready", "format": "CSV / JSON", "note": "Fysisk klimarisikoeksponering kan eksporteres videre."},
-            {"framework": "ECB Climate Stress Test", "status": "ready", "format": "JSON", "note": "Felter for banker kan pre-populeres."},
-            {"framework": "Finanstilsynet", "status": "ready", "format": "PDF", "note": "Norsk rapportstruktur for bank og forsikring."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "NVE Flomsonekart (WMS/WFS)", "access": "Public / registration"},
-            {"hazard": "Landslide", "source": "NVE skred- og kvikkleirekart", "access": "Public / registration"},
-            {"hazard": "Elevation", "source": "Kartverket DTM 1m", "access": "Indexed / local"},
-            {"hazard": "Sea level", "source": "Kartverket / Bjerknessenteret", "access": "Periodic dataset"},
-            {"hazard": "Heat", "source": "Copernicus Land Service", "access": "Public"},
-            {"hazard": "Soil", "source": "NIBIO jordsmonnskart", "access": "Public"},
-        ],
-        "default_lang": "no",
-    },
-    "SE": {
-        "label": "Sverige",
-        "currency": "SEK",
-        "vat": "25%",
-        "rule_set": "PBL / Boverkets regler / EU Taxonomy / SFDR",
-        "jurisdiction_note": {
-            "sv": "Förklara när övergången 2025–2026 mellan äldre BBR och nyare Boverket-regler påverkar slutsatsen. Kommunala krav kan tillkomma.",
-            "no": "Forklar når overgangen 2025–2026 mellom eldre BBR og nyere Boverket-regler påvirker konklusjonen. Kommunale krav kan komme i tillegg.",
-            "da": "Forklar når overgangen 2025–2026 mellem ældre BBR og nyere Boverket-regler påvirker konklusionen. Kommunale krav kan komme oveni.",
-            "en-GB": "Explain when the 2025–2026 transition between older BBR rules and newer Boverket regulations changes the conclusion. Municipal requirements may apply.",
-            "en-US": "Explain when the 2025–2026 transition between older BBR rules and newer Boverket regulations changes the conclusion. Municipal requirements may apply.",
-            "de": "Erklären Sie, wann der Übergang 2025–2026 zwischen älteren BBR-Regeln und neueren Boverket-Vorschriften die Schlussfolgerung beeinflusst. Kommunale Anforderungen können zusätzlich gelten.",
-            "fi": "Selitä, milloin vuosien 2025–2026 siirtymä vanhojen BBR-sääntöjen ja uusien Boverket-määräysten välillä vaikuttaa johtopäätökseen. Kunnallisia vaatimuksia voi tulla lisää.",
-        },
-        "frameworks": [
-            {"framework": "EU Taxonomy DNSH", "status": "ready", "format": "XML", "note": "No local adaptation required for core taxonomy logic."},
-            {"framework": "SFDR PAI", "status": "ready", "format": "CSV / JSON", "note": "EU framework, same core fields as other EU markets."},
-            {"framework": "ECB Climate Stress Test", "status": "ready", "format": "JSON", "note": "Bank portfolio screening compatible."},
-            {"framework": "FI / Finansinspektionen", "status": "partial", "format": "PDF / JSON", "note": "Local supervisory wording should be confirmed per use case."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "MSB Översvämningsdatabas", "access": "Open WMS"},
-            {"hazard": "Landslide", "source": "SGI rasriskkartor", "access": "Open"},
-            {"hazard": "Elevation", "source": "Lantmäteriet höjdmodell", "access": "API / agreement"},
-            {"hazard": "Energy", "source": "Boverket Energideklaration", "access": "Open API"},
-        ],
-        "default_lang": "sv",
-    },
-    "DK": {
-        "label": "Danmark",
-        "currency": "DKK",
-        "vat": "25%",
-        "rule_set": "BR18 / EU Taxonomy / SFDR",
-        "jurisdiction_note": {
-            "da": "Brug BR18 og danske datakilder som hovedramme. Kommunale og lokale forhold kan påvirke vurderingen.",
-            "no": "Bruk BR18 og danske datakilder som hovedramme. Kommunale og lokale forhold kan påvirke vurderingen.",
-            "sv": "Använd BR18 och danska datakällor som huvudram. Kommunala och lokala förhållanden kan påverka bedömningen.",
-            "en-GB": "Use BR18 and Danish data sources as the baseline. Municipal and local conditions may affect the final assessment.",
-            "en-US": "Use BR18 and Danish data sources as the baseline. Municipal and local conditions may affect the final assessment.",
-            "de": "BR18 und dänische Datenquellen bilden die Grundlage. Kommunale und lokale Bedingungen können die Bewertung beeinflussen.",
-            "fi": "BR18 ja tanskalaiset tietolähteet muodostavat lähtökohdan. Kunnalliset ja paikalliset olosuhteet voivat vaikuttaa arvioon.",
-        },
-        "frameworks": [
-            {"framework": "EU Taxonomy DNSH", "status": "ready", "format": "XML", "note": "Same EU logic as Norway and Sweden."},
-            {"framework": "SFDR PAI", "status": "ready", "format": "CSV / JSON", "note": "Physical risk export for funds and reporting."},
-            {"framework": "ECB Climate Stress Test", "status": "ready", "format": "JSON", "note": "Bank screening compatible."},
-            {"framework": "Finanstilsynet Danmark", "status": "partial", "format": "PDF / JSON", "note": "Local wording can be added in market templates."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood / sea", "source": "DMI Klimaatlas", "access": "Open API"},
-            {"hazard": "Elevation", "source": "DHM / Kortforsyningen", "access": "Public services"},
-            {"hazard": "Geology", "source": "GEUS", "access": "Public"},
-            {"hazard": "Energy", "source": "Energistyrelsen Energimærke", "access": "API"},
-        ],
-        "default_lang": "da",
-    },
-    "FI": {
-        "label": "Finland",
-        "currency": "EUR",
-        "vat": "24%",
-        "rule_set": "RakMk / YM-asetukset / EU Taxonomy / SFDR",
-        "jurisdiction_note": {
-            "fi": "Suomessa julkisella sektorilla voi olla kaksikielisiä vaatimuksia (FI/SV). Käytä RakMk- ja YM-asetuksia lähtökohtana.",
-            "no": "I Finland kan det være krav om tospråklighet (FI/SV), særlig i offentlig sektor. Bruk RakMk og YM-asetukset som grunnlag.",
-            "sv": "I Finland kan tvåspråkiga krav (FI/SV) gälla, särskilt i offentlig sektor. Använd RakMk och YM-förordningar som utgångspunkt.",
-            "da": "I Finland kan der gælde tosprogede krav (FI/SV), især i den offentlige sektor. Brug RakMk og YM-forordninger som udgangspunkt.",
-            "en-GB": "Finland may require bilingual (FI/SV) outputs in parts of the public sector. Use RakMk and Ministry of the Environment regulations as the baseline.",
-            "en-US": "Finland may require bilingual (FI/SV) outputs in parts of the public sector. Use RakMk and Ministry of the Environment regulations as the baseline.",
-            "de": "In Finnland können zweisprachige Anforderungen (FI/SV) gelten, insbesondere im öffentlichen Sektor. RakMk und die Verordnungen des Umweltministeriums bilden die Grundlage.",
-        },
-        "frameworks": [
-            {"framework": "EU Taxonomy DNSH", "status": "ready", "format": "XML", "note": "Same EU logic as other EU markets."},
-            {"framework": "SFDR PAI", "status": "ready", "format": "CSV / JSON", "note": "Same EU logic as other EU markets."},
-            {"framework": "ECB Climate Stress Test", "status": "ready", "format": "JSON", "note": "Portfolio screening for banks."},
-            {"framework": "FIN-FSA / local reporting", "status": "partial", "format": "PDF / JSON", "note": "Local supervisory wording should be reviewed per use case."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "SYKE tulvakartat", "access": "Open WMS"},
-            {"hazard": "Property", "source": "KTJ / Maanmittauslaitos", "access": "API"},
-            {"hazard": "Energy", "source": "ARA energiatodistus", "access": "Search / API evolving"},
-        ],
-        "default_lang": "fi",
-    },
-    "UK": {
-        "label": "United Kingdom (England default)",
-        "currency": "GBP",
-        "vat": "20%",
-        "rule_set": "Building Regulations / Building Safety Act 2022 / FCA SDR",
-        "jurisdiction_note": {
-            "en-GB": "Default to England. Flag where Scotland, Wales or Northern Ireland may differ. Building Safety Act 2022 and post-Grenfell requirements can materially affect interpretation.",
-            "en-US": "Default to England. Flag where Scotland, Wales, or Northern Ireland may differ. Building Safety Act 2022 and post-Grenfell requirements can materially affect interpretation.",
-            "no": "Modulen bruker England som standard og flagger der Skottland, Wales eller Nord-Irland kan avvike. Building Safety Act 2022 etter Grenfell kan påvirke tolkningen vesentlig.",
-            "sv": "Modulen använder England som standard och flaggar när Skottland, Wales eller Nordirland kan avvika. Building Safety Act 2022 kan påverka slutsatsen väsentligt.",
-            "da": "Modulet bruger England som standard og markerer, hvor Skotland, Wales eller Nordirland kan afvige. Building Safety Act 2022 kan påvirke konklusionen væsentligt.",
-            "de": "Das Modul verwendet England als Standard und kennzeichnet, wenn Schottland, Wales oder Nordirland abweichen können. Der Building Safety Act 2022 kann die Bewertung wesentlich beeinflussen.",
-            "fi": "Moduuli käyttää Englantia oletuksena ja merkitsee tilanteet, joissa Skotlanti, Wales tai Pohjois-Irlanti voivat poiketa. Building Safety Act 2022 voi vaikuttaa arvioon olennaisesti.",
-        },
-        "frameworks": [
-            {"framework": "UK Green Taxonomy", "status": "partial", "format": "XML / note", "note": "Still under development; not a direct EU Taxonomy mirror."},
-            {"framework": "FCA SDR", "status": "ready", "format": "CSV / JSON", "note": "UK equivalent to SFDR-style sustainability disclosure."},
-            {"framework": "TCFD / PRA", "status": "ready", "format": "PDF / JSON", "note": "Large-company and financial-sector reporting context."},
-            {"framework": "Flood / planning", "status": "ready", "format": "PDF", "note": "Environment Agency flood planning outputs supported."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "Environment Agency Flood Map for Planning", "access": "Open API"},
-            {"hazard": "Elevation", "source": "OS Terrain 5 / 50", "access": "OS Data Hub"},
-            {"hazard": "Energy", "source": "EPC Open Data Communities", "access": "Open API"},
-        ],
-        "default_lang": "en-GB",
-    },
-    "DE": {
-        "label": "Deutschland",
-        "currency": "EUR",
-        "vat": "19%",
-        "rule_set": "Landesbauordnungen / BauGB / EU Taxonomy / SFDR",
-        "jurisdiction_note": {
-            "de": "Die anwendbare Landesbauordnung und die Praxis der zuständigen Behörde müssen bestätigt werden. Bayern oder NRW sind sinnvolle Pilotmärkte.",
-            "no": "Relevant Landesbauordnung og lokal myndighetspraksis må bekreftes. Bayern eller NRW er naturlige pilotmarkeder.",
-            "sv": "Tillämplig Landesbauordnung och lokal myndighetspraxis måste bekräftas. Bayern eller NRW är naturliga pilotmarknader.",
-            "da": "Relevant Landesbauordnung og lokal myndighedspraksis skal bekræftes. Bayern eller NRW er naturlige pilotmarkeder.",
-            "en-GB": "The applicable Landesbauordnung and local authority practice must be confirmed. Bavaria or NRW are sensible pilot states.",
-            "en-US": "The applicable Landesbauordnung and local authority practice must be confirmed. Bavaria or NRW are sensible pilot states.",
-            "fi": "Sovellettava Landesbauordnung ja paikallisen viranomaisen käytäntö on vahvistettava. Baijeri tai NRW ovat luontevia pilottialueita.",
-        },
-        "frameworks": [
-            {"framework": "EU Taxonomy DNSH", "status": "ready", "format": "XML", "note": "Same core EU logic; local supervisory context via BaFin."},
-            {"framework": "SFDR PAI", "status": "ready", "format": "CSV / JSON", "note": "Physical-risk outputs for EU fund reporting."},
-            {"framework": "ECB Climate Stress Test", "status": "ready", "format": "JSON", "note": "Portfolio screening compatible."},
-            {"framework": "BaFin context", "status": "partial", "format": "PDF / JSON", "note": "Local wording and state references should be reviewed."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "LAWA Hochwassergefahrenkarten", "access": "State portals / INSPIRE"},
-            {"hazard": "Elevation", "source": "BKG DGM", "access": "Geobasisdaten services"},
-            {"hazard": "Landslide", "source": "BGR geologische Gefahrenkarten", "access": "INSPIRE Geoportal"},
-            {"hazard": "Property", "source": "ALKIS (state-based)", "access": "State integration required"},
-        ],
-        "default_lang": "de",
-    },
-    "US": {
-        "label": "United States",
-        "currency": "USD",
-        "vat": "N/A",
-        "rule_set": "State & local adoption / SEC / Fed-OCC guidance",
-        "jurisdiction_note": {
-            "en-US": "There is no single national building-code or property-data baseline. State and local adoption can materially change the result. Start with California or New York as pilot jurisdictions.",
-            "en-GB": "There is no single national building-code or property-data baseline. State and local adoption can materially change the result. Start with California or New York as pilot jurisdictions.",
-            "no": "Det finnes ingen én nasjonal byggeregel- eller eiendomsdatabase. Delstatlig og lokal kodeadopsjon kan endre vurderingen betydelig. Start med California eller New York som pilot.",
-            "sv": "Det finns ingen enda nationell byggkod eller fastighetsdatabas. Delstatlig och lokal kodadoption kan ändra resultatet väsentligt. Börja med Kalifornien eller New York som pilot.",
-            "da": "Der findes ikke én national byggelov eller ejendomsdatabase. Delstatslig og lokal kodeadoption kan ændre vurderingen væsentligt. Start med Californien eller New York som pilot.",
-            "de": "Es gibt keine einheitliche nationale Bauordnung oder Eigentumsdatenbank. Staatliche und lokale Vorschriften können die Bewertung wesentlich verändern. California oder New York sind sinnvolle Pilotmärkte.",
-            "fi": "Yhtä kansallista rakennusmääräystä tai kiinteistötietokantaa ei ole. Osavaltio- ja paikallissäännöt voivat muuttaa tulosta olennaisesti. Aloita Kaliforniasta tai New Yorkista pilottina.",
-        },
-        "frameworks": [
-            {"framework": "SEC Climate Disclosure", "status": "partial", "format": "JSON / PDF", "note": "Federal climate-disclosure rules are evolving and partially challenged."},
-            {"framework": "Federal Reserve / OCC", "status": "ready", "format": "JSON", "note": "Physical-risk fields for banking workflows."},
-            {"framework": "FEMA / NFIP context", "status": "ready", "format": "PDF / JSON", "note": "Flood-zone classification tied to insurability and lending."},
-            {"framework": "State climate rules", "status": "partial", "format": "PDF / note", "note": "California and New York differ materially from other states."},
-        ],
-        "data_sources": [
-            {"hazard": "Flood", "source": "FEMA National Flood Hazard Layer (NFHL)", "access": "Open API"},
-            {"hazard": "Elevation", "source": "USGS 3DEP", "access": "Open API"},
-            {"hazard": "Landslide", "source": "USGS Landslide Hazard Program", "access": "Public / state supplements"},
-            {"hazard": "Energy", "source": "ENERGY STAR / LEED / state sources", "access": "Mixed"},
-        ],
-        "default_lang": "en-US",
-    },
-}
-
-SCENARIOS = ["RCP 4.5", "RCP 8.5"]
-HORIZONS = ["2030", "2050", "2100"]
-MARKET_OPTIONS = list(MARKETS.keys())
-LANG_OPTIONS = list(LANG_LABELS.keys())
-
-DISCLAIMER = {
-    "no": "Dette er et AI-generert dataprodukt. Det er ikke en faglig attestasjon og kan ikke brukes som grunnlag for byggesøknad eller juridisk bindende avtale.",
-    "sv": "Detta är en AI-genererad dataprodukt. Det är inte en fackmässig attestering och kan inte användas som underlag för bygglov eller juridiskt bindande avtal.",
-    "da": "Dette er et AI-genereret dataprodukt. Det er ikke en faglig attestering og kan ikke bruges som grundlag for byggesag eller juridisk bindende aftaler.",
-    "en-GB": "This is an AI-generated data product. It is not a professional attestation and cannot be used as the basis for statutory approval or legally binding commitments.",
-    "en-US": "This is an AI-generated data product. It is not a professional attestation and cannot be used as the basis for statutory approval or legally binding commitments.",
-    "de": "Dies ist ein KI-generiertes Datenprodukt. Es stellt keine fachliche Attestierung dar und kann nicht als Grundlage für behördliche Genehmigungen oder rechtlich bindende Verpflichtungen verwendet werden.",
-    "fi": "Tämä on tekoälyn tuottama datapohjainen tuote. Se ei ole ammatillinen todistus eikä sitä voi käyttää viranomaisluvan tai oikeudellisesti sitovien sitoumusten perusteena.",
-}
-
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-
-def tr(lang: str, key: str) -> str:
-    return LANG[lang][key]
+DB_DIR = Path("qa_database")
+FILES_DIR = DB_DIR / "project_files"
+SSOT_FILE = DB_DIR / "ssot.json"
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
+# ────────────────────────────────────────────────────────────────
+# 2. HELPERS
+# ────────────────────────────────────────────────────────────────
+def render_html(html: str) -> None:
+    st.markdown(html.replace("\n", " "), unsafe_allow_html=True)
+
+
+def logo_data_uri() -> str:
+    for candidate in ["logo-white.png", "logo.png"]:
+        if os.path.exists(candidate):
+            suffix = Path(candidate).suffix.lower().replace(".", "") or "png"
+            with open(candidate, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("utf-8")
+            return f"data:image/{suffix};base64,{encoded}"
+    return ""
+
+
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists():
+            return str(p)
+    return ""
+
+
+def clean_text(text: Any) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    replacements = {
+        "\u2013": "-", "\u2014": "-", "\u201c": '"', "\u201d": '"',
+        "\u2018": "'", "\u2019": "'", "\u2026": "...", "\u2022": "-",
+        "\u2264": "<=", "\u2265": ">=",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def clean_pdf_text(text: Any) -> str:
+    """Clean text for PDF output — strip markdown and encode to latin-1."""
+    t = clean_text(text)
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"\*(.+?)\*", r"\1", t)
+    t = re.sub(r"__(.+?)__", r"\1", t)
+    t = re.sub(r"_(.+?)_", r"\1", t)
+    t = re.sub(r"^#{1,4}\s*", "", t, flags=re.MULTILINE)
+    t = re.sub(r"\|", " ", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.encode("latin-1", "replace").decode("latin-1").strip()
+
+
+def _find_logo() -> Optional[str]:
+    """Find the logo file in likely locations."""
+    for candidate in ["logo.png", "logo-white.png"]:
+        for base in [Path("."), DB_DIR.parent]:
+            p = base / candidate
+            if p.exists():
+                return str(p)
+    return None
+
+
+def safe_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Safely get a value from a dict-like object; returns default for non-dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+
+def nb_value(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        txt = f"{value:.1f}" if abs(value) >= 10 else f"{value:.2f}".rstrip("0").rstrip(".")
+        return txt.replace(".", ",")
+    return str(value)
+
+
+def list_to_dataframe(items: Any, columns: List[str]) -> pd.DataFrame:
+    """Turn a list-of-dicts (or similar) into a tidy DataFrame."""
+    if not items:
+        return pd.DataFrame(columns=columns)
+    if isinstance(items, list):
+        rows = []
+        for item in items:
+            if isinstance(item, dict):
+                rows.append({c: item.get(c, "") for c in columns})
+            elif isinstance(item, (list, tuple)):
+                row = {}
+                for i, c in enumerate(columns):
+                    row[c] = item[i] if i < len(item) else ""
+                rows.append(row)
+        return pd.DataFrame(rows, columns=columns)
+    return pd.DataFrame(columns=columns)
+
+
+def extract_json_blob(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```json", "", cleaned, flags=re.I).strip()
+    cleaned = re.sub(r"^```", "", cleaned).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+    first = cleaned.find("{")
+    last = cleaned.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        cleaned = cleaned[first: last + 1]
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    return cleaned
+
+
+def safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
+    blob = extract_json_blob(text)
+    if not blob:
+        return None
     try:
-        if value in (None, "", "-"):
-            return default
-        return float(value)
+        return json.loads(blob)
     except Exception:
-        return default
+        try:
+            repaired = blob.replace("\t", " ").replace("\r", " ")
+            repaired = re.sub(r"(?<!\\)'", '"', repaired)
+            repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+            return json.loads(repaired)
+        except Exception:
+            return None
 
 
-def risk_band(score: float) -> str:
-    if score >= 4.0:
-        return "High"
-    if score >= 3.0:
-        return "Elevated"
-    if score >= 2.0:
-        return "Moderate"
-    return "Low"
+# ────────────────────────────────────────────────────────────────
+# 3. PREMIUM CSS — same design language as Konstruksjon (RIB)
+# ────────────────────────────────────────────────────────────────
+st.markdown(
+    """
+<style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
 
-
-def localized_risk_band(score: float, lang: str) -> str:
-    band = risk_band(score)
-    labels = {
-        "no": {"High": "Høy", "Elevated": "Forhøyet", "Moderate": "Moderat", "Low": "Lav"},
-        "sv": {"High": "Hög", "Elevated": "Förhöjd", "Moderate": "Måttlig", "Low": "Låg"},
-        "da": {"High": "Høj", "Elevated": "Forhøjet", "Moderate": "Moderat", "Low": "Lav"},
-        "en-GB": {"High": "High", "Elevated": "Elevated", "Moderate": "Moderate", "Low": "Low"},
-        "en-US": {"High": "High", "Elevated": "Elevated", "Moderate": "Moderate", "Low": "Low"},
-        "de": {"High": "Hoch", "Elevated": "Erhöht", "Moderate": "Moderat", "Low": "Niedrig"},
-        "fi": {"High": "Korkea", "Elevated": "Kohonnut", "Moderate": "Kohtalainen", "Low": "Matala"},
+    :root {
+        --bg: #06111a;
+        --panel: rgba(10, 22, 35, 0.78);
+        --stroke: rgba(120, 145, 170, 0.18);
+        --text: #f5f7fb;
+        --muted: #9fb0c3;
+        --soft: #c8d3df;
+        --accent: #38bdf8;
+        --accent-warm: #f59e0b;
+        --radius-lg: 16px;
+        --radius-xl: 24px;
     }
-    return labels.get(lang, labels["en-GB"])[band]
-
-
-def format_money(value: float, currency: str) -> str:
-    return f"{currency} {value:,.0f}".replace(",", " ")
-
-
-def pick_soil_code(raw: str) -> str:
-    raw = (raw or "").strip().lower()
-    mapping = {
-        "morene": "morene", "morän": "morene", "moræne": "morene", "moraine": "morene", "moräne": "morene", "moreeni": "morene",
-        "leire": "clay", "lera": "clay", "ler": "clay", "clay": "clay", "lehm": "clay", "savi": "clay",
-        "berg": "rock", "bedrock": "rock", "fels": "rock", "kallio": "rock",
-        "marine avsetninger": "marine", "marine sediment": "marine", "marine sediments": "marine", "marina sediment": "marine", "marine aflejringer": "marine", "meri­sedimentti": "marine",
-        "fyllmasser": "fill", "fyllnadsmassor": "fill", "fyldmasser": "fill", "made ground": "fill", "auffüllung": "fill", "täyttömaa": "fill",
+    html, body, [class*="css"] {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
     }
-    return mapping.get(raw, "morene")
+    .stApp {
+        background-color: var(--bg) !important;
+        color: var(--text);
+    }
+    header[data-testid="stHeader"] {
+        visibility: hidden;
+        height: 0;
+    }
+    .block-container {
+        max-width: 1280px !important;
+        padding-top: 1.5rem !important;
+        padding-bottom: 4rem !important;
+    }
+    .brand-logo {
+        height: 65px;
+        filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
+    }
+
+    /* Buttons */
+    button[kind="primary"],
+    .stFormSubmitButton > button {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important;
+        border: none !important;
+        font-weight: 750 !important;
+        border-radius: 12px !important;
+        padding: 12px 24px !important;
+        font-size: 1.05rem !important;
+        transition: all 0.2s ease !important;
+    }
+    button[kind="primary"]:hover,
+    .stFormSubmitButton > button:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important;
+    }
+    button[kind="secondary"] {
+        background-color: rgba(255,255,255,0.05) !important;
+        color: #f8fafc !important;
+        border: 1px solid rgba(120,145,170,0.3) !important;
+        border-radius: 12px !important;
+        font-weight: 650 !important;
+        padding: 10px 24px !important;
+        transition: all 0.2s !important;
+    }
+    button[kind="secondary"]:hover {
+        background-color: rgba(56,194,201,0.1) !important;
+        border-color: var(--accent) !important;
+        color: var(--accent) !important;
+        transform: translateY(-2px) !important;
+    }
+
+    /* Inputs – dark backgrounds with light text */
+    div[data-baseweb="base-input"],
+    div[data-baseweb="select"] > div,
+    .stTextArea > div > div > div {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 8px !important;
+    }
+    .stTextInput input,
+    .stNumberInput input,
+    .stTextArea textarea,
+    div[data-baseweb="select"] * {
+        background-color: transparent !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border: none !important;
+        box-shadow: none !important;
+    }
+    .stTextInput input:focus,
+    .stNumberInput input:focus,
+    .stTextArea textarea:focus {
+        border: none !important;
+    }
+    div[data-baseweb="base-input"]:focus-within,
+    div[data-baseweb="select"] > div:focus-within,
+    .stTextArea > div > div > div:focus-within {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
+    }
+
+    /* Dropdowns / menus */
+    ul[data-baseweb="menu"] {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+    }
+    ul[data-baseweb="menu"] li {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+    ul[data-baseweb="menu"] li:hover {
+        background-color: rgba(56, 194, 201, 0.1) !important;
+    }
+
+    /* Input hint text */
+    div[data-testid="InputInstructions"],
+    div[data-testid="InputInstructions"] > span {
+        color: #9fb0c3 !important;
+        -webkit-text-fill-color: #9fb0c3 !important;
+    }
+
+    /* Labels */
+    .stTextInput label,
+    .stSelectbox label,
+    .stNumberInput label,
+    .stTextArea label,
+    .stFileUploader label,
+    .stMultiSelect label,
+    .stSlider label,
+    .stCheckbox label,
+    .stRadio label {
+        color: #c8d3df !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+        margin-bottom: 4px !important;
+    }
+
+    /* Slider – ensure value text is visible */
+    .stSlider div[data-baseweb="slider"] div {
+        color: #ffffff !important;
+    }
+    div[data-testid="stThumbValue"],
+    .stSlider [data-testid="stTickBarMin"],
+    .stSlider [data-testid="stTickBarMax"] {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+
+    /* Toggle / checkbox text */
+    .stCheckbox span,
+    .stToggle span,
+    label[data-baseweb="checkbox"] span {
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+    }
+
+    /* Multiselect tags */
+    span[data-baseweb="tag"] {
+        background-color: rgba(56, 194, 201, 0.15) !important;
+        color: #38bdf8 !important;
+        border: 1px solid rgba(56, 194, 201, 0.4) !important;
+        border-radius: 6px !important;
+    }
+    span[data-baseweb="tag"] span {
+        color: #38bdf8 !important;
+        -webkit-text-fill-color: #38bdf8 !important;
+    }
+
+    /* Expanders */
+    div[data-testid="stExpander"] details,
+    div[data-testid="stExpander"] details summary,
+    div[data-testid="stExpander"] {
+        background-color: #0c1520 !important;
+        color: #f5f7fb !important;
+        border-radius: 12px !important;
+    }
+    div[data-testid="stExpander"] details summary:hover {
+        background-color: rgba(255,255,255,0.03) !important;
+    }
+    div[data-testid="stExpander"] details summary p {
+        color: #f5f7fb !important;
+        font-weight: 650 !important;
+    }
+    div[data-testid="stExpander"] {
+        border: 1px solid rgba(120,145,170,0.2) !important;
+        margin-bottom: 1rem !important;
+    }
+    div[data-testid="stExpanderDetails"] {
+        background: transparent !important;
+        color: #f5f7fb !important;
+    }
+
+    /* File uploader */
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: #0d1824 !important;
+        border: 1px dashed rgba(120, 145, 170, 0.6) !important;
+        border-radius: 12px !important;
+        padding: 2rem !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        border-color: #38c2c9 !important;
+        background-color: rgba(56, 194, 201, 0.05) !important;
+    }
+    [data-testid="stFileUploaderDropzone"] * {
+        color: #c8d3df !important;
+    }
+    [data-testid="stFileUploaderFileData"] {
+        background-color: rgba(255,255,255,0.02) !important;
+        color: #f5f7fb !important;
+        border-radius: 8px !important;
+    }
+
+    /* Alerts */
+    [data-testid="stAlert"] {
+        background-color: rgba(56, 194, 201, 0.05) !important;
+        border: 1px solid rgba(56, 194, 201, 0.2) !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stAlert"] * {
+        color: #f5f7fb !important;
+    }
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        background-color: rgba(10, 22, 35, 0.5);
+        border-radius: 12px;
+        padding: 4px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: transparent !important;
+        color: #9fb0c3 !important;
+        border-radius: 8px !important;
+        padding: 8px 16px !important;
+        font-weight: 600 !important;
+        border: none !important;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: rgba(56, 194, 201, 0.08) !important;
+        color: #f5f7fb !important;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: rgba(56, 194, 201, 0.15) !important;
+        color: #38bdf8 !important;
+    }
+    .stTabs [data-baseweb="tab-highlight"] {
+        background-color: #38bdf8 !important;
+    }
+    .stTabs [data-baseweb="tab-border"] {
+        display: none !important;
+    }
+
+    /* DataFrames */
+    .stDataFrame, [data-testid="stDataFrame"] {
+        border: 1px solid rgba(120,145,170,0.2) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+    }
+
+    /* Metric cards */
+    [data-testid="stMetric"],
+    [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"],
+    [data-testid="stMetricDelta"] {
+        color: #f5f7fb !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 2rem !important;
+        font-weight: 800 !important;
+    }
+
+    /* Form */
+    [data-testid="stForm"] {
+        background-color: rgba(10, 22, 35, 0.5) !important;
+        border: 1px solid rgba(120,145,170,0.2) !important;
+        border-radius: 16px !important;
+        padding: 1.5rem !important;
+    }
+
+    /* Select slider text */
+    .stSelectSlider div[data-baseweb="slider"] div {
+        color: #ffffff !important;
+    }
+
+    /* Download buttons */
+    .stDownloadButton > button {
+        background-color: rgba(255,255,255,0.04) !important;
+        color: #c8d3df !important;
+        border: 1px solid rgba(120,145,170,0.25) !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s !important;
+    }
+    .stDownloadButton > button:hover {
+        background-color: rgba(56,194,201,0.08) !important;
+        border-color: #38bdf8 !important;
+        color: #38bdf8 !important;
+    }
+
+    /* Number input +/- buttons */
+    .stNumberInput button {
+        color: #c8d3df !important;
+        background-color: rgba(255,255,255,0.05) !important;
+        border-color: rgba(120,145,170,0.3) !important;
+    }
+
+    /* Fix markdown text color globally */
+    .stMarkdown, .stMarkdown p, .stMarkdown li,
+    .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4 {
+        color: #f5f7fb !important;
+    }
+    .stMarkdown code {
+        color: #38bdf8 !important;
+        background-color: rgba(56,194,201,0.1) !important;
+    }
+
+    /* Caption text */
+    .stCaption, small {
+        color: #9fb0c3 !important;
+    }
+
+    /* Hero section */
+    .hero-card {
+        background: linear-gradient(135deg, rgba(10,22,35,0.95), rgba(16,32,50,0.95));
+        border: 1px solid rgba(120,145,170,0.15);
+        border-radius: 20px;
+        padding: 2.5rem 2.8rem 2rem;
+        margin-bottom: 2rem;
+    }
+    .hero-eyebrow {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #38bdf8;
+        margin-bottom: 0.4rem;
+    }
+    .hero-title {
+        font-size: 1.85rem;
+        font-weight: 800;
+        line-height: 1.2;
+        color: #f5f7fb;
+        margin-bottom: 0.75rem;
+    }
+    .hero-subtitle {
+        font-size: 0.98rem;
+        color: #9fb0c3;
+        line-height: 1.6;
+        max-width: 750px;
+    }
+    .hero-pills {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 1.1rem;
+    }
+    .hero-pill {
+        background: rgba(56, 194, 201, 0.08);
+        border: 1px solid rgba(56, 194, 201, 0.25);
+        border-radius: 20px;
+        padding: 4px 14px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #38bdf8;
+    }
+    .hero-badge {
+        display: inline-block;
+        background: rgba(245,158,11,0.12);
+        border: 1px solid rgba(245,158,11,0.35);
+        border-radius: 6px;
+        padding: 2px 10px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        color: #f59e0b;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-top: 1rem;
+    }
+
+    /* Metric card custom */
+    .metric-row {
+        display: flex;
+        gap: 16px;
+        margin-bottom: 1.5rem;
+    }
+    .metric-card {
+        flex: 1;
+        background: rgba(10, 22, 35, 0.6);
+        border: 1px solid rgba(120,145,170,0.18);
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem;
+    }
+    .metric-card .mc-value {
+        font-size: 1.6rem;
+        font-weight: 800;
+        color: #38bdf8;
+        margin-bottom: 2px;
+    }
+    .metric-card .mc-label {
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #c8d3df;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 4px;
+    }
+    .metric-card .mc-desc {
+        font-size: 0.78rem;
+        color: #9fb0c3;
+        line-height: 1.4;
+    }
+
+    /* Section title */
+    .section-header {
+        margin-top: 2.5rem;
+        margin-bottom: 1rem;
+    }
+    .section-header h3 {
+        color: #f5f7fb !important;
+        font-weight: 750 !important;
+        font-size: 1.2rem !important;
+        margin-bottom: 4px !important;
+    }
+    .section-header p {
+        color: #9fb0c3 !important;
+        font-size: 0.9rem !important;
+    }
+    .section-badge {
+        display: inline-block;
+        background: rgba(56,194,201,0.1);
+        border: 1px solid rgba(56,194,201,0.25);
+        border-radius: 6px;
+        padding: 1px 8px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        color: #38bdf8;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 4px;
+    }
+
+    /* Disclaimer banner */
+    .disclaimer-banner {
+        background: rgba(245, 158, 11, 0.06);
+        border: 1px solid rgba(245,158,11,0.25);
+        border-radius: 12px;
+        padding: 0.9rem 1.3rem;
+        margin-bottom: 1.5rem;
+    }
+    .disclaimer-banner .db-title {
+        font-size: 0.88rem;
+        font-weight: 700;
+        color: #f59e0b;
+    }
+    .disclaimer-banner .db-text {
+        font-size: 0.82rem;
+        color: #c8a94e;
+        margin-top: 2px;
+    }
+
+    /* Panel box */
+    .panel-box {
+        background: rgba(10, 22, 35, 0.5);
+        border: 1px solid rgba(120,145,170,0.15);
+        border-radius: 16px;
+        padding: 1.5rem 1.8rem;
+        margin-top: 2rem;
+        margin-bottom: 1.5rem;
+    }
+    .panel-box.gold {
+        border-color: rgba(245,158,11,0.25);
+        background: rgba(245,158,11,0.03);
+    }
+    .panel-box h4 {
+        color: #f5f7fb !important;
+        font-weight: 750 !important;
+        margin-bottom: 0.4rem !important;
+    }
+    .panel-box p, .panel-box li {
+        color: #9fb0c3 !important;
+        font-size: 0.9rem !important;
+    }
+
+    /* Snapshot card */
+    .snapshot-card {
+        background: rgba(10, 22, 35, 0.6);
+        border: 1px solid rgba(120,145,170,0.18);
+        border-radius: 14px;
+        padding: 1.2rem 1.4rem;
+        margin-bottom: 1rem;
+    }
+    .snapshot-card .sc-badge {
+        display: inline-block;
+        background: rgba(56,194,201,0.1);
+        border: 1px solid rgba(56,194,201,0.2);
+        border-radius: 5px;
+        padding: 1px 8px;
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: #38bdf8;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 6px;
+    }
+    .snapshot-card .sc-name {
+        font-size: 1.05rem;
+        font-weight: 750;
+        color: #f5f7fb;
+        margin-bottom: 3px;
+    }
+    .snapshot-card .sc-row {
+        font-size: 0.82rem;
+        color: #9fb0c3;
+        margin-bottom: 1px;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
-def soil_modifier(soil_code: str) -> float:
-    return {"clay": 0.7, "marine": 0.8, "fill": 0.5, "morene": 0.1, "rock": -0.3}.get(soil_code, 0.0)
+# ────────────────────────────────────────────────────────────────
+# 4. SESSION STATE / PROJECT DATA
+# ────────────────────────────────────────────────────────────────
+DEFAULT_PROJECT = {
+    "p_name": "", "c_name": "", "p_desc": "", "adresse": "",
+    "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring / Kontor",
+    "etasjer": 1, "bta": 0, "land": "Norge",
+}
+
+if "project_data" not in st.session_state or not st.session_state.project_data.get("p_name"):
+    if SSOT_FILE.exists():
+        try:
+            with open(SSOT_FILE, "r", encoding="utf-8") as f:
+                st.session_state.project_data = json.load(f)
+        except Exception:
+            st.session_state.project_data = DEFAULT_PROJECT.copy()
+    else:
+        st.session_state.project_data = DEFAULT_PROJECT.copy()
+
+pd_state = st.session_state.project_data
 
 
-def market_multiplier(market: str) -> Dict[str, float]:
-    # Subtle default calibration by market; internal calculations still follow shared model.
-    if market == "DK":
-        return {"flood": 1.05, "sea": 1.15, "landslide": 0.90, "heat": 1.00}
-    if market == "SE":
-        return {"flood": 1.00, "sea": 1.00, "landslide": 1.05, "heat": 1.00}
-    if market == "FI":
-        return {"flood": 1.00, "sea": 0.95, "landslide": 1.00, "heat": 0.95}
-    if market == "UK":
-        return {"flood": 1.10, "sea": 1.10, "landslide": 0.95, "heat": 1.00}
-    if market == "DE":
-        return {"flood": 1.05, "sea": 0.90, "landslide": 1.00, "heat": 1.00}
-    if market == "US":
-        return {"flood": 1.10, "sea": 1.05, "landslide": 1.00, "heat": 1.10}
-    return {"flood": 1.0, "sea": 1.0, "landslide": 1.0, "heat": 1.0}
+# ────────────────────────────────────────────────────────────────
+# 5. AI BACKEND
+# ────────────────────────────────────────────────────────────────
+google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+HAS_GEMINI = bool(google_key and genai is not None)
+HAS_OPENAI = bool(openai_key and OpenAI is not None)
+
+if HAS_GEMINI:
+    try:
+        genai.configure(api_key=google_key)
+    except Exception:
+        HAS_GEMINI = False
+
+HAS_AI = HAS_GEMINI or HAS_OPENAI
+_OAI_CLIENT = None
 
 
-def compute_scores(asset: Dict[str, Any], market: str, weights: Dict[str, float]) -> Dict[str, Any]:
-    elevation_m = safe_float(asset.get("elevation_m"), 12.0)
-    distance_coast_km = safe_float(asset.get("distance_coast_km"), 2.0)
-    distance_river_km = safe_float(asset.get("distance_river_km"), 0.8)
-    slope_deg = safe_float(asset.get("slope_deg"), 6.0)
-    heat_index = safe_float(asset.get("heat_index"), 5.0)
-    basement = bool(asset.get("has_basement"))
-    flood_zone = bool(asset.get("flood_zone"))
-    landslide_zone = bool(asset.get("landslide_zone"))
-    scenario = str(asset.get("scenario", "RCP 4.5"))
-    horizon = str(asset.get("horizon", "2050"))
-    asset_value = safe_float(asset.get("asset_value"), 50_000_000)
-    soil_code = pick_soil_code(str(asset.get("soil_type", "Morene")))
-    mult = market_multiplier(market)
+def _get_openai():
+    global _OAI_CLIENT
+    if _OAI_CLIENT is None and HAS_OPENAI and OpenAI is not None:
+        try:
+            _OAI_CLIENT = OpenAI(api_key=openai_key)
+        except Exception:
+            pass
+    return _OAI_CLIENT
 
-    flood_score = 1.6 + (2.6 if flood_zone else 0.0) + max(0.0, 0.75 - distance_river_km) * 1.9
-    flood_score += 0.25 if basement else 0.0
-    flood_score -= elevation_m / 140.0
-    flood_score *= mult["flood"]
 
-    landslide_score = 1.4 + (2.4 if landslide_zone else 0.0) + slope_deg / 20.0 + soil_modifier(soil_code)
-    landslide_score *= mult["landslide"]
+def generate_text_ai(prompt: str, temperature: float = 0.15) -> str:
+    """Call available AI backend with a text prompt; returns raw text."""
+    if HAS_OPENAI:
+        client = _get_openai()
+        if client:
+            try:
+                model_name = clean_text(
+                    os.environ.get("OPENAI_MODEL") or "gpt-4.1-mini"
+                ).strip() or "gpt-4.1-mini"
+                resp = client.responses.create(
+                    model=model_name,
+                    input=[{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+                    temperature=temperature,
+                )
+                return clean_text(getattr(resp, "output_text", "")).strip()
+            except Exception:
+                pass
 
-    climate_modifier = 0.35 if "8.5" in scenario else 0.10
-    horizon_modifier = 0.35 if horizon == "2100" else 0.18 if horizon == "2050" else 0.05
+    if HAS_GEMINI and genai is not None:
+        try:
+            models = [m.name for m in genai.list_models() if "generateContent" in getattr(m, "supported_generation_methods", [])]
+            model_name = models[0] if models else "models/gemini-1.5-flash"
+            model = genai.GenerativeModel(model_name)
+            resp = model.generate_content(prompt, generation_config={"temperature": temperature})
+            return clean_text(getattr(resp, "text", "")).strip()
+        except Exception:
+            pass
 
-    sea_score = 4.15 - elevation_m / 21.0 - distance_coast_km / 2.0 + climate_modifier
-    sea_score += 0.20 if basement else 0.0
-    sea_score *= mult["sea"]
+    return ""
 
-    heat_score = 1.3 + heat_index / 2.0 + horizon_modifier
-    heat_score *= mult["heat"]
 
-    flood_score = max(1.0, min(5.0, round(flood_score, 2)))
-    landslide_score = max(1.0, min(5.0, round(landslide_score, 2)))
-    sea_score = max(1.0, min(5.0, round(sea_score, 2)))
-    heat_score = max(1.0, min(5.0, round(heat_score, 2)))
+# ────────────────────────────────────────────────────────────────
+# 6. DOCUMENT HANDLING
+# ────────────────────────────────────────────────────────────────
+TENDER_FILE_CATEGORIES = {
+    "konkurransegrunnlag": ["konkurransegrunnlag", "contest", "tender doc", "utlysning"],
+    "beskrivelse": ["beskrivelse", "specification", "spesifikasjon", "kravspec"],
+    "tegning": ["tegning", "drawing", "plan", "snitt", "fasade", "dwg"],
+    "kontrakt": ["kontrakt", "contract", "avtale", "agreement"],
+    "tilbud": ["tilbud", "offer", "bid", "pris", "price"],
+    "bok": ["bok", "book", "mengde", "quantity"],
+    "sha": ["sha", "hms", "safety", "sikkerhet"],
+    "miljo": ["miljo", "environment", "breeam", "ceequal"],
+    "rigg": ["rigg", "logistikk", "rigging", "logistics"],
+    "ifc": [".ifc"],
+    "annet": [],
+}
 
-    total_weight = sum(weights.values()) or 1.0
-    agg = (
-        flood_score * weights["flood"]
-        + landslide_score * weights["landslide"]
-        + sea_score * weights["sea"]
-        + heat_score * weights["heat"]
-    ) / total_weight
 
-    completeness_fields = [asset.get("address") or asset.get("lat"), asset.get("municipality") or asset.get("region"), asset.get("asset_class"), asset.get("asset_value")]
-    completeness = sum(1 for v in completeness_fields if v not in (None, "", 0)) / len(completeness_fields)
-    uncertainty = round(max(0.20, 1.10 - completeness * 0.35 - (0.15 if flood_zone else 0.0) - (0.10 if landslide_zone else 0.0)), 2)
+def classify_file(name: str) -> str:
+    low = name.lower()
+    for cat, keywords in TENDER_FILE_CATEGORIES.items():
+        if any(kw in low for kw in keywords):
+            return cat
+    return "annet"
 
-    damage_cost = round(asset_value * (agg / 5.0) * (0.030 + (0.010 if flood_zone else 0.0) + (0.005 if basement else 0.0)), 0)
-    top_factor = max(
-        [("flood", flood_score), ("landslide", landslide_score), ("sea_level", sea_score), ("heat_stress", heat_score)],
-        key=lambda x: x[1],
-    )[0]
+
+def normalize_uploaded_files(files) -> List[Dict[str, Any]]:
+    """Turn uploaded files into flat manifest records."""
+    records = []
+    if not files:
+        return records
+    for f in files:
+        name = getattr(f, "name", "ukjent_fil")
+        size = getattr(f, "size", 0)
+        records.append({
+            "filename": name,
+            "category": classify_file(name),
+            "extension": Path(name).suffix.lower(),
+            "size_kb": round(size / 1024, 1) if size else 0,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+    return records
+
+
+def load_project_files() -> List[Dict[str, Any]]:
+    """Load files saved in Project Setup (qa_database/project_files/)."""
+    records = []
+    if not FILES_DIR.exists():
+        return records
+    for p in sorted(FILES_DIR.iterdir()):
+        if p.is_file():
+            records.append({
+                "filename": p.name,
+                "category": classify_file(p.name),
+                "extension": p.suffix.lower(),
+                "size_kb": round(p.stat().st_size / 1024, 1),
+                "timestamp": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "source": "Project Setup",
+            })
+    return records
+
+
+def expected_categories(procurement_mode: str, packages: List[str]) -> List[str]:
+    base = ["konkurransegrunnlag", "beskrivelse", "tegning"]
+    if procurement_mode in ["Totalentreprise", "Design & Build"]:
+        base.append("kontrakt")
+    if len(packages) > 3:
+        base.append("bok")
+    base.extend(["sha", "miljo"])
+    return base
+
+
+# ────────────────────────────────────────────────────────────────
+# 7. RULES-BASED TENDER ANALYSIS
+# ────────────────────────────────────────────────────────────────
+SEVERITY_MAP = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def build_tender_rules(
+    records: List[Dict[str, Any]],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Heuristic analysis based on uploaded document manifest and config.
+    Returns checklist items, risk items, RFI suggestions, etc.
+    """
+    procurement_mode = config.get("procurement_mode", "Totalentreprise")
+    discipline_focus = config.get("discipline_focus", [])
+    packages = config.get("packages", [])
+    qa_level = config.get("qa_level", "Standard")
+    bid_value = config.get("bid_value_mnok", 100)
+    notes = config.get("notes", "")
+    include_bid = config.get("include_bid_documents", True)
+
+    found_cats = set(r["category"] for r in records)
+    expected = expected_categories(procurement_mode, packages)
+    missing = [c for c in expected if c not in found_cats]
+
+    # Data completeness score
+    total_expected = max(len(expected), 1)
+    completeness = max(0.0, min(1.0, (total_expected - len(missing)) / total_expected))
+
+    # Checklist items
+    checklist: List[Dict[str, Any]] = []
+    for cat in expected:
+        status = "OK" if cat in found_cats else "MANGLER"
+        severity = "HIGH" if status == "MANGLER" and cat in ["konkurransegrunnlag", "beskrivelse", "tegning"] else "MEDIUM" if status == "MANGLER" else "LOW"
+        checklist.append({
+            "topic": f"Dokumentkategori: {cat}",
+            "status": status,
+            "severity": severity,
+            "paragraph_ref": "-",
+            "reason": f"{'Funnet i opplastede dokumenter' if status == 'OK' else 'Ikke funnet blant opplastede filer – bør kontrolleres'}.",
+            "source": "Regelmotor",
+        })
+
+    # Discipline-specific checks
+    for disc in discipline_focus:
+        found = any(disc.lower() in r["filename"].lower() for r in records)
+        checklist.append({
+            "topic": f"Fagdokumenter: {disc}",
+            "status": "OK" if found else "ADVARSEL",
+            "severity": "MEDIUM" if not found else "LOW",
+            "paragraph_ref": "-",
+            "reason": f"{'Fag-fil funnet' if found else 'Ingen fil med referanse til ' + disc + ' funnet'}.",
+            "source": "Regelmotor",
+        })
+
+    # Package coverage
+    for pkg in packages:
+        found = any(pkg.lower() in r["filename"].lower() for r in records)
+        checklist.append({
+            "topic": f"Pakkedekning: {pkg}",
+            "status": "OK" if found else "ADVARSEL",
+            "severity": "MEDIUM" if not found else "LOW",
+            "paragraph_ref": "-",
+            "reason": f"{'Dekket' if found else 'Ingen fil refererer til pakke ' + pkg}.",
+            "source": "Regelmotor",
+        })
+
+    if not include_bid:
+        checklist.append({
+            "topic": "Tilbudsdokumenter",
+            "status": "MANGLER",
+            "severity": "HIGH",
+            "paragraph_ref": "-",
+            "reason": "Tilbudsdokumenter er ikke markert som opplastet – begrenset kontroll mulig.",
+            "source": "Regelmotor",
+        })
+
+    # Risk items
+    risk_items: List[Dict[str, Any]] = []
+    if len(missing) > 2:
+        risk_items.append({
+            "title": "Ufullstendig dokumentgrunnlag",
+            "severity": "HIGH",
+            "impact": "Risiko for at sentrale krav eller forutsetninger ikke fanges opp i tilbudet.",
+            "recommendation": "Etterspor manglende dokumentkategorier for innlevering.",
+            "source": "Regelmotor",
+            "paragraph_ref": "-",
+        })
+    if bid_value > 200:
+        risk_items.append({
+            "title": "Hoy tilbudsverdi krever utvidet kontroll",
+            "severity": "HIGH",
+            "impact": f"Tilbudsverdi {nb_value(bid_value)} MNOK overstiger 200 MNOK – anbefaler forsterket kontrollregime.",
+            "recommendation": "Vurder pre-bid review med uavhengig tredjepart.",
+            "source": "Regelmotor",
+            "paragraph_ref": "-",
+        })
+    if "sha" in missing:
+        risk_items.append({
+            "title": "SHA-dokumentasjon mangler",
+            "severity": "HIGH",
+            "impact": "Byggherreforskriften krever SHA-plan. Manglende SHA kan gi sanksjon.",
+            "recommendation": "Etterspor SHA-plan og risikovurdering for utforelsefasen.",
+            "source": "Regelmotor",
+            "paragraph_ref": "-",
+        })
+    for disc in discipline_focus:
+        if not any(disc.lower() in r["filename"].lower() for r in records):
+            risk_items.append({
+                "title": f"Manglende {disc}-dokumentasjon",
+                "severity": "MEDIUM",
+                "impact": f"Fag {disc} er prioritert men ingen dokumenter refererer til det.",
+                "recommendation": f"Be om {disc}-underlag eller avklar scope.",
+                "source": "Regelmotor",
+                "paragraph_ref": "-",
+            })
+
+    # Interface risks from notes
+    if "grensesnitt" in notes.lower():
+        risk_items.append({
+            "title": "Grensesnittrisiko identifisert",
+            "severity": "MEDIUM",
+            "impact": "Prosjektspesifikke grensesnitt krever sarskilt oppfolging mellom pakker.",
+            "recommendation": "Lag grensesnittmatrise og avklar eierskap/ansvar for delingslinjer.",
+            "source": "Prosjektnotat",
+            "paragraph_ref": "-",
+        })
+
+    # RFI suggestions
+    rfi_suggestions: List[Dict[str, Any]] = []
+    for cat in missing[:5]:
+        rfi_suggestions.append({
+            "priority": "Hoy" if cat in ["konkurransegrunnlag", "beskrivelse", "tegning"] else "Middels",
+            "question": f"Dokumentkategori '{cat}' er ikke funnet i konkurransegrunnlaget. Kan dette ettersendes eller avklares?",
+            "why": f"Kategorien '{cat}' er forventet for {procurement_mode} og mangler i underlaget.",
+            "owner": "Byggherre / tilbyder",
+        })
+    if bid_value > 100:
+        rfi_suggestions.append({
+            "priority": "Middels",
+            "question": "Kan det bekreftes at alle mengder er endelige, eller skal tilbyder kalkulere egne mengder?",
+            "why": "Ved hoy tilbudsverdi er mengderisiko vesentlig.",
+            "owner": "Byggherre",
+        })
+
+    # Contract fields (summary)
+    contract_fields = [
+        {"field": "Anskaffelsesform", "value": procurement_mode, "source": "Konfigurasjon"},
+        {"field": "Pakker", "value": ", ".join(packages), "source": "Konfigurasjon"},
+        {"field": "Estimert verdi", "value": f"{nb_value(bid_value)} MNOK", "source": "Konfigurasjon"},
+        {"field": "Kontrolldybde", "value": qa_level, "source": "Konfigurasjon"},
+        {"field": "Prioriterte fag", "value": ", ".join(discipline_focus), "source": "Konfigurasjon"},
+        {"field": "Antall dokumenter", "value": str(len(records)), "source": "Opplasting"},
+        {"field": "Manglende kategorier", "value": ", ".join(missing) if missing else "Ingen", "source": "Regelmotor"},
+    ]
 
     return {
-        "flood_score": flood_score,
-        "landslide_score": landslide_score,
-        "sea_level_score": sea_score,
-        "heat_stress_score": heat_score,
-        "aggregate_score": round(agg, 2),
-        "uncertainty_interval": uncertainty,
-        "estimated_damage_cost": damage_cost,
-        "risk_band": risk_band(agg),
-        "top_factor": top_factor,
+        "checklist_items": checklist,
+        "risk_items": risk_items,
+        "rfi_suggestions": rfi_suggestions,
+        "missing_categories": missing,
+        "data_completeness_score": completeness,
+        "contract_fields": contract_fields,
+        "packages": packages,
     }
 
 
-def top_factor_label(code: str, lang: str) -> str:
-    labels = {
-        "no": {"flood": "Flom", "landslide": "Skred / ras", "sea_level": "Havnivå / stormflo", "heat_stress": "Varmestress"},
-        "sv": {"flood": "Översvämning", "landslide": "Ras / skred", "sea_level": "Havsnivå / stormflod", "heat_stress": "Värmestress"},
-        "da": {"flood": "Oversvømmelse", "landslide": "Skred / ras", "sea_level": "Havniveau / stormflod", "heat_stress": "Varmestress"},
-        "en-GB": {"flood": "Flood", "landslide": "Landslide", "sea_level": "Sea level / storm surge", "heat_stress": "Heat stress"},
-        "en-US": {"flood": "Flood", "landslide": "Landslide", "sea_level": "Sea level / storm surge", "heat_stress": "Heat stress"},
-        "de": {"flood": "Hochwasser", "landslide": "Rutschung / Hangversagen", "sea_level": "Meeresspiegel / Sturmflut", "heat_stress": "Hitzestress"},
-        "fi": {"flood": "Tulva", "landslide": "Sortuma / maanvyöry", "sea_level": "Merenpinta / myrskytulva", "heat_stress": "Lämpöstressi"},
-    }
-    return labels.get(lang, labels["en-GB"]).get(code, code)
+# ────────────────────────────────────────────────────────────────
+# 8. AI ANALYSIS (optional enhancement)
+# ────────────────────────────────────────────────────────────────
+def run_ai_tender_analysis(
+    records: List[Dict[str, Any]],
+    config: Dict[str, Any],
+    rules: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    If AI backend is available, enrich the rules-based result with AI summary.
+    Returns a dict compatible with rules output, with additional AI fields.
+    """
+    if not HAS_AI:
+        return {"data": None, "attempt_log": [{"step": "AI", "status": "Ingen AI-backend tilgjengelig."}]}
 
-
-def make_source_rows(market: str, asset: Dict[str, Any]) -> List[Dict[str, str]]:
-    rows = []
-    for item in MARKETS[market]["data_sources"]:
-        rows.append({
-            "hazard": item["hazard"],
-            "source": item["source"],
-            "access": item["access"],
-            "status": "configured" if asset.get("address") or asset.get("lat") else "waiting_for_input",
-            "version": datetime.now(timezone.utc).strftime("%Y-%m"),
-        })
-    if asset.get("address") and market == "NO":
-        geo = geocode_address(str(asset.get("address")), str(asset.get("municipality", "")))
-        rows.append({
-            "hazard": "Address resolution",
-            "source": geo.get("source", "Address API"),
-            "access": geo.get("status", "missing"),
-            "status": geo.get("status", "missing"),
-            "version": datetime.now(timezone.utc).strftime("%Y-%m"),
-        })
-    return rows
-
-
-def make_regulatory_outputs(market: str, scores: Dict[str, Any], analysis_mode: str, asset_class: str) -> List[Dict[str, str]]:
-    outputs = []
-    for item in MARKETS[market]["frameworks"]:
-        note = item["note"]
-        if item["framework"].startswith("ECB") or item["framework"].startswith("Federal Reserve"):
-            note = f"{note} Asset class: {asset_class}. Aggregate score: {scores['aggregate_score']}."
-        outputs.append({
-            "framework": item["framework"],
-            "status": item["status"],
-            "format": item["format"],
-            "note": note,
-        })
-    if analysis_mode == "Portfolio":
-        outputs.append({
-            "framework": "Portfolio batch",
-            "status": "ready",
-            "format": "CSV / JSON",
-            "note": "Batch summary with one row per asset and pre-populated risk fields.",
-        })
-    return outputs
-
-
-def load_portfolio(upload) -> List[Dict[str, Any]]:
-    if upload is None:
-        return []
-    name = getattr(upload, "name", "").lower()
-    data = upload.getvalue()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(data))
-        else:
-            df = pd.read_excel(io.BytesIO(data))
-    except Exception:
-        return []
-    df = df.fillna("")
-    rows: List[Dict[str, Any]] = []
-    for _, row in df.head(5000).iterrows():
-        rows.append({
-            "id": row.get("id") or row.get("asset_id") or row.get("address") or f"asset-{len(rows)+1}",
-            "asset_name": row.get("asset_name") or row.get("name") or row.get("property_name") or row.get("address") or f"Asset {len(rows)+1}",
-            "address": row.get("address") or row.get("adresse") or "",
-            "municipality": row.get("municipality") or row.get("kommune") or row.get("city") or "",
-            "region": row.get("region") or row.get("state") or row.get("county") or "",
-            "asset_class": row.get("asset_class") or row.get("type") or "Office",
-            "asset_value": safe_float(row.get("asset_value") or row.get("value") or row.get("property_value"), 0.0),
-            "elevation_m": safe_float(row.get("elevation_m") or row.get("elevation"), 12.0),
-            "distance_coast_km": safe_float(row.get("distance_coast_km") or row.get("distance_to_coast_km"), 2.0),
-            "distance_river_km": safe_float(row.get("distance_river_km") or row.get("distance_to_river_km"), 0.8),
-            "slope_deg": safe_float(row.get("slope_deg") or row.get("slope"), 6.0),
-            "heat_index": safe_float(row.get("heat_index") or row.get("urban_heat") or row.get("uhi_index"), 5.0),
-            "soil_type": row.get("soil_type") or row.get("ground_type") or "Morene",
-            "flood_zone": str(row.get("flood_zone") or row.get("in_flood_zone") or "").strip().lower() in {"1", "true", "yes", "ja", "y"},
-            "landslide_zone": str(row.get("landslide_zone") or row.get("in_landslide_zone") or "").strip().lower() in {"1", "true", "yes", "ja", "y"},
-            "has_basement": str(row.get("has_basement") or row.get("basement") or "").strip().lower() in {"1", "true", "yes", "ja", "y"},
-        })
-    return rows
-
-
-def deterministic_summary(lang: str, market: str, asset_name: str, scores: Dict[str, Any], outputs: List[Dict[str, str]]) -> Dict[str, Any]:
-    top = top_factor_label(scores["top_factor"], lang)
-    band = localized_risk_band(scores["aggregate_score"], lang)
-    framework_names = ", ".join(item["framework"] for item in outputs[:3])
-    templates = {
-        "no": f"{asset_name or 'Eiendommen'} har {band.lower()} klimarisiko med samlet score {scores['aggregate_score']}/5. Høyeste driver er {top.lower()}. Rapporten er strukturert for {framework_names} og kan brukes som screeninggrunnlag og videre oppfølging.",
-        "sv": f"{asset_name or 'Fastigheten'} har {band.lower()} klimatrisk med total score {scores['aggregate_score']}/5. Starkaste riskdrivaren är {top.lower()}. Rapporten är strukturerad för {framework_names} och kan användas som screeningunderlag och vidare uppföljning.",
-        "da": f"{asset_name or 'Ejendommen'} har {band.lower()} klimarisiko med samlet score {scores['aggregate_score']}/5. Den stærkeste risikodriver er {top.lower()}. Rapporten er struktureret til {framework_names} og kan bruges til screening og videre opfølgning.",
-        "en-GB": f"{asset_name or 'The asset'} shows {band.lower()} climate risk with an aggregate score of {scores['aggregate_score']}/5. The main risk driver is {top.lower()}. The report is structured for {framework_names} and can be used for screening and follow-up.",
-        "en-US": f"{asset_name or 'The asset'} shows {band.lower()} climate risk with an aggregate score of {scores['aggregate_score']}/5. The main risk driver is {top.lower()}. The report is structured for {framework_names} and can be used for screening and follow-up.",
-        "de": f"{asset_name or 'Das Objekt'} weist ein {band.lower()}es Klimarisiko mit einem Gesamtscore von {scores['aggregate_score']}/5 auf. Der wichtigste Risikotreiber ist {top.lower()}. Der Bericht ist für {framework_names} strukturiert und eignet sich für Screening und weitere Maßnahmen.",
-        "fi": f"{asset_name or 'Kohteessa'} on {band.lower()} ilmastoriski, kokonaispiste {scores['aggregate_score']}/5. Suurin riskiajuri on {top.lower()}. Raportti on jäsennelty kehyksille {framework_names} ja sitä voi käyttää seulontaan ja jatkotoimiin.",
-    }
-    action_templates = {
-        "no": [
-            {"action": f"Bekreft datagrunnlag for {top.lower()}", "priority": "High", "why": "Dette er faktoren som driver totalrisikoen mest."},
-            {"action": "Avklar behov for tiltak eller dypere fagvurdering", "priority": "Medium", "why": "Høy eller forhøyet score bør følges opp før investering eller kredittbeslutning."},
-            {"action": "Eksporter relevant regulatorisk mapping", "priority": "Medium", "why": "Gjør det enklere å bruke samme analyse i bank- og rapporteringsløp."},
-        ],
-        "sv": [
-            {"action": f"Bekräfta datagrunden för {top.lower()}", "priority": "High", "why": "Detta är den faktor som driver totalrisken mest."},
-            {"action": "Klargör behovet av åtgärder eller djupare fackgranskning", "priority": "Medium", "why": "Hög eller förhöjd score bör följas upp före investering eller kreditbeslut."},
-            {"action": "Exportera relevant regulatorisk mapping", "priority": "Medium", "why": "Gör det enklare att använda samma analys i bank- och rapporteringsflöden."},
-        ],
-        "da": [
-            {"action": f"Bekræft datagrundlaget for {top.lower()}", "priority": "High", "why": "Det er denne faktor, der driver totalrisikoen mest."},
-            {"action": "Afklar behov for tiltag eller dybere faglig vurdering", "priority": "Medium", "why": "Høj eller forhøjet score bør følges op før investering eller kreditbeslutning."},
-            {"action": "Eksportér relevant regulatorisk mapping", "priority": "Medium", "why": "Gør det lettere at bruge samme analyse i bank- og rapporteringsflows."},
-        ],
-        "en-GB": [
-            {"action": f"Confirm the underlying data for {top.lower()}", "priority": "High", "why": "This factor is driving the total score the most."},
-            {"action": "Clarify whether further mitigation or expert review is required", "priority": "Medium", "why": "High or elevated scores should be reviewed before investment or lending decisions."},
-            {"action": "Export the relevant regulatory mapping", "priority": "Medium", "why": "This makes the same screening usable across banking and reporting workflows."},
-        ],
-        "en-US": [
-            {"action": f"Confirm the underlying data for {top.lower()}", "priority": "High", "why": "This factor is driving the total score the most."},
-            {"action": "Clarify whether further mitigation or expert review is required", "priority": "Medium", "why": "High or elevated scores should be reviewed before investment or lending decisions."},
-            {"action": "Export the relevant regulatory mapping", "priority": "Medium", "why": "This makes the same screening usable across banking and reporting workflows."},
-        ],
-        "de": [
-            {"action": f"Bestätigen Sie die Datengrundlage für {top.lower()}", "priority": "High", "why": "Dieser Faktor treibt den Gesamtscore am stärksten."},
-            {"action": "Klären Sie, ob weitere Maßnahmen oder eine fachliche Prüfung erforderlich sind", "priority": "Medium", "why": "Hohe oder erhöhte Scores sollten vor Investitions- oder Kreditentscheidungen geprüft werden."},
-            {"action": "Exportieren Sie das relevante regulatorische Mapping", "priority": "Medium", "why": "So kann dieselbe Analyse in Bank- und Reporting-Workflows genutzt werden."},
-        ],
-        "fi": [
-            {"action": f"Vahvista {top.lower()}-riskin tietoperusta", "priority": "High", "why": "Tämä tekijä vaikuttaa kokonaispisteeseen eniten."},
-            {"action": "Arvioi tarvitaanko lisätoimia tai asiantuntijakatselmusta", "priority": "Medium", "why": "Korkea tai kohonnut pistetaso kannattaa tarkistaa ennen sijoitus- tai luottopäätöstä."},
-            {"action": "Vie tarvittava sääntelykartoitus", "priority": "Medium", "why": "Näin sama analyysi on käytettävissä pankki- ja raportointiprosesseissa."},
-        ],
-    }
-    return {
-        "executive_summary": templates.get(lang, templates["en-GB"]),
-        "key_drivers": [top, band, f"{scores['aggregate_score']}/5"],
-        "recommended_actions": action_templates.get(lang, action_templates["en-GB"]),
-    }
-
-
-def ai_summary(lang: str, market: str, analysis_payload: Dict[str, Any]) -> Dict[str, Any]:
-    if generate_json_with_fallback is None:
-        return {"ok": False, "error": "AI fallback unavailable", "attempt_log": []}
-
-    schema = {
-        "executive_summary": "Short end-user summary",
-        "key_drivers": ["List the main drivers"],
-        "recommended_actions": [{"action": "", "priority": "High|Medium|Low", "why": ""}],
-        "jurisdiction_note": "Short country-specific legal note",
-    }
-    market_cfg = MARKETS[market]
-    lang_name = {
-        "no": "Norsk bokmål", "sv": "Svenska", "da": "Dansk", "en-GB": "British English", "en-US": "American English", "de": "Deutsch", "fi": "Suomi"
-    }[lang]
-    system_prompt = f"""
-You are the Builtly Climate Risk report writer.
-Write in {lang_name}.
-Audience: end users such as developers, banks, insurers, investors and project teams.
-Jurisdiction: {market_cfg['label']}.
-Primary rule set / reporting context: {market_cfg['rule_set']}.
-Country note: {market_cfg['jurisdiction_note'][lang]}.
-This module is a level 1 auto-report product. Do not claim legal approval, certification or professional sign-off.
-Be practical, concise, and user-facing.
-Return JSON only.
-""".strip()
-    user_prompt = json.dumps(analysis_payload, ensure_ascii=False, indent=2)
-    return generate_json_with_fallback(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        schema_hint=schema,
-        task="document_engine",
-        preferred_providers=["openai", "anthropic", "gemini"],
-        estimated_context_chars=len(user_prompt),
-        max_output_tokens=1000,
-        temperature=0.15,
+    manifest_text = "\n".join(
+        f"- {r['filename']} ({r['category']}, {r['size_kb']} KB)" for r in records
+    )
+    missing_text = ", ".join(rules.get("missing_categories", [])) or "Ingen"
+    risk_text = "\n".join(
+        f"- {r['title']} [{r['severity']}]: {r['impact']}" for r in rules.get("risk_items", [])
     )
 
+    prompt = f"""Du er Builtly Tender AI. Du skal analysere et tilbudsgrunnlag og gi en kort oppsummering.
 
-def build_factor_df(lang: str, scores: Dict[str, Any], source_rows: List[Dict[str, str]]) -> pd.DataFrame:
-    label_map = {
-        "no": {"flood": "Flom", "landslide": "Skred / ras", "sea_level": "Havnivå / stormflo", "heat_stress": "Varmestress"},
-        "sv": {"flood": "Översvämning", "landslide": "Ras / skred", "sea_level": "Havsnivå / stormflod", "heat_stress": "Värmestress"},
-        "da": {"flood": "Oversvømmelse", "landslide": "Skred / ras", "sea_level": "Havniveau / stormflod", "heat_stress": "Varmestress"},
-        "en-GB": {"flood": "Flood", "landslide": "Landslide", "sea_level": "Sea level / storm surge", "heat_stress": "Heat stress"},
-        "en-US": {"flood": "Flood", "landslide": "Landslide", "sea_level": "Sea level / storm surge", "heat_stress": "Heat stress"},
-        "de": {"flood": "Hochwasser", "landslide": "Rutschung", "sea_level": "Meeresspiegel", "heat_stress": "Hitzestress"},
-        "fi": {"flood": "Tulva", "landslide": "Maanvyöry", "sea_level": "Merenpinta", "heat_stress": "Lämpöstressi"},
-    }
-    labels = label_map.get(lang, label_map["en-GB"])
-    confidence = max(0.45, min(0.95, 1.0 - scores["uncertainty_interval"] / 2.0))
-    source_text = ", ".join({row["source"] for row in source_rows[:3]})
-    rows = [
-        {"factor": labels["flood"], "score": scores["flood_score"], "confidence": round(confidence, 2), "note": "risk driver", "source": source_text},
-        {"factor": labels["landslide"], "score": scores["landslide_score"], "confidence": round(confidence, 2), "note": "risk driver", "source": source_text},
-        {"factor": labels["sea_level"], "score": scores["sea_level_score"], "confidence": round(confidence, 2), "note": "risk driver", "source": source_text},
-        {"factor": labels["heat_stress"], "score": scores["heat_stress_score"], "confidence": round(confidence, 2), "note": "risk driver", "source": source_text},
-    ]
-    return pd.DataFrame(rows)
+PROSJEKT:
+- Navn: {clean_text(pd_state.get('p_name', 'Ukjent'))}
+- Type: {clean_text(pd_state.get('b_type', 'Ukjent'))}
+- Sted: {clean_text(pd_state.get('kommune', ''))}
 
+KONFIGURASJON:
+- Anskaffelsesform: {config.get('procurement_mode')}
+- Pakker: {', '.join(config.get('packages', []))}
+- Kontrolldybde: {config.get('qa_level')}
+- Verdi: {config.get('bid_value_mnok')} MNOK
+- Prosjektnotater: {config.get('notes', '')}
 
-def portfolio_analysis(rows: List[Dict[str, Any]], market: str, scenario: str, horizon: str, weights: Dict[str, float]) -> pd.DataFrame:
-    out_rows: List[Dict[str, Any]] = []
-    for row in rows:
-        asset = dict(row)
-        asset["scenario"] = scenario
-        asset["horizon"] = horizon
-        scores = compute_scores(asset, market, weights)
-        out_rows.append({
-            "id": row.get("id") or row.get("asset_name"),
-            "asset_name": row.get("asset_name") or row.get("address") or row.get("id"),
-            "address": row.get("address", ""),
-            "municipality": row.get("municipality", ""),
-            "region": row.get("region", ""),
-            "asset_class": row.get("asset_class", ""),
-            "aggregate_score": scores["aggregate_score"],
-            "risk_band": scores["risk_band"],
-            "top_factor": scores["top_factor"],
-            "estimated_damage_cost": scores["estimated_damage_cost"],
-            "uncertainty_interval": scores["uncertainty_interval"],
-        })
-    return pd.DataFrame(out_rows)
+OPPLASTEDE DOKUMENTER:
+{manifest_text or 'Ingen dokumenter opplastet.'}
 
+MANGLENDE KATEGORIER: {missing_text}
 
-def _bytes_io() -> io.BytesIO:
-    return io.BytesIO()
+IDENTIFISERTE RISIKOER:
+{risk_text or 'Ingen heuristiske risikoer.'}
 
+Returner KUN gyldig JSON med dette skjemaet:
+{{
+  "executive_summary": "Kort sammendrag av tilbudsgrunnlagets tilstand og viktigste funn (2-4 setninger).",
+  "contract_fields": [{{"field": "...", "value": "...", "source": "AI"}}],
+  "checklist_items": [{{"topic": "...", "status": "OK|ADVARSEL|MANGLER", "severity": "HIGH|MEDIUM|LOW", "paragraph_ref": "-", "reason": "...", "source": "AI"}}],
+  "risk_items": [{{"title": "...", "severity": "HIGH|MEDIUM|LOW", "impact": "...", "recommendation": "...", "source": "AI", "paragraph_ref": "-"}}],
+  "rfi_suggestions": [{{"priority": "Hoy|Middels|Lav", "question": "...", "why": "...", "owner": "..."}}]
+}}
 
-def xml_from_mapping(meta: Dict[str, Any], regulatory_outputs: List[Dict[str, str]], factor_df: pd.DataFrame) -> bytes:
-    root = ET.Element("climateRiskAnalysis")
-    meta_el = ET.SubElement(root, "meta")
-    for key, value in meta.items():
-        child = ET.SubElement(meta_el, key)
-        child.text = str(value)
-    factors_el = ET.SubElement(root, "riskFactors")
-    for _, row in factor_df.iterrows():
-        factor = ET.SubElement(factors_el, "factor")
-        for key in ["factor", "score", "confidence", "source"]:
-            child = ET.SubElement(factor, key)
-            child.text = str(row[key])
-    reg_el = ET.SubElement(root, "regulatoryOutputs")
-    for item in regulatory_outputs:
-        out = ET.SubElement(reg_el, "output")
-        for key in ["framework", "status", "format", "note"]:
-            child = ET.SubElement(out, key)
-            child.text = str(item.get(key, ""))
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+Returner kun JSON, ingen annen tekst."""
 
-
-def markdown_report(lang: str, market: str, meta: Dict[str, Any], summary: str, factor_df: pd.DataFrame, regulatory_outputs: List[Dict[str, str]], source_rows: List[Dict[str, str]], actions: List[Dict[str, str]]) -> str:
-    lines = [
-        f"# {meta['report_title']}",
-        "",
-        f"- Analysis ID: {meta['analysis_id']}",
-        f"- Market: {MARKETS[market]['label']}",
-        f"- Asset: {meta['asset_name']}",
-        f"- Created: {meta['created_at']}",
-        f"- Delivery level: auto",
-        "",
-        "## Summary",
-        summary,
-        "",
-        "## Scores",
-    ]
-    for _, row in factor_df.iterrows():
-        lines.append(f"- **{row['factor']}**: {row['score']} (confidence {row['confidence']})")
-    lines += ["", "## Regulatory mapping"]
-    for item in regulatory_outputs:
-        lines.append(f"- **{item['framework']}** ({item['status']}): {item['note']}")
-    lines += ["", "## Data sources"]
-    for row in source_rows:
-        lines.append(f"- **{row['source']}** – {row['hazard']} ({row['access']})")
-    lines += ["", "## Recommended actions"]
-    for action in actions:
-        lines.append(f"- **{action['priority']}**: {action['action']} — {action['why']}")
-    lines += ["", "## Disclaimer", DISCLAIMER[lang], ""]
-    return "\n".join(lines)
-
-
-def build_docx_report(lang: str, market: str, meta: Dict[str, Any], summary: str, factor_df: pd.DataFrame, regulatory_outputs: List[Dict[str, str]], source_rows: List[Dict[str, str]], actions: List[Dict[str, str]]) -> Optional[bytes]:
-    if Document is None:
-        return None
-    doc = Document()
-    title = doc.add_heading(meta["report_title"], 0)
-    if WD_ALIGN_PARAGRAPH:
-        title.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    p = doc.add_paragraph()
-    p.add_run(f"Analysis ID: {meta['analysis_id']}\n").bold = True
-    p.add_run(f"Created: {meta['created_at']}\n")
-    p.add_run(f"Market: {MARKETS[market]['label']}\n")
-    p.add_run(f"Asset: {meta['asset_name']}\n")
-    p.add_run(f"Delivery level: auto")
-
-    doc.add_heading(tr(lang, "summary_title"), level=1)
-    doc.add_paragraph(summary)
-
-    doc.add_heading(tr(lang, "factors_title"), level=1)
-    table = doc.add_table(rows=1, cols=4)
-    hdr = table.rows[0].cells
-    hdr[0].text = tr(lang, "tab_factors")
-    hdr[1].text = "Score"
-    hdr[2].text = "Confidence"
-    hdr[3].text = "Source"
-    for _, row in factor_df.iterrows():
-        cells = table.add_row().cells
-        cells[0].text = str(row["factor"])
-        cells[1].text = str(row["score"])
-        cells[2].text = str(row["confidence"])
-        cells[3].text = str(row["source"])
-
-    doc.add_heading(tr(lang, "mapping_title"), level=1)
-    for item in regulatory_outputs:
-        doc.add_paragraph(f"{item['framework']} ({item['status']}) — {item['note']}", style="List Bullet")
-
-    doc.add_heading(tr(lang, "sources_title"), level=1)
-    for row in source_rows:
-        doc.add_paragraph(f"{row['source']} — {row['hazard']} — {row['access']}", style="List Bullet")
-
-    doc.add_heading(tr(lang, "actions_title"), level=1)
-    for action in actions:
-        doc.add_paragraph(f"{action['priority']}: {action['action']} — {action['why']}", style="List Bullet")
-
-    doc.add_heading(tr(lang, "disclaimer_title"), level=1)
-    doc.add_paragraph(DISCLAIMER[lang])
-
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-
-def build_pdf_report(lang: str, market: str, meta: Dict[str, Any], summary: str, factor_df: pd.DataFrame, regulatory_outputs: List[Dict[str, str]], source_rows: List[Dict[str, str]], actions: List[Dict[str, str]]) -> Optional[bytes]:
-    if not REPORTLAB_READY:
-        return None
-    bio = io.BytesIO()
-    doc = SimpleDocTemplate(bio, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
-
+    attempt_log = []
     try:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if Path(font_path).exists() and Path(bold_path).exists():
-            pdfmetrics.registerFont(TTFont("BuiltlySans", font_path))
-            pdfmetrics.registerFont(TTFont("BuiltlySansBold", bold_path))
-            base_font = "BuiltlySans"
-            bold_font = "BuiltlySansBold"
+        raw = generate_text_ai(prompt, temperature=0.1)
+        attempt_log.append({"step": "AI-kall", "status": "OK", "length": len(raw)})
+        parsed = safe_json_loads(raw)
+        if parsed:
+            attempt_log.append({"step": "JSON-parsing", "status": "OK"})
+            return {"data": parsed, "attempt_log": attempt_log}
         else:
-            base_font = "Helvetica"
-            bold_font = "Helvetica-Bold"
-    except Exception:
-        base_font = "Helvetica"
-        bold_font = "Helvetica-Bold"
+            attempt_log.append({"step": "JSON-parsing", "status": "Feilet – kunne ikke tolke respons."})
+            return {"data": None, "attempt_log": attempt_log}
+    except Exception as e:
+        attempt_log.append({"step": "AI-kall", "status": f"Feil: {type(e).__name__}: {e}"})
+        return {"data": None, "attempt_log": attempt_log}
 
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="BuiltlyTitle", fontName=bold_font, fontSize=18, leading=22, textColor=colors.HexColor("#0b1f3a")))
-    styles.add(ParagraphStyle(name="BuiltlyHead", fontName=bold_font, fontSize=12, leading=16, textColor=colors.HexColor("#18325a"), spaceBefore=10, spaceAfter=6))
-    styles.add(ParagraphStyle(name="BuiltlyBody", fontName=base_font, fontSize=9.6, leading=14))
 
-    story = [
-        Paragraph(meta["report_title"], styles["BuiltlyTitle"]),
-        Spacer(1, 4 * mm),
-        Paragraph(f"Analysis ID: {meta['analysis_id']}<br/>Created: {meta['created_at']}<br/>Market: {MARKETS[market]['label']}<br/>Asset: {meta['asset_name']}<br/>Delivery level: auto", styles["BuiltlyBody"]),
-        Spacer(1, 4 * mm),
-        Paragraph(tr(lang, "summary_title"), styles["BuiltlyHead"]),
-        Paragraph(summary, styles["BuiltlyBody"]),
-        Spacer(1, 3 * mm),
-        Paragraph(tr(lang, "factors_title"), styles["BuiltlyHead"]),
+# ────────────────────────────────────────────────────────────────
+# 9. REPORT BUILDER (Markdown)
+# ────────────────────────────────────────────────────────────────
+def build_markdown_report(
+    records: List[Dict[str, Any]],
+    rules: Dict[str, Any],
+    ai_result: Dict[str, Any],
+    config: Dict[str, Any],
+) -> str:
+    parts = []
+    parts.append(f"# Anbudskontroll – {clean_text(pd_state.get('p_name', 'Prosjekt'))}")
+    parts.append(f"*Generert: {datetime.now().strftime('%d.%m.%Y %H:%M')}*\n")
+
+    # Executive summary
+    ai_data = ai_result.get("data") if isinstance(ai_result, dict) else None
+    summary = safe_get(ai_data, "executive_summary", "") if ai_data else ""
+    if summary:
+        parts.append(f"## Sammendrag\n{clean_text(summary)}\n")
+    else:
+        parts.append("## Sammendrag\nIngen AI-oppsummering tilgjengelig. Resultatet er basert på regelmotor.\n")
+
+    # Config
+    parts.append("## Konfigurasjon")
+    for cf in rules.get("contract_fields", []):
+        if isinstance(cf, dict):
+            parts.append(f"- **{cf.get('field', '')}**: {cf.get('value', '')}")
+    parts.append("")
+
+    # Checklist
+    parts.append("## Sjekkliste")
+    all_checks = rules.get("checklist_items", [])
+    if ai_data and isinstance(safe_get(ai_data, "checklist_items"), list):
+        all_checks = all_checks + safe_get(ai_data, "checklist_items", [])
+    for item in all_checks:
+        if isinstance(item, dict):
+            parts.append(f"- [{item.get('status', '?')}] {item.get('topic', '')} — {item.get('reason', '')}")
+    parts.append("")
+
+    # Risks
+    parts.append("## Risikoer")
+    all_risks = rules.get("risk_items", [])
+    if ai_data and isinstance(safe_get(ai_data, "risk_items"), list):
+        all_risks = all_risks + safe_get(ai_data, "risk_items", [])
+    for item in all_risks:
+        if isinstance(item, dict):
+            parts.append(f"- **{item.get('title', '')}** [{item.get('severity', '')}]: {item.get('impact', '')}")
+    parts.append("")
+
+    # RFI
+    parts.append("## Forslag til RFI / sporsmal")
+    all_rfi = rules.get("rfi_suggestions", [])
+    if ai_data and isinstance(safe_get(ai_data, "rfi_suggestions"), list):
+        all_rfi = all_rfi + safe_get(ai_data, "rfi_suggestions", [])
+    for item in all_rfi:
+        if isinstance(item, dict):
+            parts.append(f"- [{item.get('priority', '')}] {item.get('question', '')}")
+    parts.append("")
+
+    # Manifest
+    parts.append("## Dokumentmanifest")
+    for r in records:
+        parts.append(f"- {r['filename']} ({r['category']}, {r['size_kb']} KB)")
+    parts.append("")
+
+    parts.append("---\n*Rapport generert av Builtly Anbudskontroll. Utkast – krever faglig gjennomgang.*")
+    return "\n".join(parts)
+
+
+# ────────────────────────────────────────────────────────────────
+# 10. PDF REPORT BUILDER
+# ────────────────────────────────────────────────────────────────
+def build_pdf_report(
+    records: List[Dict[str, Any]],
+    rules: Dict[str, Any],
+    ai_result: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Optional[bytes]:
+    """Build a professional PDF matching the Konstruksjon report style."""
+    if FPDF is None:
+        return None
+
+    class TenderPDF(FPDF):
+        def header(self):
+            if self.page_no() == 1:
+                return
+            self.set_y(11)
+            self.set_text_color(88, 94, 102)
+            self.set_font("Helvetica", "", 8)
+            self.cell(0, 4, clean_pdf_text(f"Anbudskontroll – {pd_state.get('p_name', 'Prosjekt')}"), 0, 0, "L")
+            self.cell(0, 4, clean_pdf_text(datetime.now().strftime("%d.%m.%Y")), 0, 1, "R")
+            self.set_draw_color(188, 192, 197)
+            self.line(18, 18, 192, 18)
+            self.set_y(24)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_draw_color(210, 214, 220)
+            self.line(18, 285, 192, 285)
+            self.set_font("Helvetica", "", 7)
+            self.set_text_color(110, 114, 119)
+            self.cell(60, 5, "Builtly-TENDER-001", 0, 0, "L")
+            self.cell(70, 5, clean_pdf_text("Utkast – krever faglig kontroll"), 0, 0, "C")
+            self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
+
+        def ensure_space(self, h):
+            if self.get_y() + h > 272:
+                self.add_page()
+
+        def section_title(self, title):
+            self.ensure_space(20)
+            self.ln(2)
+            self.set_font("Helvetica", "B", 17)
+            self.set_text_color(36, 50, 72)
+            self.set_x(20)
+            self.multi_cell(170, 8, clean_pdf_text(title.upper()), 0, "L")
+            self.set_draw_color(204, 209, 216)
+            self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
+            self.ln(5)
+
+        def body_text(self, text):
+            if not text:
+                return
+            self.set_x(20)
+            self.set_font("Helvetica", "", 10.2)
+            self.set_text_color(35, 39, 43)
+            self.multi_cell(170, 5.5, clean_pdf_text(text))
+            self.ln(1.6)
+
+        def bullet_list(self, items):
+            for item in items:
+                if not item:
+                    continue
+                self.ensure_space(10)
+                self.set_font("Helvetica", "", 10.1)
+                self.set_text_color(35, 39, 43)
+                y = self.get_y()
+                self.set_xy(22, y)
+                self.cell(6, 5.2, "-", 0, 0, "L")
+                self.set_xy(28, y)
+                self.multi_cell(162, 5.2, clean_pdf_text(item))
+                self.ln(0.8)
+
+        def kv_card(self, items, x=None, width=80, title=None):
+            if x is None:
+                x = self.get_x()
+            height = 10 + (len(items) * 6.3) + (7 if title else 0)
+            self.ensure_space(height + 3)
+            start_y = self.get_y()
+            self.set_fill_color(245, 247, 249)
+            self.set_draw_color(214, 219, 225)
+            self.rect(x, start_y, width, height, "DF")
+            yy = start_y + 5
+            if title:
+                self.set_xy(x + 4, yy)
+                self.set_font("Helvetica", "B", 10)
+                self.set_text_color(48, 64, 86)
+                self.cell(width - 8, 5, clean_pdf_text(title.upper()), 0, 1)
+                yy += 7
+            for label, value in items:
+                self.set_xy(x + 4, yy)
+                self.set_font("Helvetica", "B", 8.6)
+                self.set_text_color(72, 79, 87)
+                self.cell(28, 5, clean_pdf_text(label), 0, 0)
+                self.set_font("Helvetica", "", 8.6)
+                self.set_text_color(35, 39, 43)
+                self.multi_cell(width - 34, 5, clean_pdf_text(value))
+                yy = self.get_y() + 1
+            self.set_y(max(self.get_y(), start_y + height))
+
+        def highlight_box(self, title, items, fill=(245, 247, 250), accent=(50, 77, 106)):
+            self.set_font("Helvetica", "", 10)
+            total_h = 14 + sum(8 for _ in items)
+            self.ensure_space(total_h + 5)
+            x, y = 20, self.get_y()
+            self.set_fill_color(*fill)
+            self.set_draw_color(217, 223, 230)
+            self.rect(x, y, 170, total_h, "DF")
+            self.set_fill_color(*accent)
+            self.rect(x, y, 3, total_h, "F")
+            self.set_xy(x + 6, y + 4)
+            self.set_font("Helvetica", "B", 10.5)
+            self.set_text_color(*accent)
+            self.cell(0, 5, clean_pdf_text(title.upper()), 0, 1)
+            self.set_text_color(35, 39, 43)
+            self.set_font("Helvetica", "", 10)
+            yy = y + 10
+            for item in items:
+                self.set_xy(x + 8, yy)
+                self.cell(5, 5, "-", 0, 0)
+                self.multi_cell(154, 5.2, clean_pdf_text(item))
+                yy = self.get_y() + 2
+            self.set_y(y + total_h + 3)
+
+    pdf = TenderPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(True, margin=15)
+
+    # ── Cover page ──
+    pdf.add_page()
+    logo_path = _find_logo()
+    if logo_path:
+        try:
+            pdf.image(logo_path, x=150, y=15, w=40)
+        except Exception:
+            pass
+
+    pdf.set_xy(20, 45)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(100, 105, 110)
+    pdf.cell(80, 6, "ANBUDSKONTROLL", 0, 1, "L")
+
+    pdf.set_x(20)
+    pdf.set_font("Helvetica", "B", 30)
+    pdf.set_text_color(20, 28, 38)
+    pdf.multi_cell(95, 11, clean_pdf_text(pd_state.get("p_name", "Prosjekt")), 0, "L")
+
+    pdf.ln(4)
+    pdf.set_x(20)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(64, 68, 74)
+    pdf.multi_cell(95, 6.5, clean_pdf_text("Avviksmatrise, mangelliste, uklarhetslogg og scopesammenstilling"), 0, "L")
+
+    pdf.set_xy(118, 45)
+    pdf.kv_card([
+        ("Oppdragsgiver", clean_pdf_text(pd_state.get("c_name", "-"))),
+        ("Emne", "Anbudskontroll"),
+        ("Dato / rev", f"{datetime.now().strftime('%d.%m.%Y')} / 01"),
+        ("Dokumentkode", "Builtly-TENDER-001"),
+        ("Anskaffelse", config.get("procurement_mode", "-")),
+        ("Verdi", f"{nb_value(config.get('bid_value_mnok', 0))} MNOK"),
+    ], x=118, width=72)
+
+    pdf.set_xy(20, 180)
+    pdf.set_font("Helvetica", "", 8.8)
+    pdf.set_text_color(104, 109, 116)
+    pdf.multi_cell(170, 4.5, clean_pdf_text(
+        "Rapporten er generert av Builtly Anbudskontroll på bakgrunn av opplastede dokumenter og prosjektkonfigurasjon. "
+        "Dokumentet er et arbeidsutkast og skal fagkontrolleres for bruk i tilbudsinnlevering eller beslutning."
+    ))
+
+    # ── Table of contents ──
+    pdf.add_page()
+    pdf.section_title("Innholdsfortegnelse")
+    toc = [
+        "1. Sammendrag", "2. Konfigurasjon og forutsetninger",
+        "3. Dokumentmanifest", "4. Sjekkliste",
+        "5. Risikoer og avvik", "6. Forslag til RFI / sporsmal",
+        "7. Scopeoversikt",
     ]
-    factor_table = Table([[str(c) for c in factor_df.columns]] + factor_df.astype(str).values.tolist(), repeatRows=1)
-    factor_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#19324d")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), bold_font),
-        ("FONTNAME", (0, 1), (-1, -1), base_font),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d3d9e4")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor("#eef3f8")]),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story += [factor_table, Spacer(1, 3 * mm), Paragraph(tr(lang, "mapping_title"), styles["BuiltlyHead"])]
-    for item in regulatory_outputs:
-        story.append(Paragraph(f"<b>{item['framework']}</b> ({item['status']}) – {item['note']}", styles["BuiltlyBody"]))
-    story += [Spacer(1, 3 * mm), Paragraph(tr(lang, "sources_title"), styles["BuiltlyHead"])]
-    for row in source_rows:
-        story.append(Paragraph(f"{row['source']} – {row['hazard']} – {row['access']}", styles["BuiltlyBody"]))
-    story += [Spacer(1, 3 * mm), Paragraph(tr(lang, "actions_title"), styles["BuiltlyHead"])]
-    for action in actions:
-        story.append(Paragraph(f"<b>{action['priority']}</b>: {action['action']} – {action['why']}", styles["BuiltlyBody"]))
-    story += [Spacer(1, 3 * mm), Paragraph(tr(lang, "disclaimer_title"), styles["BuiltlyHead"]), Paragraph(DISCLAIMER[lang], styles["BuiltlyBody"])]
-    doc.build(story)
-    return bio.getvalue()
+    pdf.set_font("Helvetica", "", 10.5)
+    pdf.set_text_color(45, 49, 55)
+    for item in toc:
+        y = pdf.get_y()
+        pdf.set_x(22)
+        pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
+        pdf.set_draw_color(225, 229, 234)
+        pdf.line(22, y + 6, 188, y + 6)
+        pdf.ln(8)
+
+    # ── 1. Summary ──
+    pdf.add_page()
+    pdf.section_title("1. Sammendrag")
+    ai_data = safe_get(ai_result, "data")
+    summary = safe_get(ai_data, "executive_summary", "") if isinstance(ai_data, dict) else ""
+    if summary:
+        pdf.body_text(summary)
+    else:
+        pdf.body_text("Ingen AI-oppsummering tilgjengelig. Resultatet er basert på heuristisk regelmotor.")
+
+    completeness = rules.get("data_completeness_score", 0)
+    high_risks = len([r for r in rules.get("risk_items", []) if isinstance(r, dict) and r.get("severity") == "HIGH"])
+    pdf.highlight_box("Nøkkeltall", [
+        f"Dokumenter lastet opp: {len(records)}",
+        f"Datakompletthet: {int(completeness * 100)}%",
+        f"Manglende kategorier: {len(rules.get('missing_categories', []))}",
+        f"Hoyrisikoer: {high_risks}",
+    ])
+
+    # ── 2. Config ──
+    pdf.section_title("2. Konfigurasjon og forutsetninger")
+    for cf in rules.get("contract_fields", []):
+        if isinstance(cf, dict):
+            pdf.body_text(f"{cf.get('field', '')}: {cf.get('value', '')}")
+
+    # ── 3. Manifest ──
+    pdf.section_title("3. Dokumentmanifest")
+    pdf.bullet_list([f"{r['filename']} — {r['category']} ({r['size_kb']} KB)" for r in records])
+
+    # ── 4. Checklist ──
+    pdf.section_title("4. Sjekkliste")
+    all_checks = rules.get("checklist_items", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "checklist_items"), list):
+        all_checks = all_checks + safe_get(ai_data, "checklist_items", [])
+    for item in all_checks:
+        if isinstance(item, dict):
+            pdf.ensure_space(12)
+            pdf.body_text(f"[{item.get('status', '?')}] {item.get('topic', '')} — {item.get('reason', '')}")
+
+    # ── 5. Risks ──
+    pdf.section_title("5. Risikoer og avvik")
+    all_risks = rules.get("risk_items", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "risk_items"), list):
+        all_risks = all_risks + safe_get(ai_data, "risk_items", [])
+    for item in all_risks:
+        if isinstance(item, dict):
+            pdf.ensure_space(14)
+            pdf.body_text(f"{item.get('title', '')} [{item.get('severity', '')}]")
+            pdf.body_text(f"  Konsekvens: {item.get('impact', '-')}")
+            pdf.body_text(f"  Anbefaling: {item.get('recommendation', '-')}")
+
+    # ── 6. RFI ──
+    pdf.section_title("6. Forslag til RFI / sporsmal")
+    all_rfi = rules.get("rfi_suggestions", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "rfi_suggestions"), list):
+        all_rfi = all_rfi + safe_get(ai_data, "rfi_suggestions", [])
+    pdf.bullet_list([
+        f"[{r.get('priority', '')}] {r.get('question', '')}" for r in all_rfi if isinstance(r, dict)
+    ])
+
+    # ── 7. Scope ──
+    pdf.section_title("7. Scopeoversikt")
+    packages = config.get("packages", [])
+    for idx, pkg in enumerate(packages):
+        status = "Dekket" if idx < max(1, len(packages) - 1) else "Krevende grensesnitt"
+        pdf.body_text(f"{pkg}: {status}")
+
+    # Disclaimer
+    pdf.ln(10)
+    pdf.highlight_box(
+        "Ansvarsfraskrivelse",
+        [
+            "Rapporten er et arbeidsutkast generert av Builtly Anbudskontroll.",
+            "Dokumentet er ikke signert med ansvarsrett og er ikke juridisk bindende.",
+            "Resultatet skal fagkontrolleres for bruk.",
+        ],
+        fill=(255, 248, 235),
+        accent=(180, 130, 40),
+    )
+
+    return bytes(pdf.output())
 
 
-def audit_entry(provider_result: Dict[str, Any], analysis_id: str, market: str, lang: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "analysis_id": analysis_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "delivery_level": "auto",
-        "market": market,
-        "language": lang,
-        "provider": provider_result.get("provider") or "deterministic",
-        "model": provider_result.get("model") or "deterministic-template",
-        "attempt_log": provider_result.get("attempt_log", []),
-        "input_summary": {
-            "analysis_mode": payload.get("analysis_mode"),
-            "asset_count": payload.get("asset_count"),
-            "scenario": payload.get("scenario"),
-            "horizon": payload.get("horizon"),
-        },
-    }
+# ────────────────────────────────────────────────────────────────
+# 11. UI – HEADER + BACK BUTTON
+# ────────────────────────────────────────────────────────────────
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo = logo_data_uri()
+    logo_html = (
+        f'<img src="{logo}" class="brand-logo">' if logo
+        else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    )
+    render_html(logo_html)
 
+with top_r:
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("\u2190 Tilbake til prosjekt", use_container_width=True, type="secondary"):
+        target = find_page("Project")
+        if target:
+            st.switch_page(target)
+        else:
+            st.warning("Fant ikke Project-siden.")
 
-# ---------------------------------------------------------
-# Main page
-# ---------------------------------------------------------
-
-project = configure_page("Builtly | Climate Risk", "🌍")
-
-# Defaults from project state
-market_default = "NO"
-market_names = {v["label"]: k for k, v in MARKETS.items()}
-lang_default_label = "Norsk"
-if str(project.get("land", "")).lower().startswith("sverige"):
-    market_default, lang_default_label = "SE", "Svenska"
-elif str(project.get("land", "")).lower().startswith("danmark"):
-    market_default, lang_default_label = "DK", "Dansk"
-elif "united states" in str(project.get("land", "")).lower():
-    market_default, lang_default_label = "US", "English (US)"
-elif "united kingdom" in str(project.get("land", "")).lower() or "england" in str(project.get("land", "")).lower():
-    market_default, lang_default_label = "UK", "English (UK)"
-elif "tysk" in str(project.get("land", "")).lower() or "deutsch" in str(project.get("land", "")).lower():
-    market_default, lang_default_label = "DE", "Deutsch"
-elif "finland" in str(project.get("land", "")).lower() or "suomi" in str(project.get("land", "")).lower():
-    market_default, lang_default_label = "FI", "Suomi"
-
-lang_label = st.session_state.get("climate_lang_label", lang_default_label)
-if lang_label not in LANG_LABELS:
-    lang_label = lang_default_label
-lang = LANG_LABELS[lang_label]
-
-render_hero(
-    eyebrow=tr(lang, "eyebrow"),
-    title=tr(lang, "title"),
-    subtitle=tr(lang, "subtitle"),
-    pills=["Flood", "Landslide", "Sea level", "Heat stress", "Portfolio", "PDF / DOCX / JSON / XML"],
-    badge=tr(lang, "eyebrow"),
+st.markdown(
+    "<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>",
+    unsafe_allow_html=True,
 )
 
-render_section(tr(lang, "setup_title"), tr(lang, "setup_sub"), tr(lang, "setup_kicker"))
+# ── Check project exists ──
+if pd_state.get("p_name") in ["", "Nytt Prosjekt", None]:
+    st.warning("Du må sette opp prosjektdata før du kan bruke denne modulen.")
+    if find_page("Project"):
+        if st.button("Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
+    st.stop()
+
+
+# ────────────────────────────────────────────────────────────────
+# 12. HERO
+# ────────────────────────────────────────────────────────────────
+render_html(f"""
+<div class="hero-card">
+    <div class="hero-eyebrow">Tender Control</div>
+    <div class="hero-title">Anbudskontroll som finner hull for markedet gjor det.</div>
+    <div class="hero-subtitle">
+        Sammenstill konkurransegrunnlag, beskrivelser, tegninger, IFC/PDF og tilbudsdokumenter i en arbeidsflate.
+        Modulen lager avviksmatrise, mangelliste, uklarhetslogg, scopesammenstilling og forslag til sporsmal for innlevering.
+    </div>
+    <div class="hero-pills">
+        <span class="hero-pill">Entreprenor</span>
+        <span class="hero-pill">Radgiver</span>
+        <span class="hero-pill">Utbygger</span>
+        <span class="hero-pill">Audit trail</span>
+        <span class="hero-pill">RFI-generator</span>
+    </div>
+    <div class="hero-badge">Horizontal engine</div>
+</div>
+""")
+
+
+# ────────────────────────────────────────────────────────────────
+# 13. FORM – Intake
+# ────────────────────────────────────────────────────────────────
 left, right = st.columns([1.25, 0.75], gap="large")
 
 with left:
-    lang_idx = LANG_OPTIONS.index(lang_label)
-    lang_label = st.selectbox(tr(lang, "lang_label"), LANG_OPTIONS, index=lang_idx)
-    lang = LANG_LABELS[lang_label]
-    st.session_state["climate_lang_label"] = lang_label
+    render_html("""
+    <div class="section-header">
+        <span class="section-badge">Tender intake</span>
+        <h3>Inntak og kontrollparametere</h3>
+        <p>Definer hva som inngar i tilbudspakken og hvilke kontroller Builtly skal prioritere.</p>
+    </div>
+    """)
 
-    market_labels = [f"{MARKETS[k]['label']} ({k})" for k in MARKET_OPTIONS]
-    market_idx = MARKET_OPTIONS.index(st.session_state.get("climate_market", market_default)) if st.session_state.get("climate_market", market_default) in MARKET_OPTIONS else MARKET_OPTIONS.index(market_default)
-    market_choice = st.selectbox(tr(lang, "market_label"), market_labels, index=market_idx)
-    market = market_choice.rsplit("(", 1)[1].replace(")", "")
-    st.session_state["climate_market"] = market
-    market_cfg = MARKETS[market]
+    with st.form("tender_control_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            procurement_mode = st.selectbox(
+                "Anskaffelsesform",
+                ["Totalentreprise", "Utforelsesentreprise", "Samspillsentreprise", "Design & Build"],
+                index=0,
+            )
+            discipline_focus = st.multiselect(
+                "Fag / scope som skal kvalitetssikres forst",
+                ["ARK", "RIB", "RIV", "RIE", "Brann", "Akustikk", "Geo", "Trafikk", "SHA", "MOP", "BREEAM"],
+                default=["ARK", "RIB", "Geo", "Brann"],
+            )
+            delivery_level = st.selectbox("Leveranseniva", ["auto", "reviewed", "attested"], index=1)
+            include_bid_documents = st.toggle("Tilbudsdokumenter er lastet opp", value=True)
 
-    mode = st.radio(tr(lang, "mode_label"), [tr(lang, "mode_single"), tr(lang, "mode_portfolio")], horizontal=True)
-    analysis_mode = "Portfolio" if mode == tr(lang, "mode_portfolio") else "Single"
+        with c2:
+            packages = st.multiselect(
+                "Pakker / delentrepriser",
+                ["Grunnarbeid", "Betong", "Stal", "Fasade", "Tomrer", "Tak", "VVS", "Elektro", "Utomhus"],
+                default=["Grunnarbeid", "Betong", "Fasade", "VVS", "Elektro"],
+            )
+            qa_level = st.select_slider(
+                "Kontrolldybde",
+                options=["Lett", "Standard", "Dyp", "Pre-bid review"],
+                value="Dyp",
+            )
+            required_outputs = st.multiselect(
+                "Onskede leveranser",
+                ["Avviksmatrise", "Mangelliste", "Uklarhetslogg", "Scopesammenstilling", "Forslag til sporsmal/RFI", "Submission readiness"],
+                default=["Avviksmatrise", "Mangelliste", "Uklarhetslogg", "Scopesammenstilling", "Forslag til sporsmal/RFI"],
+            )
+            bid_value_mnok = st.number_input("Estimert tilbudsverdi (MNOK)", min_value=1.0, value=120.0, step=1.0)
 
-    a1, a2 = st.columns(2)
-    with a1:
-        asset_name = st.text_input(tr(lang, "property_name"), value=project.get("p_name", ""))
-        address = st.text_input(tr(lang, "address"), value=project.get("adresse", ""))
-        municipality = st.text_input(tr(lang, "municipality"), value=project.get("kommune", ""))
-        region = st.text_input(tr(lang, "region"), value="")
-        asset_class = st.selectbox(tr(lang, "asset_class"), ASSET_CLASSES.get(lang, ASSET_CLASSES["en-GB"]), index=1)
-    with a2:
-        year_built = st.number_input(tr(lang, "year_built"), min_value=1850, max_value=2100, value=2012, step=1)
-        area_m2 = st.number_input(tr(lang, "area"), min_value=50.0, value=float(project.get("bta", 2500)), step=50.0)
-        currency = market_cfg["currency"]
-        st.text_input(tr(lang, "currency_hint"), value=currency, disabled=True)
-        asset_value = st.number_input(tr(lang, "value"), min_value=0.0, value=85_000_000.0 if currency in {"NOK", "SEK", "DKK"} else 12_000_000.0, step=100_000.0)
+        files = st.file_uploader(
+            "Last opp konkurransegrunnlag, tegninger, IFC/PDF og tilbudsdokumenter",
+            type=["pdf", "ifc", "xlsx", "xls", "docx", "csv", "zip", "dwg", "dxf"],
+            accept_multiple_files=True,
+            key="tender_files_v6",
+        )
+        rulepack_upload = st.file_uploader(
+            "Valgfritt: last opp eget regelbibliotek (JSON/CSV/XLSX)",
+            type=["json", "csv", "xlsx", "xls"],
+            key="tender_rulepack_v2",
+        )
+        notes = st.text_area(
+            "Prosjektspesifikke forhold som bør vektes høyt",
+            value="Særskilt fokus på grensesnitt mellom grunnarbeid, betong og fasade. Kontroller at rigg/logistikk, SHA og ytre miljø er konsistente i alle dokumenter.",
+            height=110,
+        )
+        submitted = st.form_submit_button("Kjør anbudskontroll")
 
-    st.markdown(f"### {tr(lang, 'analysis_settings')}")
-    b1, b2, b3, b4 = st.columns(4)
-    with b1:
-        scenario = st.selectbox(tr(lang, "scenario"), SCENARIOS, index=0)
-        horizon = st.selectbox(tr(lang, "horizon"), HORIZONS, index=1)
-    with b2:
-        elevation_m = st.number_input(tr(lang, "elevation"), min_value=0.0, value=14.0, step=1.0)
-        distance_coast_km = st.number_input(tr(lang, "coast"), min_value=0.0, value=1.8, step=0.1)
-    with b3:
-        distance_river_km = st.number_input(tr(lang, "river"), min_value=0.0, value=0.45, step=0.05)
-        slope_deg = st.number_input(tr(lang, "slope"), min_value=0.0, value=12.0, step=1.0)
-    with b4:
-        soil_type = st.selectbox(tr(lang, "soil"), SOIL_OPTIONS.get(lang, SOIL_OPTIONS["en-GB"]), index=1)
-        heat_index = st.slider(tr(lang, "heat"), 0, 10, 6)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        flood_zone = st.toggle(tr(lang, "flood_zone"), value=True)
-    with c2:
-        landslide_zone = st.toggle(tr(lang, "landslide_zone"), value=False)
-    with c3:
-        has_basement = st.toggle(tr(lang, "basement"), value=True)
+# ────────────────────────────────────────────────────────────────
+# 14. DISCLAIMER BANNER
+# ────────────────────────────────────────────────────────────────
+disclaimer_text = {
+    "auto": "Automatisk nivavurdering – resultatet er et forsteutkast.",
+    "reviewed": "Dette utkastet er ment for fagperson-gjennomgang. Det er ikke signert med ansvarsrett og er ikke juridisk bindende.",
+    "attested": "Markert som attestert – men krever fortsatt signatur og kontroll for juridisk gyldighet.",
+}
+render_html(f"""
+<div class="disclaimer-banner">
+    <div class="db-title">Leveranseniva: {delivery_level}</div>
+    <div class="db-text">{disclaimer_text.get(delivery_level, '')}</div>
+</div>
+""")
 
-    st.markdown(f"### {tr(lang, 'weights_title')}")
-    st.caption(tr(lang, "weights_help"))
-    w1, w2, w3, w4 = st.columns(4)
-    with w1:
-        weight_flood = st.slider("Flood", 0.0, 1.0, 0.35, 0.05)
-    with w2:
-        weight_landslide = st.slider("Landslide", 0.0, 1.0, 0.25, 0.05)
-    with w3:
-        weight_sea = st.slider("Sea", 0.0, 1.0, 0.25, 0.05)
-    with w4:
-        weight_heat = st.slider("Heat", 0.0, 1.0, 0.15, 0.05)
-    weights = {"flood": weight_flood, "landslide": weight_landslide, "sea": weight_sea, "heat": weight_heat}
 
-    portfolio_upload = None
-    if analysis_mode == "Portfolio":
-        portfolio_upload = st.file_uploader(tr(lang, "upload_portfolio"), type=["csv", "xlsx", "xls"], key="climate_portfolio_upload_v2")
+# ────────────────────────────────────────────────────────────────
+# 15. RUN ANALYSIS
+# ────────────────────────────────────────────────────────────────
+config = {
+    "procurement_mode": procurement_mode,
+    "discipline_focus": discipline_focus,
+    "packages": packages,
+    "qa_level": qa_level,
+    "required_outputs": required_outputs,
+    "bid_value_mnok": bid_value_mnok,
+    "notes": notes,
+    "include_bid_documents": include_bid_documents,
+    "delivery_level": delivery_level,
+}
 
-    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
-    can_run = bool(address or portfolio_upload or asset_name)
-    generate_clicked = st.button(tr(lang, "generate"), type="primary", use_container_width=True)
-    rerun_clicked = st.button(tr(lang, "rerun"), use_container_width=True)
-    if (generate_clicked or rerun_clicked) and not can_run:
-        st.warning(tr(lang, "need_inputs"))
+records = normalize_uploaded_files(files if submitted else files or [])
+project_records = load_project_files()
+if project_records:
+    # Avoid duplicates by filename
+    existing_names = {r["filename"] for r in records}
+    for pr in project_records:
+        if pr["filename"] not in existing_names:
+            records.append(pr)
+    st.success(f"{len(project_records)} fil(er) hentet automatisk fra prosjektoppsettet.")
+rules = build_tender_rules(records, config)
 
+# AI analysis (run when submitted or when files present)
+if "tender_ai_result" not in st.session_state:
+    st.session_state.tender_ai_result = {"data": None, "attempt_log": []}
+
+if submitted and records and HAS_AI:
+    with st.spinner("Kjorer AI-analyse..."):
+        st.session_state.tender_ai_result = run_ai_tender_analysis(records, config, rules)
+
+ai_result = st.session_state.tender_ai_result
+ai_data = safe_get(ai_result, "data") if isinstance(ai_result, dict) else None
+
+
+# ────────────────────────────────────────────────────────────────
+# 16. RIGHT COLUMN – Project snapshot + metrics
+# ────────────────────────────────────────────────────────────────
 with right:
-    market_cfg = MARKETS[st.session_state.get("climate_market", market_default)]
-    render_project_snapshot(project, badge=market_cfg["label"])
-    render_panel(
-        tr(lang, "live_data_title"),
-        tr(lang, "live_data_sub"),
-        [
-            f"{tr(lang, 'country_note_label')}: {market_cfg['jurisdiction_note'][lang]}",
-            f"Rule set: {market_cfg['rule_set']}",
-            f"Currency: {market_cfg['currency']} · VAT: {market_cfg['vat']}",
-        ],
-        tone="blue",
-        badge=market_cfg["label"],
+    # Project snapshot
+    render_html(f"""
+    <div class="snapshot-card">
+        <span class="sc-badge">Tender context</span>
+        <div class="sc-name">{clean_text(pd_state.get('p_name', 'Prosjekt'))}</div>
+        <div class="sc-row">Type: {clean_text(pd_state.get('b_type', '-'))}</div>
+        <div class="sc-row">Sted: {clean_text(pd_state.get('adresse', ''))}, {clean_text(pd_state.get('kommune', ''))}</div>
+        <div class="sc-row">Etasjer: {nb_value(pd_state.get('etasjer', '-'))} | BTA: {nb_value(pd_state.get('bta', '-'))} m2</div>
+    </div>
+    """)
+
+    # Compute metrics
+    risk_items = rules.get("risk_items", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "risk_items"), list):
+        risk_items = risk_items + safe_get(ai_data, "risk_items", [])
+    high_risks = len([r for r in risk_items if isinstance(r, dict) and r.get("severity") == "HIGH"])
+    completeness = rules.get("data_completeness_score", 0.0)
+    readiness = max(35, int(completeness * 100) - 4 * len(rules.get("missing_categories", [])) - 3 * high_risks)
+
+    render_html(f"""
+    <div class="metric-row">
+        <div class="metric-card">
+            <div class="mc-value">{len(records)}</div>
+            <div class="mc-label">Dokumenter</div>
+            <div class="mc-desc">I kontrollsloyfe</div>
+        </div>
+        <div class="metric-card">
+            <div class="mc-value">{len(rules.get('missing_categories', []))}</div>
+            <div class="mc-label">Manglende kat.</div>
+            <div class="mc-desc">Forventede typer</div>
+        </div>
+    </div>
+    <div class="metric-row">
+        <div class="metric-card">
+            <div class="mc-value">{high_risks}</div>
+            <div class="mc-label">Hoy risiko</div>
+            <div class="mc-desc">Bor lukkes/RFI</div>
+        </div>
+        <div class="metric-card">
+            <div class="mc-value">{readiness}%</div>
+            <div class="mc-label">Readiness</div>
+            <div class="mc-desc">Modenhetsvurdering</div>
+        </div>
+    </div>
+    """)
+
+    # Config payload preview
+    with st.expander("Bestillingspayload"):
+        st.json({
+            "delivery_level": delivery_level,
+            "procurement_mode": procurement_mode,
+            "packages": packages,
+            "required_outputs": required_outputs,
+            "qa_level": qa_level,
+            "bid_value_mnok": bid_value_mnok,
+        })
+
+
+# ────────────────────────────────────────────────────────────────
+# 17. RESULTS – Tabs
+# ────────────────────────────────────────────────────────────────
+render_html("""
+<div class="section-header">
+    <span class="section-badge">Review</span>
+    <h3>Analyse og eksport</h3>
+    <p>Rules-first sjekkliste, AI-oppsummering og revisjonsspor i samme arbeidsflate.</p>
+</div>
+""")
+
+tabs = st.tabs(["AI-utkast", "Dokumentmanifest", "Sjekkliste", "Risiko og RFI", "Scope / pakker", "Audit trail"])
+
+# ── Tab 0: AI Draft ──
+with tabs[0]:
+    st.markdown("### Sammendrag")
+    summary = safe_get(ai_data, "executive_summary", "") if isinstance(ai_data, dict) else ""
+    st.write(summary or "Ingen AI-oppsummering tilgjengelig. Kjør analysen med dokumenter for å få AI-resultat.")
+
+    # Contract fields
+    cf_rules = rules.get("contract_fields", [])
+    cf_ai = safe_get(ai_data, "contract_fields", []) if isinstance(ai_data, dict) else []
+    all_cf = cf_rules + (cf_ai if isinstance(cf_ai, list) else [])
+    if all_cf:
+        cf_df = list_to_dataframe(all_cf, ["field", "value", "source"])
+        st.dataframe(cf_df, use_container_width=True, hide_index=True)
+
+    # Downloads
+    report_md = build_markdown_report(records, rules, ai_result, config)
+    st.download_button(
+        "Last ned anbudsrapport (.md)",
+        data=report_md,
+        file_name="tender_report.md",
+        mime="text/markdown",
     )
-    render_panel(
-        tr(lang, "disclaimer_title"),
-        DISCLAIMER[lang],
-        [],
-        tone="gold",
-        badge="Level 1",
+
+    pdf_bytes = build_pdf_report(records, rules, ai_result, config)
+    if pdf_bytes:
+        st.download_button(
+            "Last ned anbudsrapport (.pdf)",
+            data=pdf_bytes,
+            file_name="tender_report.pdf",
+            mime="application/pdf",
+        )
+
+    ai_json = safe_get(ai_result, "data") or {}
+    st.download_button(
+        "Last ned AI-resultat (.json)",
+        data=json.dumps(ai_json, indent=2, ensure_ascii=False, default=str),
+        file_name="tender_result.json",
+        mime="application/json",
     )
 
-# Analysis execution
-if generate_clicked or rerun_clicked:
-    market = st.session_state.get("climate_market", market_default)
-    market_cfg = MARKETS[market]
-    asset_payload = {
-        "asset_name": asset_name or project.get("p_name") or "Asset",
-        "address": address,
-        "municipality": municipality,
-        "region": region,
-        "asset_class": asset_class,
-        "year_built": year_built,
-        "area_m2": area_m2,
-        "asset_value": asset_value,
-        "elevation_m": elevation_m,
-        "distance_coast_km": distance_coast_km,
-        "distance_river_km": distance_river_km,
-        "slope_deg": slope_deg,
-        "soil_type": soil_type,
-        "heat_index": heat_index,
-        "flood_zone": flood_zone,
-        "landslide_zone": landslide_zone,
-        "has_basement": has_basement,
-        "scenario": scenario,
-        "horizon": horizon,
-    }
-    single_scores = compute_scores(asset_payload, market, weights)
-    source_rows = make_source_rows(market, asset_payload)
-    factor_df = build_factor_df(lang, single_scores, source_rows)
-    reg_outputs = make_regulatory_outputs(market, single_scores, "Portfolio" if analysis_mode == "Portfolio" else "Single", asset_class)
+    # Attempt log
+    attempt_log = safe_get(ai_result, "attempt_log", [])
+    if attempt_log:
+        with st.expander("AI-forsokslogg"):
+            for entry in attempt_log:
+                if isinstance(entry, dict):
+                    st.write(f"**{entry.get('step', '?')}**: {entry.get('status', '-')}")
 
-    portfolio_df = None
-    portfolio_rows = []
-    portfolio_summary = {}
-    if analysis_mode == "Portfolio":
-        portfolio_rows = load_portfolio(portfolio_upload)
-        if not portfolio_rows:
-            portfolio_rows = [
-                dict(asset_payload, id=f"asset-{i+1}", asset_name=f"Asset {i+1}")
-                for i in range(1, 11)
-            ]
-        portfolio_df = portfolio_analysis(portfolio_rows, market, scenario, horizon, weights)
-        if not portfolio_df.empty:
-            portfolio_summary = {
-                "count": int(len(portfolio_df)),
-                "avg_score": round(float(portfolio_df["aggregate_score"].mean()), 2),
-                "high_count": int((portfolio_df["aggregate_score"] >= 4.0).sum()),
-                "elevated_count": int(((portfolio_df["aggregate_score"] >= 3.0) & (portfolio_df["aggregate_score"] < 4.0)).sum()),
-                "total_damage": float(portfolio_df["estimated_damage_cost"].sum()),
-            }
-
-    analysis_id = f"cr-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    ai_payload = {
-        "analysis_mode": analysis_mode,
-        "asset_count": 1 if analysis_mode == "Single" else len(portfolio_rows),
-        "market": market_cfg["label"],
-        "rule_set": market_cfg["rule_set"],
-        "scenario": scenario,
-        "horizon": horizon,
-        "scores": single_scores,
-        "top_factor": top_factor_label(single_scores["top_factor"], lang),
-        "regulatory_outputs": reg_outputs,
-        "portfolio_summary": portfolio_summary,
-    }
-    ai_result = ai_summary(lang, market, ai_payload)
-    if ai_result.get("ok") and ai_result.get("data"):
-        ai_data = ai_result["data"]
-        summary_text = ai_data.get("executive_summary") or deterministic_summary(lang, market, asset_payload["asset_name"], single_scores, reg_outputs)["executive_summary"]
-        actions = ai_data.get("recommended_actions") or deterministic_summary(lang, market, asset_payload["asset_name"], single_scores, reg_outputs)["recommended_actions"]
-        jurisdiction_note = ai_data.get("jurisdiction_note") or market_cfg["jurisdiction_note"][lang]
+# ── Tab 1: Document Manifest ──
+with tabs[1]:
+    if records:
+        manifest_df = pd.DataFrame(records)
+        st.dataframe(manifest_df, use_container_width=True, hide_index=True)
+        csv_data = manifest_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Last ned dokumentmanifest (.csv)", data=csv_data, file_name="tender_manifest.csv", mime="text/csv")
     else:
-        fallback = deterministic_summary(lang, market, asset_payload["asset_name"], single_scores, reg_outputs)
-        summary_text = fallback["executive_summary"]
-        actions = fallback["recommended_actions"]
-        jurisdiction_note = market_cfg["jurisdiction_note"][lang]
+        st.info("Ingen dokumenter lastet opp enna.")
 
-    meta = {
-        "analysis_id": analysis_id,
-        "asset_name": asset_payload["asset_name"],
-        "report_title": f"Builtly Climate Risk Report – {asset_payload['asset_name']}" if lang.startswith("en") else (
-            f"Builtly Klimarisikorapport – {asset_payload['asset_name']}" if lang in {"no", "da"} else
-            f"Builtly Klimatriskrapport – {asset_payload['asset_name']}" if lang == "sv" else
-            f"Builtly Klimarisikobericht – {asset_payload['asset_name']}" if lang == "de" else
-            f"Builtly Ilmastoriskiraportti – {asset_payload['asset_name']}"
-        ),
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-    }
+# ── Tab 2: Checklist ──
+with tabs[2]:
+    all_checks = rules.get("checklist_items", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "checklist_items"), list):
+        all_checks = all_checks + safe_get(ai_data, "checklist_items", [])
+    if all_checks:
+        checklist_df = list_to_dataframe(all_checks, ["topic", "status", "severity", "paragraph_ref", "reason", "source"])
+        st.dataframe(checklist_df, use_container_width=True, hide_index=True)
+        csv_data = checklist_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Last ned sjekkliste (.csv)", data=csv_data, file_name="tender_checklist.csv", mime="text/csv")
+    else:
+        st.info("Kjør analysen for å se sjekkliste.")
 
-    package_json = {
-        "meta": {**meta, "market": market, "market_label": market_cfg["label"], "delivery_level": "auto", "language": lang, "jurisdiction_note": jurisdiction_note},
-        "input": asset_payload,
-        "scores": single_scores,
-        "regulatory_outputs": reg_outputs,
-        "source_rows": source_rows,
-        "summary": summary_text,
-        "actions": actions,
-        "portfolio_summary": portfolio_summary,
-        "portfolio_rows": portfolio_df.to_dict(orient="records") if portfolio_df is not None else [],
-    }
-    md_report = markdown_report(lang, market, meta, summary_text, factor_df, reg_outputs, source_rows, actions)
-    docx_bytes = build_docx_report(lang, market, meta, summary_text, factor_df, reg_outputs, source_rows, actions)
-    pdf_bytes = build_pdf_report(lang, market, meta, summary_text, factor_df, reg_outputs, source_rows, actions)
-    xml_bytes = xml_from_mapping({
-        "analysis_id": analysis_id,
-        "market": market,
-        "asset_name": asset_payload["asset_name"],
-        "aggregate_score": single_scores["aggregate_score"],
-        "created_at": meta["created_at"],
-    }, reg_outputs, factor_df)
-    audit = audit_entry(ai_result, analysis_id, market, lang, ai_payload)
+    if rules.get("missing_categories"):
+        st.warning("Manglende kategorier: " + ", ".join(rules["missing_categories"]))
 
-    st.session_state["climate_report_state"] = {
-        "lang": lang,
-        "market": market,
-        "asset_payload": asset_payload,
-        "scores": single_scores,
-        "factor_df": factor_df,
-        "reg_outputs": reg_outputs,
-        "source_rows": source_rows,
-        "summary": summary_text,
-        "actions": actions,
-        "jurisdiction_note": jurisdiction_note,
-        "portfolio_df": portfolio_df,
-        "portfolio_summary": portfolio_summary,
-        "package_json": package_json,
-        "pdf_bytes": pdf_bytes,
-        "docx_bytes": docx_bytes,
-        "xml_bytes": xml_bytes,
-        "md_report": md_report,
-        "audit": audit,
-        "attempt_log": ai_result.get("attempt_log", []),
-        "ai_ok": ai_result.get("ok", False),
-        "analysis_id": analysis_id,
-    }
+# ── Tab 3: Risk & RFI ──
+with tabs[3]:
+    all_risks = rules.get("risk_items", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "risk_items"), list):
+        all_risks = all_risks + safe_get(ai_data, "risk_items", [])
 
-state = st.session_state.get("climate_report_state")
-if state:
-    lang = state["lang"]
-    market = state["market"]
-    market_cfg = MARKETS[market]
-    scores = state["scores"]
-    factor_df = state["factor_df"]
-    reg_outputs = state["reg_outputs"]
-    source_rows = state["source_rows"]
-    portfolio_df = state["portfolio_df"]
-    portfolio_summary = state["portfolio_summary"]
-    render_section(tr(lang, "results_title"), tr(lang, "results_sub"), tr(lang, "results_kicker"))
-    framework_primary = reg_outputs[0]["framework"] if reg_outputs else market_cfg["rule_set"]
-    render_metric_cards([
-        {"label": tr(lang, "metrics_score"), "value": f"{scores['aggregate_score']}/5", "desc": f"{tr(lang, 'risk_band')}: {localized_risk_band(scores['aggregate_score'], lang)}"},
-        {"label": tr(lang, "metrics_uncertainty"), "value": f"± {scores['uncertainty_interval']}", "desc": f"{tr(lang, 'top_risk')}: {top_factor_label(scores['top_factor'], lang)}"},
-        {"label": tr(lang, "metrics_assets"), "value": str(1 if portfolio_df is None else len(portfolio_df)), "desc": market_cfg['label']},
-        {"label": tr(lang, "metrics_framework"), "value": framework_primary, "desc": market_cfg['rule_set']},
-    ])
+    all_rfi = rules.get("rfi_suggestions", [])
+    if isinstance(ai_data, dict) and isinstance(safe_get(ai_data, "rfi_suggestions"), list):
+        all_rfi = all_rfi + safe_get(ai_data, "rfi_suggestions", [])
 
-    tabs = st.tabs([
-        tr(lang, "tab_overview"),
-        tr(lang, "tab_factors"),
-        tr(lang, "tab_mapping"),
-        tr(lang, "tab_sources"),
-        tr(lang, "tab_package"),
-        tr(lang, "tab_portfolio"),
-    ])
+    st.markdown("#### Risikoer")
+    if all_risks:
+        risk_df = list_to_dataframe(all_risks, ["title", "severity", "impact", "recommendation", "source", "paragraph_ref"])
+        st.dataframe(risk_df, use_container_width=True, hide_index=True)
+        csv_data = risk_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Last ned risikologg (.csv)", data=csv_data, file_name="tender_risk.csv", mime="text/csv")
+    else:
+        st.info("Ingen risikoer identifisert.")
 
-    with tabs[0]:
-        render_panel(
-            tr(lang, "summary_title"),
-            state["summary"],
-            [
-                f"{tr(lang, 'country_note_label')}: {state['jurisdiction_note']}",
-                tr(lang, "map_hint"),
-            ],
-            tone=tone_from_score(scores["aggregate_score"]),
-            badge=localized_risk_band(scores["aggregate_score"], lang),
-        )
-        render_panel(
-            tr(lang, "actions_title"),
-            "",
-            [f"{item['priority']}: {item['action']} — {item['why']}" for item in state["actions"]],
-            tone="green",
-            badge="Action",
-        )
-        if not state["ai_ok"]:
-            st.info(tr(lang, "ai_unavailable"))
+    st.markdown("#### RFI-forslag")
+    if all_rfi:
+        rfi_df = list_to_dataframe(all_rfi, ["priority", "question", "why", "owner"])
+        st.dataframe(rfi_df, use_container_width=True, hide_index=True)
+        csv_data = rfi_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Last ned RFI-utkast (.csv)", data=csv_data, file_name="tender_rfi.csv", mime="text/csv")
+    else:
+        st.info("Ingen RFI-forslag generert.")
 
-    with tabs[1]:
-        st.bar_chart(factor_df.set_index("factor")["score"])
-        st.dataframe(factor_df, use_container_width=True, hide_index=True)
-        dataframe_download(factor_df, tr(lang, "download_csv"), f"climate_factors_{state['analysis_id']}.csv")
+# ── Tab 4: Scope / packages ──
+with tabs[4]:
+    pkg_list = packages if packages else ["Grunnarbeid", "Betong", "Fasade"]
+    scope_rows = []
+    for idx, pkg in enumerate(pkg_list):
+        status = "Dekket" if idx < max(1, len(pkg_list) - 1) else "Krevende grensesnitt"
+        scope_rows.append({
+            "pakke": pkg,
+            "status": status,
+            "kommentar": "Kontroller mengder, delingslinjer og ansvar mot dokumentgrunnlaget.",
+        })
+    scope_df = pd.DataFrame(scope_rows)
+    st.dataframe(scope_df, use_container_width=True, hide_index=True)
+    csv_data = scope_df.to_csv(index=False).encode("utf-8")
+    st.download_button("Last ned scopeoversikt (.csv)", data=csv_data, file_name="tender_scope.csv", mime="text/csv")
 
-    with tabs[2]:
-        reg_df = pd.DataFrame(reg_outputs)
-        st.dataframe(reg_df, use_container_width=True, hide_index=True)
-        st.caption(state["jurisdiction_note"])
+# ── Tab 5: Audit trail ──
+with tabs[5]:
+    audit_rows = [
+        {
+            "tidspunkt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "modul": "Tender Control",
+            "leveranseniva": delivery_level,
+            "handling": "Anbudskontroll kjort",
+            "dokumenter": len(records),
+            "ai_status": "OK" if (isinstance(ai_data, dict) and ai_data) else "Ikke kjort / feilet",
+            "bruker": "Builtly-bruker",
+        }
+    ]
+    audit_df = pd.DataFrame(audit_rows)
+    st.dataframe(audit_df, use_container_width=True, hide_index=True)
 
-    with tabs[3]:
-        source_df = pd.DataFrame(source_rows)
-        st.dataframe(source_df, use_container_width=True, hide_index=True)
-        render_panel(
-            tr(lang, "live_data_title"),
-            tr(lang, "live_data_sub"),
-            [f"{row['source']} — {row['hazard']} — {row['access']}" for row in source_rows],
-            tone="blue",
-            badge=market_cfg["label"],
-        )
 
-    with tabs[4]:
-        st.success(tr(lang, "analysis_ready"))
-        st.caption(tr(lang, "report_sub"))
-        disclaimer_accepted = st.checkbox(tr(lang, "disclaimer_ack"), key=f"climate_disclaimer_{state['analysis_id']}")
-        if disclaimer_accepted:
-            if state["pdf_bytes"]:
-                st.download_button(tr(lang, "download_pdf"), state["pdf_bytes"], file_name=f"{state['analysis_id']}.pdf", mime="application/pdf")
-            else:
-                st.info("PDF engine is not available in this runtime.")
-            if state["docx_bytes"]:
-                st.download_button(tr(lang, "download_docx"), state["docx_bytes"], file_name=f"{state['analysis_id']}.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-            json_download(state["package_json"], tr(lang, "download_json"), f"{state['analysis_id']}.json")
-            st.download_button(tr(lang, "download_xml"), state["xml_bytes"], file_name=f"{state['analysis_id']}.xml", mime="application/xml")
-            st.download_button("Markdown", state["md_report"].encode("utf-8"), file_name=f"{state['analysis_id']}.md", mime="text/markdown")
-        else:
-            st.info(tr(lang, "downloads_locked"))
-        with st.expander(tr(lang, "audit_title"), expanded=False):
-            st.json(state["audit"])
-            if state["attempt_log"]:
-                st.write(pd.DataFrame(state["attempt_log"]))
-
-    with tabs[5]:
-        if portfolio_df is None or portfolio_df.empty:
-            st.info(tr(lang, "portfolio_placeholder"))
-        else:
-            pcols = st.columns(4)
-            pcols[0].metric(tr(lang, "metrics_assets"), f"{portfolio_summary['count']}")
-            pcols[1].metric(tr(lang, "metrics_score"), f"{portfolio_summary['avg_score']}/5")
-            pcols[2].metric("High", str(portfolio_summary['high_count']))
-            pcols[3].metric("Elevated", str(portfolio_summary['elevated_count']))
-            st.caption(f"{market_cfg['currency']} total estimated damage: {format_money(portfolio_summary['total_damage'], market_cfg['currency'])}")
-            st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
-            dataframe_download(portfolio_df, tr(lang, "download_portfolio"), f"{state['analysis_id']}_portfolio.csv")
-
-else:
-    render_section(tr(lang, "results_title"), tr(lang, "results_sub"), tr(lang, "results_kicker"))
-    st.info(tr(lang, "need_inputs"))
+# ────────────────────────────────────────────────────────────────
+# 18. NEXT STEPS PANEL
+# ────────────────────────────────────────────────────────────────
+render_html("""
+<div class="panel-box gold">
+    <span class="hero-badge">Pilot backlog</span>
+    <h4>Neste naturlige steg i pilot</h4>
+    <p>Denne modulen er laget som en horisontal motor for entreprenor, radgiver og utbygger.
+       Knytt parser, review og eksport enda tettere til live konkurransegrunnlag i neste iterasjon.</p>
+    <ul>
+        <li>Koble dokumentindeks og revisjonssammenligning til tilbudsbok og kontraktsgrunnlag.</li>
+        <li>Legg til klikkbar avvikslogg med manuell overstyring og RFI-status.</li>
+        <li>Bygg pre-fylt tilbudsgrunnlag for DOCX og signert review-flyt.</li>
+        <li>Koble batch/API-laget mot partner- eller bankkanaler uten a fronte det offentlig.</li>
+    </ul>
+</div>
+""")
