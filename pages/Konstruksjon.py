@@ -600,6 +600,99 @@ def detect_drawing_hint(name: str) -> str:
     return "unknown"
 
 
+def _quick_plan_score_v15(image: Image.Image) -> float:
+    """Fast visual heuristic to score how 'plan-like' an image is.
+
+    Floor plans have balanced horizontal/vertical line density and many small
+    enclosed regions (rooms). Facades are dominated by horizontal lines.
+    Landscape plans have scattered, non-orthogonal features.
+
+    Returns 0.0 (not plan-like) to 1.0 (very plan-like).
+    """
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return 0.0
+
+    try:
+        img = copy_rgb(image)
+        # Resize for speed
+        max_dim = 800
+        w, h = img.size
+        if max(w, h) > max_dim:
+            ratio = max_dim / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+        arr = np.array(img)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        height, width = gray.shape[:2]
+        if width < 50 or height < 50:
+            return 0.0
+
+        # Adaptive threshold to get line work
+        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY_INV, 21, 4)
+
+        # Extract vertical and horizontal lines
+        v_kernel_h = max(15, int(height * 0.06))
+        h_kernel_w = max(15, int(width * 0.06))
+        v_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_h)))
+        h_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_w, 1)))
+
+        v_pixels = float(np.sum(v_mask > 0))
+        h_pixels = float(np.sum(h_mask > 0))
+        total_pixels = float(width * height)
+
+        if total_pixels <= 0 or (v_pixels + h_pixels) <= 0:
+            return 0.0
+
+        # Ratio of vertical to horizontal line content
+        # Plans: ratio near 1.0, Facades: ratio << 0.5
+        line_ratio = min(v_pixels, h_pixels) / max(v_pixels, h_pixels, 1.0)
+
+        # Line density: plans have moderate density, facades often lower
+        line_density = (v_pixels + h_pixels) / total_pixels
+
+        # Room detection: count enclosed regions in the plan area
+        # Plans have many small enclosed regions (rooms)
+        combined = cv2.bitwise_or(v_mask, h_mask)
+        dilated = cv2.dilate(combined, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
+        inverted = cv2.bitwise_not(dilated)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(inverted, 4)
+
+        # Count regions that look like rooms (not too small, not too large)
+        min_room = int(total_pixels * 0.002)
+        max_room = int(total_pixels * 0.15)
+        room_count = 0
+        for idx in range(1, num_labels):
+            area = int(stats[idx, cv2.CC_STAT_AREA])
+            if min_room < area < max_room:
+                room_count += 1
+
+        # Score components
+        ratio_score = line_ratio  # 0-1, higher = more balanced = more plan-like
+        density_score = min(1.0, line_density * 18.0)  # normalized
+        room_score = min(1.0, room_count / 12.0)  # 12+ rooms = max score
+
+        # Facade penalty: facades have very low vertical content relative to horizontal
+        facade_penalty = 0.0
+        if line_ratio < 0.25 and h_pixels > v_pixels * 3.0:
+            facade_penalty = 0.4  # likely a facade
+
+        # Landscape penalty: very low line density overall
+        landscape_penalty = 0.0
+        if line_density < 0.015 and room_count < 3:
+            landscape_penalty = 0.3
+
+        score = (ratio_score * 0.35 + density_score * 0.25 + room_score * 0.40
+                 - facade_penalty - landscape_penalty)
+        return float(max(0.0, min(1.0, score)))
+
+    except Exception:
+        return 0.0
+
+
 def drawing_priority(record: Dict[str, Any]) -> int:
     hint = record.get("hint", "unknown")
     score = 0
@@ -611,6 +704,18 @@ def drawing_priority(record: Dict[str, Any]) -> int:
         score += 50
     elif hint == "detail":
         score += 20
+
+    # v15: When hint is unknown, use visual pre-classification to boost plan-like drawings
+    if hint == "unknown" and isinstance(record.get("image"), Image.Image):
+        plan_score = _quick_plan_score_v15(record["image"])
+        record["_plan_score_v15"] = plan_score  # cache for later use
+        if plan_score > 0.55:
+            score += 90  # Strong plan signal — prioritize almost like known plans
+        elif plan_score > 0.35:
+            score += 60  # Moderate plan signal
+        elif plan_score < 0.15:
+            score += 5   # Likely facade/section/landscape
+
     name = clean_pdf_text(record.get("name", "")).lower()
     if any(k in name for k in ["1.etg", "1 etg", "plan 1", "plan1", "ground", "u. etg"]):
         score += 10
@@ -6660,6 +6765,25 @@ def is_plan_like_record_v6(record: Dict[str, Any]) -> bool:
         return False
     if is_basement_like_record_v6(record):
         return True
+
+    # v15: Use cached visual plan score when available
+    plan_score = record.get("_plan_score_v15")
+    if plan_score is not None:
+        if float(plan_score) < 0.15:
+            return False  # Clearly not a plan (facade, landscape, etc.)
+        if float(plan_score) > 0.50:
+            return True  # Strong plan signal from visual analysis
+
+    # v15: Check page_cue if available — if AI says it's not a plan with confidence, respect that
+    cue = record.get("ai_page_cue_v9")
+    if isinstance(cue, dict):
+        cue_role = clean_pdf_text(cue.get("drawing_role", "")).lower()
+        cue_conf = float(cue.get("plan_confidence", 0.0) or 0.0)
+        if cue_role == "plan" and cue_conf > 0.4:
+            return True
+        if cue_role != "plan" and cue_conf < 0.2:
+            return False
+
     regions = get_plan_regions_for_record_v6(record)
     if not regions:
         return False
