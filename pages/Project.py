@@ -48,11 +48,13 @@ def go_home():
 # --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
 DB_DIR = Path("qa_database")
 IMG_DIR = DB_DIR / "project_images"
+FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
 
 def init_db():
     DB_DIR.mkdir(exist_ok=True)
     IMG_DIR.mkdir(exist_ok=True)
+    FILES_DIR.mkdir(exist_ok=True)
 
 init_db()
 
@@ -159,6 +161,7 @@ if "analyzed_file_names" not in st.session_state:
 
 pd_state = st.session_state.project_data
 saved_image_count = len(list(IMG_DIR.glob("*.jpg")))
+saved_files_count = len(list(FILES_DIR.iterdir())) if FILES_DIR.exists() else 0
 
 fields_to_check = ["p_name", "c_name", "p_desc", "adresse", "kommune", "gnr", "bnr", "b_type", "etasjer", "bta", "tomteareal"]
 filled_fields = sum(1 for field in fields_to_check if bool(pd_state.get(field)))
@@ -319,6 +322,14 @@ with input_col:
     st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
     
     uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+
+    st.file_uploader(
+        "Last opp øvrige prosjektdokumenter (DWG, IFC, DXF, XLSX, DOCX)",
+        accept_multiple_files=True,
+        type=['dwg', 'dxf', 'ifc', 'xlsx', 'xls', 'docx', 'csv', 'zip'],
+        key="project_extra_files",
+        help="Disse filene lagres i prosjektmappen og er tilgjengelig for alle fagmoduler (TDD, Anbudskontroll, Mengde & Scope, Yield osv).",
+    )
     current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
     
     if uploaded_drawings:
@@ -398,6 +409,11 @@ with input_col:
             
             for p in IMG_DIR.glob("*.jpg"):
                 p.unlink()
+            for p in FILES_DIR.iterdir():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
 
             if uploaded_drawings:
                 try:
@@ -405,7 +421,12 @@ with input_col:
                     for f in uploaded_drawings: 
                         f.seek(0)
                         if f.name.lower().endswith('pdf'):
+                            # Save original PDF to project_files
+                            f.seek(0)
+                            (FILES_DIR / f.name).write_bytes(f.read())
+                            # Also convert to JPG previews
                             if fitz is not None: 
+                                f.seek(0)
                                 doc = fitz.open(stream=f.read(), filetype="pdf")
                                 for page_num in range(min(4, len(doc))):
                                     pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
@@ -419,8 +440,21 @@ with input_col:
                             img.thumbnail((1200, 1200))
                             img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
                             img_count += 1
+                            # Also save original image to project_files
+                            f.seek(0)
+                            (FILES_DIR / f.name).write_bytes(f.read())
                 except Exception as e:
                     st.warning(f"Kunne ikke lagre alle filer: {e}")
+
+            # Save extra project files (DWG, IFC, DXF, XLSX, DOCX etc)
+            extra_files = st.session_state.get("project_extra_files", [])
+            if extra_files:
+                try:
+                    for f in extra_files:
+                        f.seek(0)
+                        (FILES_DIR / f.name).write_bytes(f.read())
+                except Exception as e:
+                    st.warning(f"Kunne ikke lagre tilleggsfiler: {e}")
                 
             st.session_state.project_data.update({
                 "land": new_land, "p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc,
@@ -451,6 +485,7 @@ with snap_col:
         <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
         <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{pd_state.get("bta", "0")} m² / {pd_state.get("tomteareal", "0")} m²</div></div>
         <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Prosjektfiler</div><div class="snap-val" style="color:#7ee081;">{saved_files_count} filer lagret</div></div>
     </div>
     """)
 
