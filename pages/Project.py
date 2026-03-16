@@ -43,13 +43,7 @@ def find_page(base_name: str) -> str:
     return ""
 
 def go_home():
-    main_file = None
-    for f in Path(".").glob("*.py"):
-        if f.name.lower() not in ["setup.py", "test.py"]:
-            main_file = str(f)
-            break
-    if main_file:
-        st.switch_page(main_file)
+    st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
 
 # --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
 DB_DIR = Path("qa_database")
