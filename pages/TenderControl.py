@@ -1404,7 +1404,7 @@ def build_pdf_report(
         accent=(180, 130, 40),
     )
 
-    return pdf.output()
+    return bytes(pdf.output())
 
 
 # ────────────────────────────────────────────────────────────────
