@@ -52,4 +52,4 @@ RUN pip install --upgrade pip && \
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.maxUploadSize=200", "--server.maxMessageSize=200", "--server.enableXsrfProtection=false"]
+CMD ["streamlit", "run", "Builtly_AI_frontpage_access_gate_expanded.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.maxUploadSize=200", "--server.maxMessageSize=200", "--server.enableXsrfProtection=false"]
