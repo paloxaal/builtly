@@ -848,7 +848,7 @@ def build_pdf_report(
         "Dokumentet er ikke signert med ansvarsrett og er ikke juridisk bindende.",
     ], fill=(255, 248, 235), accent=(180, 130, 40))
 
-    return pdf.output()
+    return bytes(pdf.output())
 
 
 # ────────────────────────────────────────────────────────────────
