@@ -43,8 +43,10 @@ from builtly_module_kit import configure_page, render_hero, render_metric_cards,
 
 DB_DIR = ROOT / "qa_database"
 IMG_DIR = DB_DIR / "project_images"
+FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR.mkdir(parents=True, exist_ok=True)
+FILES_DIR.mkdir(parents=True, exist_ok=True)
 
 project = configure_page("Builtly | Area & Yield", "🏙️")
 
@@ -545,6 +547,7 @@ def priority(record: Dict[str, Any]) -> int:
 
 def saved_drawings() -> List[Dict[str, Any]]:
     drawings: List[Dict[str, Any]] = []
+    # 1. JPG previews from project_images (already converted by Project.py)
     if IMG_DIR.exists():
         for p in sorted(IMG_DIR.iterdir()):
             if p.suffix.lower() in SUPPORTED_IMAGE_EXTS:
@@ -552,6 +555,24 @@ def saved_drawings() -> List[Dict[str, Any]]:
                     drawings.append(build_record(p.name, Image.open(p), "Project Setup"))
                 except Exception:
                     pass
+    # 2. Original PDFs from project_files (convert to images with fitz)
+    if FILES_DIR.exists() and fitz is not None:
+        for p in sorted(FILES_DIR.iterdir()):
+            if p.suffix.lower() == ".pdf":
+                try:
+                    doc = fitz.open(str(p))
+                    for page_num in range(min(4, len(doc))):
+                        page = doc.load_page(page_num)
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
+                        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                        drawings.append(build_record(f"{p.name} - page {page_num+1}", img, "Project Setup (PDF)"))
+                    doc.close()
+                except Exception:
+                    drawings.append(build_record(p.name, None, "Project Setup (PDF)"))
+            elif p.suffix.lower() in {".dwg", ".dxf", ".ifc"}:
+                # CAD/IFC files — register as available but no image preview
+                drawings.append(build_record(p.name, None, "Project Setup (CAD/IFC)"))
+    # 3. Session state images
     imgs = st.session_state.get("project_images", [])
     if isinstance(imgs, list):
         for idx, img in enumerate(imgs, start=1):
@@ -1384,10 +1405,19 @@ with left:
     saved = saved_drawings()
     if saved:
         img_count = len([d for d in saved if isinstance(d.get("image"), Image.Image)])
+        file_count = len([d for d in saved if not isinstance(d.get("image"), Image.Image)])
         if UI_LANG == "no":
-            st.success(f"{img_count} tegning(er) hentet automatisk fra prosjektoppsettet. Du kan laste opp flere under.")
+            msg = f"{img_count} tegning(er) hentet automatisk fra prosjektoppsettet."
+            if file_count:
+                msg += f" {file_count} fil(er) uten forhåndsvisning (DWG/IFC/CAD) er også registrert."
+            msg += " Du kan laste opp flere under."
+            st.success(msg)
         else:
-            st.success(f"{img_count} drawing(s) loaded automatically from Project Setup. You can upload more below.")
+            msg = f"{img_count} drawing(s) loaded automatically from Project Setup."
+            if file_count:
+                msg += f" {file_count} file(s) without preview (DWG/IFC/CAD) also registered."
+            msg += " You can upload more below."
+            st.success(msg)
         cols = st.columns(min(3, len(saved)))
         for idx, record in enumerate(saved[:6]):
             with cols[idx % len(cols)]:
