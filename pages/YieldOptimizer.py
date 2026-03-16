@@ -330,8 +330,15 @@ st.markdown("""
     div[data-baseweb="select"] input, div[data-baseweb="select"] span, div[data-baseweb="select"] div {
         color:#ffffff !important; -webkit-text-fill-color:#ffffff !important; background-color:transparent !important;
     }
-    ul[data-baseweb="menu"], [data-baseweb="popover"] > div { background:#0d1824 !important; border:1px solid rgba(120,145,170,0.42) !important; }
-    ul[data-baseweb="menu"] *, [role="listbox"] *, [role="option"] * { color:#ffffff !important; -webkit-text-fill-color:#ffffff !important; }
+    ul[data-baseweb="menu"] { background-color:#0d1824 !important; border:1px solid rgba(120,145,170,0.42) !important; }
+    ul[data-baseweb="menu"] li { color:#ffffff !important; -webkit-text-fill-color:#ffffff !important; background-color:#0d1824 !important; }
+    ul[data-baseweb="menu"] li:hover { background-color:rgba(56,194,201,0.12) !important; }
+    ul[data-baseweb="menu"] li[aria-selected="true"] { background-color:rgba(56,194,201,0.18) !important; }
+    [data-baseweb="popover"] { background-color:#0d1824 !important; }
+    [data-baseweb="popover"] > div { background-color:#0d1824 !important; border:1px solid rgba(120,145,170,0.42) !important; border-radius:10px !important; }
+    [role="listbox"] { background-color:#0d1824 !important; }
+    [role="option"] { color:#ffffff !important; -webkit-text-fill-color:#ffffff !important; background-color:#0d1824 !important; }
+    [role="option"]:hover, [role="option"][aria-selected="true"] { background-color:rgba(56,194,201,0.12) !important; }
     [data-testid="stFileUploaderDropzone"] {
         background:#0d1824 !important; border:1px dashed rgba(120,145,170,0.56) !important; border-radius:14px !important;
     }
@@ -1376,13 +1383,27 @@ with left:
     render_section(tx("drawings"), tx("drawing_help"), tx("drawings"))
     saved = saved_drawings()
     if saved:
+        img_count = len([d for d in saved if isinstance(d.get("image"), Image.Image)])
+        if UI_LANG == "no":
+            st.success(f"{img_count} tegning(er) hentet automatisk fra prosjektoppsettet. Du kan laste opp flere under.")
+        else:
+            st.success(f"{img_count} drawing(s) loaded automatically from Project Setup. You can upload more below.")
         cols = st.columns(min(3, len(saved)))
         for idx, record in enumerate(saved[:6]):
             with cols[idx % len(cols)]:
                 if isinstance(record.get("image"), Image.Image):
                     st.image(record["image"], caption=f"{record['name']} ({record['hint']})", use_container_width=True)
+    else:
+        if UI_LANG == "no":
+            st.info("Ingen tegninger funnet fra prosjektoppsettet. Last opp tegninger under, eller ga til Project Setup og last opp der forst.")
+        else:
+            st.info("No drawings found from Project Setup. Upload drawings below, or go to Project Setup and upload there first.")
 
-    files = st.file_uploader(tx("drawings"), type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "pdf", "dwg", "dxf", "zip"], accept_multiple_files=True, help=tx("drawing_help"))
+    if UI_LANG == "no":
+        _extra_label = "Last opp flere tegninger (valgfritt)" if saved else tx("drawings")
+    else:
+        _extra_label = "Upload additional drawings (optional)" if saved else tx("drawings")
+    files = st.file_uploader(_extra_label, type=["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "pdf", "dwg", "dxf", "zip"], accept_multiple_files=True, help=tx("drawing_help"))
     uploads = uploaded_drawings(files or [])
     if uploads:
         cols = st.columns(min(3, len([u for u in uploads if isinstance(u.get("image"), Image.Image)]) or 1))
