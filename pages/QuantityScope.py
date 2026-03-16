@@ -86,6 +86,29 @@ def clean_text(text: Any) -> str:
     return text
 
 
+def clean_pdf_text(text: Any) -> str:
+    """Clean text for PDF output — strip markdown and encode to latin-1."""
+    t = clean_text(text)
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"\*(.+?)\*", r"\1", t)
+    t = re.sub(r"__(.+?)__", r"\1", t)
+    t = re.sub(r"_(.+?)_", r"\1", t)
+    t = re.sub(r"^#{1,4}\s*", "", t, flags=re.MULTILINE)
+    t = re.sub(r"\|", " ", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.encode("latin-1", "replace").decode("latin-1").strip()
+
+
+def _find_logo() -> Optional[str]:
+    """Find the logo file in likely locations."""
+    for candidate in ["logo.png", "logo-white.png"]:
+        for base in [Path("."), Path("qa_database").parent, DB_DIR.parent]:
+            p = base / candidate
+            if p.exists():
+                return str(p)
+    return None
+
+
 def nb_value(value: Any) -> str:
     if value is None or value == "":
         return "-"
@@ -470,10 +493,10 @@ def load_project_files() -> List[Dict[str, Any]]:
 def compute_quantity_rows(gross_area: float, floors: int) -> pd.DataFrame:
     return pd.DataFrame([
         {"Post": "Betong dekker", "Mengde": round(gross_area * 0.32, 1), "Enhet": "m3", "Kilde": "IFC / RIB", "Sporbarhet": "Modell-ID + sone"},
-        {"Post": "Baeresystem stal", "Mengde": round(gross_area * 0.038, 1), "Enhet": "tonn", "Kilde": "IFC / RIB", "Sporbarhet": "Objektgruppe"},
+        {"Post": "Bæresystem stål", "Mengde": round(gross_area * 0.038, 1), "Enhet": "tonn", "Kilde": "IFC / RIB", "Sporbarhet": "Objektgruppe"},
         {"Post": "Fasade", "Mengde": round(gross_area * 0.58, 1), "Enhet": "m2", "Kilde": "ARK PDF", "Sporbarhet": "Tegning + akse"},
         {"Post": "Innervegger", "Mengde": round(gross_area * 1.25, 1), "Enhet": "lm", "Kilde": "ARK / beskrivelse", "Sporbarhet": "Romskjema + plan"},
-        {"Post": "Dorer", "Mengde": max(12, int(gross_area / 48)), "Enhet": "stk", "Kilde": "Dorskjema", "Sporbarhet": "Type + plan"},
+        {"Post": "Dører", "Mengde": max(12, int(gross_area / 48)), "Enhet": "stk", "Kilde": "Dørskjema", "Sporbarhet": "Type + plan"},
         {"Post": "Tekniske sjakter", "Mengde": round(floors * 2.4, 1), "Enhet": "stk", "Kilde": "RIV/RIE", "Sporbarhet": "Kjerne-aksing"},
     ])
 
@@ -482,11 +505,11 @@ def compute_delta_rows(quantity_df: pd.DataFrame, delta_pct: int) -> pd.DataFram
     delta = quantity_df.copy()
     delta["Delta mot rev. B"] = delta["Mengde"].apply(lambda x: round(x * delta_pct / 100, 1))
     delta["Kommentar"] = [
-        "Okt dekkeutstrekning i plan B",
-        "Stivere spenn / justert baeresystem",
-        "Fasade forskjovet ved hjornesone",
+        "Økt dekkeutstrekning i plan B",
+        "Stivere spenn / justert bæresystem",
+        "Fasade forskjøvet ved hjørnesone",
         "Nye romskiller i plan 2",
-        "Dortyper revidert i plan 1",
+        "Dørtyper revidert i plan 1",
         "Ekstra sjakt for teknikk",
     ][:len(delta)]
     return delta
@@ -510,10 +533,10 @@ def build_revision_trace() -> pd.DataFrame:
     return pd.DataFrame([
         {"Objekt-ID": "DECK-001", "Post": "Betong dekker, plan 1", "Kilde A": "IFC-modell rev. A", "Kilde B": "PDF plan 1 rev. B", "Status": "Konsistent", "Avvik": "-"},
         {"Objekt-ID": "WALL-014", "Post": "Innervegg korridor, plan 2", "Kilde A": "Romskjema rev. A", "Kilde B": "Beskrivelse rev. B", "Status": "Avvik", "Avvik": "+2,4 lm i beskrivelse"},
-        {"Objekt-ID": "FAS-003", "Post": "Fasadeelement sone C", "Kilde A": "ARK PDF rev. A", "Kilde B": "IFC fasade rev. B", "Status": "Avvik", "Avvik": "Geometri endret i hjorne"},
-        {"Objekt-ID": "DOOR-027", "Post": "Dor type EI60, plan 1", "Kilde A": "Dorskjema rev. A", "Kilde B": "Beskrivelse rev. B", "Status": "Konsistent", "Avvik": "-"},
+        {"Objekt-ID": "FAS-003", "Post": "Fasadeelement sone C", "Kilde A": "ARK PDF rev. A", "Kilde B": "IFC fasade rev. B", "Status": "Avvik", "Avvik": "Geometri endret i hjørne"},
+        {"Objekt-ID": "DOOR-027", "Post": "Dør type EI60, plan 1", "Kilde A": "Dørskjema rev. A", "Kilde B": "Beskrivelse rev. B", "Status": "Konsistent", "Avvik": "-"},
         {"Objekt-ID": "SHAFT-02", "Post": "Teknisk sjakt, kjerne B", "Kilde A": "RIV tegning rev. A", "Kilde B": "IFC sjakt rev. B", "Status": "Ny", "Avvik": "Lagt til i rev. B"},
-        {"Objekt-ID": "STEEL-008", "Post": "Stalbjelke akse 3-4", "Kilde A": "RIB modell rev. A", "Kilde B": "RIB modell rev. B", "Status": "Avvik", "Avvik": "Profil endret HEB300 til HEB360"},
+        {"Objekt-ID": "STEEL-008", "Post": "Stålbjelke akse 3-4", "Kilde A": "RIB modell rev. A", "Kilde B": "RIB modell rev. B", "Status": "Avvik", "Avvik": "Profil endret HEB300 til HEB360"},
     ])
 
 
@@ -598,7 +621,7 @@ def build_pdf_report(
             self.set_y(11)
             self.set_text_color(88, 94, 102)
             self.set_font("Helvetica", "", 8)
-            self.cell(0, 4, clean_text(f"Mengde & Scope – {pd_state.get('p_name', 'Prosjekt')}"), 0, 0, "L")
+            self.cell(0, 4, clean_pdf_text(f"Mengde & Scope – {pd_state.get('p_name', 'Prosjekt')}"), 0, 0, "L")
             self.cell(0, 4, datetime.now().strftime("%d.%m.%Y"), 0, 1, "R")
             self.set_draw_color(188, 192, 197)
             self.line(18, 18, 192, 18)
@@ -611,8 +634,8 @@ def build_pdf_report(
             self.set_font("Helvetica", "", 7)
             self.set_text_color(110, 114, 119)
             self.cell(60, 5, "Builtly-QTY-001", 0, 0, "L")
-            self.cell(70, 5, clean_text("Utkast - krever faglig kontroll"), 0, 0, "C")
-            self.cell(0, 5, clean_text(f"Side {self.page_no()}"), 0, 0, "R")
+            self.cell(70, 5, clean_pdf_text("Utkast – krever faglig kontroll"), 0, 0, "C")
+            self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
         def ensure_space(self, h):
             if self.get_y() + h > 272:
@@ -624,7 +647,7 @@ def build_pdf_report(
             self.set_font("Helvetica", "B", 17)
             self.set_text_color(36, 50, 72)
             self.set_x(20)
-            self.multi_cell(170, 8, clean_text(title.upper()), 0, "L")
+            self.multi_cell(170, 8, clean_pdf_text(title.upper()), 0, "L")
             self.set_draw_color(204, 209, 216)
             self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
             self.ln(5)
@@ -635,7 +658,7 @@ def build_pdf_report(
             self.set_x(20)
             self.set_font("Helvetica", "", 10.2)
             self.set_text_color(35, 39, 43)
-            self.multi_cell(170, 5.5, clean_text(text))
+            self.multi_cell(170, 5.5, clean_pdf_text(text))
             self.ln(1.6)
 
         def bullet_list(self, items):
@@ -649,7 +672,7 @@ def build_pdf_report(
                 self.set_xy(22, y)
                 self.cell(6, 5.2, "-", 0, 0, "L")
                 self.set_xy(28, y)
-                self.multi_cell(162, 5.2, clean_text(item))
+                self.multi_cell(162, 5.2, clean_pdf_text(item))
                 self.ln(0.8)
 
         def kv_card(self, items, x=None, width=80, title=None):
@@ -666,16 +689,16 @@ def build_pdf_report(
                 self.set_xy(x + 4, yy)
                 self.set_font("Helvetica", "B", 10)
                 self.set_text_color(48, 64, 86)
-                self.cell(width - 8, 5, clean_text(title.upper()), 0, 1)
+                self.cell(width - 8, 5, clean_pdf_text(title.upper()), 0, 1)
                 yy += 7
             for label, value in items:
                 self.set_xy(x + 4, yy)
                 self.set_font("Helvetica", "B", 8.6)
                 self.set_text_color(72, 79, 87)
-                self.cell(28, 5, clean_text(label), 0, 0)
+                self.cell(28, 5, clean_pdf_text(label), 0, 0)
                 self.set_font("Helvetica", "", 8.6)
                 self.set_text_color(35, 39, 43)
-                self.multi_cell(width - 34, 5, clean_text(value))
+                self.multi_cell(width - 34, 5, clean_pdf_text(value))
                 yy = self.get_y() + 1
             self.set_y(max(self.get_y(), sy + height))
 
@@ -691,66 +714,78 @@ def build_pdf_report(
             self.set_xy(x + 6, y + 4)
             self.set_font("Helvetica", "B", 10.5)
             self.set_text_color(*accent)
-            self.cell(0, 5, clean_text(title.upper()), 0, 1)
+            self.cell(0, 5, clean_pdf_text(title.upper()), 0, 1)
             self.set_text_color(35, 39, 43)
             self.set_font("Helvetica", "", 10)
             yy = y + 10
             for item in items:
                 self.set_xy(x + 8, yy)
                 self.cell(5, 5, "-", 0, 0)
-                self.multi_cell(154, 5.2, clean_text(item))
+                self.multi_cell(154, 5.2, clean_pdf_text(item))
                 yy = self.get_y() + 2
             self.set_y(y + total_h + 3)
 
-        def simple_table(self, df, max_rows=20):
-            """Render a simple DataFrame as a table."""
+        def simple_table(self, df, max_rows=30):
+            """Render a DataFrame as a clean native table with smart column widths."""
             if df is None or df.empty:
                 return
             cols = list(df.columns)
             n_cols = len(cols)
-            col_w = min(170 / n_cols, 45)
-            widths = [col_w] * n_cols
-            # Adjust last column to fill
-            remaining = 170 - col_w * (n_cols - 1)
-            widths[-1] = max(remaining, col_w)
+            table_w = 170
+            # Smart column widths based on content type
+            weights = []
+            for col in cols:
+                low = clean_text(col).lower()
+                if any(k in low for k in ["delta", "%", "andel", "share", "status"]):
+                    weights.append(0.7)
+                elif any(k in low for k in ["kommentar", "avvik", "kilde", "source", "sporbarhet"]):
+                    weights.append(1.8)
+                elif any(k in low for k in ["post", "kategori", "objekt", "category"]):
+                    weights.append(1.4)
+                else:
+                    weights.append(1.0)
+            total_w = sum(weights) or 1
+            widths = [max(16, table_w * w / total_w) for w in weights]
 
             # Header
-            self.ensure_space(10)
-            self.set_font("Helvetica", "B", 8)
+            self.ensure_space(12)
+            self.set_font("Helvetica", "B", 7.5)
             self.set_fill_color(46, 62, 84)
             self.set_text_color(255, 255, 255)
             x0 = 20
             y0 = self.get_y()
             for i, col in enumerate(cols):
                 self.set_xy(x0, y0)
-                self.cell(widths[i], 7, clean_text(str(col))[:18], 1, 0, "L", True)
+                self.cell(widths[i], 7, clean_pdf_text(str(col))[:26], 1, 0, "L", True)
                 x0 += widths[i]
             self.ln(7)
 
             # Rows
-            self.set_font("Helvetica", "", 7.5)
+            self.set_font("Helvetica", "", 7)
             self.set_text_color(35, 39, 43)
             for ridx in range(min(len(df), max_rows)):
                 row = df.iloc[ridx]
-                self.ensure_space(7)
+                self.ensure_space(8)
                 x0 = 20
                 y0 = self.get_y()
                 bg = (248, 250, 252) if ridx % 2 else (255, 255, 255)
                 self.set_fill_color(*bg)
                 for i, col in enumerate(cols):
                     self.set_xy(x0, y0)
-                    self.cell(widths[i], 6, clean_text(str(row[col]))[:30], 1, 0, "L", True)
+                    self.cell(widths[i], 6, clean_pdf_text(str(row[col]))[:50], 1, 0, "L", True)
                     x0 += widths[i]
                 self.ln(6)
+            self.ln(3)
 
     pdf = QuantityPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(True, margin=15)
 
     # ── Cover ──
     pdf.add_page()
-    if os.path.exists("logo.png"):
+    logo_path = _find_logo()
+    if logo_path:
         try:
-            pdf.image("logo.png", x=150, y=15, w=40)
+            pdf.image(logo_path, x=150, y=15, w=40)
         except Exception:
             pass
 
@@ -761,29 +796,29 @@ def build_pdf_report(
     pdf.set_x(20)
     pdf.set_font("Helvetica", "B", 30)
     pdf.set_text_color(20, 28, 38)
-    pdf.multi_cell(95, 11, clean_text(pd_state.get("p_name", "Prosjekt")), 0, "L")
+    pdf.multi_cell(95, 11, clean_pdf_text(pd_state.get("p_name", "Prosjekt")), 0, "L")
     pdf.ln(4)
     pdf.set_x(20)
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(64, 68, 74)
-    pdf.multi_cell(95, 6.5, "Mengdeoversikt, arealfordeling, revisjonsdelta og sporbarhet", 0, "L")
+    pdf.multi_cell(95, 6.5, clean_pdf_text("Mengdeoversikt, arealfordeling, revisjonsdelta og sporbarhet"), 0, "L")
 
     pdf.set_xy(118, 45)
     pdf.kv_card([
-        ("Oppdragsgiver", clean_text(pd_state.get("c_name", "-"))),
+        ("Oppdragsgiver", clean_pdf_text(pd_state.get("c_name", "-"))),
         ("Emne", "Mengde & Scope"),
         ("Dato / rev", f"{datetime.now().strftime('%d.%m.%Y')} / 01"),
         ("Kode", "Builtly-QTY-001"),
-        ("BTA", f"{nb_value(config.get('gross_area', 0))} m2"),
+        ("BTA", f"{nb_value(config.get('gross_area', 0))} m\u00b2"),
         ("Etasjer", str(config.get("floors", "-"))),
     ], x=118, width=72)
 
     pdf.set_xy(20, 180)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(170, 4.5, clean_text(
-        "Rapporten er generert av Builtly Mengde & Scope pa bakgrunn av prosjektdata og opplastede dokumenter. "
-        "Mengder er estimater basert pa arealforhold og bor verifiseres mot faktisk modell og tegningsgrunnlag."
+    pdf.multi_cell(170, 4.5, clean_pdf_text(
+        "Rapporten er generert av Builtly Mengde & Scope på bakgrunn av prosjektdata og opplastede dokumenter. "
+        "Mengder er estimater basert på arealforhold og bør verifiseres mot faktisk modell og tegningsgrunnlag."
     ))
 
     # ── TOC ──
@@ -794,7 +829,7 @@ def build_pdf_report(
         pdf.set_x(22)
         pdf.set_font("Helvetica", "", 10.5)
         pdf.set_text_color(45, 49, 55)
-        pdf.cell(0, 6, clean_text(item), 0, 0, "L")
+        pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
         pdf.set_draw_color(225, 229, 234)
         pdf.line(22, y + 6, 188, y + 6)
         pdf.ln(8)
@@ -804,15 +839,15 @@ def build_pdf_report(
     pdf.section_title("1. Sammendrag")
     ai_data = safe_get(ai_result, "data") if isinstance(ai_result, dict) else None
     summary = safe_get(ai_data, "executive_summary", "") if isinstance(ai_data, dict) else ""
-    pdf.body_text(summary or "Mengdegrunnlaget er beregnet pa basis av arealforhold og prosjektparametere. Verifiser mot faktisk modell.")
+    pdf.body_text(summary or "Mengdegrunnlaget er beregnet på basis av arealforhold og prosjektparametere. Verifiser mot faktisk modell.")
     saleable = max(config.get("net_internal", 0) - config.get("technical_area", 0) * 0.35, 0)
     ga = max(config.get("gross_area", 1), 1)
-    pdf.highlight_box("Nokkeltall", [
-        f"Bruttoareal: {nb_value(config.get('gross_area', 0))} m2",
-        f"Nettoareal: {nb_value(config.get('net_internal', 0))} m2",
+    pdf.highlight_box("Nøkkeltall", [
+        f"Bruttoareal: {nb_value(config.get('gross_area', 0))} m²",
+        f"Nettoareal: {nb_value(config.get('net_internal', 0))} m²",
         f"Salgbart/utleibart: {nb_value(saleable)} m2 ({saleable / ga * 100:.1f}%)",
         f"Mengdeposter: {len(quantity_df)}",
-        f"Detaljniva: {config.get('detail_level', '-')}",
+        f"Detaljnivå: {config.get('detail_level', '-')}",
     ])
 
     # ── 2. Quantities ──
@@ -857,7 +892,7 @@ def build_pdf_report(
         if eff:
             pdf.body_text(f"Arealutnyttelse: {eff}")
     else:
-        pdf.body_text("Ingen AI-analyse tilgjengelig. Kjor modulen med dokumenter for utvidet vurdering.")
+        pdf.body_text("Ingen AI-analyse tilgjengelig. Kjør modulen med dokumenter for utvidet vurdering.")
 
     # Disclaimer
     pdf.ln(8)
@@ -886,7 +921,7 @@ def build_markdown_report(
     ]
     ai_data = safe_get(ai_result, "data") if isinstance(ai_result, dict) else None
     summary = safe_get(ai_data, "executive_summary", "") if isinstance(ai_data, dict) else ""
-    parts.append(f"## Sammendrag\n{summary or 'Basert pa arealforhold og prosjektparametere.'}\n")
+    parts.append(f"## Sammendrag\n{summary or 'Basert på arealforhold og prosjektparametere.'}\n")
 
     parts.append("## Mengdeoversikt")
     for _, row in quantity_df.iterrows():
@@ -1005,7 +1040,7 @@ with left:
         floors = st.number_input("Etasjer", min_value=1, value=base_floors, step=1)
     with c3:
         detail_level = st.select_slider(
-            "Detaljniva",
+            "Detaljnivå",
             options=["Konsept", "Skisse", "Forprosjekt", "Detaljprosjekt", "Utforelse"],
             value="Forprosjekt",
         )
@@ -1137,7 +1172,7 @@ with left:
             csv_data = delta_df.to_csv(index=False).encode("utf-8")
             st.download_button("Last ned revisjonsdelta (.csv)", data=csv_data, file_name="builtly_revision_delta.csv", mime="text/csv")
         else:
-            st.info("Sla pa sammenligning mellom revisjoner for a generere delta-rapport.")
+            st.info("Slå på sammenligning mellom revisjoner for å generere delta-rapport.")
 
     with tabs[3]:
         trace_df = build_revision_trace()
@@ -1178,7 +1213,7 @@ with left:
                     if isinstance(risk, dict):
                         st.write(f"- **{risk.get('risk', '?')}** [{risk.get('severity', '-')}]: {risk.get('recommendation', '')}")
         else:
-            st.info("Kjor mengdekontroll med dokumenter for a fa AI-vurdering." if HAS_AI else "Ingen AI-backend tilgjengelig i miljoet.")
+            st.info("Kjor mengdekontroll med dokumenter for å få AI-vurdering." if HAS_AI else "Ingen AI-backend tilgjengelig i miljoet.")
 
         # Attempt log
         attempt_log = safe_get(ai_result, "attempt_log", [])
@@ -1250,9 +1285,9 @@ with right:
         <span class="panel-badge">Slik bruker du modulen</span>
         <h4>Anbefalt arbeidsflyt</h4>
         <ul>
-            <li>Last opp IFC, tegninger og/eller beskrivelser for a fa kildekobling.</li>
+            <li>Last opp IFC, tegninger og/eller beskrivelser for å få kildekobling.</li>
             <li>Juster arealfordelingen sa den stemmer med prosjektets forutsetninger.</li>
-            <li>Sla pa revisjonssammenligning for a se hva som endret seg mellom sett.</li>
+            <li>Slå på revisjonssammenligning for å se hva som endret seg mellom sett.</li>
             <li>Eksporter rapport og mengdelister for bruk i kalkulasjon eller tilbud.</li>
         </ul>
     </div>
@@ -1261,7 +1296,7 @@ with right:
     render_html("""
     <div class="panel-box green">
         <span class="panel-badge green">Kvalitetssikring</span>
-        <h4>Kontroll pa tvers av kilder</h4>
+        <h4>Kontroll på tvers av kilder</h4>
         <p>
             Sporbarhetstabellen viser om mengdeposter er konsistente mellom IFC, tegning og beskrivelse.
             Avvik markeres tydelig slik at du kan ta stilling for innlevering eller prosjektering.
@@ -1280,8 +1315,8 @@ render_html("""
 <div class="disclaimer-banner" style="margin-top: 2rem;">
     <div class="db-title">Utkast – krever faglig kontroll</div>
     <div class="db-text">
-        Mengder er estimater basert pa arealforhold og prosjektparametere.
-        Resultatet skal verifiseres mot faktisk modell og tegningsgrunnlag for det brukes i kalkulasjon eller beslutning.
+        Mengder er estimater basert på arealforhold og prosjektparametere.
+        Resultatet skal verifiseres mot faktisk modell og tegningsgrunnlag før det brukes i kalkulasjon eller beslutning.
     </div>
 </div>
 """)
