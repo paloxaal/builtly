@@ -805,7 +805,7 @@ def build_tdd_pdf(records, rules, config, ai_result) -> Optional[bytes]:
         "Resultatet skal fagkontrolleres for bruk i transaksjon eller beslutning.",
     ], fill=(255, 248, 235), accent=(180, 130, 40))
 
-    return pdf.output()
+    return bytes(pdf.output())
 
 
 # ────────────────────────────────────────────────────────────────
