@@ -3864,6 +3864,113 @@ def detect_core_bbox_from_geometry(
     return (x0, y0, x1 - x0, y1 - y0)
 
 
+def detect_multiple_cores_from_geometry(
+    width: int,
+    height: int,
+    line_mask,
+    footprint_mask,
+    vertical_segments: List[Dict[str, Any]],
+    horizontal_segments: List[Dict[str, Any]],
+    max_cores: int = 2,
+    min_core_distance_ratio: float = 0.25,
+) -> List[Tuple[int, int, int, int]]:
+    """Detect up to max_cores core regions (trapp/heis) in a plan.
+
+    Returns list of (x, y, w, h) bboxes in local crop coordinates.
+    Uses iterative masking: find best core, mask it out, find next.
+    """
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return [detect_core_bbox_from_geometry(width, height, line_mask, footprint_mask, vertical_segments, horizontal_segments)]
+
+    cores: List[Tuple[int, int, int, int]] = []
+    footprint = (footprint_mask > 0).astype(np.uint8)
+    line_binary = (line_mask > 0).astype(np.uint8)
+    working_line = line_binary.copy()
+    working_foot = footprint.copy()
+
+    box_w = int(clamp(width * 0.18, max(36, width * 0.12), max(55, width * 0.28)))
+    box_h = int(clamp(height * 0.20, max(40, height * 0.13), max(60, height * 0.30)))
+    step = max(4, int(min(width, height) * 0.03))
+    min_core_dist = min(width, height) * min_core_distance_ratio
+
+    for _iteration in range(max_cores):
+        ii_lines = cv2.integral(working_line)
+        ii_foot = cv2.integral(working_foot)
+        center_x = width / 2.0
+        center_y = height / 2.0
+        best: Optional[Tuple[float, int, int]] = None
+
+        max_x = max(2, width - box_w - 2)
+        max_y = max(2, height - box_h - 2)
+        for x in range(max(2, int(width * 0.08)), max_x + 1, step):
+            for y in range(max(2, int(height * 0.08)), max_y + 1, step):
+                footprint_cover = integral_rect_sum(ii_foot, x, y, box_w, box_h) / float(max(box_w * box_h, 1))
+                if footprint_cover < 0.18:
+                    continue
+                # Check minimum distance from existing cores
+                cx, cy = x + box_w / 2.0, y + box_h / 2.0
+                too_close = False
+                for prev_core in cores:
+                    pcx = prev_core[0] + prev_core[2] / 2.0
+                    pcy = prev_core[1] + prev_core[3] / 2.0
+                    if math.hypot(cx - pcx, cy - pcy) < min_core_dist:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+                line_score = integral_rect_sum(ii_lines, x, y, box_w, box_h)
+                dist = math.hypot(cx - center_x, cy - center_y)
+                # For second+ cores, reduce centrality bias to find offset cores
+                centrality_weight = 2.5 if _iteration == 0 else 1.0
+                score = line_score + footprint_cover * 400.0 - dist * centrality_weight
+                if best is None or score > best[0]:
+                    best = (score, x, y)
+
+        if best is None:
+            break
+
+        _, bx, by = best
+        # Snap to nearest line segments
+        x0 = int(bx)
+        y0 = int(by)
+        x1 = int(x0 + box_w)
+        y1 = int(y0 + box_h)
+        max_snap_x = max(12, int(width * 0.06))
+        max_snap_y = max(12, int(height * 0.06))
+        x0 = int(snap_edge_to_lines(x0, vertical_segments, max_snap_x))
+        x1 = int(snap_edge_to_lines(x1, vertical_segments, max_snap_x))
+        y0 = int(snap_edge_to_lines(y0, horizontal_segments, max_snap_y))
+        y1 = int(snap_edge_to_lines(y1, horizontal_segments, max_snap_y))
+
+        if x1 <= x0 + 18:
+            x0 = int(clamp(x0, 0, width - box_w - 1))
+            x1 = x0 + box_w
+        if y1 <= y0 + 18:
+            y0 = int(clamp(y0, 0, height - box_h - 1))
+            y1 = y0 + box_h
+
+        x0 = int(clamp(x0, 2, max(2, width - 24)))
+        y0 = int(clamp(y0, 2, max(2, height - 24)))
+        x1 = int(clamp(x1, x0 + 18, width - 2))
+        y1 = int(clamp(y1, y0 + 18, height - 2))
+
+        core_rect = (x0, y0, x1 - x0, y1 - y0)
+        cores.append(core_rect)
+
+        # Mask out this core region for next iteration
+        mask_x0 = max(0, x0 - int(box_w * 0.3))
+        mask_y0 = max(0, y0 - int(box_h * 0.3))
+        mask_x1 = min(width, x1 + int(box_w * 0.3))
+        mask_y1 = min(height, y1 + int(box_h * 0.3))
+        working_line[mask_y0:mask_y1, mask_x0:mask_x1] = 0
+        working_foot[mask_y0:mask_y1, mask_x0:mask_x1] = 0
+
+    if not cores:
+        cores = [detect_core_bbox_from_geometry(width, height, line_mask, footprint_mask, vertical_segments, horizontal_segments)]
+    return cores
+
+
 def build_plan_geometry_grounded(
     image: Image.Image,
     region_bbox_px: Tuple[int, int, int, int],
@@ -3907,6 +4014,15 @@ def build_plan_geometry_grounded(
         vertical_segments,
         horizontal_segments,
     )
+    core_bboxes = detect_multiple_cores_from_geometry(
+        rw,
+        rh,
+        line_mask,
+        footprint_mask,
+        vertical_segments,
+        horizontal_segments,
+        max_cores=2,
+    )
     junctions = build_junction_candidates(vertical_segments, horizontal_segments, footprint_mask, core_bbox)
     grid_x = choose_grid_lines_from_junctions(junctions, "x", rw, target=4 if rw >= rh * 0.85 else 3)
     grid_y = choose_grid_lines_from_junctions(junctions, "y", rh, target=4 if rh > rw * 0.95 else 3)
@@ -3920,6 +4036,7 @@ def build_plan_geometry_grounded(
         "grid_x": grid_x,
         "grid_y": grid_y,
         "core_bbox": core_bbox,
+        "core_bboxes": core_bboxes,
     }
 
 
@@ -7229,7 +7346,7 @@ def refine_sketch_with_geometry_v6(
                 refined_elements.append(refined)
     else:
         if mode in {"wall_core", "transfer_basement"}:
-            refined_elements.extend(fallback_by_type.get("wall", [])[:6])
+            refined_elements.extend(fallback_by_type.get("wall", [])[:8])
 
     ai_columns = [element for element in ai_elements if clean_pdf_text(element.get("type", "")).lower() == "column"]
     if mode != "wall_core":
@@ -7562,7 +7679,7 @@ def _normalize_page_cue_v9(cue: Any, record: Dict[str, Any]) -> Dict[str, Any]:
         norm = _normalize_line_candidate_v9(item)
         if norm is not None:
             wall_candidates.append(norm)
-    wall_candidates = wall_candidates[:5]
+    wall_candidates = wall_candidates[:8]
 
     column_candidates = []
     for item in cue.get("column_candidates", []) if isinstance(cue.get("column_candidates"), list) else []:
@@ -7613,6 +7730,24 @@ FAGRUTINER:
 6. Når du er usikker: returner færre elementer, ikke flere.
 7. Koordinater skal være normaliserte 0-1 relativt til HELE siden.
 
+KJERNE-IDENTIFIKASJON (viktig):
+- Kjerner inneholder trapp, heis og/eller sjakt, og ligger typisk sentralt i bygget.
+- I norske boligblokker finnes ofte TO kjerner, én for hver trappoppgang.
+- Kjerner er kompakte, rektangulære soner med tett linjestruktur (trappløp, heissjakt, rør).
+- Returner alle tydelige kjerner du finner (maks 2). Angi confidence 0.7+ kun når du ser tydelig trapp/heis.
+- Kjerner er IKKE hele korridorarealer eller store rom — de er kompakte vertikaltransportsoner.
+
+BÆREVEGG-IDENTIFIKASJON (viktig):
+- Bærevegger i boligblokker er typisk: leilighetsskillevegger (langsgående, repeterende), korridorvegger, og vegger ved kjerner.
+- Se etter repeterende vertikale linjer innenfor byggets planomriss — disse er sannsynlige bærevegger.
+- IKKE marker yttervegg/fasadelinje som bærevegg med mindre den er tydelig tykkere/dobbelt og kontinuerlig.
+- For P-kjeller: langsgående vegger under overliggende bærevegger er sannsynlige.
+- Returner opptil 8 bearing_wall_candidates for å fange repetertbart mønster.
+
+MULTI-PLAN:
+- Hvis arket inneholder flere planer side om side (f.eks. "Typisk etasjeplan 1 & 2" og "Typisk etasjeplan 3 & 4"), sett multi_plan: true.
+- plan_bbox skal da avgrense det STØRSTE eller mest representative planutsnittet.
+
 RETURNER DETTE JSON-OBJEKTET:
 {{
   "page_index": {int(record.get('page_index', 0))},
@@ -7635,8 +7770,8 @@ RETURNER DETTE JSON-OBJEKTET:
 }}
 
 Regler for innhold:
-- Maks 2 core_candidates.
-- Maks 5 bearing_wall_candidates.
+- Maks 2 core_candidates. Returner gjerne 2 hvis du ser to tydelige trappekjerner/heiskjerner.
+- Maks 8 bearing_wall_candidates. Prioriter indre, repeterende skillevegger.
 - Maks 10 column_candidates.
 - Hvis siden ikke er planlik: lav plan_confidence, tomme kandidatlister.
 - Ikke bruk bearing_wall_candidates til å tegne en stor rektangulær boks rundt hele bygget.
@@ -7724,7 +7859,7 @@ def _build_seed_sketch_from_page_cue_v9(cue: Optional[Dict[str, Any]], record: O
             "label": f"Kjerne {idx}",
         })
 
-    for idx, wall in enumerate(cue.get("bearing_wall_candidates", [])[:5], start=1):
+    for idx, wall in enumerate(cue.get("bearing_wall_candidates", [])[:8], start=1):
         line = _normalize_line_candidate_v9(wall)
         if line is None:
             continue
@@ -7947,52 +8082,87 @@ def _select_support_segments_v9(geometry: Dict[str, Any], axis: str) -> List[Dic
     core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
     core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
 
+    # v15: use all detected cores
+    all_core_centers = []
+    for cb in geometry.get("core_bboxes", [core_bbox]):
+        all_core_centers.append((float(cb[0] + cb[2] / 2.0), float(cb[1] + cb[3] / 2.0)))
+    if not all_core_centers:
+        all_core_centers = [(core_cx, core_cy)]
+
     scored: List[Dict[str, Any]] = []
     for seg in segments:
         center = float(seg.get("center", 0.0))
         length = float(seg.get("length", 0.0))
         thickness = float(seg.get("thickness", 1.0))
         overlap_ratio = _segment_overlap_ratio_v9(seg, footprint_bbox, axis)
-        if overlap_ratio < 0.35:
+        if overlap_ratio < 0.30:
             continue
 
         if axis == "vertical":
             edge_gap = min(abs(center - footprint_bbox[0]), abs((footprint_bbox[0] + footprint_bbox[2]) - center))
-            if length < max(42.0, rh * 0.18):
+            if length < max(38.0, rh * 0.15):
                 continue
-            if edge_gap < max(12.0, rw * 0.08) and length > rh * 0.52:
+            # v15: hard reject only the most obvious perimeter lines
+            if edge_gap < max(10.0, rw * 0.05) and length > rh * 0.55:
                 continue
+            # v15: gradient-based perimeter penalty
+            perimeter_ratio = max(0.0, 1.0 - edge_gap / max(rw * 0.16, 18.0))
+            perimeter_penalty = perimeter_ratio * perimeter_ratio * 45.0
+            if length > rh * 0.60:
+                perimeter_penalty *= 1.3
+
+            min_core_dist = min(abs(center - ccx) for ccx, _ in all_core_centers)
+            # v15: bonus for being between cores
+            between_bonus = 0.0
+            if len(all_core_centers) >= 2:
+                sorted_cx = sorted(ccx for ccx, _ in all_core_centers)
+                if sorted_cx[0] < center < sorted_cx[-1]:
+                    between_bonus = 18.0
+
             score = (
                 length * 1.0
                 + overlap_ratio * 90.0
                 + min(edge_gap, rw * 0.25) * 0.65
-                - abs(center - core_cx) * 0.22
+                - min_core_dist * 0.18
                 + min(thickness, 12.0) * 2.5
+                - perimeter_penalty
+                + between_bonus
             )
-            if 0.22 <= (center / max(rw, 1.0)) <= 0.78:
+            if 0.20 <= (center / max(rw, 1.0)) <= 0.80:
                 score += 14.0
             scored.append({**seg, "score": score, "axis_pos": center})
         else:
             edge_gap = min(abs(center - footprint_bbox[1]), abs((footprint_bbox[1] + footprint_bbox[3]) - center))
-            if length < max(36.0, rw * 0.14):
+            if length < max(32.0, rw * 0.12):
                 continue
-            if edge_gap < max(12.0, rh * 0.10) and length > rw * 0.58:
+            if edge_gap < max(10.0, rh * 0.07) and length > rw * 0.58:
                 continue
+            perimeter_ratio = max(0.0, 1.0 - edge_gap / max(rh * 0.16, 18.0))
+            perimeter_penalty = perimeter_ratio * perimeter_ratio * 40.0
+            if length > rw * 0.52:
+                perimeter_penalty *= 1.2
+
+            min_core_dist = min(abs(center - ccy) for _, ccy in all_core_centers)
+
             score = (
                 length * 0.85
                 + overlap_ratio * 80.0
                 + min(edge_gap, rh * 0.24) * 0.50
-                - abs(center - core_cy) * 0.14
+                - min_core_dist * 0.12
                 + min(thickness, 12.0) * 2.2
+                - perimeter_penalty
             )
+            # v15: corridor wall bonus - horizontal line in inner zone with good length
+            if length > rw * 0.30 and edge_gap > max(rh * 0.18, 25.0):
+                score += 10.0
             if 0.20 <= (center / max(rh, 1.0)) <= 0.80:
                 score += 8.0
             scored.append({**seg, "score": score, "axis_pos": center})
 
     if not scored:
         return segments
-    min_spacing = max(26.0, (rw if axis == "vertical" else rh) * 0.15)
-    limited = _choose_spaced_segments_v9(scored, "axis_pos", 3 if axis == "vertical" else 2, min_spacing)
+    min_spacing = max(22.0, (rw if axis == "vertical" else rh) * 0.11)
+    limited = _choose_spaced_segments_v9(scored, "axis_pos", 5 if axis == "vertical" else 3, min_spacing)
     return limited or segments
 
 
@@ -8028,19 +8198,25 @@ def generate_wall_core_elements_grounded(
     rw, rh = geometry["crop_size"]
     core_bbox = geometry["core_bbox"]
     core_x, core_y, core_w, core_h = core_bbox
-    core_x_norm, core_y_norm = local_point_to_page_norm(region_bbox_px, core_x, core_y, image_w, image_h)
+    core_bboxes = geometry.get("core_bboxes", [core_bbox])
+    if not core_bboxes:
+        core_bboxes = [core_bbox]
 
-    elements: List[Dict[str, Any]] = [{
-        "type": "core",
-        "x": core_x_norm,
-        "y": core_y_norm,
-        "w": round(clamp(core_w / max(image_w, 1), 0.03, 0.30), 6),
-        "h": round(clamp(core_h / max(image_h, 1), 0.03, 0.30), 6),
-        "label": "Betongkjerne",
-    }]
+    elements: List[Dict[str, Any]] = []
+    for idx, cb in enumerate(core_bboxes[:2], start=1):
+        cb_x, cb_y, cb_w, cb_h = cb
+        cb_x_norm, cb_y_norm = local_point_to_page_norm(region_bbox_px, cb_x, cb_y, image_w, image_h)
+        elements.append({
+            "type": "core",
+            "x": cb_x_norm,
+            "y": cb_y_norm,
+            "w": round(clamp(cb_w / max(image_w, 1), 0.03, 0.30), 6),
+            "h": round(clamp(cb_h / max(image_h, 1), 0.03, 0.30), 6),
+            "label": f"Kjerne {idx}",
+        })
 
-    chosen_vertical = geometry.get("support_vertical_v9", [])[:2]
-    chosen_horizontal = geometry.get("support_horizontal_v9", [])[:1]
+    chosen_vertical = geometry.get("support_vertical_v9", [])[:5]
+    chosen_horizontal = geometry.get("support_horizontal_v9", [])[:2]
 
     wall_count = 1
     for segment in chosen_vertical + chosen_horizontal:
@@ -8060,25 +8236,28 @@ def generate_wall_core_elements_grounded(
         })
         wall_count += 1
 
+    # Span arrows: show representative spans between adjacent vertical walls
     if len(chosen_vertical) >= 2:
-        left = min(chosen_vertical, key=lambda seg: float(seg.get("center", 0.0)))
-        right = max(chosen_vertical, key=lambda seg: float(seg.get("center", 0.0)))
+        sorted_vert = sorted(chosen_vertical, key=lambda seg: float(seg.get("center", 0.0)))
         arrow_y = min(rh - 16, int(core_y + core_h + max(16, rh * 0.07)))
-        x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, left["center"], arrow_y, image_w, image_h)
-        x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, right["center"], arrow_y, image_w, image_h)
-        elements.append({
-            "type": "span_arrow",
-            "x1": x1_norm,
-            "y1": y1_norm,
-            "x2": x2_norm,
-            "y2": y2_norm,
-            "label": "Typisk spenn",
-        })
+        for i in range(min(len(sorted_vert) - 1, 2)):
+            left_seg = sorted_vert[i]
+            right_seg = sorted_vert[i + 1]
+            x1_norm, y1_norm = local_point_to_page_norm(region_bbox_px, left_seg["center"], arrow_y, image_w, image_h)
+            x2_norm, y2_norm = local_point_to_page_norm(region_bbox_px, right_seg["center"], arrow_y, image_w, image_h)
+            elements.append({
+                "type": "span_arrow",
+                "x1": x1_norm,
+                "y1": y1_norm,
+                "x2": x2_norm,
+                "y2": y2_norm,
+                "label": f"Spenn {i+1}",
+            })
 
     notes = [
-        "Vegg-/kjerneforslaget er filtrert hardere mot indre, sannsynlige bæresoner i stedet for full perimeter.",
-        "Perimeterlinjer og tegningsramme nedprioriteres før veggskisse genereres.",
-        "Overetasjer holdes konservative: færre, men mer sannsynlige bærevegger.",
+        "Vegg-/kjerneforslaget inkluderer indre leilighetsskiller, korridorvegger og kjerner som primærbæring.",
+        "Perimeterlinjer, tegningsramme og yttervegg nedprioriteres konsekvent.",
+        "Overetasjer viser repeterbart mønster der bærevegger følger typisk leilighetslayout.",
     ]
     return elements, notes
 
@@ -8097,7 +8276,7 @@ def _cue_wall_locals_v9(cue: Optional[Dict[str, Any]], record: Dict[str, Any], r
     out: List[Dict[str, float]] = []
     if not isinstance(cue, dict):
         return out
-    for item in cue.get("bearing_wall_candidates", [])[:6]:
+    for item in cue.get("bearing_wall_candidates", [])[:8]:
         line = _normalize_line_candidate_v9(item)
         if line is None:
             continue
@@ -8138,20 +8317,70 @@ def _wall_score_v9(
     core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
     core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
 
+    # v15: Also consider all detected cores for distance scoring
+    all_core_centers = []
+    for cb in geometry.get("core_bboxes", [core_bbox]):
+        all_core_centers.append((float(cb[0] + cb[2] / 2.0), float(cb[1] + cb[3] / 2.0)))
+    if not all_core_centers:
+        all_core_centers = [(core_cx, core_cy)]
+
     if metrics["vertical"]:
         edge_gap = min(abs(metrics["x_mid"] - fx), abs((fx + fw) - metrics["x_mid"]))
-        if metrics["length"] > fh * 0.72 and edge_gap < max(12.0, fw * 0.09):
+        # v15: Gradient-based perimeter penalty instead of hard cutoff
+        # Long lines very close to edge are almost certainly perimeter/frame
+        if metrics["length"] > fh * 0.72 and edge_gap < max(12.0, fw * 0.06):
             return -1e9
+        # Graduated penalty for lines near edges (gets stronger as gap shrinks)
+        perimeter_ratio = max(0.0, 1.0 - edge_gap / max(fw * 0.18, 20.0))
+        perimeter_penalty = perimeter_ratio * perimeter_ratio * 60.0  # quadratic falloff
+        if metrics["length"] > fh * 0.55:
+            perimeter_penalty *= 1.5  # extra penalty for long edge-parallel lines
+
         overlap = max(0.0, min(metrics["y2"], fy + fh) - max(metrics["y1"], fy)) / max(metrics["length"], 1.0)
-        score = metrics["length"] + overlap * 32.0 + min(edge_gap, fw * 0.24) * 0.55 - abs(metrics["x_mid"] - core_cx) * 0.16
+        # v15: Use distance to nearest core instead of single core
+        min_core_dist = min(abs(metrics["x_mid"] - ccx) for ccx, _ in all_core_centers)
+        # Bonus for being between cores (typical for apartment separator walls)
+        between_cores_bonus = 0.0
+        if len(all_core_centers) >= 2:
+            sorted_cx = sorted(ccx for ccx, _ in all_core_centers)
+            if sorted_cx[0] < metrics["x_mid"] < sorted_cx[-1]:
+                between_cores_bonus = 22.0
+
+        score = (
+            metrics["length"]
+            + overlap * 32.0
+            + min(edge_gap, fw * 0.24) * 0.65
+            - min_core_dist * 0.12
+            - perimeter_penalty
+            + between_cores_bonus
+        )
+        # Bonus for being in inner zone
+        if 0.22 <= (metrics["x_mid"] - fx) / max(fw, 1.0) <= 0.78:
+            score += 10.0
     else:
         edge_gap = min(abs(metrics["y_mid"] - fy), abs((fy + fh) - metrics["y_mid"]))
-        if metrics["length"] > fw * 0.64 and edge_gap < max(12.0, fh * 0.12):
+        if metrics["length"] > fw * 0.64 and edge_gap < max(12.0, fh * 0.08):
             return -1e9
+        perimeter_ratio = max(0.0, 1.0 - edge_gap / max(fh * 0.18, 20.0))
+        perimeter_penalty = perimeter_ratio * perimeter_ratio * 50.0
+        if metrics["length"] > fw * 0.50:
+            perimeter_penalty *= 1.4
+
         overlap = max(0.0, min(metrics["x2"], fx + fw) - max(metrics["x1"], fx)) / max(metrics["length"], 1.0)
-        score = metrics["length"] * 0.80 + overlap * 26.0 + min(edge_gap, fh * 0.22) * 0.40 - abs(metrics["y_mid"] - core_cy) * 0.10
-        if metrics["length"] > fw * 0.55:
-            score -= 18.0
+        min_core_dist = min(abs(metrics["y_mid"] - ccy) for _, ccy in all_core_centers)
+
+        score = (
+            metrics["length"] * 0.80
+            + overlap * 26.0
+            + min(edge_gap, fh * 0.22) * 0.50
+            - min_core_dist * 0.08
+            - perimeter_penalty
+        )
+        # Horizontal walls spanning most of footprint are likely corridor walls - good if not on edge
+        if metrics["length"] > fw * 0.35 and edge_gap > max(fh * 0.20, 30.0):
+            score += 12.0  # corridor wall bonus
+        elif metrics["length"] > fw * 0.55:
+            score -= 18.0  # too long and not clearly corridor
 
     if cue_walls:
         compatible = [item for item in cue_walls if bool(round(item["vertical"])) == bool(metrics["vertical"])]
@@ -8194,6 +8423,13 @@ def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[st
     core_cx = float(core_bbox[0] + core_bbox[2] / 2.0)
     core_cy = float(core_bbox[1] + core_bbox[3] / 2.0)
 
+    # v15: use all detected cores for distance checks
+    all_core_centers_x = [float(cb[0] + cb[2] / 2.0) for cb in geometry.get("core_bboxes", [core_bbox])]
+    all_core_centers_y = [float(cb[1] + cb[3] / 2.0) for cb in geometry.get("core_bboxes", [core_bbox])]
+    if not all_core_centers_x:
+        all_core_centers_x = [core_cx]
+        all_core_centers_y = [core_cy]
+
     vertical_candidates: List[Dict[str, Any]] = []
     horizontal_candidates: List[Dict[str, Any]] = []
     for element in sketch.get("elements", []):
@@ -8208,32 +8444,33 @@ def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[st
         cue_dist = _best_wall_cue_distance_v11(metrics, cue_walls)
 
         if metrics["vertical"]:
-            core_offset = abs(metrics["x_mid"] - core_cx)
+            # v15: distance to nearest core, not just first core
+            core_offset = min(abs(metrics["x_mid"] - ccx) for ccx in all_core_centers_x)
             if metrics["length"] < max(28.0, float(fh or 0) * 0.12):
                 continue
-            if inside_x < 0.14:
+            if inside_x < 0.10:
                 continue
-            if metrics["length"] > float(fh or 0) * 0.62 and inside_x < 0.22 and cue_dist > max(32.0, float(fw or 0) * 0.16):
+            if metrics["length"] > float(fh or 0) * 0.65 and inside_x < 0.18 and cue_dist > max(32.0, float(fw or 0) * 0.16):
                 continue
             if cue_walls:
-                if cue_dist > max(52.0, float(fw or 0) * 0.24) and core_offset > float(fw or 0) * 0.30:
+                if cue_dist > max(52.0, float(fw or 0) * 0.24) and core_offset > float(fw or 0) * 0.35:
                     continue
-            elif core_offset > float(fw or 0) * 0.26:
+            elif core_offset > float(fw or 0) * 0.32:
                 continue
         else:
-            core_offset = abs(metrics["y_mid"] - core_cy)
+            core_offset = min(abs(metrics["y_mid"] - ccy) for ccy in all_core_centers_y)
             if metrics["length"] < max(26.0, float(fw or 0) * 0.09):
                 continue
-            if inside_y < 0.16:
+            if inside_y < 0.12:
                 continue
             if metrics["length"] > float(fw or 0) * 0.40 and inside_y < 0.22 and cue_dist > max(30.0, float(fh or 0) * 0.16):
                 continue
-            if metrics["length"] > float(fw or 0) * 0.50:
+            if metrics["length"] > float(fw or 0) * 0.55:
                 continue
             if cue_walls:
-                if cue_dist > max(46.0, float(fh or 0) * 0.22) and core_offset > float(fh or 0) * 0.24:
+                if cue_dist > max(46.0, float(fh or 0) * 0.22) and core_offset > float(fh or 0) * 0.28:
                     continue
-            elif core_offset > float(fh or 0) * 0.18:
+            elif core_offset > float(fh or 0) * 0.22:
                 continue
 
         score = _wall_score_v9(metrics, geometry, cue_walls, cue_cores)
@@ -8248,16 +8485,16 @@ def _filter_upper_floor_elements_v9_impl(sketch: Dict[str, Any], record: Dict[st
         else:
             horizontal_candidates.append(item)
 
-    chosen_vertical = _choose_spaced_segments_v9(vertical_candidates, "x_mid", 2, max(30.0, float(rw or 0) * 0.18))
-    chosen_horizontal = _choose_spaced_segments_v9(horizontal_candidates, "y_mid", 1, max(24.0, float(rh or 0) * 0.16))
+    chosen_vertical = _choose_spaced_segments_v9(vertical_candidates, "x_mid", 4, max(22.0, float(rw or 0) * 0.12))
+    chosen_horizontal = _choose_spaced_segments_v9(horizontal_candidates, "y_mid", 2, max(20.0, float(rh or 0) * 0.12))
     kept_walls = [item["element"] for item in chosen_vertical + chosen_horizontal]
 
     notes = [clean_pdf_text(item) for item in sketch.get("notes", []) if clean_pdf_text(item)]
-    note = "Vegger i overetasjer er v11-filtrert mer konservativt mot kjerne, indre bæresoner og AI-cues for å unngå yttervegg/perimeter-feil."
+    note = "Vegger i overetasjer er v15-filtrert mot kjerne, indre bæresoner og AI-cues. Inkluderer leilighetsskiller og korridorvegger."
     if note not in notes:
         notes = [note] + notes
 
-    sketch["elements"] = kept_cores + kept_walls[:3] + spans + beams
+    sketch["elements"] = kept_cores + kept_walls[:7] + spans + beams
     sketch["notes"] = notes[:6]
     return sketch
 
@@ -8391,6 +8628,14 @@ VIKTIG:
 - Når du er usikker: færre elementer.
 - Koordinater i sketches skal være normaliserte 0-1 relativt til HELE siden.
 
+VIKTIGE SKISSEREGLER FOR BOLIGBLOKKER:
+- I norske boligblokker er bæresystemet typisk VEGGBASERT, ikke søylebasert.
+- Bærevegger er primært: leilighetsskillevegger (langsgående, repeterende med jevn avstand), korridorvegger, og vegger rundt kjerner.
+- Returner 4-8 wall-elementer for overetasjer som fanger det repeterende mønsteret av leilighetsskiller.
+- Kjerner (trapp/heis) finnes typisk 1-2 stk sentralt i bygget. Returner alle du finner som separate core-elementer.
+- IKKE marker yttervegg/fasadelinje som bærevegg. Yttervegg i norske boligblokker er normalt ikke-bærende.
+- Span_arrows skal vise typisk avstand mellom bærevegger (normalt 6-8 m).
+
 OBLIGATORISKE MATERIALREGLER (norsk praksis / TEK17):
 - recommended_system SKAL være systemet med høyest total_score i alternativmatrisen, MED MINDRE du har konkret faglig grunn fra tegningene til å avvike (begrunn i så fall tydelig).
 - ALDRI anbefal massivtre/CLT som hovedsystem for bygg over 8 etasjer. Over 8 etasjer krever plasstøpt betong, prefabrikkert betong eller hybrid med betongkjerne.
@@ -8464,11 +8709,14 @@ JSON-SKJEMA:
       "confidence": 0.0,
       "notes": ["kort note"],
       "elements": [
-        {{"type": "column", "x": 0.1, "y": 0.2, "label": "C1"}},
-        {{"type": "core", "x": 0.45, "y": 0.35, "w": 0.14, "h": 0.18, "label": "K1"}},
-        {{"type": "wall", "x1": 0.2, "y1": 0.2, "x2": 0.2, "y2": 0.7, "label": "Skive"}},
-        {{"type": "beam", "x1": 0.1, "y1": 0.2, "x2": 0.75, "y2": 0.2, "label": "Primærdrager"}},
-        {{"type": "span_arrow", "x1": 0.1, "y1": 0.78, "x2": 0.4, "y2": 0.78, "label": "ca 7,2 m"}}
+        {{"type": "core", "x": 0.30, "y": 0.35, "w": 0.08, "h": 0.14, "label": "Kjerne 1"}},
+        {{"type": "core", "x": 0.55, "y": 0.35, "w": 0.08, "h": 0.14, "label": "Kjerne 2"}},
+        {{"type": "wall", "x1": 0.25, "y1": 0.20, "x2": 0.25, "y2": 0.70, "label": "Bærevegg 1"}},
+        {{"type": "wall", "x1": 0.35, "y1": 0.20, "x2": 0.35, "y2": 0.70, "label": "Bærevegg 2"}},
+        {{"type": "wall", "x1": 0.50, "y1": 0.20, "x2": 0.50, "y2": 0.70, "label": "Bærevegg 3"}},
+        {{"type": "wall", "x1": 0.65, "y1": 0.20, "x2": 0.65, "y2": 0.70, "label": "Bærevegg 4"}},
+        {{"type": "wall", "x1": 0.20, "y1": 0.45, "x2": 0.70, "y2": 0.45, "label": "Korridorvegg"}},
+        {{"type": "span_arrow", "x1": 0.25, "y1": 0.78, "x2": 0.35, "y2": 0.78, "label": "ca 6,5 m"}}
       ]
     }}
   ],
@@ -8482,8 +8730,10 @@ JSON-SKJEMA:
 
 Viktige grenser:
 - Maks 3 sketches.
-- Skissene skal følge page_cues og være konservative.
-- Ikke bruk store perimeter- eller rektangelskissser som bærevegger.
+- Skissene skal følge page_cues og vise det repeterende bæremønsteret.
+- Returner 4-8 vegger per skisse for overetasjer, færre for kjeller.
+- Returner opptil 2 kjerner per skisse.
+- Ikke bruk store perimeter- eller rektangelskisser som bærevegger.
 - Returner kun JSON.
 """.strip()
 
