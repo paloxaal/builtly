@@ -547,37 +547,50 @@ def priority(record: Dict[str, Any]) -> int:
 
 def saved_drawings() -> List[Dict[str, Any]]:
     drawings: List[Dict[str, Any]] = []
-    # 1. JPG previews from project_images (already converted by Project.py)
-    if IMG_DIR.exists():
-        for p in sorted(IMG_DIR.iterdir()):
-            if p.suffix.lower() in SUPPORTED_IMAGE_EXTS:
-                try:
-                    drawings.append(build_record(p.name, Image.open(p), "Project Setup"))
-                except Exception:
-                    pass
-    # 2. Original PDFs from project_files (convert to images with fitz)
+    has_pdf_originals = False
+
+    # 1. PREFER original PDFs from project_files at high resolution for AI analysis
     if FILES_DIR.exists() and fitz is not None:
         for p in sorted(FILES_DIR.iterdir()):
             if p.suffix.lower() == ".pdf":
+                has_pdf_originals = True
                 try:
                     doc = fitz.open(str(p))
-                    for page_num in range(min(4, len(doc))):
+                    for page_num in range(min(6, len(doc))):
                         page = doc.load_page(page_num)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
+                        # High resolution for AI vision — 2.0x gives ~144 DPI
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
                         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-                        drawings.append(build_record(f"{p.name} - page {page_num+1}", img, "Project Setup (PDF)"))
+                        drawings.append(build_record(f"{p.name} - side {page_num+1}", img, "Project Setup (PDF original)"))
                     doc.close()
                 except Exception:
                     drawings.append(build_record(p.name, None, "Project Setup (PDF)"))
+            elif p.suffix.lower() in SUPPORTED_IMAGE_EXTS:
+                # Original images from project_files (full quality)
+                try:
+                    drawings.append(build_record(p.name, Image.open(str(p)).convert("RGB"), "Project Setup (original)"))
+                except Exception:
+                    pass
             elif p.suffix.lower() in {".dwg", ".dxf", ".ifc"}:
-                # CAD/IFC files — register as available but no image preview
                 drawings.append(build_record(p.name, None, "Project Setup (CAD/IFC)"))
+
+    # 2. JPG previews from project_images ONLY if no PDF originals were found
+    #    (these are low-res 1200px thumbnails — worse for AI analysis)
+    if not has_pdf_originals and IMG_DIR.exists():
+        for p in sorted(IMG_DIR.iterdir()):
+            if p.suffix.lower() in SUPPORTED_IMAGE_EXTS:
+                try:
+                    drawings.append(build_record(p.name, Image.open(p), "Project Setup (preview)"))
+                except Exception:
+                    pass
+
     # 3. Session state images
     imgs = st.session_state.get("project_images", [])
     if isinstance(imgs, list):
         for idx, img in enumerate(imgs, start=1):
             if isinstance(img, Image.Image):
                 drawings.append(build_record(f"project_image_{idx}.png", img, "Session State"))
+
     drawings.sort(key=priority, reverse=True)
     for idx, record in enumerate(drawings):
         record["page_index"] = idx
@@ -597,9 +610,10 @@ def uploaded_drawings(files: Sequence[Any]) -> List[Dict[str, Any]]:
                 try:
                     raw = f.read()
                     doc = fitz.open(stream=raw, filetype="pdf")
-                    for page_num in range(min(4, len(doc))):
+                    for page_num in range(min(6, len(doc))):
                         page = doc.load_page(page_num)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
+                        # High resolution for AI vision — 2.0x gives ~144 DPI
+                        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
                         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
                         drawings.append(build_record(f"{name} - page {page_num+1}", img, "Uploaded PDF"))
                     doc.close()
@@ -1405,15 +1419,22 @@ with left:
     saved = saved_drawings()
     if saved:
         img_count = len([d for d in saved if isinstance(d.get("image"), Image.Image)])
+        pdf_originals = len([d for d in saved if "PDF original" in (d.get("source") or "")])
         file_count = len([d for d in saved if not isinstance(d.get("image"), Image.Image)])
         if UI_LANG == "no":
-            msg = f"{img_count} tegning(er) hentet automatisk fra prosjektoppsettet."
+            if pdf_originals:
+                msg = f"{img_count} tegning(er) hentet fra prosjektoppsettet i full opplosning (fra original-PDF)."
+            else:
+                msg = f"{img_count} tegning(er) hentet fra prosjektoppsettet."
             if file_count:
                 msg += f" {file_count} fil(er) uten forhåndsvisning (DWG/IFC/CAD) er også registrert."
             msg += " Du kan laste opp flere under."
             st.success(msg)
         else:
-            msg = f"{img_count} drawing(s) loaded automatically from Project Setup."
+            if pdf_originals:
+                msg = f"{img_count} drawing(s) loaded from Project Setup at full resolution (from original PDF)."
+            else:
+                msg = f"{img_count} drawing(s) loaded from Project Setup."
             if file_count:
                 msg += f" {file_count} file(s) without preview (DWG/IFC/CAD) also registered."
             msg += " You can upload more below."
