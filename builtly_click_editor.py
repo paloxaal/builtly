@@ -4,8 +4,12 @@ builtly_click_editor.py
 =======================
 Docker-kompatibel klikk-editor for RIB-modulen.
 
-Bruker st.components.v1.declare_component med en temp-mappe
+Bruker st.components.v1.declare_component med en stabil mappe
 som inneholder all HTML/JS. Fungerer i Docker, Render og lokalt.
+
+v15: Fikset komponent-lasting i Docker/Render ved å bruke stabil sti
+     i stedet for tempfile.mkdtemp (som ikke alltid er tilgjengelig
+     for Streamlit sin statiske filserver).
 
 Bruk:
     from builtly_click_editor import render_click_editor
@@ -37,16 +41,53 @@ _COMPONENT_FUNC: Optional[Any] = None
 
 
 def _get_component_dir() -> Path:
-    """Create (once) a temp directory with the editor's index.html."""
+    """Create (once) a directory with the editor's index.html.
+
+    v15: Tries multiple locations in priority order:
+    1. Subdirectory next to this script file (most reliable in Docker)
+    2. Subdirectory in current working directory
+    3. Temp directory (original approach, less reliable in Docker)
+    """
     global _COMPONENT_DIR
     if _COMPONENT_DIR is not None and _COMPONENT_DIR.exists():
-        return _COMPONENT_DIR
+        # Verify the index.html still exists
+        if (_COMPONENT_DIR / "index.html").exists():
+            return _COMPONENT_DIR
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="builtly_click_editor_"))
-    index_html = tmpdir / "index.html"
+    # Priority 1: next to the script file
+    script_dir = Path(__file__).parent
+    candidates = [
+        script_dir / "_builtly_click_editor_component",
+        Path.cwd() / "_builtly_click_editor_component",
+    ]
+
+    for candidate_dir in candidates:
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            index_html = candidate_dir / "index.html"
+            index_html.write_text(_EDITOR_HTML, encoding="utf-8")
+            _COMPONENT_DIR = candidate_dir
+            return candidate_dir
+        except (OSError, PermissionError):
+            continue
+
+    # Priority 3: temp directory (original approach)
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="builtly_click_editor_"))
+        index_html = tmpdir / "index.html"
+        index_html.write_text(_EDITOR_HTML, encoding="utf-8")
+        _COMPONENT_DIR = tmpdir
+        return tmpdir
+    except Exception:
+        pass
+
+    # Last resort: use /tmp directly
+    fallback = Path("/tmp/builtly_click_editor_component")
+    fallback.mkdir(parents=True, exist_ok=True)
+    index_html = fallback / "index.html"
     index_html.write_text(_EDITOR_HTML, encoding="utf-8")
-    _COMPONENT_DIR = tmpdir
-    return tmpdir
+    _COMPONENT_DIR = fallback
+    return fallback
 
 
 def _get_component():
@@ -100,14 +141,22 @@ def render_click_editor(
 
     data_url = _image_to_data_url(image)
 
-    result = comp(
-        image_data=data_url,
-        natural_width=image.width,
-        natural_height=image.height,
-        status_text=status_text,
-        key=key,
-        default=None,
-    )
+    try:
+        result = comp(
+            image_data=data_url,
+            natural_width=image.width,
+            natural_height=image.height,
+            status_text=status_text,
+            key=key,
+            default=None,
+        )
+    except Exception:
+        # v15: If the component fails to render, reset and show fallback
+        global _COMPONENT_FUNC
+        _COMPONENT_FUNC = None
+        st.image(image, use_container_width=True)
+        st.caption("Interaktiv editor feilet under lasting. Bruk tabellredigering.")
+        return None
 
     if isinstance(result, dict) and "x" in result and "y" in result:
         return {
