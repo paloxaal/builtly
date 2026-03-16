@@ -56,6 +56,7 @@ st.set_page_config(
 )
 
 DB_DIR = Path("qa_database")
+FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
 
 
@@ -696,7 +697,7 @@ st.markdown(
 # ────────────────────────────────────────────────────────────────
 DEFAULT_PROJECT = {
     "p_name": "", "c_name": "", "p_desc": "", "adresse": "",
-    "kommune": "", "gnr": "", "bnr": "", "b_type": "Naering",
+    "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring / Kontor",
     "etasjer": 1, "bta": 0, "land": "Norge",
 }
 
@@ -814,6 +815,24 @@ def normalize_uploaded_files(files) -> List[Dict[str, Any]]:
             "size_kb": round(size / 1024, 1) if size else 0,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         })
+    return records
+
+
+def load_project_files() -> List[Dict[str, Any]]:
+    """Load files saved in Project Setup (qa_database/project_files/)."""
+    records = []
+    if not FILES_DIR.exists():
+        return records
+    for p in sorted(FILES_DIR.iterdir()):
+        if p.is_file():
+            records.append({
+                "filename": p.name,
+                "category": classify_file(p.name),
+                "extension": p.suffix.lower(),
+                "size_kb": round(p.stat().st_size / 1024, 1),
+                "timestamp": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "source": "Project Setup",
+            })
     return records
 
 
@@ -1564,6 +1583,14 @@ config = {
 }
 
 records = normalize_uploaded_files(files if submitted else files or [])
+project_records = load_project_files()
+if project_records:
+    # Avoid duplicates by filename
+    existing_names = {r["filename"] for r in records}
+    for pr in project_records:
+        if pr["filename"] not in existing_names:
+            records.append(pr)
+    st.success(f"{len(project_records)} fil(er) hentet automatisk fra prosjektoppsettet.")
 rules = build_tender_rules(records, config)
 
 # AI analysis (run when submitted or when files present)
