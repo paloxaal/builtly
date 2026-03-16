@@ -99,6 +99,29 @@ def clean_text(text: Any) -> str:
     return text
 
 
+def clean_pdf_text(text: Any) -> str:
+    """Clean text for PDF output — strip markdown and encode to latin-1."""
+    t = clean_text(text)
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"\*(.+?)\*", r"\1", t)
+    t = re.sub(r"__(.+?)__", r"\1", t)
+    t = re.sub(r"_(.+?)_", r"\1", t)
+    t = re.sub(r"^#{1,4}\s*", "", t, flags=re.MULTILINE)
+    t = re.sub(r"\|", " ", t)
+    t = re.sub(r"\s{2,}", " ", t)
+    return t.encode("latin-1", "replace").decode("latin-1").strip()
+
+
+def _find_logo() -> Optional[str]:
+    """Find the logo file in likely locations."""
+    for candidate in ["logo.png", "logo-white.png"]:
+        for base in [Path("."), DB_DIR.parent]:
+            p = base / candidate
+            if p.exists():
+                return str(p)
+    return None
+
+
 def safe_get(obj: Any, key: str, default: Any = None) -> Any:
     """Safely get a value from a dict-like object; returns default for non-dicts."""
     if isinstance(obj, dict):
@@ -886,7 +909,7 @@ def build_tender_rules(
             "status": status,
             "severity": severity,
             "paragraph_ref": "-",
-            "reason": f"{'Funnet i opplastede dokumenter' if status == 'OK' else 'Ikke funnet blant opplastede filer – bor kontrolleres'}.",
+            "reason": f"{'Funnet i opplastede dokumenter' if status == 'OK' else 'Ikke funnet blant opplastede filer – bør kontrolleres'}.",
             "source": "Regelmotor",
         })
 
@@ -1105,7 +1128,7 @@ def build_markdown_report(
     if summary:
         parts.append(f"## Sammendrag\n{clean_text(summary)}\n")
     else:
-        parts.append("## Sammendrag\nIngen AI-oppsummering tilgjengelig. Resultatet er basert pa regelmotor.\n")
+        parts.append("## Sammendrag\nIngen AI-oppsummering tilgjengelig. Resultatet er basert på regelmotor.\n")
 
     # Config
     parts.append("## Konfigurasjon")
@@ -1174,8 +1197,8 @@ def build_pdf_report(
             self.set_y(11)
             self.set_text_color(88, 94, 102)
             self.set_font("Helvetica", "", 8)
-            self.cell(0, 4, clean_text(f"Anbudskontroll – {pd_state.get('p_name', 'Prosjekt')}"), 0, 0, "L")
-            self.cell(0, 4, clean_text(datetime.now().strftime("%d.%m.%Y")), 0, 1, "R")
+            self.cell(0, 4, clean_pdf_text(f"Anbudskontroll – {pd_state.get('p_name', 'Prosjekt')}"), 0, 0, "L")
+            self.cell(0, 4, clean_pdf_text(datetime.now().strftime("%d.%m.%Y")), 0, 1, "R")
             self.set_draw_color(188, 192, 197)
             self.line(18, 18, 192, 18)
             self.set_y(24)
@@ -1187,8 +1210,8 @@ def build_pdf_report(
             self.set_font("Helvetica", "", 7)
             self.set_text_color(110, 114, 119)
             self.cell(60, 5, "Builtly-TENDER-001", 0, 0, "L")
-            self.cell(70, 5, clean_text("Utkast - krever faglig kontroll"), 0, 0, "C")
-            self.cell(0, 5, clean_text(f"Side {self.page_no()}"), 0, 0, "R")
+            self.cell(70, 5, clean_pdf_text("Utkast – krever faglig kontroll"), 0, 0, "C")
+            self.cell(0, 5, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
         def ensure_space(self, h):
             if self.get_y() + h > 272:
@@ -1200,7 +1223,7 @@ def build_pdf_report(
             self.set_font("Helvetica", "B", 17)
             self.set_text_color(36, 50, 72)
             self.set_x(20)
-            self.multi_cell(170, 8, clean_text(title.upper()), 0, "L")
+            self.multi_cell(170, 8, clean_pdf_text(title.upper()), 0, "L")
             self.set_draw_color(204, 209, 216)
             self.line(20, self.get_y() + 1, 190, self.get_y() + 1)
             self.ln(5)
@@ -1211,7 +1234,7 @@ def build_pdf_report(
             self.set_x(20)
             self.set_font("Helvetica", "", 10.2)
             self.set_text_color(35, 39, 43)
-            self.multi_cell(170, 5.5, clean_text(text))
+            self.multi_cell(170, 5.5, clean_pdf_text(text))
             self.ln(1.6)
 
         def bullet_list(self, items):
@@ -1225,7 +1248,7 @@ def build_pdf_report(
                 self.set_xy(22, y)
                 self.cell(6, 5.2, "-", 0, 0, "L")
                 self.set_xy(28, y)
-                self.multi_cell(162, 5.2, clean_text(item))
+                self.multi_cell(162, 5.2, clean_pdf_text(item))
                 self.ln(0.8)
 
         def kv_card(self, items, x=None, width=80, title=None):
@@ -1242,16 +1265,16 @@ def build_pdf_report(
                 self.set_xy(x + 4, yy)
                 self.set_font("Helvetica", "B", 10)
                 self.set_text_color(48, 64, 86)
-                self.cell(width - 8, 5, clean_text(title.upper()), 0, 1)
+                self.cell(width - 8, 5, clean_pdf_text(title.upper()), 0, 1)
                 yy += 7
             for label, value in items:
                 self.set_xy(x + 4, yy)
                 self.set_font("Helvetica", "B", 8.6)
                 self.set_text_color(72, 79, 87)
-                self.cell(28, 5, clean_text(label), 0, 0)
+                self.cell(28, 5, clean_pdf_text(label), 0, 0)
                 self.set_font("Helvetica", "", 8.6)
                 self.set_text_color(35, 39, 43)
-                self.multi_cell(width - 34, 5, clean_text(value))
+                self.multi_cell(width - 34, 5, clean_pdf_text(value))
                 yy = self.get_y() + 1
             self.set_y(max(self.get_y(), start_y + height))
 
@@ -1268,14 +1291,14 @@ def build_pdf_report(
             self.set_xy(x + 6, y + 4)
             self.set_font("Helvetica", "B", 10.5)
             self.set_text_color(*accent)
-            self.cell(0, 5, clean_text(title.upper()), 0, 1)
+            self.cell(0, 5, clean_pdf_text(title.upper()), 0, 1)
             self.set_text_color(35, 39, 43)
             self.set_font("Helvetica", "", 10)
             yy = y + 10
             for item in items:
                 self.set_xy(x + 8, yy)
                 self.cell(5, 5, "-", 0, 0)
-                self.multi_cell(154, 5.2, clean_text(item))
+                self.multi_cell(154, 5.2, clean_pdf_text(item))
                 yy = self.get_y() + 2
             self.set_y(y + total_h + 3)
 
@@ -1284,9 +1307,10 @@ def build_pdf_report(
 
     # ── Cover page ──
     pdf.add_page()
-    if os.path.exists("logo.png"):
+    logo_path = _find_logo()
+    if logo_path:
         try:
-            pdf.image("logo.png", x=150, y=15, w=40)
+            pdf.image(logo_path, x=150, y=15, w=40)
         except Exception:
             pass
 
@@ -1298,17 +1322,17 @@ def build_pdf_report(
     pdf.set_x(20)
     pdf.set_font("Helvetica", "B", 30)
     pdf.set_text_color(20, 28, 38)
-    pdf.multi_cell(95, 11, clean_text(pd_state.get("p_name", "Prosjekt")), 0, "L")
+    pdf.multi_cell(95, 11, clean_pdf_text(pd_state.get("p_name", "Prosjekt")), 0, "L")
 
     pdf.ln(4)
     pdf.set_x(20)
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(64, 68, 74)
-    pdf.multi_cell(95, 6.5, clean_text("Avviksmatrise, mangelliste, uklarhetslogg og scopesammenstilling"), 0, "L")
+    pdf.multi_cell(95, 6.5, clean_pdf_text("Avviksmatrise, mangelliste, uklarhetslogg og scopesammenstilling"), 0, "L")
 
     pdf.set_xy(118, 45)
     pdf.kv_card([
-        ("Oppdragsgiver", clean_text(pd_state.get("c_name", "-"))),
+        ("Oppdragsgiver", clean_pdf_text(pd_state.get("c_name", "-"))),
         ("Emne", "Anbudskontroll"),
         ("Dato / rev", f"{datetime.now().strftime('%d.%m.%Y')} / 01"),
         ("Dokumentkode", "Builtly-TENDER-001"),
@@ -1319,8 +1343,8 @@ def build_pdf_report(
     pdf.set_xy(20, 180)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
-    pdf.multi_cell(170, 4.5, clean_text(
-        "Rapporten er generert av Builtly Anbudskontroll pa bakgrunn av opplastede dokumenter og prosjektkonfigurasjon. "
+    pdf.multi_cell(170, 4.5, clean_pdf_text(
+        "Rapporten er generert av Builtly Anbudskontroll på bakgrunn av opplastede dokumenter og prosjektkonfigurasjon. "
         "Dokumentet er et arbeidsutkast og skal fagkontrolleres for bruk i tilbudsinnlevering eller beslutning."
     ))
 
@@ -1338,7 +1362,7 @@ def build_pdf_report(
     for item in toc:
         y = pdf.get_y()
         pdf.set_x(22)
-        pdf.cell(0, 6, clean_text(item), 0, 0, "L")
+        pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
         pdf.set_draw_color(225, 229, 234)
         pdf.line(22, y + 6, 188, y + 6)
         pdf.ln(8)
@@ -1351,11 +1375,11 @@ def build_pdf_report(
     if summary:
         pdf.body_text(summary)
     else:
-        pdf.body_text("Ingen AI-oppsummering tilgjengelig. Resultatet er basert pa heuristisk regelmotor.")
+        pdf.body_text("Ingen AI-oppsummering tilgjengelig. Resultatet er basert på heuristisk regelmotor.")
 
     completeness = rules.get("data_completeness_score", 0)
     high_risks = len([r for r in rules.get("risk_items", []) if isinstance(r, dict) and r.get("severity") == "HIGH"])
-    pdf.highlight_box("Nokkeltall", [
+    pdf.highlight_box("Nøkkeltall", [
         f"Dokumenter lastet opp: {len(records)}",
         f"Datakompletthet: {int(completeness * 100)}%",
         f"Manglende kategorier: {len(rules.get('missing_categories', []))}",
@@ -1454,9 +1478,9 @@ st.markdown(
 
 # ── Check project exists ──
 if pd_state.get("p_name") in ["", "Nytt Prosjekt", None]:
-    st.warning("Du ma sette opp prosjektdata for du kan bruke denne modulen.")
+    st.warning("Du må sette opp prosjektdata før du kan bruke denne modulen.")
     if find_page("Project"):
-        if st.button("Ga til Project Setup", type="primary"):
+        if st.button("Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
     st.stop()
 
@@ -1544,11 +1568,11 @@ with left:
             key="tender_rulepack_v2",
         )
         notes = st.text_area(
-            "Prosjektspesifikke forhold som bor vektes hoyt",
-            value="Saerskilt fokus pa grensesnitt mellom grunnarbeid, betong og fasade. Kontroller at rigg/logistikk, SHA og ytre miljo er konsistente i alle dokumenter.",
+            "Prosjektspesifikke forhold som bør vektes høyt",
+            value="Særskilt fokus på grensesnitt mellom grunnarbeid, betong og fasade. Kontroller at rigg/logistikk, SHA og ytre miljø er konsistente i alle dokumenter.",
             height=110,
         )
-        submitted = st.form_submit_button("Kjor anbudskontroll")
+        submitted = st.form_submit_button("Kjør anbudskontroll")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -1684,7 +1708,7 @@ tabs = st.tabs(["AI-utkast", "Dokumentmanifest", "Sjekkliste", "Risiko og RFI", 
 with tabs[0]:
     st.markdown("### Sammendrag")
     summary = safe_get(ai_data, "executive_summary", "") if isinstance(ai_data, dict) else ""
-    st.write(summary or "Ingen AI-oppsummering tilgjengelig. Kjor analysen med dokumenter for a fa AI-resultat.")
+    st.write(summary or "Ingen AI-oppsummering tilgjengelig. Kjør analysen med dokumenter for å få AI-resultat.")
 
     # Contract fields
     cf_rules = rules.get("contract_fields", [])
@@ -1749,7 +1773,7 @@ with tabs[2]:
         csv_data = checklist_df.to_csv(index=False).encode("utf-8")
         st.download_button("Last ned sjekkliste (.csv)", data=csv_data, file_name="tender_checklist.csv", mime="text/csv")
     else:
-        st.info("Kjor analysen for a se sjekkliste.")
+        st.info("Kjør analysen for å se sjekkliste.")
 
     if rules.get("missing_categories"):
         st.warning("Manglende kategorier: " + ", ".join(rules["missing_categories"]))
