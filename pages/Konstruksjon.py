@@ -586,6 +586,9 @@ def thumbnail_image(img: Image.Image, size: Tuple[int, int] = (1600, 1600)) -> I
 
 def detect_drawing_hint(name: str) -> str:
     low = clean_pdf_text(name).lower()
+    # v15: site/landscape plans must be excluded BEFORE "plan" substring match
+    if any(k in low for k in ["situasjonsplan", "situasjon", "site plan", "siteplan", "utomhus", "landskap", "landscape", "tomt", "overordnet"]):
+        return "unknown"
     if any(k in low for k in ["plan", "plantegning", "etg", "floor", "plan1", "plan 1"]):
         return "plan"
     if any(k in low for k in ["snitt", "section", "cut"]):
@@ -6578,10 +6581,17 @@ BASEMENT_KEYWORDS_V6 = [
 PLAN_KEYWORDS_V6 = [
     "plan", "plantegning", "etg", "etasje", "etasjeplan", "typisk", "level", "nivå",
 ]
+SITE_KEYWORDS_V15 = [
+    "situasjonsplan", "situasjon", "site plan", "siteplan", "utomhus", "landskap",
+    "landscape", "tomt", "overordnet", "oversikt", "site", "utendørs",
+]
 
 
 def detect_drawing_hint(name: str) -> str:
     low = clean_pdf_text(name).lower()
+    # v15: site/landscape plans must be excluded BEFORE "plan" substring match
+    if any(k in low for k in SITE_KEYWORDS_V15):
+        return "unknown"
     if any(k in low for k in PLAN_KEYWORDS_V6 + BASEMENT_KEYWORDS_V6 + ["floor", "plan1", "plan 1"]):
         return "plan"
     if any(k in low for k in ["snitt", "section", "cut"]):
@@ -6640,6 +6650,10 @@ def get_plan_regions_for_record_v6(record: Dict[str, Any]) -> List[Dict[str, Any
 
 def is_plan_like_record_v6(record: Dict[str, Any]) -> bool:
     hint = clean_pdf_text(record.get("hint", "")).lower()
+    # v15: always exclude site plans even if hint somehow became "plan"
+    record_text = _record_text_v6(record)
+    if any(k in record_text for k in SITE_KEYWORDS_V15):
+        return False
     if hint == "plan":
         return True
     if hint in {"section", "facade", "detail"}:
