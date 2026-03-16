@@ -44,6 +44,7 @@ st.set_page_config(
 )
 
 DB_DIR = Path("qa_database")
+FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
 
 
@@ -442,6 +443,24 @@ def normalize_uploaded_files(files) -> List[Dict[str, Any]]:
             "size_kb": round(size / 1024, 1) if size else 0,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
         })
+    return records
+
+
+def load_project_files() -> List[Dict[str, Any]]:
+    """Load files saved in Project Setup (qa_database/project_files/)."""
+    records = []
+    if not FILES_DIR.exists():
+        return records
+    for p in sorted(FILES_DIR.iterdir()):
+        if p.is_file():
+            records.append({
+                "filename": p.name,
+                "category": classify_quantity_file(p.name),
+                "extension": p.suffix.lower(),
+                "size_kb": round(p.stat().st_size / 1024, 1),
+                "timestamp": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "source": "Project Setup",
+            })
     return records
 
 
@@ -1045,6 +1064,13 @@ with left:
     }
 
     file_records = normalize_uploaded_files(uploaded_files or [])
+    project_records = load_project_files()
+    if project_records:
+        existing_names = {r["filename"] for r in file_records}
+        for pr in project_records:
+            if pr["filename"] not in existing_names:
+                file_records.append(pr)
+        st.success(f"{len(project_records)} fil(er) hentet automatisk fra prosjektoppsettet.")
 
     # ── AI ──
     if "qty_ai_result" not in st.session_state:
