@@ -526,3 +526,47 @@ if completeness > 30:
     render_module_card(r3c3, "♻️", "Environment", "badge-roadmap", "Miljøoppfølging (MOP)", 
                        "Miljøoppfølgingsplan for byggeplass. Vurderer avfallshåndtering, ombruk, utslipp og bevaring av natur.", 
                        "Prosjektdata + miljømål", "MOP Dokument", "Åpne MOP", "MOP")
+
+    # --- SEKSJON: ANBUD & ENTREPRISE ---
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ Anbud & Entreprise</h3>
+        <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
+            Analyser anbudsdokumenter, mengdebeskrivelser og kontrakter automatisk.
+            Reduser risiko og tidsbruk i tilbudsarbeid.
+        </p>
+    """, unsafe_allow_html=True)
+
+    r4c1, r4c2, r4c3 = st.columns(3)
+    render_module_card(r4c1, "📑", "Commercial", "badge-priority", "ANBUDSKONTROLL – Tilbudsgrunnlag & QA",
+                       "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
+                       "Anbudsgrunnlag + tegninger + IFC/PDF", "Avviksmatrise, scope-logg, RFIs",
+                       "Åpne Tender Control", "TenderControl")
+    render_module_card(r4c2, "📏", "Core engine", "badge-phase2", "MENGDE & SCOPE – Revisjon og sporbarhet",
+                       "Fanger mengder, arealer, revisjonsendringer og sporbarhet mellom modell, tegning og beskrivelse.",
+                       "IFC / PDF / BOQ / romdata", "Mengdeliste, areallogg, deltarapport",
+                       "Åpne Mengde & Scope", "QuantityScope")
+    render_module_card(r4c3, "🏙️", "Developer-first", "badge-early", "AREAL & YIELD – Utvikleroptimalisering",
+                       "Analyserer brutto/netto, salgbart og utleibart areal, kjerneandel, tekniske rom og scenarioer for mer verdiskaping.",
+                       "Plangrunnlag + arealprogram", "Yield-notat, scenarioer, verdiøkning",
+                       "Åpne Yield Optimizer", "YieldOptimizer")
+
+    # --- SEKSJON: KLIMA, PORTEFØLJE & FINANS ---
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏦 Klima, Portefølje & Finans</h3>
+        <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
+            Porteføljescreening, klimarisiko og teknisk due diligence for banker,
+            forsikringsselskaper og eiendomsinvestorer. Nivå 1 (auto) – ingen fagperson-review påkrevd.
+        </p>
+    """, unsafe_allow_html=True)
+
+    r5c1, r5c2 = st.columns(2)
+    render_module_card(r5c1, "🌊", "Portfolio", "badge-phase2", "KLIMARISIKO – Eiendom & portefølje",
+                       "Skårer flom, skred, havnivå og varmestress per eiendom og mapper output mot EU Taxonomy, SFDR og bankrapportering.",
+                       "Adresse / koordinater + eksponering", "Klimarisikoscore, taxonomy-mapping",
+                       "Åpne Klimarisiko", "ClimateRisk")
+    render_module_card(r5c2, "🏦", "Finance", "badge-phase2", "TEKNISK DUE DILIGENCE (TDD)",
+                       "Automatisert TDD-rapport for eiendomstransaksjoner. Aggregerer tilstand, avvik mot TEK17, restlevetid og risikoprofil.",
+                       "Tegninger + ferdigattest + FDV + tilstandsrapport", "TDD-rapport, risikomatrise, tiltaksliste",
+                       "Åpne TDD", "TDD")
