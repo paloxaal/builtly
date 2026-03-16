@@ -252,7 +252,18 @@ def clean_text(value: Any) -> str:
     return text.strip()
 
 def clean_pdf_text(value: Any) -> str:
-    return clean_text(value).encode("latin-1", "replace").decode("latin-1")
+    text = clean_text(value)
+    # Strip markdown bold/italic markers
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+    # Strip markdown headers used inline
+    text = re.sub(r"^#{1,4}\s*", "", text, flags=re.MULTILINE)
+    # Strip pipe-table formatting
+    text = re.sub(r"\|", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.encode("latin-1", "replace").decode("latin-1").strip()
 
 def short_text(value: Any, max_len: int = 120) -> str:
     text = clean_text(value)
@@ -1193,6 +1204,80 @@ class BuiltlyPDF(FPDF):
             self.multi_cell(width, 4, clean_pdf_text(caption), 0, "L")
         self.ln(6)
 
+    def native_table(self, df: pd.DataFrame, title: str = "", subtitle: str = ""):
+        """Render a DataFrame as a clean native fpdf table."""
+        if df is None or df.empty:
+            return
+        if title:
+            self.ensure_space(20)
+            self.set_font("Helvetica", "B", 11)
+            self.set_text_color(48, 64, 86)
+            self.set_x(20)
+            self.cell(170, 6, clean_pdf_text(title), 0, 1, "L")
+            self.ln(1)
+        if subtitle:
+            self.set_font("Helvetica", "I", 8.5)
+            self.set_text_color(104, 109, 116)
+            self.set_x(20)
+            self.multi_cell(170, 4, clean_pdf_text(subtitle), 0, "L")
+            self.ln(2)
+
+        cols = list(df.columns)
+        n_cols = len(cols)
+        table_w = 170
+        # Smart column widths
+        col_ws = []
+        for col in cols:
+            low = clean_text(col).lower()
+            if any(k in low for k in ["delta", "%", "share", "andel"]):
+                col_ws.append(0.7)
+            elif any(k in low for k in ["constraint", "recommend", "effect", "evidence", "finding", "kommentar"]):
+                col_ws.append(2.5)
+            elif any(k in low for k in ["scenario", "category", "kategori"]):
+                col_ws.append(1.4)
+            else:
+                col_ws.append(1.0)
+        total_w = sum(col_ws) or 1
+        col_ws = [max(18, table_w * w / total_w) for w in col_ws]
+
+        # Header
+        self.ensure_space(12)
+        self.set_fill_color(46, 62, 84)
+        self.set_text_color(255, 255, 255)
+        self.set_font("Helvetica", "B", 7.5)
+        x0 = 20
+        y0 = self.get_y()
+        for i, col in enumerate(cols):
+            self.set_xy(x0, y0)
+            self.cell(col_ws[i], 7, clean_pdf_text(str(col))[:24], 1, 0, "L", True)
+            x0 += col_ws[i]
+        self.ln(7)
+
+        # Rows
+        self.set_font("Helvetica", "", 7)
+        self.set_text_color(35, 39, 43)
+        for ridx in range(min(len(df), 30)):
+            row = df.iloc[ridx]
+            self.ensure_space(8)
+            x0 = 20
+            y0 = self.get_y()
+            bg = (248, 250, 252) if ridx % 2 else (255, 255, 255)
+            self.set_fill_color(*bg)
+            max_h = 6
+            # Calculate row height
+            for i, col in enumerate(cols):
+                val = clean_pdf_text(str(row[col]))[:60]
+                w = self.get_string_width(val)
+                lines = max(1, int(w / (col_ws[i] - 4)) + 1)
+                max_h = max(max_h, lines * 4 + 2)
+            for i, col in enumerate(cols):
+                self.set_xy(x0, y0)
+                val = clean_pdf_text(str(row[col]))[:60]
+                self.cell(col_ws[i], max_h, val, 1, 0, "L", True)
+                x0 += col_ws[i]
+            self.ln(max_h)
+        self.ln(3)
+
 def table_image(df: pd.DataFrame, title: str, subtitle: str = "") -> Image.Image:
     df = df.copy().fillna("")
     font_title = get_font(34, bold=True)
@@ -1261,6 +1346,28 @@ def split_sections(text: str) -> List[Dict[str, Any]]:
         sections.append(current)
     return sections
 
+def level_disclaimer(level_label: str) -> str:
+    """Return the appropriate disclaimer text for the delivery level."""
+    levels = list(tx("levels"))
+    try:
+        idx = levels.index(level_label)
+    except ValueError:
+        idx = 0
+    if idx >= 2:
+        return tx("disclaimer_review")
+    if idx == 1:
+        return tx("disclaimer_review")
+    return tx("disclaimer_auto")
+
+
+def _find_logo() -> Optional[str]:
+    """Find the logo file in likely locations."""
+    for candidate in [ROOT / "logo.png", Path("logo.png"), ROOT / "logo-white.png", Path("logo-white.png")]:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
 def report_pdf(project: Dict[str, Any], level: str, report_text: str, before_df: pd.DataFrame, scenario_df: pd.DataFrame, findings: pd.DataFrame, sources: pd.DataFrame, cover: Optional[Image.Image]) -> Optional[bytes]:
     if FPDF is None:
         return None
@@ -1269,14 +1376,17 @@ def report_pdf(project: Dict[str, Any], level: str, report_text: str, before_df:
     pdf.set_margins(18, 18, 18)
     pdf.header_left = clean_pdf_text(project.get("p_name", tx("module")))
     pdf.header_right = clean_pdf_text(tx("module"))
-    pdf.footer_center = clean_pdf_text(tx("disclaimer_auto")[:42] + "...")
+    pdf.footer_center = clean_pdf_text(level_disclaimer(level)[:42] + "...")
+
+    # ── Cover page ──
     pdf.add_page()
-    logo = ROOT / "logo.png"
-    if logo.exists():
+    logo_path = _find_logo()
+    if logo_path:
         try:
-            pdf.image(str(logo), x=150, y=15, w=40)
+            pdf.image(logo_path, x=150, y=15, w=40)
         except Exception:
             pass
+
     pdf.set_xy(20, 45)
     pdf.set_font("Helvetica", "B", 11)
     pdf.set_text_color(100, 105, 110)
@@ -1290,39 +1400,51 @@ def report_pdf(project: Dict[str, Any], level: str, report_text: str, before_df:
     pdf.set_font("Helvetica", "B", 14)
     pdf.set_text_color(64, 68, 74)
     pdf.multi_cell(95, 6.5, clean_pdf_text(tx("report_subject")), 0, "L")
+
+    # Meta card — language-aware labels
+    kv_labels = {
+        "no": [("Oppdragsgiver", clean_text(project.get("c_name")) or "-"), ("Modul", clean_text(tx("module"))), ("Dato / rev", datetime.now().strftime("%d.%m.%Y") + " / 01"), ("Land", market_code()), ("Nivå", level)],
+        "en": [("Client", clean_text(project.get("c_name")) or "-"), ("Module", clean_text(tx("module"))), ("Date / rev", datetime.now().strftime("%d.%m.%Y") + " / 01"), ("Country", market_code()), ("Level", level)],
+    }
     pdf.set_xy(118, 45)
-    pdf.kv_card([
-        ("Client", clean_text(project.get("c_name")) or "-"),
-        ("Module", clean_text(tx("module"))),
-        ("Date / rev", datetime.now().strftime("%d.%m.%Y") + " / 01"),
-        ("Country", market_code()),
-        ("Level", level),
-    ], title="Meta")
+    pdf.kv_card(kv_labels.get(UI_LANG, kv_labels["en"]), title="Meta")
+
     if cover is not None:
         path = save_temp(cover.convert("RGB"), ".jpg")
         pdf.image_box(path, width=165, caption=tx("analysis_caption"))
     else:
         pdf.highlight_box(tx("drawings"), [tx("need_input")])
-    disclaimer = tx("disclaimer_auto") if level == tx("levels")[0] else tx("disclaimer_review")
+
+    disclaimer = level_disclaimer(level)
     pdf.set_xy(20, 252)
     pdf.set_font("Helvetica", "", 8.8)
     pdf.set_text_color(104, 109, 116)
     pdf.multi_cell(170, 4.5, clean_pdf_text(disclaimer))
 
+    # ── Table of contents — language-aware ──
     pdf.add_page()
-    pdf.section_title("Contents")
-    for item in [
-        "1. Summary and conclusion",
-        "2. Data basis",
-        "3. Goal and assumptions",
-        "4. Current area profile",
-        "5. Scenario analysis",
-        "6. Drawing-based findings",
+    toc_title = "Innholdsfortegnelse" if UI_LANG == "no" else "Contents"
+    toc_items_no = [
+        "1. Sammendrag og konklusjon", "2. Datagrunnlag", "3. Mål og forutsetninger",
+        "4. Nåværende arealprofil", "5. Scenarioanalyse", "6. Tegningsbaserte funn",
+        "7. Anbefalte neste steg",
+        "Vedlegg A. Før og etter", "Vedlegg B. Scenariomatrise",
+        "Vedlegg C. Tegningsfunn", "Vedlegg D. Kildefiler",
+    ]
+    toc_items_en = [
+        "1. Summary and conclusion", "2. Data basis", "3. Goal and assumptions",
+        "4. Current area profile", "5. Scenario analysis", "6. Drawing-based findings",
         "7. Recommended next steps",
-        "Appendix A. Before and after",
-        "Appendix B. Scenario matrix",
-        "Appendix C. Source files",
-    ]:
+        "Appendix A. Before and after", "Appendix B. Scenario matrix",
+        "Appendix C. Drawing findings", "Appendix D. Source files",
+    ]
+    toc_items = toc_items_no if UI_LANG == "no" else toc_items_en
+    appendix_titles = toc_items[7:]
+
+    pdf.section_title(toc_title)
+    pdf.set_font("Helvetica", "", 10.5)
+    pdf.set_text_color(45, 49, 55)
+    for item in toc_items:
         y = pdf.get_y()
         pdf.set_x(22)
         pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
@@ -1332,19 +1454,31 @@ def report_pdf(project: Dict[str, Any], level: str, report_text: str, before_df:
     pdf.ln(6)
     pdf.highlight_box(tx("what_you_get"), [clean_text(x) for x in tx("what_items")])
 
+    # ── Report body ──
     pdf.add_page()
     for section in split_sections(report_text):
         pdf.section_title(section["title"])
         bullets = []
         para = []
         for line in section["lines"]:
-            if not line:
+            if not line.strip():
+                if para:
+                    pdf.body_paragraph(" ".join(para))
+                    para = []
+                if bullets:
+                    pdf.bullets(bullets)
+                    bullets = []
                 continue
             if re.match(r"^[-*•]\s+", line):
                 if para:
                     pdf.body_paragraph(" ".join(para))
                     para = []
                 bullets.append(re.sub(r"^[-*•]\s+", "", line))
+            elif re.match(r"^\d+\.\s+", line):
+                if para:
+                    pdf.body_paragraph(" ".join(para))
+                    para = []
+                bullets.append(line)
             else:
                 if bullets:
                     pdf.bullets(bullets)
@@ -1355,17 +1489,22 @@ def report_pdf(project: Dict[str, Any], level: str, report_text: str, before_df:
         if bullets:
             pdf.bullets(bullets)
 
-    for title, df, subtitle in [
-        ("Appendix A. Before and after", before_df, "Preferred scenario compared with the current baseline"),
-        ("Appendix B. Scenario matrix", scenario_df[["Scenario", "Recommendation", "sale_gain", "let_gain", "value_uplift", "Constraint", "Source"]], "Three generated scenarios"),
-        ("Appendix C. Drawing findings", findings if not findings.empty else pd.DataFrame([{"Finding": "No strong drawing findings were available in this run."}]), tx("find_sub")),
-        ("Appendix D. Source files", sources if not sources.empty else pd.DataFrame([{"File": "No files uploaded"}]), tx("drawings")),
-    ]:
+    # ── Appendices with native tables ──
+    appendix_data = [
+        (appendix_titles[0], before_df, tx("before_after")),
+        (appendix_titles[1], scenario_df[["Scenario", "Recommendation", "sale_gain", "let_gain", "value_uplift", "Constraint", "Source"]], tx("scenarios")),
+        (appendix_titles[2], findings if not findings.empty else pd.DataFrame([{"Finding": tx("drawing_help")}]), tx("find_sub")),
+        (appendix_titles[3], sources if not sources.empty else pd.DataFrame([{"File": tx("need_input")}]), tx("drawings")),
+    ]
+    for title, df, subtitle in appendix_data:
         pdf.add_page()
         pdf.section_title(title)
-        img = table_image(df, title, subtitle)
-        path = save_temp(img, ".png")
-        pdf.image_box(path, width=170, caption=subtitle)
+        pdf.native_table(df, subtitle=subtitle)
+
+    # ── Disclaimer page ──
+    pdf.ln(10)
+    disclaimer_title = "Ansvarsfraskrivelse" if UI_LANG == "no" else "Disclaimer"
+    pdf.highlight_box(disclaimer_title, [clean_text(disclaimer)])
 
     out = pdf.output(dest="S")
     return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode("latin-1")
