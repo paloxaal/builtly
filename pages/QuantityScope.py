@@ -340,7 +340,7 @@ st.markdown(
 # ────────────────────────────────────────────────────────────────
 DEFAULT_PROJECT = {
     "p_name": "", "c_name": "", "p_desc": "", "adresse": "",
-    "kommune": "", "gnr": "", "bnr": "", "b_type": "Naering",
+    "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring / Kontor",
     "etasjer": 4, "bta": 2500, "land": "Norge",
 }
 
