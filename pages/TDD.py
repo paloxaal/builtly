@@ -400,7 +400,7 @@ st.markdown("""
 # ────────────────────────────────────────────────────────────────
 # 5. SESSION STATE / PROJECT
 # ────────────────────────────────────────────────────────────────
-DEFAULT_PROJECT = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Naering", "etasjer": 1, "bta": 0, "land": "Norge"}
+DEFAULT_PROJECT = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring / Kontor", "etasjer": 1, "bta": 0, "land": "Norge"}
 if "project_data" not in st.session_state or not st.session_state.project_data.get("p_name"):
     if SSOT_FILE.exists():
         try:
