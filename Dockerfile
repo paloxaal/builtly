@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PYTHONIOENCODING=utf-8
+
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
@@ -19,6 +23,9 @@ RUN apt-get update && apt-get install -y \
     libpcre2-dev \
     ca-certificates \
     patch \
+    locales \
+ && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
+ && locale-gen \
  && rm -rf /var/lib/apt/lists/*
 
 # Build and install LibreDWG (provides dwgread / dwg2dxf)
@@ -36,13 +43,13 @@ ENV PATH="/usr/local/bin:${PATH}"
 
 COPY . /app
 
-# Streamlit config — fixes upload size limit and headless mode
+# Streamlit config — upload size, headless, CORS
 RUN mkdir -p /root/.streamlit && \
-    printf '[server]\nmaxUploadSize = 200\nenableCORS = false\nheadless = true\nmaxMessageSize = 200\n\n[browser]\ngatherUsageStats = false\n' > /root/.streamlit/config.toml
+    printf '[server]\nmaxUploadSize = 200\nmaxMessageSize = 200\nenableCORS = false\nenableXsrfProtection = false\nheadless = true\n\n[browser]\ngatherUsageStats = false\n' > /root/.streamlit/config.toml
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 EXPOSE 8501
 
-CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.maxUploadSize=200", "--server.maxMessageSize=200"]
+CMD ["streamlit", "run", "Builtly_AI.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.maxUploadSize=200", "--server.maxMessageSize=200", "--server.enableXsrfProtection=false"]
