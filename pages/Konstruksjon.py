@@ -600,6 +600,16 @@ def detect_drawing_hint(name: str) -> str:
     return "unknown"
 
 
+def optional_cv_stack():
+    """Import cv2 and numpy on demand — used for visual scoring and geometry."""
+    try:
+        import cv2
+        import numpy as np
+        return cv2, np
+    except Exception:
+        return None, None
+
+
 def _quick_plan_score_v15(image: Image.Image) -> float:
     """Fast visual heuristic to score how 'plan-like' an image is.
 
