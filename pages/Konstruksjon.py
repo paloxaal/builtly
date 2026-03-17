@@ -7633,6 +7633,36 @@ def refine_sketch_with_geometry_v6(
         refined_elements.extend(fallback_by_type.get("span_arrow", [])[:1])
 
     refined_elements = _dedupe_refined_elements_v6(refined_elements, record["image"].size)
+
+    # v15: Clip elements to region boundary — reject elements outside the plan region
+    image_w, image_h = record["image"].size
+    rx, ry, rw, rh = region["bbox_px"]
+    region_margin = max(15, int(min(rw, rh) * 0.05))
+    rx_min_norm = max(0.0, (rx - region_margin) / max(image_w, 1))
+    ry_min_norm = max(0.0, (ry - region_margin) / max(image_h, 1))
+    rx_max_norm = min(1.0, (rx + rw + region_margin) / max(image_w, 1))
+    ry_max_norm = min(1.0, (ry + rh + region_margin) / max(image_h, 1))
+
+    clipped_elements: List[Dict[str, Any]] = []
+    for element in refined_elements:
+        e_type = clean_pdf_text(element.get("type", "")).lower()
+        if e_type == "column":
+            ex, ey = float(element.get("x", 0.5)), float(element.get("y", 0.5))
+            if rx_min_norm <= ex <= rx_max_norm and ry_min_norm <= ey <= ry_max_norm:
+                clipped_elements.append(element)
+        elif e_type == "core":
+            ex, ey = float(element.get("x", 0.5)), float(element.get("y", 0.5))
+            if rx_min_norm <= ex <= rx_max_norm and ry_min_norm <= ey <= ry_max_norm:
+                clipped_elements.append(element)
+        elif e_type in {"wall", "beam", "span_arrow"}:
+            mid_x = (float(element.get("x1", 0.5)) + float(element.get("x2", 0.5))) / 2.0
+            mid_y = (float(element.get("y1", 0.5)) + float(element.get("y2", 0.5))) / 2.0
+            if rx_min_norm <= mid_x <= rx_max_norm and ry_min_norm <= mid_y <= ry_max_norm:
+                clipped_elements.append(element)
+        else:
+            clipped_elements.append(element)
+    refined_elements = clipped_elements
+
     if not refined_elements:
         return None
 
@@ -8142,7 +8172,7 @@ def _build_seed_sketch_from_page_cue_v9(cue: Optional[Dict[str, Any]], record: O
         if cleaned and cleaned not in notes:
             notes.append(cleaned)
     if cue.get("plan_confidence", 0.0) > 0.0:
-        notes.insert(0, f"OpenAI fokuserte planutvalg: confidens ca {round(float(cue.get('plan_confidence', 0.0)), 2)}.")
+        notes.insert(0, f"AI-fokusert planutvalg: confidens ca {round(float(cue.get('plan_confidence', 0.0)), 2)}.")
 
     return {
         "page_index": page_index,
@@ -12398,8 +12428,12 @@ if analyze_clicked or direct_pdf_clicked:
             valid_models = list_available_models()
             valgt_modell = pick_model(valid_models)
             if not valgt_modell:
-                st.error("Kunne ikke finne en tilgjengelig AI-modell (OpenAI/Gemini) i miljøet.")
+                st.error("Kunne ikke finne en tilgjengelig AI-modell (Anthropic/OpenAI/Gemini) i miljøet.")
                 st.stop()
+
+            # v15: Show which AI model is selected
+            model_display = clean_pdf_text(valgt_modell).replace("anthropic:", "Claude ").replace("openai:", "OpenAI ")
+            st.caption(f"AI-motor: {model_display}")
 
             model = build_runtime_ai_model(valgt_modell)
             candidates = build_structural_system_candidates(pd_state, material_valg, optimaliser_for, fundamentering)
