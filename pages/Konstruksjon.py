@@ -600,16 +600,6 @@ def detect_drawing_hint(name: str) -> str:
     return "unknown"
 
 
-def optional_cv_stack():
-    """Import cv2 and numpy on demand — used for visual scoring and geometry."""
-    try:
-        import cv2
-        import numpy as np
-        return cv2, np
-    except Exception:
-        return None, None
-
-
 def _quick_plan_score_v15(image: Image.Image) -> float:
     """Fast visual heuristic to score how 'plan-like' an image is.
 
@@ -1359,87 +1349,6 @@ def normalize_analysis_result(
         h = clamp(h, 0.04, max(0.04, 0.98 - y))
         return {"x": round(x, 6), "y": round(y, 6), "w": round(w, 6), "h": round(h, 6)}
 
-    def _sanitize_element(e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Validate and clean up a single sketch element. Returns None if invalid."""
-        if not isinstance(e, dict):
-            return None
-        e_type = str(e.get("type", "")).lower().strip()
-        if e_type not in {"column", "core", "wall", "beam", "span_arrow", "grid"}:
-            return None
-
-        out = dict(e)
-        out["type"] = e_type
-
-        if e_type == "core":
-            # Cores must have reasonable dimensions (not tiny, not huge)
-            ew = float(out.get("w", 0.12))
-            eh = float(out.get("h", 0.16))
-            if ew < 0.02 or eh < 0.02:
-                return None  # Too small to be a real core
-            if ew > 0.5 or eh > 0.5:
-                return None  # Unreasonably large — probably a bbox error
-            out["w"] = clamp(ew, 0.03, 0.35)
-            out["h"] = clamp(eh, 0.03, 0.35)
-            out["x"] = clamp(float(out.get("x", 0.5)), 0.02, 0.98)
-            out["y"] = clamp(float(out.get("y", 0.5)), 0.02, 0.98)
-
-        elif e_type == "wall":
-            # Walls must have meaningful length
-            x1, y1 = float(out.get("x1", 0)), float(out.get("y1", 0))
-            x2, y2 = float(out.get("x2", 0)), float(out.get("y2", 0))
-            length = math.hypot(x2 - x1, y2 - y1)
-            if length < 0.03:
-                return None  # Too short to be a real wall
-            # Clamp to valid range
-            out["x1"] = clamp(x1, 0.0, 1.0)
-            out["y1"] = clamp(y1, 0.0, 1.0)
-            out["x2"] = clamp(x2, 0.0, 1.0)
-            out["y2"] = clamp(y2, 0.0, 1.0)
-
-        elif e_type in {"column", "beam", "span_arrow"}:
-            # Clamp all coordinate values
-            for key in ["x", "y", "x1", "y1", "x2", "y2"]:
-                if key in out:
-                    try:
-                        out[key] = clamp(float(out[key]), 0.0, 1.0)
-                    except (TypeError, ValueError):
-                        out[key] = 0.5
-
-        return out
-
-    def _deduplicate_elements(elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove near-duplicate elements (same type, very close position)."""
-        kept = []
-        for e in elements:
-            is_dup = False
-            e_type = e.get("type", "")
-            for existing in kept:
-                if existing.get("type") != e_type:
-                    continue
-                if e_type == "core":
-                    dx = abs(float(e.get("x", 0)) - float(existing.get("x", 0)))
-                    dy = abs(float(e.get("y", 0)) - float(existing.get("y", 0)))
-                    if dx < 0.05 and dy < 0.05:
-                        is_dup = True
-                        break
-                elif e_type == "column":
-                    dx = abs(float(e.get("x", 0)) - float(existing.get("x", 0)))
-                    dy = abs(float(e.get("y", 0)) - float(existing.get("y", 0)))
-                    if dx < 0.03 and dy < 0.03:
-                        is_dup = True
-                        break
-                elif e_type == "wall":
-                    d1 = math.hypot(float(e.get("x1", 0)) - float(existing.get("x1", 0)),
-                                    float(e.get("y1", 0)) - float(existing.get("y1", 0)))
-                    d2 = math.hypot(float(e.get("x2", 0)) - float(existing.get("x2", 0)),
-                                    float(e.get("y2", 0)) - float(existing.get("y2", 0)))
-                    if d1 < 0.04 and d2 < 0.04:
-                        is_dup = True
-                        break
-            if not is_dup:
-                kept.append(e)
-        return kept
-
     if not isinstance(analysis, dict):
         analysis = default_analysis_result(candidates, drawings)
 
@@ -1487,15 +1396,11 @@ def normalize_analysis_result(
         if not isinstance(notes, list):
             notes = []
 
-        # Sanitize and deduplicate elements
-        sanitized_elements = [se for se in [_sanitize_element(e) for e in elements] if se is not None]
-        sanitized_elements = _deduplicate_elements(sanitized_elements)
-
         normalized_entry: Dict[str, Any] = {
             "page_index": page_index,
             "page_label": clean_pdf_text(sketch.get("page_label") or f"Tegning {page_index}"),
             "notes": [clean_pdf_text(x) for x in notes if clean_pdf_text(x)],
-            "elements": sanitized_elements,
+            "elements": [e for e in elements if isinstance(e, dict)],
         }
         plan_bbox = normalize_plan_bbox(sketch.get("plan_bbox"))
         if plan_bbox is not None:
@@ -1577,22 +1482,15 @@ TEGNINGSMANIFEST I SAMME REKKEFØLGE SOM BILDENE SENDES:
 
 EKSTRA FAGRUTINER SOM MÅ FØLGES:
 1. Skill tydelig mellom papirramme / titleblock / naboplan / situasjonsinnstikk og selve byggets plan. Papirkanter, tegningsrammer, tittelfelt, utsnittsbokser, terrasseomriss, nabobygg og cropkanter er IKKE bæresystem.
-2. Hvis én tegningsside inneholder flere planvarianter side om side, skal du identifisere den VIKTIGSTE planen (typisk den med flest detaljer eller laveste etasje) og returnere plan_bbox som avgrenser KUN den planen. Alle elementkoordinater skal da være relative til plan_bbox — IKKE hele siden. x=0,y=0 er øvre venstre hjørne av plan_bbox, x=1,y=1 er nedre høyre hjørne av plan_bbox.
+2. Hvis én tegningsside inneholder flere planvarianter side om side, skal du identifisere riktig planområde og returnere plan_bbox for hver skisse. plan_bbox skal avgrense selve planutsnittet, ikke hele siden.
 3. Yttervegg er ikke automatisk bærende. Ikke marker hele byggets perimeter som bærevegger med mindre tegningen tydelig viser en kontinuerlig massiv yttervegg som faktisk er del av primær bærestruktur.
 4. For boligplaner i overetasjer skal du prioritere kjerner, korridorvegger og leilighetsskillevegger før du eventuelt tar med perimetervegger.
 5. For P-kjeller / transfer-nivå skal søyler bare brukes der det er sannsynlig lastnedføring fra overliggende vegger eller kjerner. Unngå generiske rutenett som ikke er begrunnet i planen.
 6. Når du er usikker, skal du returnere færre elementer, ikke flere. Det er bedre å utelate enn å finne på.
 7. Aldri tegn et fullstendig rektangel rundt hele planområdet som "bærevegger" bare fordi konturen er tydelig.
-8. KRITISK: Alle elementkoordinater (x, y, x1, y1, x2, y2, w, h) skal være normaliserte mellom 0 og 1 RELATIVT TIL plan_bbox — IKKE hele siden. Hvis plan_bbox dekker venstre halvdel av siden, og en kjerne ligger midt i den planen, skal kjernens x være ca 0.5, IKKE 0.25.
-9. Maks 3 sketch-sider. Maks 1 plan_bbox per skisse. Velg den mest representative planen per side.
+8. Koordinater skal være normaliserte mellom 0 og 1 relativt til HELE siden.
+9. Maks 3 sketch-sider. Maks 1 plan_bbox per skisse.
 10. Vær eksplisitt om usikkerhet i observasjoner og mangler.
-
-PLASSERINGSREGLER FOR BÆREELEMENTER:
-A. KJERNER (type "core"): Plasser KUN der du ser tydelige trappehus eller heissjakter med tykke omsluttende vegger. Kjerner skal ha rektangulær form som matcher det synlige sjaktarealet. Typisk 2-4 kjerner for en boligblokk. IKKE plasser kjerner vilkårlig — de MÅ matche synlige trapp/heis-symboler i tegningen.
-B. BÆREVEGGER (type "wall"): Plasser langs synlige tykke linjer mellom leiligheter (leilighetsskillevegger) og langs korridorvegger. Disse veggene er typisk LANGSGÅENDE (parallelle med byggets lengderetning). IKKE plasser vegger langs fasade/yttervegg med mindre det er tydelig at ytterveggen er massiv og bærende.
-C. SØYLER (type "column"): Bruk KUN i P-kjeller/åpne plan der søyler er tydelig markert som sirkler eller firkanter i tegningen. I boligetasjer skal søyler normalt IKKE brukes — bæring skjer via vegger og kjerner.
-D. SPENNPILER (type "span_arrow"): Vis hovedspennretning MELLOM bærevegger. Pilene skal gå VINKELRETT på bæreveggene og vise typisk spenn (f.eks. "ca 6,5 m"). Plasser dem i midten av et typisk felt.
-E. BJELKER (type "beam"): Bruk kun der det er tydelige primærdragere synlig i tegningen. Ikke bruk bjelker som erstatning for bærevegger.
 
 OBLIGATORISKE MATERIALREGLER (norsk praksis / TEK17):
 11. recommended_system SKAL være systemet med høyest total_score i alternativmatrisen, MED MINDRE du har konkret faglig grunn fra tegningene til å avvike (begrunn i så fall tydelig).
@@ -1905,24 +1803,8 @@ def render_overlay_image(
     draw.rounded_rectangle((sx, sy, sx + sw + 16, sy + sh + 10), radius=12, fill=(10, 22, 35, 220))
     draw.text((sx + 8, sy + 5), status_text, font=font_small, fill=OVERLAY_COLORS["white"])
 
-    # Tegn elementer — transformert til plan_bbox-regionen
+    # Tegn elementer
     elements = sketch.get("elements", [])
-    bbox = sketch.get("plan_bbox") or {}
-    # plan_bbox i pikselkoordinater
-    bx = float(bbox.get("x", 0.0)) * w
-    by = float(bbox.get("y", 0.0)) * h
-    bw = float(bbox.get("w", 1.0)) * w
-    bh = float(bbox.get("h", 1.0)) * h
-    # Fallback: hvis plan_bbox mangler eller er hele siden, bruk sikre marginer
-    if bw < 50 or bh < 50:
-        bx, by, bw, bh = pad + 10, pad + ribbon_h + 10, w - 2 * pad - 20, h - 2 * pad - ribbon_h - 120
-
-    def _to_px(norm_x: float, norm_y: float):
-        """Konverter plan_bbox-relative koordinater (0-1) til piksler på full side."""
-        px = bx + max(0.0, min(1.0, float(norm_x))) * bw
-        py = by + max(0.0, min(1.0, float(norm_y))) * bh
-        return int(px), int(py)
-
     for element in elements:
         e_type = clean_pdf_text(element.get("type", "")).lower()
 
@@ -1930,59 +1812,67 @@ def render_overlay_image(
             orientation = clean_pdf_text(element.get("orientation", "")).lower()
             label = clean_pdf_text(element.get("label", ""))
             if orientation.startswith("v"):
-                gx, _ = _to_px(normalize_relative_value(element.get("x"), 0.2), 0.0)
-                draw.line((gx, int(by), gx, int(by + bh)), fill=OVERLAY_COLORS["grid"], width=3)
+                x = int(normalize_relative_value(element.get("x"), 0.2) * w)
+                draw.line((x, pad + ribbon_h + 8, x, h - pad - 40), fill=OVERLAY_COLORS["grid"], width=3)
                 if label:
-                    draw_label(draw, (gx - 10, int(by) + 8), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
-                    draw_label(draw, (gx - 10, int(by + bh) - 22), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+                    draw_label(draw, (x - 10, pad + ribbon_h + 16), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+                    draw_label(draw, (x - 10, h - pad - 52), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
             elif orientation.startswith("h"):
-                _, gy = _to_px(0.0, normalize_relative_value(element.get("y"), 0.2))
-                draw.line((int(bx), gy, int(bx + bw), gy), fill=OVERLAY_COLORS["grid"], width=3)
+                y = int(normalize_relative_value(element.get("y"), 0.2) * h)
+                draw.line((pad + 10, y, w - pad - 10, y), fill=OVERLAY_COLORS["grid"], width=3)
                 if label:
-                    draw_label(draw, (int(bx) + 8, gy - 14), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
-                    draw_label(draw, (int(bx + bw) - 36, gy - 14), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+                    draw_label(draw, (pad + 14, y - 14), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+                    draw_label(draw, (w - pad - 44, y - 14), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
 
         elif e_type == "column":
-            cx, cy = _to_px(normalize_relative_value(element.get("x"), 0.5), normalize_relative_value(element.get("y"), 0.5))
+            x = int(normalize_relative_value(element.get("x"), 0.5) * w)
+            y = int(normalize_relative_value(element.get("y"), 0.5) * h)
             r = max(8, int(min_dim * 0.012))
-            draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=OVERLAY_COLORS["column"], outline=OVERLAY_COLORS["white"], width=3)
+            draw.ellipse((x - r, y - r, x + r, y + r), fill=OVERLAY_COLORS["column"], outline=OVERLAY_COLORS["white"], width=3)
             label = clean_pdf_text(element.get("label", ""))
             if label:
-                draw_label(draw, (cx + r + 6, cy - r - 10), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
+                draw_label(draw, (x + r + 6, y - r - 10), label, font_small, OVERLAY_COLORS["dark"], OVERLAY_COLORS["white"])
 
         elif e_type == "core":
-            cx, cy = _to_px(normalize_relative_value(element.get("x"), 0.45), normalize_relative_value(element.get("y"), 0.45))
-            cw_px = int(normalize_relative_value(element.get("w"), 0.12) * bw)
-            ch_px = int(normalize_relative_value(element.get("h"), 0.16) * bh)
-            rect = (cx, cy, min(w - pad, cx + cw_px), min(h - pad, cy + ch_px))
+            x = int(normalize_relative_value(element.get("x"), 0.45) * w)
+            y = int(normalize_relative_value(element.get("y"), 0.45) * h)
+            cw = int(normalize_relative_value(element.get("w"), 0.12) * w)
+            ch = int(normalize_relative_value(element.get("h"), 0.16) * h)
+            rect = (x, y, min(w - pad, x + cw), min(h - pad, y + ch))
             draw.rounded_rectangle(rect, radius=10, fill=OVERLAY_COLORS["core_fill"], outline=OVERLAY_COLORS["core_stroke"], width=4)
             label = clean_pdf_text(element.get("label", "Kjerne"))
             draw_label(draw, (rect[0] + 8, rect[1] + 8), label, font_small, (255, 196, 64, 230), (30, 30, 30, 255))
 
         elif e_type == "wall":
-            wx1, wy1 = _to_px(normalize_relative_value(element.get("x1"), 0.2), normalize_relative_value(element.get("y1"), 0.2))
-            wx2, wy2 = _to_px(normalize_relative_value(element.get("x2"), 0.2), normalize_relative_value(element.get("y2"), 0.7))
-            draw.line((wx1, wy1, wx2, wy2), fill=OVERLAY_COLORS["wall"], width=max(6, int(min_dim * 0.01)))
+            x1 = int(normalize_relative_value(element.get("x1"), 0.2) * w)
+            y1 = int(normalize_relative_value(element.get("y1"), 0.2) * h)
+            x2 = int(normalize_relative_value(element.get("x2"), 0.2) * w)
+            y2 = int(normalize_relative_value(element.get("y2"), 0.7) * h)
+            draw.line((x1, y1, x2, y2), fill=OVERLAY_COLORS["wall"], width=max(6, int(min_dim * 0.01)))
             label = clean_pdf_text(element.get("label", "Skive"))
             if label:
-                draw_label(draw, (min(wx1, wx2) + 8, min(wy1, wy2) + 8), label, font_small, (255, 153, 153, 220), (35, 35, 35, 255))
+                draw_label(draw, (min(x1, x2) + 8, min(y1, y2) + 8), label, font_small, (255, 153, 153, 220), (35, 35, 35, 255))
 
         elif e_type == "beam":
-            bx1, by1 = _to_px(normalize_relative_value(element.get("x1"), 0.1), normalize_relative_value(element.get("y1"), 0.2))
-            bx2, by2 = _to_px(normalize_relative_value(element.get("x2"), 0.7), normalize_relative_value(element.get("y2"), 0.2))
-            draw.line((bx1, by1, bx2, by2), fill=OVERLAY_COLORS["beam"], width=max(5, int(min_dim * 0.008)))
+            x1 = int(normalize_relative_value(element.get("x1"), 0.1) * w)
+            y1 = int(normalize_relative_value(element.get("y1"), 0.2) * h)
+            x2 = int(normalize_relative_value(element.get("x2"), 0.7) * w)
+            y2 = int(normalize_relative_value(element.get("y2"), 0.2) * h)
+            draw.line((x1, y1, x2, y2), fill=OVERLAY_COLORS["beam"], width=max(5, int(min_dim * 0.008)))
             label = clean_pdf_text(element.get("label", "Bjelke"))
             if label:
-                mx, my = int((bx1 + bx2) / 2), int((by1 + by2) / 2)
+                mx, my = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 draw_label(draw, (mx + 8, my - 24), label, font_small, (10, 22, 35, 220), OVERLAY_COLORS["white"])
 
         elif e_type == "span_arrow":
-            sx1, sy1 = _to_px(normalize_relative_value(element.get("x1"), 0.1), normalize_relative_value(element.get("y1"), 0.8))
-            sx2, sy2 = _to_px(normalize_relative_value(element.get("x2"), 0.4), normalize_relative_value(element.get("y2"), 0.8))
-            draw_arrow(draw, (sx1, sy1), (sx2, sy2), OVERLAY_COLORS["span"], width=max(4, int(min_dim * 0.006)))
+            x1 = int(normalize_relative_value(element.get("x1"), 0.1) * w)
+            y1 = int(normalize_relative_value(element.get("y1"), 0.8) * h)
+            x2 = int(normalize_relative_value(element.get("x2"), 0.4) * w)
+            y2 = int(normalize_relative_value(element.get("y2"), 0.8) * h)
+            draw_arrow(draw, (x1, y1), (x2, y2), OVERLAY_COLORS["span"], width=max(4, int(min_dim * 0.006)))
             label = clean_pdf_text(element.get("label", "Spenn"))
             if label:
-                mx, my = int((sx1 + sx2) / 2), int((sy1 + sy2) / 2)
+                mx, my = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 draw_label(draw, (mx - 30, my - 34), label, font_small, (196, 235, 176, 230), (30, 30, 30, 255))
 
     # Fotnote
