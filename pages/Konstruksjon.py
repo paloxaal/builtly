@@ -6558,10 +6558,10 @@ def render_rib_draft_editor_ui() -> None:
         st.toggle("Vis snappinghjelp", value=True, key="rib_editor_show_guides")
     with toolbar_right:
         st.text_area(
-            "Faglig kommentar til AI før ny analyse",
+            "💬 Instruksjon til AI (valgfritt)",
             key="rib_draft_ai_user_note",
             height=90,
-            placeholder="Eks.: Søylelinje skal ut, bæring tas i stedet i leilighetsskille mot kjerne.",
+            placeholder="F.eks: «Bærevegger bør følge leilighetsskillene», «Legg til korridorvegg», «Fjern søyler i overetasjer», «Spenn ca 6.5 m»",
         )
 
     sketch_idx, selected_sketch = get_draft_sketch_by_uid(selected_sketch_uid)
@@ -6708,39 +6708,16 @@ def render_rib_draft_editor_ui() -> None:
                 st.success("Tabellendringer er lagret i utkastet.")
                 st.rerun()
 
-    # v15: AI-instruksjonsvindu for skissejustering
-    st.markdown("---")
-    with st.expander("💬 AI-instruksjon for skissejustering", expanded=False):
-        st.caption(
-            "Skriv en kort instruksjon om hva du vil endre i skissene. "
-            "Eksempler: «Flytt bærevegg 2 nærmere kjerne 1», «Legg til korridorvegg i midten», "
-            "«Fjern søyler og bruk kun vegger», «Spenn bør være ca 6.5 m», «Legg til kjerne ved trapp B»."
-        )
-        ai_instruction = st.text_area(
-            "Din instruksjon til AI-agenten:",
-            value=st.session_state.get("rib_draft_ai_user_note", ""),
-            height=80,
-            key="rib_ai_instruction_input_v15",
-            placeholder="F.eks: Bæreveggene bør følge leilighetsskillene tettere. Legg til en horisontal korridorvegg.",
-        )
-        if ai_instruction != st.session_state.get("rib_draft_ai_user_note", ""):
-            st.session_state["rib_draft_ai_user_note"] = ai_instruction
+    # v15: AI instruction is already in the toolbar text_area "rib_draft_ai_user_note" (line ~6560)
 
     bottom_left, bottom_mid, bottom_right = st.columns([1.0, 1.2, 1.4])
     with bottom_left:
-        bcol1, bcol2 = st.columns(2)
-        with bcol1:
-            if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all_v3"):
-                push_draft_history()
-                st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
-                st.session_state["rib_draft_ai_user_note"] = ""
-                mark_draft_changed()
-                st.success("Alle skisser er nullstilt.")
-                st.rerun()
-        with bcol2:
-            if st.button("Nullstill AI-instruksjon", use_container_width=True, key="rib_reset_instruction_v15"):
-                st.session_state["rib_draft_ai_user_note"] = ""
-                st.rerun()
+        if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all_v3"):
+            push_draft_history()
+            st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+            mark_draft_changed()
+            st.success("Alle skisser er nullstilt.")
+            st.rerun()
 
     with bottom_mid:
         has_instruction = bool(clean_pdf_text(st.session_state.get("rib_draft_ai_user_note", "")).strip())
