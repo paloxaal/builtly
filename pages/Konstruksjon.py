@@ -1097,57 +1097,90 @@ def list_gemini_models() -> List[str]:
 
 def list_available_models() -> List[str]:
     models: List[str] = []
-    if HAS_ANTHROPIC_BACKEND:
-        preferred_anthropic = clean_pdf_text(
-            os.environ.get("ANTHROPIC_MODEL") or ""
-        ).strip()
-        if preferred_anthropic:
-            models.append(f"anthropic:{preferred_anthropic}")
-        for candidate in ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
-            tagged = f"anthropic:{candidate}"
-            if tagged not in models:
-                models.append(tagged)
-    if HAS_OPENAI_BACKEND:
-        preferred_openai = clean_pdf_text(
-            os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
-        ).strip()
-        if preferred_openai:
-            models.append(f"openai:{preferred_openai}")
-        for candidate in ["gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
-            tagged = f"openai:{candidate}"
-            if tagged not in models:
-                models.append(tagged)
-    for gemini_name in list_gemini_models():
-        if gemini_name not in models:
-            models.append(gemini_name)
+    # v15: Read provider order from env (e.g. "anthropic,openai,gemini")
+    provider_order_raw = clean_pdf_text(os.environ.get("BUILTLY_PROVIDER_ORDER") or "anthropic,openai,gemini").strip().lower()
+    provider_order = [p.strip() for p in provider_order_raw.split(",") if p.strip()]
+    if not provider_order:
+        provider_order = ["anthropic", "openai", "gemini"]
+
+    for provider in provider_order:
+        if provider == "anthropic" and HAS_ANTHROPIC_BACKEND:
+            preferred_anthropic = clean_pdf_text(
+                os.environ.get("BUILTLY_CLAUDE_MODEL") or os.environ.get("ANTHROPIC_MODEL") or ""
+            ).strip()
+            if preferred_anthropic:
+                tag = f"anthropic:{preferred_anthropic}"
+                if tag not in models:
+                    models.append(tag)
+            for candidate in ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
+                tagged = f"anthropic:{candidate}"
+                if tagged not in models:
+                    models.append(tagged)
+        elif provider == "openai" and HAS_OPENAI_BACKEND:
+            preferred_openai = clean_pdf_text(
+                os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
+            ).strip()
+            if preferred_openai:
+                tag = f"openai:{preferred_openai}"
+                if tag not in models:
+                    models.append(tag)
+            for candidate in ["gpt-4.1", "gpt-4o", "gpt-4.1-mini"]:
+                tagged = f"openai:{candidate}"
+                if tagged not in models:
+                    models.append(tagged)
+        elif provider == "gemini" and HAS_GEMINI_BACKEND:
+            for gemini_name in list_gemini_models():
+                if gemini_name not in models:
+                    models.append(gemini_name)
+
+    # Ensure all available providers are included even if not in BUILTLY_PROVIDER_ORDER
+    if HAS_ANTHROPIC_BACKEND and not any(m.startswith("anthropic:") for m in models):
+        models.append("anthropic:claude-sonnet-4-20250514")
+    if HAS_OPENAI_BACKEND and not any(m.startswith("openai:") for m in models):
+        models.append("openai:gpt-4.1")
+    if HAS_GEMINI_BACKEND:
+        for gemini_name in list_gemini_models():
+            if gemini_name not in models:
+                models.append(gemini_name)
     return models
 
 
 def pick_model(valid_models: List[str]) -> Optional[str]:
     preferred: List[str] = []
-    # v15: Anthropic/Claude preferred first for better vision understanding
-    preferred_anthropic = clean_pdf_text(
-        os.environ.get("ANTHROPIC_MODEL") or ""
-    ).strip()
-    if preferred_anthropic:
-        preferred.append(f"anthropic:{preferred_anthropic}")
-    preferred.extend([
-        "anthropic:claude-sonnet-4-20250514",
-        "anthropic:claude-haiku-4-5-20251001",
-    ])
-    preferred_openai = clean_pdf_text(
-        os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
-    ).strip()
-    if preferred_openai:
-        preferred.append(f"openai:{preferred_openai}")
-    preferred.extend([
-        "openai:gpt-4.1",
-        "openai:gpt-4o",
-        "openai:gpt-4.1-mini",
-        "models/gemini-1.5-pro",
-        "models/gemini-1.5-flash",
-        "models/gemini-pro-vision",
-    ])
+    # v15: Read provider order from env (e.g. "anthropic,openai,gemini")
+    provider_order_raw = clean_pdf_text(os.environ.get("BUILTLY_PROVIDER_ORDER") or "anthropic,openai,gemini").strip().lower()
+    provider_order = [p.strip() for p in provider_order_raw.split(",") if p.strip()]
+    if not provider_order:
+        provider_order = ["anthropic", "openai", "gemini"]
+
+    for provider in provider_order:
+        if provider == "anthropic":
+            preferred_anthropic = clean_pdf_text(
+                os.environ.get("BUILTLY_CLAUDE_MODEL") or os.environ.get("ANTHROPIC_MODEL") or ""
+            ).strip()
+            if preferred_anthropic:
+                preferred.append(f"anthropic:{preferred_anthropic}")
+            preferred.extend([
+                "anthropic:claude-sonnet-4-20250514",
+                "anthropic:claude-haiku-4-5-20251001",
+            ])
+        elif provider == "openai":
+            preferred_openai = clean_pdf_text(
+                os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
+            ).strip()
+            if preferred_openai:
+                preferred.append(f"openai:{preferred_openai}")
+            preferred.extend([
+                "openai:gpt-4.1",
+                "openai:gpt-4o",
+                "openai:gpt-4.1-mini",
+            ])
+        elif provider == "gemini":
+            preferred.extend([
+                "models/gemini-1.5-pro",
+                "models/gemini-1.5-flash",
+                "models/gemini-pro-vision",
+            ])
     for fav in preferred:
         if fav in valid_models:
             return fav
