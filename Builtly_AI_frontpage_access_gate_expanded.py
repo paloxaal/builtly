@@ -173,17 +173,18 @@ def get_access_copy(lang_key: str) -> Dict:
 # 3) LANGUAGE TEXTS & REGULATORY PROFILES
 # -------------------------------------------------
 TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulations / Approved Documents)',
-                     'eyebrow': 'Reimagining engineering delivery',
-                     'title': "<span class='accent'>AI produces.</span> Professionals verify. You deliver.",
+                     'eyebrow': 'Reimagining engineering in construction and property',
+                     'title': "Engineering meets AI.",
                      'subtitle': 'Builtly automates the standardised technical deliverables in construction, civil and property. '
-                                 'Upload raw data – AI analyses, calculates and generates the report. '
-                                 'Human-in-the-loop where the law requires it. You focus on the work that actually needs an engineer.',
+                                 'Upload raw data – AI analyses, calculates and produces the report. '
+                                 'Qualified professionals review and sign off where the law requires it. '
+                                 'You get more time for the work that actually needs an engineer.',
                      'btn_setup': 'Open project setup',
                      'btn_qa': 'Open QA and sign-off',
                      'proofs': ['Rules-first AI', 'Human-in-the-loop', 'PDF + DOCX output', 'Digital sign-off', 'Full audit trail'],
                      'why_kicker': 'Why Builtly?',
-                     'stat1_v': '80-90%',
-                     'stat1_t': 'Less manual writing',
+                     'stat1_v': 'Time back',
+                     'stat1_t': '80–90% less manual writing',
                      'stat1_d': 'AI handles the repetitive. You handle the judgement.',
                      'stat2_v': 'Verified',
                      'stat2_t': 'Professional sign-off where the law requires it',
@@ -318,17 +319,18 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                      'assistant_scope_value': 'GEO · Structural · Demolition · Acoustics · Fire · Environment · SHA · BREEAM · Property · '
                                               'Traffic'},
  '🇳🇴 Norsk': {'rule_set': 'Norge (TEK17 / plan- og bygningsloven)',
-              'eyebrow': 'Vi revolusjonerer prosjekteringen',
-              'title': "<span class='accent'>AI produserer.</span> Fagpersoner verifiserer. Du leverer.",
+              'eyebrow': 'Vi revolusjonerer prosjekteringen i bygg og eiendom',
+              'title': "Ingeniørfaget møter AI.",
               'subtitle': 'Builtly automatiserer de standardiserte faglige leveransene i bygg, anlegg og eiendom. '
-                          'Last opp rådata – AI analyserer, beregner og genererer rapporten. '
-                          'Human-in-the-loop der det teller. Du får mer tid til det som faktisk krever ingeniørhodet ditt.',
+                          'Last opp rådata – AI analyserer, beregner og utarbeider rapporten. '
+                          'Fagpersoner kvalitetssikrer og signerer der loven krever det. '
+                          'Du får mer tid til det som faktisk krever ingeniørhodet ditt.',
               'btn_setup': 'Åpne Project Setup',
               'btn_qa': 'Åpne QA & Sign-off',
               'proofs': ['Regelstyrt AI', 'Human-in-the-loop', 'PDF + DOCX', 'Digital signering', 'Full revisjonsspor'],
               'why_kicker': 'Hvorfor Builtly?',
-              'stat1_v': '80-90%',
-              'stat1_t': 'Mindre skrivearbeid',
+              'stat1_v': 'Tid tilbake',
+              'stat1_t': '80–90% mindre skrivearbeid',
               'stat1_d': 'AI tar det repetitive. Du tar det faglige.',
               'stat2_v': 'Verifisert',
               'stat2_t': 'Faglig ansvar der loven krever det',
