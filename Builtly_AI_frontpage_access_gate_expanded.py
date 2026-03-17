@@ -1667,7 +1667,13 @@ def page_route(page_key: str) -> Optional[str]:
 
 
 def href_or_none(page_key: str) -> Optional[str]:
-    return page_route(page_key)
+    route = page_route(page_key)
+    if route is None:
+        return None
+    # If gate is enabled and user is not yet authenticated, intercept the click
+    if access_gate_enabled() and not st.session_state.get("site_access_granted"):
+        return f"?gate={page_key}"
+    return route
 
 
 def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
@@ -2248,6 +2254,51 @@ def ensure_frontpage_access(lang_key: str) -> None:
         return
     render_site_access_gate(lang_key)
     st.stop()
+
+
+@st.dialog("🔐 Tilgang kreves", width="small")
+def _module_gate_dialog(lang_key: str, dest_key: str) -> None:
+    """Shown when an unauthenticated user clicks a module card."""
+    copy = get_access_copy(lang_key)
+    lang_bundle = get_text_bundle(lang_key)
+
+    st.markdown(
+        f"<p style='color:var(--soft,#c8d3df);font-size:0.95rem;margin-bottom:1rem;'>{copy['subtitle']}</p>",
+        unsafe_allow_html=True,
+    )
+
+    if not access_gate_configured():
+        st.warning(copy["admin_missing"])
+        return
+
+    nonce = st.session_state.get("site_access_input_nonce", 0)
+    with st.form("module_gate_form"):
+        code = st.text_input(
+            copy["label"],
+            key=f"module_gate_code_{nonce}",
+            type="password",
+            placeholder=copy["placeholder"],
+        )
+        submitted = st.form_submit_button(copy["button"], use_container_width=True)
+
+    if submitted:
+        if verify_site_access_code(code):
+            st.session_state.site_access_granted = True
+            st.session_state.site_access_error = ""
+            token = _generate_session_token(code)
+            params = get_query_params_dict()
+            params.pop("gate", None)
+            params["s"] = token
+            set_query_params_dict(params)
+            dest_route = page_route(dest_key)
+            if dest_route:
+                st.switch_page(PAGES.get(dest_key, dest_route))
+            else:
+                st.rerun()
+        else:
+            st.error(copy["error_invalid"])
+            bump_site_access_nonce()
+            st.rerun()
 
 
 def reference_base_dir() -> Path:
@@ -4141,6 +4192,35 @@ st.markdown(
         background: transparent !important;
     }
 
+    /* Contact form – nuclear fix for white-on-white inputs */
+    div[data-testid="stExpander"] input,
+    div[data-testid="stExpander"] textarea,
+    div[data-testid="stForm"] input,
+    div[data-testid="stForm"] textarea {
+        background: rgba(255,255,255,0.03) !important;
+        background-color: rgba(255,255,255,0.03) !important;
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+        caret-color: #38c2c9 !important;
+    }
+
+    div[data-testid="stExpander"] input:-webkit-autofill,
+    div[data-testid="stExpander"] textarea:-webkit-autofill,
+    div[data-testid="stForm"] input:-webkit-autofill,
+    div[data-testid="stForm"] textarea:-webkit-autofill {
+        -webkit-box-shadow: 0 0 0px 1000px rgba(12,25,39,0.98) inset !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+        caret-color: #38c2c9 !important;
+    }
+
+    div[data-testid="stExpander"] input::placeholder,
+    div[data-testid="stExpander"] textarea::placeholder,
+    div[data-testid="stForm"] input::placeholder,
+    div[data-testid="stForm"] textarea::placeholder {
+        color: rgba(159,176,195,0.7) !important;
+        -webkit-text-fill-color: rgba(159,176,195,0.7) !important;
+    }
+
     .access-gate-head {
         background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
         border: 1px solid var(--stroke);
@@ -4218,7 +4298,14 @@ for key, value in MODULE_COPY_OVERRIDES.get(st.session_state.app_lang, {}).items
 
 st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 
-ensure_frontpage_access(st.session_state.app_lang)
+# Restore session from URL token if present (silent, no st.stop)
+if not st.session_state.get("site_access_granted"):
+    _restore_session_from_url()
+
+# If user clicked a module card while unauthenticated, show gate dialog
+_gate_dest = get_query_params_dict().get("gate", "").strip()
+if _gate_dest and access_gate_enabled() and not st.session_state.get("site_access_granted"):
+    _module_gate_dialog(st.session_state.app_lang, _gate_dest)
 
 # -------------------------------------------------
 # 8) HERO + ASSISTANT ENTRYPOINT
