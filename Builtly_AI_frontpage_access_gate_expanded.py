@@ -1467,6 +1467,20 @@ MODULE_COPY_OVERRIDES = {
         "m_tdd_in": "Drawings + certificates + condition docs",
         "m_tdd_out": "TDD draft, risk matrix, remediation overview",
         "m_tdd_btn": "Open TDD",
+        "mod_sec6": "Bank & Finance",
+        "mod_sec6_sub": "Modules for construction loan control, credit assessment and bank reporting. Automated data collection and structured decision support for lenders.",
+        "badge_byggelanskontroll": "Construction loan",
+        "badge_kredittgrunnlag": "Credit",
+        "m_byggelanskontroll_t": "CONSTRUCTION LOAN CONTROL – Draw verification & control",
+        "m_byggelanskontroll_d": "Verifies draw requests against construction budget, progress schedule and contract basis. Generates the bank control report with deviations and approval documentation.",
+        "m_byggelanskontroll_in": "Draw request + budget + progress plan",
+        "m_byggelanskontroll_out": "Control report, deviation log, approval basis",
+        "m_byggelanskontroll_btn": "Open Loan Control",
+        "m_kredittgrunnlag_t": "CREDIT ASSESSMENT – Decision support for credit committee",
+        "m_kredittgrunnlag_d": "Consolidates technical, regulatory and financial data into a structured credit memorandum for land loans, construction loans and rental loans.",
+        "m_kredittgrunnlag_in": "Project data + property info + financial structure",
+        "m_kredittgrunnlag_out": "Credit memo, risk matrix, decision basis",
+        "m_kredittgrunnlag_btn": "Open Credit Assessment",
         "partner_line": "Are you a consulting engineering firm or system supplier? Contact us about integration.",
         "contact_form_title": "Contact us about integration",
         "contact_form_sub": "Tell us briefly what you want to connect, automate or deliver through Builtly. We will route your request to the right team.",
@@ -1534,6 +1548,20 @@ MODULE_COPY_OVERRIDES = {
         "m_tdd_in": "Tegninger + attester + tilstandsgrunnlag",
         "m_tdd_out": "TDD-utkast, risikomatrise, kostnadsoversikt",
         "m_tdd_btn": "Åpne TDD",
+        "mod_sec6": "Bank & Finansiering",
+        "mod_sec6_sub": "Moduler for byggelånskontroll, kredittgrunnlag og bankrapportering. Automatisert datainnhenting og strukturert beslutningsstøtte for banker og kredittgivere.",
+        "badge_byggelanskontroll": "Byggelån",
+        "badge_kredittgrunnlag": "Kreditt",
+        "m_byggelanskontroll_t": "BYGGELÅNSKONTROLL – Utbetalingskontroll & verifisering",
+        "m_byggelanskontroll_d": "Verifiserer trekkforespørsler mot byggebudsjett, fremdriftsplan og kontraktsgrunnlag. Genererer bankens kontrollrapport med avvik og godkjenningsgrunnlag.",
+        "m_byggelanskontroll_in": "Trekkforespørsel + budsjett + fremdriftsplan",
+        "m_byggelanskontroll_out": "Kontrollrapport, avvikslogg, godkjenningsgrunnlag",
+        "m_byggelanskontroll_btn": "Åpne Byggelånskontroll",
+        "m_kredittgrunnlag_t": "KREDITTGRUNNLAG – Beslutningsstøtte for kredittkomité",
+        "m_kredittgrunnlag_d": "Sammenstiller tekniske, regulatoriske og finansielle data til et strukturert kredittgrunnlag for tomtelån, byggelån og utleielån.",
+        "m_kredittgrunnlag_in": "Prosjektdata + eiendomsinfo + finansstruktur",
+        "m_kredittgrunnlag_out": "Kredittmemo, risikomatrise, beslutningsgrunnlag",
+        "m_kredittgrunnlag_btn": "Åpne Kredittgrunnlag",
         "partner_line": "Er du et rådgivende ingeniørfirma eller systemleverandør? Ta kontakt om integrering.",
         "contact_form_title": "Kontakt oss om integrering",
         "contact_form_sub": "Fortell kort hva du ønsker å koble på, automatisere eller levere gjennom Builtly, så sender vi henvendelsen til riktig team.",
@@ -1647,6 +1675,8 @@ PAGES = {
     "climate_risk": find_page("ClimateRisk"),
     "tdd": find_page("TDD"),
     "partner_api": find_page("PartnerAPI"),
+    "byggelanskontroll": find_page("Byggelanskontroll"),
+    "kredittgrunnlag": find_page("Kredittgrunnlag"),
     "project": find_page("Project"),
     "review": find_page("Review"),
 }
@@ -4434,6 +4464,11 @@ platform_cards = [
     module_card("tdd", "🏦", lang["badge_tdd"], "badge-phase2", lang["m_tdd_t"], lang["m_tdd_d"], lang["m_tdd_in"], lang["m_tdd_out"], lang["m_tdd_btn"]),
 ]
 
+bank_cards = [
+    module_card("byggelanskontroll", "🏗️", lang["badge_byggelanskontroll"], "badge-phase2", lang["m_byggelanskontroll_t"], lang["m_byggelanskontroll_d"], lang["m_byggelanskontroll_in"], lang["m_byggelanskontroll_out"], lang["m_byggelanskontroll_btn"]),
+    module_card("kredittgrunnlag", "📋", lang["badge_kredittgrunnlag"], "badge-phase2", lang["m_kredittgrunnlag_t"], lang["m_kredittgrunnlag_d"], lang["m_kredittgrunnlag_in"], lang["m_kredittgrunnlag_out"], lang["m_kredittgrunnlag_btn"]),
+]
+
 render_html(
     f"""
     <div class="section-head">
@@ -4459,6 +4494,10 @@ render_html(
     <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec5']}</div>
     <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec5_sub']}</div>
     <div class="module-grid module-grid-two">{''.join(platform_cards)}</div>
+
+    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec6']}</div>
+    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec6_sub']}</div>
+    <div class="module-grid module-grid-two">{''.join(bank_cards)}</div>
     """
 )
 
