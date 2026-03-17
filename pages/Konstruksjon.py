@@ -33,6 +33,11 @@ except Exception:
     OpenAI = None
 
 try:
+    import anthropic as _anthropic_module
+except Exception:
+    _anthropic_module = None
+
+try:
     import fitz
 except Exception:
     fitz = None
@@ -86,9 +91,11 @@ def _is_docker_environment() -> bool:
 
 google_key = os.environ.get("GOOGLE_API_KEY", "").strip()
 openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
 HAS_GEMINI_BACKEND = bool(google_key and genai is not None)
 HAS_OPENAI_BACKEND = bool(openai_key and OpenAI is not None)
+HAS_ANTHROPIC_BACKEND = bool(anthropic_key and _anthropic_module is not None)
 
 if HAS_GEMINI_BACKEND:
     try:
@@ -96,13 +103,15 @@ if HAS_GEMINI_BACKEND:
     except Exception:
         HAS_GEMINI_BACKEND = False
 
-if not HAS_GEMINI_BACKEND and not HAS_OPENAI_BACKEND:
+if not HAS_GEMINI_BACKEND and not HAS_OPENAI_BACKEND and not HAS_ANTHROPIC_BACKEND:
     if google_key and genai is None:
         st.error("Kritisk feil: GOOGLE_API_KEY er satt, men pakken 'google.generativeai' er ikke tilgjengelig i miljøet.")
     elif openai_key and OpenAI is None:
         st.error("Kritisk feil: OPENAI_API_KEY er satt, men pakken 'openai' er ikke tilgjengelig i miljøet.")
+    elif anthropic_key and _anthropic_module is None:
+        st.error("Kritisk feil: ANTHROPIC_API_KEY er satt, men pakken 'anthropic' er ikke tilgjengelig i miljøet. Kjør: pip install anthropic")
     else:
-        st.error("Kritisk feil: Fant verken en brukbar Gemini-backend eller en brukbar OpenAI-backend. Sjekk Environment Variables i Render.")
+        st.error("Kritisk feil: Fant verken en brukbar Gemini-, OpenAI- eller Anthropic-backend. Sjekk Environment Variables i Render.")
     st.stop()
 
 
@@ -601,94 +610,50 @@ def detect_drawing_hint(name: str) -> str:
 
 
 def _quick_plan_score_v15(image: Image.Image) -> float:
-    """Fast visual heuristic to score how 'plan-like' an image is.
-
-    Floor plans have balanced horizontal/vertical line density and many small
-    enclosed regions (rooms). Facades are dominated by horizontal lines.
-    Landscape plans have scattered, non-orthogonal features.
-
-    Returns 0.0 (not plan-like) to 1.0 (very plan-like).
-    """
+    """Fast visual heuristic to score how plan-like an image is.
+    Plans have balanced H/V lines and many enclosed room-like regions.
+    Returns 0.0-1.0."""
     cv2, np = optional_cv_stack()
     if cv2 is None or np is None:
         return 0.0
-
     try:
         img = copy_rgb(image)
-        # Resize for speed
         max_dim = 800
         w, h = img.size
         if max(w, h) > max_dim:
             ratio = max_dim / max(w, h)
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-
         arr = np.array(img)
         gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
         height, width = gray.shape[:2]
         if width < 50 or height < 50:
             return 0.0
-
-        # Adaptive threshold to get line work
-        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                    cv2.THRESH_BINARY_INV, 21, 4)
-
-        # Extract vertical and horizontal lines
+        bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 4)
         v_kernel_h = max(15, int(height * 0.06))
         h_kernel_w = max(15, int(width * 0.06))
-        v_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
-                                   cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_h)))
-        h_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN,
-                                   cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_w, 1)))
-
+        v_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_h)))
+        h_mask = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_w, 1)))
         v_pixels = float(np.sum(v_mask > 0))
         h_pixels = float(np.sum(h_mask > 0))
         total_pixels = float(width * height)
-
         if total_pixels <= 0 or (v_pixels + h_pixels) <= 0:
             return 0.0
-
-        # Ratio of vertical to horizontal line content
-        # Plans: ratio near 1.0, Facades: ratio << 0.5
         line_ratio = min(v_pixels, h_pixels) / max(v_pixels, h_pixels, 1.0)
-
-        # Line density: plans have moderate density, facades often lower
         line_density = (v_pixels + h_pixels) / total_pixels
-
-        # Room detection: count enclosed regions in the plan area
-        # Plans have many small enclosed regions (rooms)
         combined = cv2.bitwise_or(v_mask, h_mask)
         dilated = cv2.dilate(combined, cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
         inverted = cv2.bitwise_not(dilated)
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(inverted, 4)
-
-        # Count regions that look like rooms (not too small, not too large)
         min_room = int(total_pixels * 0.002)
         max_room = int(total_pixels * 0.15)
-        room_count = 0
-        for idx in range(1, num_labels):
-            area = int(stats[idx, cv2.CC_STAT_AREA])
-            if min_room < area < max_room:
-                room_count += 1
-
-        # Score components
-        ratio_score = line_ratio  # 0-1, higher = more balanced = more plan-like
-        density_score = min(1.0, line_density * 18.0)  # normalized
-        room_score = min(1.0, room_count / 12.0)  # 12+ rooms = max score
-
-        # Facade penalty: facades have very low vertical content relative to horizontal
-        facade_penalty = 0.0
-        if line_ratio < 0.25 and h_pixels > v_pixels * 3.0:
-            facade_penalty = 0.4  # likely a facade
-
-        # Landscape penalty: very low line density overall
-        landscape_penalty = 0.0
-        if line_density < 0.015 and room_count < 3:
-            landscape_penalty = 0.3
-
-        score = (ratio_score * 0.35 + density_score * 0.25 + room_score * 0.40
-                 - facade_penalty - landscape_penalty)
+        room_count = sum(1 for idx in range(1, num_labels) if min_room < int(stats[idx, cv2.CC_STAT_AREA]) < max_room)
+        ratio_score = line_ratio
+        density_score = min(1.0, line_density * 18.0)
+        room_score = min(1.0, room_count / 12.0)
+        facade_penalty = 0.4 if (line_ratio < 0.25 and h_pixels > v_pixels * 3.0) else 0.0
+        landscape_penalty = 0.3 if (line_density < 0.015 and room_count < 3) else 0.0
+        score = ratio_score * 0.35 + density_score * 0.25 + room_score * 0.40 - facade_penalty - landscape_penalty
         return float(max(0.0, min(1.0, score)))
-
     except Exception:
         return 0.0
 
@@ -704,18 +669,16 @@ def drawing_priority(record: Dict[str, Any]) -> int:
         score += 50
     elif hint == "detail":
         score += 20
-
-    # v15: When hint is unknown, use visual pre-classification to boost plan-like drawings
+    # v15: visual pre-classification for unknown hints
     if hint == "unknown" and isinstance(record.get("image"), Image.Image):
         plan_score = _quick_plan_score_v15(record["image"])
-        record["_plan_score_v15"] = plan_score  # cache for later use
+        record["_plan_score_v15"] = plan_score
         if plan_score > 0.55:
-            score += 90  # Strong plan signal — prioritize almost like known plans
+            score += 90
         elif plan_score > 0.35:
-            score += 60  # Moderate plan signal
+            score += 60
         elif plan_score < 0.15:
-            score += 5   # Likely facade/section/landscape
-
+            score += 5
     name = clean_pdf_text(record.get("name", "")).lower()
     if any(k in name for k in ["1.etg", "1 etg", "plan 1", "plan1", "ground", "u. etg"]):
         score += 10
@@ -1092,6 +1055,7 @@ def candidate_matrix_text(candidates: List[Dict[str, Any]], limit: int = 5) -> s
 # 8. AI-MOTOR: STRUKTURERT ANALYSE OG RAPPORT
 # ------------------------------------------------------------
 _RUNTIME_OPENAI_CLIENT: Any = None
+_RUNTIME_ANTHROPIC_CLIENT: Any = None
 
 
 def optional_openai_client() -> Any:
@@ -1104,6 +1068,18 @@ def optional_openai_client() -> Any:
         except Exception:
             _RUNTIME_OPENAI_CLIENT = None
     return _RUNTIME_OPENAI_CLIENT
+
+
+def optional_anthropic_client() -> Any:
+    global _RUNTIME_ANTHROPIC_CLIENT
+    if not HAS_ANTHROPIC_BACKEND or _anthropic_module is None:
+        return None
+    if _RUNTIME_ANTHROPIC_CLIENT is None:
+        try:
+            _RUNTIME_ANTHROPIC_CLIENT = _anthropic_module.Anthropic(api_key=anthropic_key)
+        except Exception:
+            _RUNTIME_ANTHROPIC_CLIENT = None
+    return _RUNTIME_ANTHROPIC_CLIENT
 
 
 def list_gemini_models() -> List[str]:
@@ -1121,6 +1097,16 @@ def list_gemini_models() -> List[str]:
 
 def list_available_models() -> List[str]:
     models: List[str] = []
+    if HAS_ANTHROPIC_BACKEND:
+        preferred_anthropic = clean_pdf_text(
+            os.environ.get("ANTHROPIC_MODEL") or ""
+        ).strip()
+        if preferred_anthropic:
+            models.append(f"anthropic:{preferred_anthropic}")
+        for candidate in ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
+            tagged = f"anthropic:{candidate}"
+            if tagged not in models:
+                models.append(tagged)
     if HAS_OPENAI_BACKEND:
         preferred_openai = clean_pdf_text(
             os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
@@ -1139,6 +1125,16 @@ def list_available_models() -> List[str]:
 
 def pick_model(valid_models: List[str]) -> Optional[str]:
     preferred: List[str] = []
+    # v15: Anthropic/Claude preferred first for better vision understanding
+    preferred_anthropic = clean_pdf_text(
+        os.environ.get("ANTHROPIC_MODEL") or ""
+    ).strip()
+    if preferred_anthropic:
+        preferred.append(f"anthropic:{preferred_anthropic}")
+    preferred.extend([
+        "anthropic:claude-sonnet-4-20250514",
+        "anthropic:claude-haiku-4-5-20251001",
+    ])
     preferred_openai = clean_pdf_text(
         os.environ.get("OPENAI_VISION_MODEL") or os.environ.get("OPENAI_MODEL") or ""
     ).strip()
@@ -1162,6 +1158,9 @@ def build_runtime_ai_model(model_name: str) -> Any:
     if isinstance(model_name, dict):
         return model_name
     selected = clean_pdf_text(model_name or "").strip()
+    if selected.startswith("anthropic:"):
+        client = optional_anthropic_client()
+        return {"provider": "anthropic", "client": client, "model_name": selected.split(":", 1)[1]}
     if selected.startswith("openai:"):
         client = optional_openai_client()
         return {"provider": "openai", "client": client, "model_name": selected.split(":", 1)[1]}
@@ -1176,6 +1175,61 @@ def pil_image_to_data_uri_for_ai(img: Image.Image) -> str:
 
 
 def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
+    # --- Anthropic / Claude ---
+    if isinstance(model, dict) and model.get("provider") == "anthropic":
+        client = model.get("client") or optional_anthropic_client()
+        if client is None:
+            raise RuntimeError("Anthropic-backend er valgt, men klienten kunne ikke initialiseres.")
+
+        model_name = clean_pdf_text(model.get("model_name") or "claude-sonnet-4-20250514").strip()
+        content: List[Dict[str, Any]] = []
+        for part in parts:
+            if isinstance(part, Image.Image):
+                img_bytes = png_bytes_from_image(copy_rgb(part))
+                b64_data = base64.b64encode(img_bytes).decode("utf-8")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64_data,
+                    },
+                })
+            else:
+                txt = clean_pdf_text(part)
+                if txt:
+                    content.append({"type": "text", "text": txt})
+
+        try:
+            response = client.messages.create(
+                model=model_name,
+                max_tokens=8192,
+                temperature=float(temperature),
+                messages=[{"role": "user", "content": content}],
+            )
+            result_text = ""
+            for block in getattr(response, "content", []) or []:
+                if hasattr(block, "text"):
+                    result_text += clean_pdf_text(block.text)
+            return result_text.strip()
+        except Exception as exc:
+            # Fallback to OpenAI or Gemini
+            if HAS_OPENAI_BACKEND:
+                st.session_state["rib_ai_backend_warning"] = short_text(
+                    f"Anthropic-feil, falt tilbake til OpenAI: {type(exc).__name__}: {exc}", 240,
+                )
+                fallback = build_runtime_ai_model(f"openai:{os.environ.get('OPENAI_MODEL', 'gpt-4.1')}")
+                return generate_text(fallback, parts, temperature=temperature)
+            if HAS_GEMINI_BACKEND and genai is not None:
+                fallback_name = next((name for name in list_gemini_models() if name), None)
+                if fallback_name:
+                    st.session_state["rib_ai_backend_warning"] = short_text(
+                        f"Anthropic-feil, falt tilbake til Gemini: {type(exc).__name__}: {exc}", 240,
+                    )
+                    return generate_text(genai.GenerativeModel(fallback_name), parts, temperature=temperature)
+            raise
+
+    # --- OpenAI ---
     if isinstance(model, dict) and model.get("provider") == "openai":
         client = model.get("client") or optional_openai_client()
         if client is None:
@@ -5785,17 +5839,18 @@ KORRIGERTE SKISSER - KORT OPPSUMMERING:
 KORRIGERTE SKISSER - JSON:
 {sketch_json}
 
-BRUKERENS EGEN FAGKOMMENTAR:
-{clean_pdf_text(user_note) if clean_pdf_text(user_note) else "-"}
+BRUKERENS INSTRUKSJON FOR ENDRING:
+{clean_pdf_text(user_note) if clean_pdf_text(user_note) else "Ingen spesifikk instruksjon - bruk de korrigerte skissene som grunnlag."}
 
 VIKTIGE REGLER:
 1. Ikke generer nye tilfeldige søyler, bærelinjer eller kjerner som strider mot de korrigerte skissene.
-2. Hvis de korrigerte skissene viser vegg-/kjernebæring, skal det komme tydelig frem.
-3. Hvis de korrigerte skissene viser søyle-/bjelkesystem, skal det komme tydelig frem.
-4. Vær ærlig om usikkerhet i grunnlaget.
-5. Oppdater observasjoner, mangler, anbefalt system, stabilitetsprinsipp, lastvei, risiko og neste steg.
-6. "sketches" skal returneres som tom liste [], fordi manuell skisse beholdes uendret i appen.
-7. Returner KUN gyldig JSON.
+2. Hvis brukerens instruksjon ber om spesifikke endringer (flytte vegger, legge til kjerner, endre spenn osv.), skal disse prioriteres og reflekteres i recommended_system, observasjoner og lastvei.
+3. Hvis de korrigerte skissene viser vegg-/kjernebæring, skal det komme tydelig frem.
+4. Hvis de korrigerte skissene viser søyle-/bjelkesystem, skal det komme tydelig frem.
+5. Vær ærlig om usikkerhet i grunnlaget.
+6. Oppdater observasjoner, mangler, anbefalt system, stabilitetsprinsipp, lastvei, risiko og neste steg.
+7. "sketches" skal returneres som tom liste [], fordi manuell skisse beholdes uendret i appen.
+8. Returner KUN gyldig JSON.
 
 JSON-SKJEMA:
 {{
@@ -6620,17 +6675,44 @@ def render_rib_draft_editor_ui() -> None:
                 st.success("Tabellendringer er lagret i utkastet.")
                 st.rerun()
 
+    # v15: AI-instruksjonsvindu for skissejustering
+    st.markdown("---")
+    with st.expander("💬 AI-instruksjon for skissejustering", expanded=False):
+        st.caption(
+            "Skriv en kort instruksjon om hva du vil endre i skissene. "
+            "Eksempler: «Flytt bærevegg 2 nærmere kjerne 1», «Legg til korridorvegg i midten», "
+            "«Fjern søyler og bruk kun vegger», «Spenn bør være ca 6.5 m», «Legg til kjerne ved trapp B»."
+        )
+        ai_instruction = st.text_area(
+            "Din instruksjon til AI-agenten:",
+            value=st.session_state.get("rib_draft_ai_user_note", ""),
+            height=80,
+            key="rib_ai_instruction_input_v15",
+            placeholder="F.eks: Bæreveggene bør følge leilighetsskillene tettere. Legg til en horisontal korridorvegg.",
+        )
+        if ai_instruction != st.session_state.get("rib_draft_ai_user_note", ""):
+            st.session_state["rib_draft_ai_user_note"] = ai_instruction
+
     bottom_left, bottom_mid, bottom_right = st.columns([1.0, 1.2, 1.4])
     with bottom_left:
-        if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all_v3"):
-            push_draft_history()
-            st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
-            mark_draft_changed()
-            st.success("Alle skisser er nullstilt.")
-            st.rerun()
+        bcol1, bcol2 = st.columns(2)
+        with bcol1:
+            if st.button("Nullstill alle skisser", use_container_width=True, key="rib_reset_all_v3"):
+                push_draft_history()
+                st.session_state.rib_draft_sketches = deep_copy_jsonable(st.session_state.get("rib_draft_original_sketches", []))
+                st.session_state["rib_draft_ai_user_note"] = ""
+                mark_draft_changed()
+                st.success("Alle skisser er nullstilt.")
+                st.rerun()
+        with bcol2:
+            if st.button("Nullstill AI-instruksjon", use_container_width=True, key="rib_reset_instruction_v15"):
+                st.session_state["rib_draft_ai_user_note"] = ""
+                st.rerun()
 
     with bottom_mid:
-        if st.button("🤖 Re-analyser bæresystem med AI", use_container_width=True, key="rib_reanalyze_ai_v3"):
+        has_instruction = bool(clean_pdf_text(st.session_state.get("rib_draft_ai_user_note", "")).strip())
+        reanalyze_label = "🤖 Re-generer med AI-instruksjon" if has_instruction else "🤖 Re-analyser bæresystem med AI"
+        if st.button(reanalyze_label, use_container_width=True, key="rib_reanalyze_ai_v3"):
             valid_models = list_available_models()
             valgt_modell = pick_model(valid_models)
             if valgt_modell:
@@ -6765,16 +6847,14 @@ def is_plan_like_record_v6(record: Dict[str, Any]) -> bool:
         return False
     if is_basement_like_record_v6(record):
         return True
-
-    # v15: Use cached visual plan score when available
+    # v15: Use cached visual plan score
     plan_score = record.get("_plan_score_v15")
     if plan_score is not None:
         if float(plan_score) < 0.15:
-            return False  # Clearly not a plan (facade, landscape, etc.)
+            return False
         if float(plan_score) > 0.50:
-            return True  # Strong plan signal from visual analysis
-
-    # v15: Check page_cue if available — if AI says it's not a plan with confidence, respect that
+            return True
+    # v15: Check page_cue
     cue = record.get("ai_page_cue_v9")
     if isinstance(cue, dict):
         cue_role = clean_pdf_text(cue.get("drawing_role", "")).lower()
@@ -6783,7 +6863,6 @@ def is_plan_like_record_v6(record: Dict[str, Any]) -> bool:
             return True
         if cue_role != "plan" and cue_conf < 0.2:
             return False
-
     regions = get_plan_regions_for_record_v6(record)
     if not regions:
         return False
@@ -7917,7 +7996,7 @@ Regler for innhold:
 
 
 def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if not (isinstance(model, dict) and model.get("provider") == "openai"):
+    if not (isinstance(model, dict) and model.get("provider") in ("openai", "anthropic")):
         return []
     cues: List[Dict[str, Any]] = []
     for record in drawings[: min(len(drawings), 6)]:
@@ -7926,8 +8005,9 @@ def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]])
             raw = generate_text(model, [prompt, add_analysis_badge(record["image"], int(record.get("page_index", 0)), clean_pdf_text(record.get("label", "Tegning")))], temperature=0.02)
             cue = _normalize_page_cue_v9(safe_json_loads(raw), record)
         except Exception as exc:
+            provider_name = clean_pdf_text(model.get("provider", "AI"))
             st.session_state["rib_ai_backend_warning"] = short_text(
-                f"OpenAI sideanalyse delvis feilet: {type(exc).__name__}: {exc}",
+                f"{provider_name} sideanalyse delvis feilet: {type(exc).__name__}: {exc}",
                 220,
             )
             cue = _normalize_page_cue_v9({}, record)
@@ -11437,7 +11517,7 @@ def _merge_page_cues_v13(primary: Dict[str, Any], secondary: Optional[Dict[str, 
 
 def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     cues: List[Dict[str, Any]] = []
-    openai_enabled = isinstance(model, dict) and model.get("provider") == "openai"
+    vision_enabled = isinstance(model, dict) and model.get("provider") in ("openai", "anthropic")
     for record in drawings[: min(len(drawings), 8)]:
         semantic = record.get("semantic_page_cue_v13") if isinstance(record.get("semantic_page_cue_v13"), dict) else None
         if semantic and clean_pdf_text(record.get("drawing_format", "")).lower() == "ifc":
@@ -11446,7 +11526,7 @@ def _detect_page_cues_with_openai_v9(model: Any, drawings: List[Dict[str, Any]])
             cues.append(cue)
             continue
         ai_cue = None
-        if openai_enabled:
+        if vision_enabled:
             try:
                 ai_cue_list = _DETECT_PAGE_CUES_WITH_OPENAI_V12_BASE(model, [record])
                 ai_cue = ai_cue_list[0] if ai_cue_list else None
