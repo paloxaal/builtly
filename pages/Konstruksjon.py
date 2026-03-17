@@ -7728,11 +7728,298 @@ def calibrate_analysis_from_refined_sketches_v6(
 
 
 
+# ------------------------------------------------------------
+# V15 VISION-DIRECT: Let Claude read the plan image directly
+# and return precise element positions.
+# ------------------------------------------------------------
+
+def _add_reference_grid_to_crop(crop_image: Image.Image, grid_cols: int = 10, grid_rows: int = 10) -> Image.Image:
+    """Add a visible reference grid with PIXEL markers for precise Claude positioning."""
+    img = crop_image.copy().convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    w, h = img.size
+    grid_color = (60, 140, 220, 70)
+    label_color = (40, 120, 200, 180)
+    tick_color = (255, 60, 60, 140)
+    try:
+        label_font = get_font(max(11, int(min(w, h) * 0.020)), bold=True)
+    except Exception:
+        label_font = ImageFont.load_default()
+
+    for i in range(grid_cols + 1):
+        x = int(w * i / grid_cols)
+        draw.line([(x, 0), (x, h)], fill=grid_color, width=1)
+        if i > 0 and i < grid_cols:
+            draw.text((x + 2, 1), f"{x}", font=label_font, fill=label_color)
+            draw.line([(x, 0), (x, 6)], fill=tick_color, width=2)
+            draw.line([(x, h - 6), (x, h)], fill=tick_color, width=2)
+    for j in range(grid_rows + 1):
+        y = int(h * j / grid_rows)
+        draw.line([(0, y), (w, y)], fill=grid_color, width=1)
+        if j > 0 and j < grid_rows:
+            draw.text((2, y + 1), f"{y}", font=label_font, fill=label_color)
+            draw.line([(0, y), (6, y)], fill=tick_color, width=2)
+            draw.line([(w - 6, y), (w, y)], fill=tick_color, width=2)
+
+    dim_font = get_font(max(12, int(min(w, h) * 0.022)), bold=True)
+    draw.text((w - 80, h - 18), f"{w}x{h}px", font=dim_font, fill=(255, 80, 80, 200))
+    return Image.alpha_composite(img, overlay).convert("RGB")
+
+
+def _vision_direct_prompt_v15(mode: str, page_label: str, crop_w: int = 800, crop_h: int = 600) -> str:
+    """Build prompt for vision-direct element identification using PIXEL coordinates."""
+    mode_guidance = ""
+    if mode == "wall_core":
+        mode_guidance = f"""
+SYSTEMTYPE: Vegg-/kjernebæring (typisk norsk boligblokk)
+
+STEG 1 - IDENTIFISER BYGGETS YTTERGRENSE:
+Før du markerer noe, finn byggets YTRE KONTUR (den tykke sammenhengende linjen som avgrenser
+innendørsarealet). Alt UTENFOR denne konturen er uteareal (terrasser, balkonger, landskap).
+INGEN elementer skal plasseres utenfor byggets yttergrense.
+
+STEG 2 - FINN BÆREVEGGER (4-8 stk):
+A) LEILIGHETSSKILLEVEGGER (vertikale, 3-6 stk):
+   - Se etter de TYKKE vertikale linjene som deler bygget i jevne soner.
+   - De løper fra TOPP til BUNN av byggets innvendige areal.
+   - Typisk avstand: 6-8 meter (ca {int(crop_w * 0.15)}-{int(crop_w * 0.22)} piksler fra hverandre).
+   - De er TYKKERE enn vanlige romvegger (2-3 piksler vs 1 piksel).
+   - IKKE marker ytterveggen/fasadelinjen.
+
+B) KORRIDORVEGG (horisontal, 1-2 stk):
+   - Bygget er typisk delt i to rader av leiligheter med en korridor mellom.
+   - Korridorveggen er en HORISONTAL linje som løper fra VENSTRE til HØYRE.
+   - Den ligger typisk ca midt i byggets dybde.
+
+STEG 3 - FINN KJERNER (1-2 stk):
+- Trappekjerner har SIKKSAKKLINJER (trappløp) inne i et rektangulært område.
+- Heiskjerner har et lite rektangulært rom med heisdør.
+- Kjerner ligger typisk SENTRALT, nær korridoren.
+- Marker bounding box rundt trapp+heis-området.
+
+STEG 4 - SPENNPIL:
+- Plasser EN pil mellom to tilstøtende bærevegger for å vise typisk spenn.
+- Plasser pilen UNDER byggets fotavtrykk, ikke oppå planinnholdet."""
+
+    elif mode == "transfer_basement":
+        mode_guidance = f"""
+SYSTEMTYPE: Parkeringskjeller / transfer-nivå
+
+STEG 1: Finn kjellerens YTTERGRENSE. Alt utenfor er terreng.
+STEG 2: Bærevegger under overliggende leilighetsskiller (4-6 vertikale).
+STEG 3: Søyler (små firkanter/sirkler) i parkeringsarealet (4-8 stk).
+STEG 4: Kjerner ved trapp/heis (1-2 stk)."""
+
+    else:
+        mode_guidance = """
+SYSTEMTYPE: Søyle-/bjelkesystem
+- Finn byggets yttergrense. Søyler ved aksekryss. Kjerner ved trapp/heis."""
+
+    return f"""Du ser en BESKÅRET plantegning med et referansegrid med pikselposisjoner.
+Bildets størrelse er {crop_w} x {crop_h} piksler (bredde x høyde).
+Referansegridets tall langs kantene viser pikselverdier.
+
+TEGNING: {clean_pdf_text(page_label)}
+{mode_guidance}
+
+KRITISKE REGLER:
+1. ALLE elementer må ligge INNENFOR byggets yttergrense/fotavtrykk.
+2. Balkonger, terrasser, uteplasser er UTENFOR — plasser INGENTING der.
+3. Tegningsramme, titleblock, mållinjer er UTENFOR — ignorer dem.
+4. Vegger skal følge FAKTISKE vegglinjer du SER i tegningen — ikke gjett.
+5. Bruk referansegridets pikseltall for presise koordinater.
+6. (0, 0) er øverste venstre hjørne. ({crop_w}, {crop_h}) er nederste høyre.
+
+FORMAT — en vertikal vegg: x1 ≈ x2 (samme x, ulik y).
+FORMAT — en horisontal vegg: y1 ≈ y2 (samme y, ulik x).
+
+RETURNER KUN gyldig JSON:
+{{
+  "building_footprint": {{"x_min": 40, "y_min": 30, "x_max": 720, "y_max": 560}},
+  "elements": [
+    {{"type": "core", "x": 280, "y": 200, "w": 65, "h": 90, "label": "Kjerne 1"}},
+    {{"type": "wall", "x1": 180, "y1": 60, "x2": 180, "y2": 520, "label": "Bærevegg 1"}},
+    {{"type": "wall", "x1": 320, "y1": 60, "x2": 320, "y2": 520, "label": "Bærevegg 2"}},
+    {{"type": "wall", "x1": 50, "y1": 290, "x2": 600, "y2": 290, "label": "Korridorvegg"}},
+    {{"type": "span_arrow", "x1": 180, "y1": 560, "x2": 320, "y2": 560, "label": "ca 6.5 m"}}
+  ],
+  "notes": ["kort observasjon"]
+}}"""
+
+
+def _vision_direct_elements_v15(
+    model: Any,
+    record: Dict[str, Any],
+    region_bbox_px: Tuple[int, int, int, int],
+    mode: str,
+    page_label: str,
+) -> Optional[Tuple[List[Dict[str, Any]], List[str]]]:
+    """Use AI vision to directly identify structural elements from a cropped plan image.
+    Returns (elements_list, notes_list) or None on failure."""
+    if model is None:
+        return None
+    if not (isinstance(model, dict) and model.get("provider") in ("anthropic", "openai")):
+        return None
+
+    try:
+        image = record["image"]
+        image_w, image_h = image.size
+        rx, ry, rw, rh = region_bbox_px
+
+        x0 = int(max(0, rx))
+        y0 = int(max(0, ry))
+        x1 = int(min(image_w, rx + rw))
+        y1 = int(min(image_h, ry + rh))
+        if x1 - x0 < 50 or y1 - y0 < 50:
+            return None
+
+        crop = copy_rgb(image).crop((x0, y0, x1, y1))
+        max_dim = 1400
+        cw_orig, ch_orig = crop.size
+        scale = 1.0
+        if max(cw_orig, ch_orig) > max_dim:
+            scale = max_dim / max(cw_orig, ch_orig)
+            crop = crop.resize((int(cw_orig * scale), int(ch_orig * scale)), Image.LANCZOS)
+
+        cw, ch = crop.size
+        annotated_crop = _add_reference_grid_to_crop(crop)
+        prompt = _vision_direct_prompt_v15(mode, page_label, cw, ch)
+        raw = generate_text(model, [prompt, annotated_crop], temperature=0.05)
+        parsed = safe_json_loads(raw)
+
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("elements"), list):
+            return None
+
+        # v15: Extract building footprint for element clipping
+        footprint = parsed.get("building_footprint")
+        fp_xmin = fp_ymin = 0.0
+        fp_xmax = float(cw)
+        fp_ymax = float(ch)
+        if isinstance(footprint, dict):
+            try:
+                fp_xmin = float(footprint.get("x_min", 0))
+                fp_ymin = float(footprint.get("y_min", 0))
+                fp_xmax = float(footprint.get("x_max", cw))
+                fp_ymax = float(footprint.get("y_max", ch))
+            except (TypeError, ValueError):
+                pass
+        fp_margin = max(15, min(cw, ch) * 0.03)
+
+        def _inside_footprint(px, py):
+            return (fp_xmin - fp_margin) <= px <= (fp_xmax + fp_margin) and (fp_ymin - fp_margin) <= py <= (fp_ymax + fp_margin)
+
+
+        elements: List[Dict[str, Any]] = []
+        for item in parsed.get("elements", [])[:15]:
+            if not isinstance(item, dict):
+                continue
+            e_type = clean_pdf_text(item.get("type", "")).lower()
+
+            if e_type == "core":
+                try:
+                    px = float(item.get("x", cw * 0.4))
+                    py = float(item.get("y", ch * 0.4))
+                    pw = float(item.get("w", cw * 0.08))
+                    ph = float(item.get("h", ch * 0.12))
+                    if "x_pct" in item:
+                        px = float(item["x_pct"]) * cw / 100.0
+                        py = float(item["y_pct"]) * ch / 100.0
+                        pw = float(item.get("w_pct", 8)) * cw / 100.0
+                        ph = float(item.get("h_pct", 12)) * ch / 100.0
+                    # v15: footprint check (coords are in scaled crop space)
+                    if not _inside_footprint(px + pw / 2, py + ph / 2):
+                        continue
+                    px, py, pw, ph = px / scale, py / scale, pw / scale, ph / scale
+                    gx = (rx + px) / max(image_w, 1)
+                    gy = (ry + py) / max(image_h, 1)
+                    gw = pw / max(image_w, 1)
+                    gh = ph / max(image_h, 1)
+                    elements.append({
+                        "type": "core",
+                        "x": round(clamp(gx, 0.01, 0.99), 5),
+                        "y": round(clamp(gy, 0.01, 0.99), 5),
+                        "w": round(clamp(gw, 0.02, 0.25), 5),
+                        "h": round(clamp(gh, 0.02, 0.25), 5),
+                        "label": clean_pdf_text(item.get("label", "Kjerne")),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+            elif e_type in ("wall", "beam", "span_arrow"):
+                try:
+                    if "x1_pct" in item:
+                        px1 = float(item["x1_pct"]) * cw / 100.0
+                        py1 = float(item["y1_pct"]) * ch / 100.0
+                        px2 = float(item["x2_pct"]) * cw / 100.0
+                        py2 = float(item["y2_pct"]) * ch / 100.0
+                    else:
+                        px1 = float(item["x1"])
+                        py1 = float(item["y1"])
+                        px2 = float(item["x2"])
+                        py2 = float(item["y2"])
+                    length_px = math.hypot(px2 - px1, py2 - py1)
+                    if length_px < max(15, min(cw, ch) * 0.03):
+                        continue
+                    # v15: footprint check on midpoint (span_arrows can be outside)
+                    mid_px = (px1 + px2) / 2.0
+                    mid_py = (py1 + py2) / 2.0
+                    if e_type != "span_arrow" and not _inside_footprint(mid_px, mid_py):
+                        continue
+                    px1, py1, px2, py2 = px1 / scale, py1 / scale, px2 / scale, py2 / scale
+                    nx1 = clamp((rx + px1) / max(image_w, 1), 0.0, 1.0)
+                    ny1 = clamp((ry + py1) / max(image_h, 1), 0.0, 1.0)
+                    nx2 = clamp((rx + px2) / max(image_w, 1), 0.0, 1.0)
+                    ny2 = clamp((ry + py2) / max(image_h, 1), 0.0, 1.0)
+                    elements.append({
+                        "type": e_type,
+                        "x1": round(nx1, 5), "y1": round(ny1, 5),
+                        "x2": round(nx2, 5), "y2": round(ny2, 5),
+                        "label": clean_pdf_text(item.get("label", "")),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+            elif e_type == "column":
+                try:
+                    if "x_pct" in item:
+                        px = float(item["x_pct"]) * cw / 100.0
+                        py = float(item["y_pct"]) * ch / 100.0
+                    else:
+                        px = float(item["x"])
+                        py = float(item["y"])
+                    # v15: footprint check
+                    if not _inside_footprint(px, py):
+                        continue
+                    px, py = px / scale, py / scale
+                    gx = clamp((rx + px) / max(image_w, 1), 0.0, 1.0)
+                    gy = clamp((ry + py) / max(image_h, 1), 0.0, 1.0)
+                    elements.append({
+                        "type": "column",
+                        "x": round(gx, 5), "y": round(gy, 5),
+                        "label": clean_pdf_text(item.get("label", "")),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+        if len(elements) < 2:
+            return None
+
+        notes = [clean_pdf_text(n) for n in parsed.get("notes", [])[:4] if clean_pdf_text(n)]
+        notes.insert(0, f"Bæreelementer identifisert direkte fra {cw}x{ch}px planbilde med AI-visjon (v15).")
+        return elements, notes
+
+    except Exception as exc:
+        st.session_state["_v15_vision_debug"] = f"Vision-direkte feilet: {type(exc).__name__}: {short_text(str(exc), 120)}"
+        return None
+
+
 def generate_grounded_sketches(
     drawings: List[Dict[str, Any]],
     analysis_result: Dict[str, Any],
     material_preference: str,
     max_sketches: int = 3,
+    model: Any = None,
 ) -> List[Dict[str, Any]]:
     cv2, np = optional_cv_stack()
     if cv2 is None or np is None:
@@ -7743,13 +8030,51 @@ def generate_grounded_sketches(
     refined: List[Dict[str, Any]] = []
     used_keys = set()
 
+    # v15: Helper to try vision-direct for a record/region, with geometry fallback
+    def _try_vision_then_geometry(record, region, region_index, sketch_seed):
+        page_label = clean_pdf_text(sketch_seed.get("page_label", "")) or clean_pdf_text(record.get("label", "Tegning"))
+        mode = infer_sketch_mode_v6(record, sketch_seed, analysis_result, material_preference)
+
+        # Try vision-direct first (Claude reads the cropped plan)
+        if model is not None:
+            try:
+                vision_result = _vision_direct_elements_v15(model, record, region["bbox_px"], mode, page_label)
+            except Exception:
+                vision_result = None
+            if vision_result is not None:
+                vision_elements, vision_notes = vision_result
+                if region_index > 0 and "delplan" not in page_label.lower() and len(get_plan_regions_for_record_v6(record)) > 1:
+                    page_label = f"{page_label} - delplan {region_index + 1}"
+                return {
+                    "page_index": int(record.get("page_index", 0)),
+                    "region_index": int(region_index),
+                    "page_label": page_label,
+                    "plan_bbox": region.get("bbox_norm") or px_bbox_to_norm(region["bbox_px"], record["image"].size[0], record["image"].size[1]),
+                    "notes": vision_notes[:6],
+                    "elements": vision_elements,
+                    "grounded_engine": True,
+                    "grounded_mode": mode,
+                    "vision_direct_v15": True,
+                }
+
+        # Fallback: geometry-based refinement
+        return refine_sketch_with_geometry_v6(
+            record, sketch_seed, analysis_result, material_preference,
+            transfer_hints, forced_region=region, forced_region_index=region_index,
+        )
+
     for sketch in ai_sketches:
         if not isinstance(sketch, dict):
             continue
         record = lookup_record_by_page(drawings, int(sketch.get("page_index", -1)))
         if record is None:
             continue
-        refined_sketch = refine_sketch_with_geometry_v6(record, sketch, analysis_result, material_preference, transfer_hints)
+        # For AI sketches, use the chosen region
+        if not is_plan_like_record_v6(record):
+            continue
+        regions = get_plan_regions_for_record_v6(record)
+        region, region_index = _choose_region_for_sketch_v6(record, sketch) if regions else ({"bbox_px": (0, 0, *record["image"].size)}, 0)
+        refined_sketch = _try_vision_then_geometry(record, region, region_index, sketch)
         if refined_sketch is None:
             continue
         key = (int(refined_sketch.get("page_index", -1)), int(refined_sketch.get("region_index", 0)))
@@ -7764,7 +8089,7 @@ def generate_grounded_sketches(
         if not is_plan_like_record_v6(record):
             continue
         regions = get_plan_regions_for_record_v6(record)
-        for region_index, region in enumerate(regions[:2]):
+        for region_index, region in enumerate(regions[:3]):
             key = (int(record.get("page_index", -1)), int(region_index))
             if key in used_keys:
                 continue
@@ -7774,15 +8099,7 @@ def generate_grounded_sketches(
                 "elements": [],
                 "notes": [],
             }
-            refined_sketch = refine_sketch_with_geometry_v6(
-                record,
-                seed_sketch,
-                analysis_result,
-                material_preference,
-                transfer_hints,
-                forced_region=region,
-                forced_region_index=region_index,
-            )
+            refined_sketch = _try_vision_then_geometry(record, region, region_index, seed_sketch)
             if refined_sketch is None:
                 continue
             refined.append(refined_sketch)
@@ -7798,9 +8115,10 @@ def replace_analysis_sketches_with_grounded(
     analysis_result: Dict[str, Any],
     drawings: List[Dict[str, Any]],
     material_preference: str,
+    model: Any = None,
 ) -> Dict[str, Any]:
     try:
-        grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3)
+        grounded_sketches = generate_grounded_sketches(drawings, analysis_result, material_preference, max_sketches=3, model=model)
     except Exception as exc:
         observations = [clean_pdf_text(item) for item in analysis_result.get("observasjoner", []) if clean_pdf_text(item)]
         warning = f"Geometri-kalibrering hoppet over i v11 etter feil: {type(exc).__name__}: {short_text(exc, 160)}"
@@ -12446,7 +12764,18 @@ if analyze_clicked or direct_pdf_clicked:
                 analysis_result=analysis_result,
                 drawings=all_drawings,
                 material_preference=material_valg,
+                model=model,
             )
+
+            # v15: Show diagnostic about sketch generation method
+            vision_debug = st.session_state.pop("_v15_vision_debug", None)
+            if vision_debug:
+                st.caption(f"Skissemotor: {vision_debug}")
+            sketch_modes = set(clean_pdf_text(s.get("grounded_mode", "")).lower() for s in analysis_result.get("sketches", []) if isinstance(s, dict))
+            if "claude_direct_v15" in sketch_modes or any(s.get("vision_direct_v15") for s in analysis_result.get("sketches", []) if isinstance(s, dict)):
+                st.caption("Skisser generert med Claude-direkte visuell identifikasjon.")
+            elif sketch_modes:
+                st.caption(f"Skisser generert med geometri-forankring (modus: {', '.join(sketch_modes)}).")
 
             report_text = run_report_writer(
                 model=model,
