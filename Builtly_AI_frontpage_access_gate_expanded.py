@@ -4645,52 +4645,61 @@ render_html(
 # Anchor element that the scroll targets
 render_html('<div id="contact-form-anchor" style="position:relative;top:-100px;height:1px;pointer-events:none;"></div>')
 
-# Render the partner link AND the scroll-check script together in one component
-# so the script runs in the iframe context and can reach window.parent.document
-_contact_url = contact_href(st.session_state.app_lang).replace("#contact-form-anchor", "")
-st.components.v1.html(
+# Render the partner link visually as normal HTML
+render_html(
     f"""
-    <style>
-      body {{ margin:0; padding:0; background:transparent; }}
-      a.partner-link {{
-        display:block; text-align:center;
-        color:#9fb0c3; font-size:0.88rem; text-decoration:none;
-        padding:0.6rem 0; transition:color 0.2s;
-      }}
-      a.partner-link:hover {{ color:#38c2c9; }}
-    </style>
-    <a class="partner-link" href="{_contact_url}"
-       onclick="sessionStorage.setItem('builtly_scroll_contact','1');">
-      {lang['partner_line']}
-    </a>
-    <script>
-    // Check if we should scroll to contact form (set before last reload)
-    (function() {{
-      if (sessionStorage.getItem('builtly_scroll_contact') !== '1') return;
-      sessionStorage.removeItem('builtly_scroll_contact');
-      function tryScroll(n) {{
-        try {{
-          var doc = window.parent.document;
-          var el = doc.getElementById('contact-form-anchor');
-          if (!el) {{
-            // fallback: find last expander
-            var exps = doc.querySelectorAll('[data-testid="stExpander"]');
-            if (exps.length) el = exps[exps.length - 1];
-          }}
-          if (el) {{
-            el.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
-          }} else if (n > 0) {{
-            setTimeout(function() {{ tryScroll(n - 1); }}, 250);
-          }}
-        }} catch(e) {{
-          if (n > 0) setTimeout(function() {{ tryScroll(n - 1); }}, 250);
-        }}
-      }}
-      setTimeout(function() {{ tryScroll(12); }}, 400);
-    }})();
-    </script>
-    """,
-    height=36,
+    <div class="integration-footer-callout">
+        <a href="{contact_href(st.session_state.app_lang)}" target="_self" class="integration-footer-link">{lang['partner_line']}</a>
+    </div>
+    """
+)
+
+# Hidden component: attaches onclick to the link (sets sessionStorage flag)
+# and on page load checks if flag is set and scrolls to contact form
+st.components.v1.html(
+    """<script>
+    (function() {
+        // Check sessionStorage on every load
+        if (sessionStorage.getItem('builtly_scroll_contact') === '1') {
+            sessionStorage.removeItem('builtly_scroll_contact');
+            function scrollToContact(n) {
+                try {
+                    var doc = window.parent.document;
+                    var el = doc.getElementById('contact-form-anchor');
+                    if (!el) {
+                        var exps = doc.querySelectorAll('[data-testid="stExpander"]');
+                        if (exps.length) el = exps[exps.length - 1];
+                    }
+                    if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    } else if (n > 0) {
+                        setTimeout(function() { scrollToContact(n - 1); }, 250);
+                    }
+                } catch(e) {
+                    if (n > 0) setTimeout(function() { scrollToContact(n - 1); }, 250);
+                }
+            }
+            setTimeout(function() { scrollToContact(12); }, 400);
+        }
+
+        // Attach onclick to the partner link in parent document
+        function attachClickHandler(n) {
+            try {
+                var doc = window.parent.document;
+                var link = doc.querySelector('.integration-footer-link');
+                if (link) {
+                    link.addEventListener('click', function() {
+                        sessionStorage.setItem('builtly_scroll_contact', '1');
+                    });
+                } else if (n > 0) {
+                    setTimeout(function() { attachClickHandler(n - 1); }, 200);
+                }
+            } catch(e) {}
+        }
+        setTimeout(function() { attachClickHandler(10); }, 300);
+    })();
+    </script>""",
+    height=0,
 )
 
 if contact_query_requested():
