@@ -153,6 +153,187 @@ def extract_text_from_uploads(files) -> str:
     return "\n\n".join(all_text)[:80000]
 
 
+
+
+def prefill_from_docs(client_type, client, doc_text: str) -> dict:
+    """AI leser opplastede dokumenter og returnerer strukturerte prosjektdata for forhåndsutfylling."""
+    prompt = """Du er en norsk kredittanalytiker. Les dokumentteksten og ekstraher all prosjekt- og finansieringsdata.
+Returner KUN gyldig JSON med disse feltene (null for ukjente):
+{
+  "prosjekt_navn": "",
+  "laantaker": "",
+  "orgnr": "",
+  "laanetype": "Byggelån",
+  "soekt_laan_mnok": 0.0,
+  "totalinvestering_mnok": 0.0,
+  "egenkapital_mnok": 0.0,
+  "prosjekttype": "Bolig - salg",
+  "entrepriseform": "Totalentreprise",
+  "antall_enheter": 0,
+  "bra_i_kvm": 0,
+  "tomt_kvm": 0,
+  "tomtekost_mnok": 0.0,
+  "entreprisekost_mnok": 0.0,
+  "forhaandssalg_pst": 0,
+  "inntekt_mnok": 0.0,
+  "forventet_salgspris_kvm": 0,
+  "byggekost_kvm_bra_i": 0,
+  "nibor_margin_pst": 0.0,
+  "provisjon_pst_kvartal": 0.0,
+  "etableringsgebyr_nok": 0,
+  "loepetid_mnd": 0,
+  "kausjoner": [
+    {"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner", "kommentar": ""}
+  ],
+  "vilkaar_foer_utbetaling": [],
+  "covenants_liste": [],
+  "spesielle_forhold": ""
+}
+VIKTIG: BRA-i er det salgbare innendørsarealet som brukes for entreprisekost og salgsinntekt per kvm.
+Dokumenttekst:
+""" + doc_text[:60000]
+    try:
+        if client_type == "openai":
+            resp = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1, max_tokens=3000,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(resp.choices[0].message.content)
+        elif client_type == "gemini":
+            resp = client.generate_content(prompt,
+                generation_config={"temperature": 0.1, "max_output_tokens": 3000})
+            text = resp.text.strip()
+            text = re.sub(r"^```json\s*", "", text); text = re.sub(r"\s*```$", "", text)
+            return json.loads(text)
+    except Exception as e:
+        st.warning(f"Forhåndsutfylling feilet: {e}")
+    return {}
+
+
+def lookup_company(orgnr_or_name: str) -> dict:
+    """Søk opp selskapsinfo fra proff.no / Brreg."""
+    import urllib.request, urllib.parse
+    result = {"navn": "", "orgnr": "", "bransje": "", "ansatte": "", "omsetning": "", "resultat": "", "egenkapital_selskap": "", "kilde": ""}
+    if not orgnr_or_name.strip():
+        return result
+    # Try Brreg open API first (reliable)
+    try:
+        clean = re.sub(r"\s", "", orgnr_or_name.strip())
+        if clean.isdigit() and len(clean) == 9:
+            url = f"https://data.brreg.no/enhetsregisteret/api/enheter/{clean}"
+        else:
+            q = urllib.parse.quote(orgnr_or_name.strip())
+            url = f"https://data.brreg.no/enhetsregisteret/api/enheter?navn={q}&size=1"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        if "_embedded" in data:
+            enheter = data.get("_embedded", {}).get("enheter", [])
+            if enheter: data = enheter[0]
+        result["navn"] = data.get("navn", "")
+        result["orgnr"] = str(data.get("organisasjonsnummer", ""))
+        result["bransje"] = data.get("naeringskode1", {}).get("beskrivelse", "") if isinstance(data.get("naeringskode1"), dict) else ""
+        result["ansatte"] = str(data.get("antallAnsatte", ""))
+        result["kilde"] = "Brreg"
+    except Exception:
+        pass
+    # Try proff.no for financial data
+    try:
+        q = urllib.parse.quote(result.get("navn", "") or orgnr_or_name.strip())
+        url = f"https://www.proff.no/roller/{q}/-/-/"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        # Extract financials from meta tags / structured data
+        omsetning_m = re.search(r"omsetning[^>]*>\s*([\d\s]+)\s*kr", html, re.I)
+        resultat_m = re.search(r"(?:resultat|årsresultat)[^>]*>\s*(-?[\d\s]+)\s*kr", html, re.I)
+        ek_m = re.search(r"egenkapital[^>]*>\s*(-?[\d\s]+)\s*kr", html, re.I)
+        if omsetning_m: result["omsetning"] = omsetning_m.group(1).strip() + " kr"
+        if resultat_m: result["resultat"] = resultat_m.group(1).strip() + " kr"
+        if ek_m: result["egenkapital_selskap"] = ek_m.group(1).strip() + " kr"
+        if result.get("kilde") != "Brreg": result["kilde"] = "proff.no"
+        else: result["kilde"] += " + proff.no"
+    except Exception:
+        pass
+    return result
+
+
+def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
+    """Beregn finansieringsstatus. 85%-regel: bank kan alltid tilby 85% av totale prosjektkostnader."""
+    nt = safe_get(analysis, "noekkeltall", {})
+    oek = safe_get(analysis, "oekonomisk_analyse", {})
+    anbefaling = safe_get(analysis, "anbefaling", "")
+
+    total = float(safe_get(nt, "totalinvestering_mnok", 0) or project_info.get("totalinvestering_mnok", 0) or 0)
+    soekt = float(safe_get(nt, "soekt_laan_mnok", 0) or project_info.get("soekt_laan_mnok", 0) or 0)
+    ek_pst = float(safe_get(nt, "egenkapitalprosent", 0) or 0)
+    ltv = float(safe_get(nt, "belaaningsgrad_ltv", 0) or 0)
+    margin_pst = float(safe_get(oek, "resultatmargin_pst", 0) or 0)
+    forhaandssalg = int(project_info.get("forhaandssalg_pst", 0) or 0)
+
+    bank_max = round(total * 0.85, 1) if total > 0 else 0
+    soekt_ok = soekt <= bank_max if bank_max > 0 and soekt > 0 else True
+
+    kausjoner = project_info.get("kausjoner", [])
+    total_kausjon = sum(float(k.get("beloep_mnok", 0) or 0) for k in kausjoner if isinstance(k, dict))
+
+    red_flags, yellow_flags, betingelser = [], [], []
+
+    if margin_pst > 0 and margin_pst < 8:
+        red_flags.append(f"Margin {margin_pst:.1f}% under bankens minstekrav på 8%")
+    if ek_pst > 0 and ek_pst < 15:
+        red_flags.append(f"Egenkapital {ek_pst:.1f}% under minimumskravet 15%")
+    if ltv > 90:
+        red_flags.append(f"LTV {ltv:.1f}% er over bankens øvre grense 90%")
+    if anbefaling == "Ikke anbefalt":
+        red_flags.append("AI-analyse anbefaler ikke innvilgelse basert på dokumentgrunnlaget")
+
+    if not soekt_ok and soekt > 0:
+        yellow_flags.append(f"Søkt beløp {soekt:.1f} MNOK over 85%-grensen {bank_max:.1f} MNOK")
+        betingelser.append(f"Banken kan tilby inntil {bank_max:.1f} MNOK (85% av {total:.1f} MNOK). Resterende {round(soekt-bank_max,1)} MNOK må dekkes av egenkapital eller kausjon.")
+    if ltv > 80 and ltv <= 90:
+        yellow_flags.append(f"LTV {ltv:.1f}% over anbefalt 80% — krever tilleggssikkerhet")
+        betingelser.append("LTV over 80% krever kausjon eller annen tilleggssikkerhet for overskytende del")
+    if forhaandssalg > 0 and forhaandssalg < 60:
+        yellow_flags.append(f"Forhåndssalg {forhaandssalg}% under anbefalt 60%")
+        betingelser.append(f"Forhåndssalg bør økes til 60%+ (nå {forhaandssalg}%) — alternativt kreves høyere kausjonsandel")
+    if margin_pst >= 8 and margin_pst < 12:
+        yellow_flags.append(f"Margin {margin_pst:.1f}% akseptabel men under preferert 12%")
+
+    # Kausjon kan løfte rød til gul
+    kan_kausjon_loefte = False
+    if red_flags and total_kausjon > 0:
+        gap = soekt - bank_max if soekt > bank_max else 0
+        if total_kausjon >= gap * 0.5:
+            kan_kausjon_loefte = True
+            betingelser.append(f"Kausjoner totalt {total_kausjon:.1f} MNOK kan delvis mitigere — innvilgelse mulig med forsterkede vilkår")
+
+    if red_flags and not kan_kausjon_loefte:
+        farge, status = "rød", "Ikke anbefalt innvilget"
+        kan_tilby = False
+        bankens_tilbud = None
+    elif red_flags and kan_kausjon_loefte:
+        farge, status = "rød-betinget", "Kan innvilges under forutsetning av tilleggssikkerheter"
+        kan_tilby = True
+        bankens_tilbud = f"Inntil {bank_max:.1f} MNOK mot kausjon {total_kausjon:.1f} MNOK og oppfyllelse av vilkår"
+    elif yellow_flags:
+        farge, status = "gul", "Kan innvilges med betingelser"
+        kan_tilby = True
+        bankens_tilbud = f"Inntil {bank_max:.1f} MNOK mot oppfyllelse av vilkår nedenfor"
+    else:
+        farge, status = "grønn", "Anbefalt innvilget"
+        kan_tilby = True
+        bankens_tilbud = f"Opp til {bank_max:.1f} MNOK (85% av {total:.1f} MNOK prosjektkost)"
+
+    return {
+        "farge": farge, "status": status, "red_flags": red_flags,
+        "yellow_flags": yellow_flags, "betingelser": betingelser,
+        "bank_max_mnok": bank_max, "total_kausjon_mnok": total_kausjon,
+        "kan_tilby": kan_tilby, "bankens_tilbud": bankens_tilbud,
+    }
+
 def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) -> dict:
     """AI-analyse for kredittgrunnlag."""
     system_prompt = textwrap.dedent("""
@@ -287,7 +468,7 @@ Prosjektinformasjon:
 - Egenkapital: {project_info.get('egenkapital_mnok', 0)} MNOK
 - Prosjekttype: {project_info.get('prosjekttype', '')}
 - Antall enheter: {project_info.get('antall_enheter', '')}
-- BTA: {project_info.get('bta_kvm', '')} kvm
+- BRA-i / SBRA: {project_info.get('bra_i_kvm', '')} kvm (salgbart innendørs areal — brukes for entreprisekost og salgsinntekt)
 - Tomt: {project_info.get('tomt_kvm', '')} kvm
 - Reguleringsplan: {project_info.get('reguleringsplan', '')}
 - Rammegodkjenning: {project_info.get('rammegodkjenning', '')}
@@ -298,6 +479,10 @@ Prosjektinformasjon:
 - Forventet leie/salgsinntekt: {project_info.get('inntekt_mnok', 0)} MNOK
 - Eksisterende gjeld: {project_info.get('eksisterende_gjeld_mnok', 0)} MNOK
 - Pantesikkerhet: {project_info.get('pantesikkerhet', '')}
+- Rentevilkår: NIBOR 3MND + {project_info.get('nibor_margin_pst', 0)}% margin, provisjon {project_info.get('provisjon_pst_kvartal', 0)}% per kvartal, etablering NOK {project_info.get('etableringsgebyr_nok', 0)}, løpetid {project_info.get('loepetid_mnd', 0)} mnd
+- 85%-regelen: Bank kan finansiere maks 85% av prosjektkost = {round(float(project_info.get('totalinvestering_mnok', 0) or 0) * 0.85, 1)} MNOK. Vurder om søkt beløp {project_info.get('soekt_laan_mnok', 0)} MNOK er innenfor.
+- Kausjoner og tilleggsgarantier: {json.dumps(project_info.get('kausjoner', []), ensure_ascii=False)}
+- Selskapsinformasjon låntaker (Brreg/Proff): {json.dumps(project_info.get('selskapsinfo', {}), ensure_ascii=False)}
 - Spesielle forhold: {project_info.get('spesielle_forhold', '')}
 
 Verdivurdering og dokumentasjon:
@@ -308,9 +493,9 @@ Verdivurdering og dokumentasjon:
 - Entreprisekost: {project_info.get('entreprisekost_mnok', 0)} MNOK
 
 Bolig (residualverdi):
-- Forventet salgspris: {project_info.get('forventet_salgspris_kvm', 0)} kr/kvm BRA
-- Salgbart areal BRA: {project_info.get('bra_kvm', 0)} kvm
-- Byggekost: {project_info.get('byggekost_kvm', 0)} kr/kvm BTA
+- Forventet salgspris: {project_info.get('forventet_salgspris_kvm', 0)} kr/kvm BRA-i
+- Salgbart areal BRA-i: {project_info.get('bra_i_kvm', project_info.get('bra_kvm', 0))} kvm
+- Byggekost entreprise: {project_info.get('byggekost_kvm', 0)} kr/kvm BRA-i
 - Minimum utviklermargin: {project_info.get('target_margin', 12)}%
 
 Næring (yield-metode):
@@ -358,6 +543,12 @@ class CreditPDF(FPDF if FPDF else object):
         self._add_fonts()
         self.accent = (56, 194, 201)
         self.dark = (6, 17, 26)
+
+
+    @staticmethod
+    def _safe(text: str) -> str:
+        """Strip characters outside latin-1 range so Helvetica fallback never crashes."""
+        return str(text).replace('—', '-').replace('–', '-').replace('‘', "'").replace('’', "'").replace('“', '"').replace('”', '"').encode('latin-1', errors='replace').decode('latin-1')
 
     def _add_fonts(self):
         for style, name in [("", "Inter-Regular.ttf"), ("B", "Inter-Bold.ttf")]:
@@ -424,7 +615,7 @@ class CreditPDF(FPDF if FPDF else object):
     def body_text(self, text):
         self._font("", 10)
         self.set_text_color(40, 50, 60)
-        self.multi_cell(0, 5.5, str(text))
+        self.multi_cell(0, 5.5, self._safe(str(text)))
         self.ln(2)
 
     def key_value(self, key, value):
@@ -433,7 +624,7 @@ class CreditPDF(FPDF if FPDF else object):
         self.cell(70, 5.5, key)
         self._font("", 10)
         self.set_text_color(6, 17, 26)
-        self.cell(0, 5.5, str(value), new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 5.5, self._safe(str(value)), new_x="LMARGIN", new_y="NEXT")
 
     def status_box(self, status, text):
         color_map = {"Anbefalt innvilget": (34, 197, 94), "Anbefalt med vilkår": (245, 158, 11), "Ikke anbefalt": (239, 68, 68)}
@@ -468,6 +659,33 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     )
 
     pdf.add_page()
+
+    # 0. Finansieringsvurdering (trafikklys)
+    tl = project_info.get("_traffic_light", {})
+    if tl:
+        farge = tl.get("farge", "grønn")
+        tl_color_map = {
+            "grønn": (34, 197, 94), "gul": (245, 158, 11),
+            "rød-betinget": (249, 115, 22), "rød": (239, 68, 68)
+        }
+        tl_col = tl_color_map.get(farge, (56, 194, 201))
+        pdf.section_title(0, "Finansieringsvurdering")
+        pdf.set_draw_color(*tl_col); pdf.set_fill_color(*tl_col)
+        pdf.rect(10, pdf.get_y(), 5, 12, style="F")
+        pdf._font("B", 12); pdf.set_text_color(*tl_col)
+        pdf.set_xy(18, pdf.get_y())
+        pdf.cell(0, 6, tl.get("status", ""), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+        pdf._font("", 9); pdf.set_text_color(40, 50, 60)
+        pdf.key_value("85%-grense:", f"{tl.get('bank_max_mnok',0):.1f} MNOK")
+        pdf.key_value("Sum kausjoner:", f"{tl.get('total_kausjon_mnok',0):.1f} MNOK")
+        if tl.get("bankens_tilbud"):
+            pdf.key_value("Bankens tilbud:", tl.get("bankens_tilbud",""))
+        for f in tl.get("red_flags", []) + tl.get("yellow_flags", []):
+            pdf.body_text(f"• {f}")
+        for b in tl.get("betingelser", []):
+            pdf.body_text(f"→ {b}")
+        pdf.ln(3)
 
     # 1. Sammendrag
     pdf.section_title(1, "Sammendrag og anbefaling")
@@ -761,6 +979,22 @@ st.markdown("""
     .stDownloadButton > button { background-color: rgba(255,255,255,0.04) !important; color: #c8d3df !important;
         border: 1px solid rgba(120,145,170,0.25) !important; border-radius: 10px !important; font-weight: 600 !important; }
 
+    /* Back button and secondary buttons – force dark-mode visible */
+    button[kind="secondary"],
+    .stButton > button[kind="secondary"] {
+        background-color: rgba(10,22,35,0.7) !important;
+        color: #c8d3df !important;
+        border: 1px solid rgba(120,145,170,0.35) !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+    }
+    button[kind="secondary"]:hover,
+    .stButton > button[kind="secondary"]:hover {
+        background-color: rgba(56,194,201,0.08) !important;
+        border-color: rgba(56,194,201,0.4) !important;
+        color: #38bdf8 !important;
+    }
+
     .stDataFrame { border-radius: 12px; overflow: hidden; }
     .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4 { color: #f5f7fb !important; }
 
@@ -810,51 +1044,182 @@ render_hero(
 # ────────────────────────────────────────────────────────────────
 # MAIN LAYOUT
 # ────────────────────────────────────────────────────────────────
+
+# ── Session state defaults ──
+for _k, _v in {
+    "pf": {},           # prefill data
+    "selskap_info": {}, # company lookup result
+    "kausjon_rows": [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}],
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+pf = st.session_state.pf
+
+# ── TOP: Upload first ─────────────────────────────────────────────────
+render_section("0. Last opp dokumentgrunnlag", "Last opp tilbudbrev, prosjektkalkyle, budsjett og finansieringsgrunnlag — AI forhåndsutfyller alle felt.", "Dokumenter")
+
+uploads = st.file_uploader(
+    "Tilbudsbrev, prosjektkalkyle, budsjett, reguleringsplan, takst, leieavtaler, regnskap",
+    type=["pdf", "xlsx", "xls", "csv", "docx", "txt"],
+    accept_multiple_files=True,
+    key="credit_uploads",
+)
+
+col_pf, col_clr = st.columns([3, 1])
+with col_pf:
+    do_prefill = st.button("🔍  Hent data fra dokumenter og forhåndsutfyll", type="primary", use_container_width=True, disabled=not uploads)
+with col_clr:
+    if st.button("Nullstill skjema", use_container_width=True):
+        st.session_state.pf = {}
+        st.session_state.selskap_info = {}
+        st.session_state.kausjon_rows = [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
+        st.rerun()
+
+if do_prefill and uploads:
+    client_type_pf, client_pf = get_ai_client()
+    if client_pf:
+        with st.spinner("Leser dokumenter og forhåndsutfyller..."):
+            raw_text = extract_text_from_uploads(uploads)
+            extracted = prefill_from_docs(client_type_pf, client_pf, raw_text)
+        if extracted:
+            st.session_state.pf = extracted
+            if extracted.get("kausjoner"):
+                st.session_state.kausjon_rows = extracted["kausjoner"]
+            st.success("✓ Data hentet fra dokumentene — kontroller og juster feltene nedenfor.")
+            st.rerun()
+        else:
+            st.warning("Ingen data funnet i dokumentene. Fyll inn manuelt.")
+    else:
+        st.error("Ingen AI-nøkkel konfigurert.")
+
+if pf:
+    render_html('''<div style="background:rgba(34,197,94,0.06);border:1px solid rgba(34,197,94,0.2);border-radius:12px;padding:0.7rem 1.1rem;margin-bottom:1rem;">
+        <span style="color:#22c55e;font-weight:700;font-size:0.85rem;">✓ Forhåndsutfylt fra dokumenter</span>
+        <span style="color:#9fb0c3;font-size:0.82rem;"> — kontroller at alle felt er korrekte</span>
+    </div>''')
+
 left, right = st.columns([3, 2], gap="large")
 
 with left:
-    render_section("1. Prosjekt og låntaker", "Registrer nøkkeldata for prosjektet og lånesøknaden.", "Input")
+    render_section("1. Prosjekt og låntaker", "Nøkkeldata for prosjektet og lånesøknaden.", "Input")
 
     c1, c2 = st.columns(2)
     with c1:
-        prosjekt_navn = st.text_input("Prosjektnavn", value="", placeholder="F.eks. Havneparken Trinn 3")
-        laantaker = st.text_input("Låntaker / utbygger", value="", placeholder="Selskap AS")
-        orgnr = st.text_input("Org.nr.", value="", placeholder="999 888 777")
-        laanetype = st.selectbox("Lånetype", ["Tomtelån", "Byggelån", "Langsiktig lån (utleie)", "Kombinert tomte- og byggelån", "Refinansiering"])
-        soekt_laan = st.number_input("Søkt lån (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
+        prosjekt_navn = st.text_input("Prosjektnavn", value=pf.get("prosjekt_navn", ""), placeholder="F.eks. Steinan Park BT3")
+        laantaker = st.text_input("Låntaker / utbygger", value=pf.get("laantaker", ""), placeholder="Selskap AS")
+        orgnr_raw = pf.get("orgnr", "")
+        orgnr = st.text_input("Org.nr.", value=orgnr_raw, placeholder="999 888 777")
+        laanetype_opts = ["Byggelån", "Tomtelån", "Kombinert tomte- og byggelån", "Infralån", "Langsiktig lån (utleie)", "Refinansiering"]
+        pf_lt = pf.get("laanetype", "Byggelån")
+        lt_idx = laanetype_opts.index(pf_lt) if pf_lt in laanetype_opts else 0
+        laanetype = st.selectbox("Lånetype", laanetype_opts, index=lt_idx)
+        soekt_laan = st.number_input("Søkt lån (MNOK)", min_value=0.0, value=float(pf.get("soekt_laan_mnok", 0) or 0), step=1.0, format="%.1f")
     with c2:
-        totalinvestering = st.number_input("Totalinvestering (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
-        egenkapital = st.number_input("Egenkapital (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
-        prosjekttype = st.selectbox("Prosjekttype", ["Bolig - salg", "Bolig - utleie", "Kontor", "Handel/retail", "Logistikk", "Mixed-use", "Hotell", "Annet"])
-        entrepriseform = st.selectbox("Entrepriseform", ["Totalentreprise", "Hovedentreprise", "Delte entrepriser", "Byggherrestyrt", "Annet"])
+        totalinvestering = st.number_input("Totalinvestering (MNOK)", min_value=0.0, value=float(pf.get("totalinvestering_mnok", 0) or 0), step=1.0, format="%.1f")
+        egenkapital = st.number_input("Egenkapital (MNOK)", min_value=0.0, value=float(pf.get("egenkapital_mnok", 0) or 0), step=1.0, format="%.1f")
+        pt_opts = ["Bolig - salg", "Bolig - utleie", "Kontor", "Handel/retail", "Logistikk", "Mixed-use", "Hotell", "Annet"]
+        pf_pt = pf.get("prosjekttype", "Bolig - salg")
+        pt_idx = pt_opts.index(pf_pt) if pf_pt in pt_opts else 0
+        prosjekttype = st.selectbox("Prosjekttype", pt_opts, index=pt_idx)
+        ef_opts = ["Totalentreprise", "Hovedentreprise", "Delte entrepriser", "Byggherrestyrt", "Annet"]
+        pf_ef = pf.get("entrepriseform", "Totalentreprise")
+        ef_idx = ef_opts.index(pf_ef) if pf_ef in ef_opts else 0
+        entrepriseform = st.selectbox("Entrepriseform", ef_opts, index=ef_idx)
 
-    render_section("2. Tomt og regulering", "Detaljer om tomt, regulering og godkjenningsstatus.", "Regulering")
+    # Company lookup
+    col_lu, col_lu_btn = st.columns([3, 1])
+    with col_lu:
+        lu_query = st.text_input("Selskapssøk (navn eller org.nr.)", value=orgnr or laantaker, label_visibility="collapsed", placeholder="Søk selskap på proff.no / Brreg...")
+    with col_lu_btn:
+        do_lookup = st.button("🔎 Søk", use_container_width=True)
+    if do_lookup and lu_query:
+        with st.spinner("Søker..."):
+            st.session_state.selskap_info = lookup_company(lu_query)
+    if st.session_state.selskap_info:
+        si = st.session_state.selskap_info
+        cols_si = [f"**{si.get('navn','')}**", f"Org.nr: {si.get('orgnr','-')}", f"Bransje: {si.get('bransje','-')}", f"Ansatte: {si.get('ansatte','-')}"]
+        fin_si = []
+        if si.get("omsetning"): fin_si.append(f"Omsetning: {si['omsetning']}")
+        if si.get("resultat"): fin_si.append(f"Resultat: {si['resultat']}")
+        if si.get("egenkapital_selskap"): fin_si.append(f"EK: {si['egenkapital_selskap']}")
+        render_html(f'''<div style="background:rgba(56,194,201,0.05);border:1px solid rgba(56,194,201,0.18);border-radius:10px;padding:0.7rem 1rem;margin:0.5rem 0;font-size:0.85rem;">
+            <span style="color:#38bdf8;">{"  ·  ".join(cols_si)}</span><br>
+            <span style="color:#9fb0c3;">{" · ".join(fin_si) if fin_si else "Regnskapstall ikke tilgjengelig"}</span>
+            <span style="color:#555;font-size:0.75rem;"> (kilde: {si.get("kilde","")})</span>
+        </div>''')
+
+    render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering og godkjenningsstatus.", "Regulering")
 
     c3, c4 = st.columns(2)
     with c3:
-        antall_enheter = st.number_input("Antall enheter", min_value=0, value=0, step=1)
-        bta_kvm = st.number_input("BTA (kvm)", min_value=0, value=0, step=100)
-        tomt_kvm = st.number_input("Tomt (kvm)", min_value=0, value=0, step=100)
-        reguleringsplan = st.selectbox("Reguleringsplan", ["Vedtatt", "Under behandling", "Ikke påbegynt", "Krever omregulering"])
+        antall_enheter = st.number_input("Antall enheter", min_value=0, value=int(pf.get("antall_enheter", 0) or 0), step=1)
+        bra_i_kvm = st.number_input("BRA-i / SBRA (kvm)", min_value=0, value=int(pf.get("bra_i_kvm", 0) or 0), step=100, help="Salgbart innendørs bruksareal — brukes for entreprisekost og salgsinntekt per kvm")
+        tomt_kvm = st.number_input("Tomt (kvm)", min_value=0, value=int(pf.get("tomt_kvm", 0) or 0), step=100)
+        reg_opts = ["Vedtatt", "Under behandling", "Ikke påbegynt", "Krever omregulering"]
+        reguleringsplan = st.selectbox("Reguleringsplan", reg_opts)
     with c4:
-        rammegodkjenning = st.selectbox("Rammegodkjenning / IG", ["Godkjent", "Søkt", "Ikke søkt"])
+        rg_opts = ["Godkjent", "Søkt", "Ikke søkt"]
+        rammegodkjenning = st.selectbox("Rammegodkjenning / IG", rg_opts)
         byggestart = st.date_input("Planlagt byggestart", value=date(2026, 9, 1))
         ferdigstillelse = st.date_input("Planlagt ferdigstillelse", value=date(2028, 12, 31))
-        forhaandssalg = st.number_input("Forhåndssalg/utleiegrad (%)", min_value=0, max_value=100, value=0, step=5)
+        forhaandssalg = st.number_input("Forhåndssalg/utleiegrad (%)", min_value=0, max_value=100, value=int(pf.get("forhaandssalg_pst", 0) or 0), step=5)
 
-    render_section("3. Økonomi og sikkerheter", "Inntekter, gjeld og pantesikkerhet.", "Økonomi")
+    render_section("3. Rentevilkår og finansstruktur", "Rentebetingelser fra bankens tilbud.", "Rente")
+    cr1, cr2, cr3, cr4 = st.columns(4)
+    with cr1:
+        nibor_margin = st.number_input("NIBOR-margin (%)", min_value=0.0, value=float(pf.get("nibor_margin_pst", 1.75) or 1.75), step=0.05, format="%.2f")
+    with cr2:
+        provisjon = st.number_input("Provisjon (% kvartal)", min_value=0.0, value=float(pf.get("provisjon_pst_kvartal", 0.15) or 0.15), step=0.01, format="%.2f")
+    with cr3:
+        etablering = st.number_input("Etableringsgebyr (kr)", min_value=0, value=int(pf.get("etableringsgebyr_nok", 0) or 0), step=50000)
+    with cr4:
+        loepetid = st.number_input("Løpetid (mnd)", min_value=0, value=int(pf.get("loepetid_mnd", 24) or 24), step=6)
 
+    render_section("4. Økonomi og sikkerheter", "Inntekter, gjeld og pantesikkerhet.", "Økonomi")
     c5, c6 = st.columns(2)
     with c5:
-        inntekt = st.number_input("Forventet salgs-/leieinntekt (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
+        inntekt = st.number_input("Forventet salgs-/leieinntekt (MNOK)", min_value=0.0, value=float(pf.get("inntekt_mnok", 0) or 0), step=1.0, format="%.1f")
         eksisterende_gjeld = st.number_input("Eksisterende gjeld (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
     with c6:
         pantesikkerhet = st.selectbox("Primær pantesikkerhet", ["1. prioritet pant i eiendom", "2. prioritet pant", "Pant i tomt + fremtidig bygg", "Selvskyldnergaranti", "Kombinert"])
         garanti = st.multiselect("Tilleggsgarantier", ["Bankgaranti §12", "Morselskapsgaranti", "Personlig garanti", "Depositum", "Ingen"])
 
-    render_section("3b. Verdivurdering og dokumentasjon på verdi",
-                   "En takst alene er ikke tilstrekkelig. For bolig beregnes residualverdi, for næring brukes yield-metode.",
-                   "Verdivurdering")
+    # ── Kausjoner (dynamic rows) ──────────────────────────────────────────
+    render_section("5. Kausjoner og morselskapsgarantier", "Selvskyldner- eller simpelkausjoner fra eiere, morselskap eller andre parter.", "Kausjoner")
+    render_html('''<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);border-radius:10px;padding:0.7rem 1rem;margin-bottom:0.8rem;font-size:0.83rem;color:#9fb0c3;">
+        Kausjoner kan løfte en rød finansieringsvurdering til gul eller grønn. Oppgi kausjonist, beløp og type.
+        AI-analysen søker opp regnskapstallene og vurderer kausjonistens kapasitet.
+    </div>''')
+
+    kausjon_rows = st.session_state.kausjon_rows
+    updated_rows = []
+    for i, row in enumerate(kausjon_rows):
+        kc1, kc2, kc3, kc4, kc5 = st.columns([3, 2, 1.5, 1.5, 0.7])
+        with kc1:
+            kn = st.text_input(f"Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{i}", placeholder="Fredensborg Bolig AS", label_visibility="collapsed" if i > 0 else "visible")
+        with kc2:
+            ko = st.text_input(f"Org.nr.", value=row.get("orgnr", ""), key=f"ko_{i}", placeholder="919 998 296", label_visibility="collapsed" if i > 0 else "visible")
+        with kc3:
+            kb = st.number_input("Beløp (MNOK)", value=float(row.get("beloep_mnok", 0) or 0), key=f"kb_{i}", step=5.0, format="%.1f", label_visibility="collapsed" if i > 0 else "visible")
+        with kc4:
+            kt_opts = ["Selvskyldner", "Simpel"]
+            kt = st.selectbox("Type", kt_opts, key=f"kt_{i}", index=0 if row.get("type", "Selvskyldner") == "Selvskyldner" else 1, label_visibility="collapsed" if i > 0 else "visible")
+        with kc5:
+            if i > 0 and st.button("✕", key=f"kdel_{i}", use_container_width=True):
+                kausjon_rows.pop(i); st.session_state.kausjon_rows = kausjon_rows; st.rerun()
+        updated_rows.append({"kausjonist": kn, "orgnr": ko, "beloep_mnok": kb, "type": kt})
+
+    st.session_state.kausjon_rows = updated_rows
+    if st.button("+ Legg til kausjon", use_container_width=True):
+        st.session_state.kausjon_rows.append({"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"})
+        st.rerun()
+
+    total_kausjon_display = sum(r.get("beloep_mnok", 0) or 0 for r in updated_rows if r.get("kausjonist"))
+    if total_kausjon_display > 0:
+        render_html(f'<div style="text-align:right;font-size:0.85rem;color:#f59e0b;font-weight:700;margin-top:4px;">Sum kausjoner: {total_kausjon_display:.1f} MNOK</div>')
+
+    render_section("6. Verdivurdering", "For bolig: residualverdi. For næring: yield-metode.", "Verdivurdering")
 
     is_bolig = prosjekttype in ["Bolig - salg", "Mixed-use"]
     is_naering = prosjekttype in ["Bolig - utleie", "Kontor", "Handel/retail", "Logistikk", "Hotell", "Mixed-use", "Annet"]
@@ -866,29 +1231,31 @@ with left:
         if har_takst:
             takst_kilde = st.selectbox("Takstkilde", ["Ekstern takstmann", "Internvurdering bank", "Megler", "Utbyggers eget estimat", "Annet"])
             takst_dato = st.date_input("Takstdato", value=date.today())
+        else:
+            takst_kilde = "Ikke oppgitt"
     with cv2:
-        tomtekost_mnok = st.number_input("Betalt / avtalt tomtepris (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
-        entreprisekost_mnok = st.number_input("Entreprisekost (MNOK)", min_value=0.0, value=0.0, step=1.0, format="%.1f")
+        tomtekost_mnok = st.number_input("Betalt / avtalt tomtepris (MNOK)", min_value=0.0, value=float(pf.get("tomtekost_mnok", 0) or 0), step=1.0, format="%.1f")
+        entreprisekost_mnok = st.number_input("Entreprisekost (MNOK)", min_value=0.0, value=float(pf.get("entreprisekost_mnok", 0) or 0), step=1.0, format="%.1f")
 
     if is_bolig:
-        render_html("""<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:1rem 1.2rem;margin:0.8rem 0;">
-            <div style="font-weight:700;font-size:0.85rem;color:#38bdf8;margin-bottom:4px;">Residualverdimetode (Bolig)</div>
-            <div style="font-size:0.82rem;color:#9fb0c3;">En tomt er aldri verdt mer enn det som gir utbygger minimum 12% margin. Residualverdi = Salgsverdi - Utbyggingskost - Margin (12%).</div>
+        render_html("""<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:0.8rem 1.1rem;margin:0.6rem 0;">
+            <div style="font-weight:700;font-size:0.85rem;color:#38bdf8;margin-bottom:3px;">Residualverdimetode — BRA-i</div>
+            <div style="font-size:0.82rem;color:#9fb0c3;">Salgspris per kvm BRA-i × BRA-i = total salgsverdi. Entreprisekost per kvm BRA-i × BRA-i = total byggekost.</div>
         </div>""")
         cb1, cb2 = st.columns(2)
         with cb1:
-            forventet_salgspris_kvm = st.number_input("Forventet salgspris (kr/kvm BRA)", min_value=0, value=0, step=1000)
-            bra_kvm = st.number_input("Salgbart areal BRA (kvm)", min_value=0, value=0, step=10)
+            forventet_salgspris_kvm = st.number_input("Salgspris (kr/kvm BRA-i)", min_value=0, value=int(pf.get("forventet_salgspris_kvm", 0) or 0), step=1000)
+            bra_kvm = bra_i_kvm  # same field
         with cb2:
-            byggekost_kvm = st.number_input("Byggekost (kr/kvm BTA)", min_value=0, value=0, step=500)
+            byggekost_kvm = st.number_input("Byggekost entreprise (kr/kvm BRA-i)", min_value=0, value=int(pf.get("byggekost_kvm_bra_i", 0) or 0), step=500)
             target_margin = st.number_input("Minimum utviklermargin (%)", min_value=0.0, value=12.0, step=1.0, format="%.1f")
     else:
-        forventet_salgspris_kvm = 0; bra_kvm = 0; byggekost_kvm = 0; target_margin = 12.0
+        forventet_salgspris_kvm = 0; bra_kvm = bra_i_kvm; byggekost_kvm = 0; target_margin = 12.0
 
     if is_naering:
-        render_html("""<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);border-radius:12px;padding:1rem 1.2rem;margin:0.8rem 0;">
-            <div style="font-weight:700;font-size:0.85rem;color:#f59e0b;margin-bottom:4px;">Yield-metode (Næring)</div>
-            <div style="font-size:0.82rem;color:#9fb0c3;">Verdi = Netto leieinntekt / Markedsyield. Yield on cost må være høyere enn markedsyield for å skape verdi.</div>
+        render_html("""<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);border-radius:12px;padding:0.8rem 1.1rem;margin:0.6rem 0;">
+            <div style="font-weight:700;font-size:0.85rem;color:#f59e0b;margin-bottom:3px;">Yield-metode (Næring)</div>
+            <div style="font-size:0.82rem;color:#9fb0c3;">Verdi = Netto leieinntekt / Markedsyield. Yield on cost &gt; markedsyield for positiv verdiskaping.</div>
         </div>""")
         cn1, cn2 = st.columns(2)
         with cn1:
@@ -903,23 +1270,14 @@ with left:
         brutto_leie_mnok = 0.0; eierkost_mnok = 0.0; antatt_markedsyield = 5.0
         wault = 0.0; vakanse_pst = 5; exit_yield = 5.5
 
-    render_section("4. Dokumentasjon", "Last opp grunnlag for kredittanalysen.", "Dokumenter")
-
-    uploads = st.file_uploader(
-        "Reguleringsplan, prosjektkalkyle, leieavtaler, grunnboksutskrift, lånesøknad, takst, regnskap, budsjett",
-        type=["pdf", "xlsx", "xls", "csv", "docx", "jpg", "jpeg", "png", "zip"],
-        accept_multiple_files=True,
-        key="credit_uploads",
-    )
-
     spesielle_forhold = st.text_area(
-        "Spesielle forhold",
-        value="",
-        placeholder="F.eks. tomten har kulturminnekrav, utbygger har pågående tvistesak, det er krav om rekkefølgebestemmelser...",
-        height=90,
+        "Spesielle forhold / merknader",
+        value=pf.get("spesielle_forhold", ""),
+        placeholder="Krav om rekkefølgebestemmelser, kulturminner, pågående tvister, særskilte vilkår...",
+        height=80,
     )
 
-    run_analysis = st.button("Generer kredittnotat", type="primary", use_container_width=True)
+    run_analysis = st.button("⚡  Generer kredittnotat", type="primary", use_container_width=True)
 
 with right:
     render_section("Om kredittgrunnlag", "Modulen bygger et strukturert beslutningsgrunnlag for kredittkomitéen.", "Info")
@@ -983,7 +1341,7 @@ if run_analysis:
         "prosjekttype": prosjekttype,
         "entrepriseform": entrepriseform,
         "antall_enheter": antall_enheter,
-        "bta_kvm": bta_kvm,
+        "bra_i_kvm": bra_i_kvm,
         "tomt_kvm": tomt_kvm,
         "reguleringsplan": reguleringsplan,
         "rammegodkjenning": rammegodkjenning,
@@ -995,15 +1353,24 @@ if run_analysis:
         "pantesikkerhet": pantesikkerhet,
         "garantier": garanti,
         "spesielle_forhold": spesielle_forhold,
+        # Rentevilkår
+        "nibor_margin_pst": nibor_margin,
+        "provisjon_pst_kvartal": provisjon,
+        "etableringsgebyr_nok": etablering,
+        "loepetid_mnd": loepetid,
+        # Kausjoner
+        "kausjoner": [r for r in st.session_state.kausjon_rows if r.get("kausjonist")],
+        # Selskapssøk-resultat
+        "selskapsinfo": st.session_state.selskap_info,
         # Verdivurdering
         "har_takst": har_takst,
         "takst_mnok": takst_mnok,
-        "takst_kilde": takst_kilde if har_takst else "Ikke oppgitt",
+        "takst_kilde": takst_kilde,
         "tomtekost_mnok": tomtekost_mnok,
         "entreprisekost_mnok": entreprisekost_mnok,
-        # Bolig residual
+        # Bolig residual (BRA-i)
         "forventet_salgspris_kvm": forventet_salgspris_kvm,
-        "bra_kvm": bra_kvm,
+        "bra_kvm": bra_i_kvm,
         "byggekost_kvm": byggekost_kvm,
         "target_margin": target_margin,
         # Næring yield
@@ -1022,7 +1389,7 @@ if run_analysis:
 
     doc_text = ""
     if uploads:
-        with st.spinner("Leser dokumenter..."):
+        with st.spinner("Leser dokumenter for AI-analyse..."):
             doc_text = extract_text_from_uploads(uploads)
 
     with st.spinner("Genererer kredittnotat..."):
@@ -1034,14 +1401,54 @@ if run_analysis:
 
     st.session_state["credit_analysis"] = analysis
     st.session_state["credit_project_info"] = project_info
+    st.session_state["traffic_light"] = compute_traffic_light(project_info, analysis)
 
 
 # ── Display results ──
 if "credit_analysis" in st.session_state:
     analysis = st.session_state["credit_analysis"]
     project_info = st.session_state.get("credit_project_info", {})
+    tl = st.session_state.get("traffic_light", {})
 
     render_section("Kredittnotat", "Strukturert beslutningsgrunnlag basert på innsendt dokumentasjon og prosjektdata.", "Resultat")
+
+    # ── TRAFFIC LIGHT BANNER ────────────────────────────────────────────────
+    if tl:
+        farge = tl.get("farge", "grønn")
+        tl_colors = {
+            "grønn": ("#22c55e", "rgba(34,197,94,0.08)", "rgba(34,197,94,0.25)", "✅"),
+            "gul": ("#f59e0b", "rgba(245,158,11,0.08)", "rgba(245,158,11,0.25)", "⚠️"),
+            "rød-betinget": ("#f97316", "rgba(249,115,22,0.08)", "rgba(249,115,22,0.25)", "🔴"),
+            "rød": ("#ef4444", "rgba(239,68,68,0.08)", "rgba(239,68,68,0.25)", "🔴"),
+        }
+        tc, tbg, tborder, ticon = tl_colors.get(farge, tl_colors["grønn"])
+
+        flags_html = ""
+        for f in tl.get("red_flags", []):
+            flags_html += f'<li style="color:#ef4444;font-size:0.84rem;">🔴 {f}</li>'
+        for f in tl.get("yellow_flags", []):
+            flags_html += f'<li style="color:#f59e0b;font-size:0.84rem;">⚠️ {f}</li>'
+        betingelser_html = ""
+        for b in tl.get("betingelser", []):
+            betingelser_html += f'<li style="color:#c8d3df;font-size:0.83rem;margin-bottom:3px;">→ {b}</li>'
+
+        tilbud_html = ""
+        if tl.get("bankens_tilbud"):
+            tilbud_html = f'<div style="margin-top:0.7rem;padding:0.6rem 0.9rem;background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.2);border-radius:8px;font-size:0.85rem;color:#38bdf8;font-weight:600;">🏦 Bankens tilbud: {tl["bankens_tilbud"]}</div>'
+
+        render_html(f'''
+        <div style="background:{tbg};border:2px solid {tborder};border-radius:18px;padding:1.4rem 1.8rem;margin-bottom:1.5rem;">
+            <div style="display:flex;align-items:center;gap:0.7rem;margin-bottom:0.7rem;">
+                <span style="font-size:1.6rem;">{ticon}</span>
+                <div>
+                    <div style="font-size:1.1rem;font-weight:800;color:{tc};">{tl.get("status","")}</div>
+                    <div style="font-size:0.8rem;color:#9fb0c3;">85%-regel: Bankens maksgrense {tl.get("bank_max_mnok",0):.1f} MNOK · Kausjoner {tl.get("total_kausjon_mnok",0):.1f} MNOK</div>
+                </div>
+            </div>
+            {(f'<ul style="margin:0 0 0.5rem 0;padding-left:1rem;">{flags_html}</ul>') if flags_html else ""}
+            {(f'<ul style="margin:0;padding-left:1rem;">{betingelser_html}</ul>') if betingelser_html else ""}
+            {tilbud_html}
+        </div>''')
 
     # Status banner
     anbefaling = safe_get(analysis, "anbefaling", "Ikke vurdert")
@@ -1252,6 +1659,7 @@ if "credit_analysis" in st.session_state:
                 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     with tabs[8]:
+        project_info["_traffic_light"] = st.session_state.get("traffic_light", {})
         pdf_bytes = generate_credit_pdf(project_info, analysis)
         if pdf_bytes:
             st.download_button(
