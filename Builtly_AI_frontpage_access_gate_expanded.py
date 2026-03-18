@@ -3054,6 +3054,16 @@ st.markdown(
         color: var(--text);
     }
 
+    /* Prevent Streamlit from injecting white backgrounds on inner containers */
+    div[data-testid="stExpander"] [data-testid="stVerticalBlock"],
+    div[data-testid="stExpander"] [data-testid="element-container"],
+    div[data-testid="stExpander"] [class*="stElementContainer"],
+    div[data-testid="stExpander"] section,
+    div[data-testid="stExpander"] [class*="block-container"] {
+        background: transparent !important;
+        background-color: transparent !important;
+    }
+
     header[data-testid="stHeader"] {
         visibility: hidden;
         height: 0;
@@ -3502,11 +3512,18 @@ st.markdown(
     }
 
     div[data-testid="stForm"] {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
+        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
+        background-color: rgba(12,25,39,0.98) !important;
         border: 1px solid var(--stroke) !important;
         border-radius: 22px !important;
         padding: 1.2rem 1.15rem 1.15rem 1.15rem !important;
         box-shadow: 0 12px 38px rgba(0,0,0,0.18);
+    }
+
+    /* All direct children of stForm */
+    div[data-testid="stForm"] > div {
+        background: transparent !important;
+        background-color: transparent !important;
     }
 
     div[data-testid="stForm"] label {
@@ -3575,7 +3592,27 @@ st.markdown(
     div[data-testid="stExpander"] {
         border: 1px solid rgba(120,145,170,0.16) !important;
         border-radius: 18px !important;
-        background: rgba(255,255,255,0.03);
+        background: rgba(12,24,38,0.98) !important;
+        background-color: rgba(12,24,38,0.98) !important;
+    }
+
+    /* Expander content area – the inner div Streamlit wraps content in */
+    div[data-testid="stExpander"] > div,
+    div[data-testid="stExpander"] > div > div,
+    div[data-testid="stExpander"] details,
+    div[data-testid="stExpander"] details > div,
+    div[data-testid="stExpander"] details summary ~ div {
+        background: rgba(12,24,38,0.98) !important;
+        background-color: rgba(12,24,38,0.98) !important;
+    }
+
+    /* Force all text inside expander dark-mode */
+    div[data-testid="stExpander"] p,
+    div[data-testid="stExpander"] span,
+    div[data-testid="stExpander"] label,
+    div[data-testid="stExpander"] .stMarkdown,
+    div[data-testid="stExpander"] .stCaptionContainer {
+        color: #c8d3df !important;
     }
 
     div[data-testid="stVerticalBlockBorderWrapper"] {
