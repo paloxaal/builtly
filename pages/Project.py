@@ -512,7 +512,7 @@ def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, ou
         else:
             st.button("In development", key=f"btn_{page_target}_dev", type="secondary", disabled=True, use_container_width=True)
 
-if completeness > 30:
+if True:  # Moduler alltid synlige i utviklingsfasen – fjern denne linjen for å aktivere kompletthetskravet (completeness > 30)
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     
     st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>🛠️ Prosjektering & Fagmoduler</h3>", unsafe_allow_html=True)
@@ -599,3 +599,23 @@ if completeness > 30:
                        "Automatisert TDD-rapport for eiendomstransaksjoner. Aggregerer tilstand, avvik mot TEK17, restlevetid og risikoprofil.",
                        "Tegninger + ferdigattest + FDV + tilstandsrapport", "TDD-rapport, risikomatrise, tiltaksliste",
                        "Åpne TDD", "TDD")
+
+    # --- SEKSJON: BANK & FINANSIERING ---
+    st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
+    st.markdown("""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ Bank & Finansiering</h3>
+        <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
+            Byggelånskontroll, kredittgrunnlag og beslutningsstøtte for banker og kredittgivere.
+            Automatisert datainnhenting og strukturert rapportering.
+        </p>
+    """, unsafe_allow_html=True)
+
+    r6c1, r6c2 = st.columns(2)
+    render_module_card(r6c1, "🏗️", "Byggelån", "badge-phase2", "BYGGELÅNSKONTROLL – Utbetalingskontroll & verifisering",
+                       "Verifiserer trekkforespørsler mot byggebudsjett, fremdriftsplan og kontraktsgrunnlag. Genererer bankens kontrollrapport med avvik og godkjenningsgrunnlag.",
+                       "Trekkforespørsel + budsjett + fremdriftsplan", "Kontrollrapport, avvikslogg, godkjenningsgrunnlag",
+                       "Åpne Byggelånskontroll", "Byggelanskontroll")
+    render_module_card(r6c2, "📋", "Kreditt", "badge-phase2", "KREDITTGRUNNLAG – Beslutningsstøtte for kredittkomité",
+                       "Sammenstiller tekniske, regulatoriske og finansielle data til et strukturert kredittgrunnlag for tomtelån, byggelån og utleielån.",
+                       "Prosjektdata + eiendomsinfo + finansstruktur", "Kredittmemo, risikomatrise, beslutningsgrunnlag",
+                       "Åpne Kredittgrunnlag", "Kredittgrunnlag")
