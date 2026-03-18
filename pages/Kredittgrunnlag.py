@@ -353,6 +353,111 @@ def lookup_company(orgnr_or_name: str) -> dict:
 
 
 
+def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
+    """
+    Henter regnskap fra Brreg og gjør en kort soliditetsanalyse av kausjonisten.
+    Returnerer vurdering: sterk / akseptabel / svak / ukjent.
+    """
+    si = lookup_company(orgnr_or_name)
+    if not si.get("navn") or not si.get("regnskap"):
+        return {"navn": si.get("navn", orgnr_or_name), "orgnr": si.get("orgnr", ""), "vurdering": "ukjent",
+                "farge": "#9fb0c3", "begrunnelse": "Regnskapstall ikke tilgjengelig i Brreg.", "regnskap": []}
+
+    reg = si["regnskap"]  # siste 3 år, nyeste først
+    siste = reg[0]
+
+    ek_raw     = siste.get("_ek_nok") or 0
+    res_raw    = siste.get("_aarsresultat_nok") or 0
+    omset_raw  = siste.get("_omsetning_nok") or 0
+
+    ek_mnok    = round(ek_raw / 1_000_000, 1)
+    res_mnok   = round(res_raw / 1_000_000, 1)
+    omset_mnok = round(omset_raw / 1_000_000, 1)
+
+    # Nøkkeltall
+    ek_vs_kausjon = round(ek_mnok / kausjon_beloep_mnok, 1) if kausjon_beloep_mnok > 0 else None
+
+    punkter = []
+    score = 0  # 0=ukjent, 1=svak, 2=akseptabel, 3=sterk
+
+    # EK-dekning av kausjonsbeløp
+    if ek_mnok > 0 and kausjon_beloep_mnok > 0:
+        if ek_vs_kausjon >= 3:
+            punkter.append(f"✅ Egenkapital {siste['egenkapital']} dekker {ek_vs_kausjon:.1f}x kausjonsbeløpet – sterk dekning")
+            score = max(score, 3)
+        elif ek_vs_kausjon >= 1.5:
+            punkter.append(f"⚠️ Egenkapital {siste['egenkapital']} dekker {ek_vs_kausjon:.1f}x kausjonsbeløpet – akseptabel dekning")
+            score = max(score, 2)
+        elif ek_vs_kausjon >= 1:
+            punkter.append(f"⚠️ Egenkapital {siste['egenkapital']} dekker akkurat kausjonsbeløpet ({ek_vs_kausjon:.1f}x) – begrenset buffer")
+            score = max(score, 1)
+        else:
+            punkter.append(f"🔴 Egenkapital {siste['egenkapital']} dekker kun {ek_vs_kausjon:.1f}x av kausjonsbeløpet – utilstrekkelig")
+            score = max(score, 1)
+    elif ek_mnok < 0:
+        punkter.append(f"🔴 Negativ egenkapital {siste['egenkapital']} – kausjonisten er teknisk insolvent")
+        score = max(score, 1)
+
+    # Lønnsomhet siste år
+    if res_mnok > 0:
+        punkter.append(f"✅ Positiv årsresultat {siste['aarsresultat']} ({siste['aar']})")
+        score = max(score, 2)
+    elif res_mnok < 0:
+        punkter.append(f"⚠️ Negativt årsresultat {siste['aarsresultat']} ({siste['aar']}) – vurder trend")
+
+    # EK-andel
+    ek_andel_str = siste.get("ek_andel", "-")
+    try:
+        ek_pst = float(ek_andel_str.replace("%", "").strip())
+        if ek_pst >= 30:
+            punkter.append(f"✅ EK-andel {ek_andel_str} – solid balanse")
+        elif ek_pst >= 15:
+            punkter.append(f"⚠️ EK-andel {ek_andel_str} – akseptabel")
+        else:
+            punkter.append(f"🔴 EK-andel {ek_andel_str} – svak soliditet")
+            score = min(score, 1) if score > 0 else 1
+    except Exception:
+        pass
+
+    # Konkurs / avvikling
+    if si.get("konkurs"):
+        punkter.append("🔴 Selskapet er under konkursbehandling – kausjon har ingen verdi")
+        score = 1
+    if si.get("under_avvikling"):
+        punkter.append("🔴 Selskapet er under avvikling")
+        score = min(score, 1)
+
+    # Trend: sammenlign 2 siste år EK
+    if len(reg) >= 2:
+        ek_prev = reg[1].get("_ek_nok") or 0
+        if ek_raw > ek_prev and ek_prev > 0:
+            punkter.append(f"✅ EK vokste fra {round(ek_prev/1e6,1)} til {ek_mnok} MNOK – positiv trend")
+        elif ek_raw < ek_prev and ek_prev > 0:
+            punkter.append(f"⚠️ EK falt fra {round(ek_prev/1e6,1)} til {ek_mnok} MNOK – negativ trend")
+
+    # Konklusjon
+    if score == 0:
+        vurdering, farge = "ukjent", "#9fb0c3"
+    elif score == 1:
+        vurdering, farge = "svak", "#ef4444"
+    elif score == 2:
+        vurdering, farge = "akseptabel", "#f59e0b"
+    else:
+        vurdering, farge = "sterk", "#22c55e"
+
+    return {
+        "navn": si.get("navn", ""),
+        "orgnr": si.get("orgnr", ""),
+        "vurdering": vurdering,
+        "farge": farge,
+        "begrunnelse": punkter,
+        "regnskap": reg,
+        "ek_mnok": ek_mnok,
+        "ek_vs_kausjon": ek_vs_kausjon,
+        "kilde": si.get("kilde", ""),
+    }
+
+
 def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
     """Beregn finansieringsstatus. 85%-regel: bank kan alltid tilby 85% av totale prosjektkostnader."""
     nt = safe_get(analysis, "noekkeltall", {})
@@ -1388,6 +1493,97 @@ with left:
     total_kausjon_display = sum(r.get("beloep_mnok", 0) or 0 for r in updated_rows if r.get("kausjonist"))
     if total_kausjon_display > 0:
         render_html(f'<div style="text-align:right;font-size:0.85rem;color:#f59e0b;font-weight:700;margin-top:4px;">Sum kausjoner: {total_kausjon_display:.1f} MNOK</div>')
+
+    # ── Kausjonist-analyse ──────────────────────────────────────────────────
+    aktive_kausjoner = [r for r in updated_rows if r.get("kausjonist") and (r.get("orgnr") or r.get("kausjonist"))]
+    if aktive_kausjoner:
+        ka_col1, ka_col2 = st.columns([2, 1])
+        with ka_col1:
+            do_kausjon_analyse = st.button(
+                "📊  Analyser kausjonister (Brreg)",
+                use_container_width=True,
+                help="Henter regnskap fra Brønnøysundregistrene og vurderer soliditet og kausjonskapasitet"
+            )
+        with ka_col2:
+            if st.button("Nullstill analyse", use_container_width=True):
+                st.session_state.pop("kausjon_analyser", None)
+                st.rerun()
+
+        if do_kausjon_analyse:
+            with st.spinner("Henter regnskap fra Brreg for alle kausjonister..."):
+                analyser = {}
+                for r in aktive_kausjoner:
+                    key = r.get("orgnr") or r.get("kausjonist", "")
+                    if key:
+                        analyser[key] = analyse_kausjonist(
+                            r.get("orgnr") or r.get("kausjonist"),
+                            float(r.get("beloep_mnok") or 0)
+                        )
+                        analyser[key]["_kausjon_beloep"] = float(r.get("beloep_mnok") or 0)
+                        analyser[key]["_type"] = r.get("type", "Selvskyldner")
+                st.session_state["kausjon_analyser"] = analyser
+            st.rerun()
+
+        if "kausjon_analyser" in st.session_state and st.session_state["kausjon_analyser"]:
+            for key, ka in st.session_state["kausjon_analyser"].items():
+                farge = ka.get("farge", "#9fb0c3")
+                vurd  = ka.get("vurdering", "ukjent")
+                navn  = ka.get("navn") or key
+
+                # Regnskap mini-tabell
+                reg_html = ""
+                for r in ka.get("regnskap", [])[:3]:
+                    aarsres_raw = r.get("_aarsresultat_nok") or 0
+                    res_color = "#22c55e" if aarsres_raw >= 0 else "#ef4444"
+                    reg_html += (
+                        f'<tr style="border-bottom:1px solid rgba(120,145,170,0.1);">'
+                        f'<td style="padding:3px 8px;color:#c8d3df;font-weight:600;">{r["aar"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["omsetning"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:{res_color};font-weight:700;">{r["aarsresultat"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["egenkapital"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["ek_andel"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["totalkapital"]}</td>'
+                        f'</tr>'
+                    )
+                if reg_html:
+                    reg_html = (
+                        '<table style="width:100%;border-collapse:collapse;font-size:0.8rem;margin-top:0.5rem;">'
+                        '<tr style="color:#9fb0c3;border-bottom:1px solid rgba(120,145,170,0.2);">'
+                        '<th style="padding:3px 8px;text-align:left;">År</th>'
+                        '<th style="padding:3px 8px;text-align:right;">Omsetning</th>'
+                        '<th style="padding:3px 8px;text-align:right;">Årsresultat</th>'
+                        '<th style="padding:3px 8px;text-align:right;">EK</th>'
+                        '<th style="padding:3px 8px;text-align:right;">EK-andel</th>'
+                        '<th style="padding:3px 8px;text-align:right;">Totalkapital</th>'
+                        '</tr>'
+                        + reg_html + '</table>'
+                    )
+
+                punkter_html = "".join(
+                    f'<div style="font-size:0.82rem;color:#c8d3df;margin-bottom:3px;">{p}</div>'
+                    for p in ka.get("begrunnelse", [])
+                )
+
+                ek_dekning = ""
+                if ka.get("ek_vs_kausjon") is not None:
+                    ek_dekning = f' · EK-dekning: <span style="color:{farge};font-weight:700;">{ka["ek_vs_kausjon"]:.1f}x kausjonsbeløpet</span>'
+
+                render_html(f'''
+                <div style="background:rgba(10,22,35,0.6);border:1px solid {farge}44;border-left:4px solid {farge};
+                            border-radius:12px;padding:1rem 1.2rem;margin-bottom:0.8rem;">
+                    <div style="display:flex;align-items:baseline;gap:0.6rem;margin-bottom:0.4rem;flex-wrap:wrap;">
+                        <span style="font-weight:700;font-size:0.95rem;color:#f5f7fb;">{navn}</span>
+                        <span style="font-size:0.78rem;color:#9fb0c3;">{ka.get("orgnr","")}</span>
+                        <span style="background:{farge}22;border:1px solid {farge}55;border-radius:5px;
+                                     padding:1px 8px;font-size:0.75rem;font-weight:700;color:{farge};text-transform:uppercase;">
+                            {vurd}
+                        </span>
+                        <span style="font-size:0.8rem;color:#9fb0c3;">{ka.get("_type","Selvskyldner")} · {ka.get("_kausjon_beloep",0):.1f} MNOK{ek_dekning}</span>
+                    </div>
+                    <div style="margin-bottom:0.5rem;">{punkter_html}</div>
+                    {reg_html}
+                    <div style="font-size:0.7rem;color:#555;margin-top:5px;">Kilde: {ka.get("kilde","Brreg")}</div>
+                </div>''')
 
     render_section("6. Verdivurdering", "For bolig: residualverdi. For næring: yield-metode.", "Verdivurdering")
 
