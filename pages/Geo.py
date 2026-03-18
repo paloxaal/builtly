@@ -8,6 +8,7 @@ import base64
 from datetime import datetime
 import tempfile
 import re
+import json
 import requests
 import urllib.parse
 import io
@@ -497,7 +498,7 @@ class BuiltlyCorporatePDF(FPDF):
 
     def subheading(self, text):
         text = ironclad_text_formatter(text.replace("##", "").rstrip(":"))
-        self.ensure_space(14)
+        self.ensure_space(28)
         self.ln(2)
         self.set_x(20)
         self.set_font("Helvetica", "B", 10.8)
@@ -522,7 +523,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.ln(0.8)
 
     def section_title(self, title: str):
-        self.ensure_space(20) # Strammere marginer for å unngå tomme sider
+        self.ensure_space(50) # Sikrer plass til overskrift + minst noen linjer innhold (unngår ensomme overskrifter)
         self.ln(2)
         title = ironclad_text_formatter(title)
         num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
@@ -1088,7 +1089,7 @@ with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
                 else:
                     st.error("Fant ikke kart. Vennligst last opp manuelt.")
 
-        if st.session_state.geo_maps["recent"]:
+        if st.session_state.geo_maps["recent"] and st.session_state.geo_maps["source"] != "Manuelt opplastet":
             st.image(st.session_state.geo_maps["recent"], caption=f"Valgt: {st.session_state.geo_maps['source']}", use_container_width=True)
 
     with col_b:
@@ -1098,9 +1099,15 @@ with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
             st.session_state.geo_maps["recent"] = Image.open(man_recent).convert("RGB")
             st.session_state.geo_maps["source"] = "Manuelt opplastet"
 
+        if st.session_state.geo_maps["recent"] and st.session_state.geo_maps["source"] == "Manuelt opplastet":
+            st.image(st.session_state.geo_maps["recent"], caption="Nyere ortofoto (Manuelt opplastet)", use_container_width=True)
+
         man_hist = st.file_uploader("Last opp historisk flyfoto (F.eks. fra 1950 for å sjekke tidl. industri)", type=["png", "jpg", "jpeg"])
         if man_hist:
             st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
+
+        if st.session_state.geo_maps["historical"]:
+            st.image(st.session_state.geo_maps["historical"], caption="Historisk flyfoto (Manuelt opplastet)", use_container_width=True)
 
 with st.expander("3. Laboratoriedata & Plantegninger", expanded=True):
     st.info("Slipp Excel/CSV-filer med prøvesvar her. AI-en leser verdiene og tilstandsklassifiserer massene.")
