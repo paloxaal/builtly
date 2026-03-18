@@ -494,6 +494,50 @@ st.markdown("""
     .stTextInput input, .stTextArea textarea, .stNumberInput input, .stSelectbox > div > div,
     .stMultiSelect > div > div { background-color: rgba(10,22,35,0.6) !important; color: #f5f7fb !important;
         border: 1px solid rgba(120,145,170,0.2) !important; border-radius: 12px !important; }
+    /* ── Deep input fix – webkit autofill + number input ── */
+    div[data-baseweb='base-input'],
+    div[data-baseweb='input'] {
+        background-color: rgba(10,22,35,0.6) !important;
+        border-color: rgba(120,145,170,0.2) !important;
+    }
+    div[data-baseweb='base-input'] input,
+    div[data-baseweb='input'] input,
+    .stTextInput input,
+    .stTextArea textarea,
+    .stNumberInput input {
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+        caret-color: #38c2c9 !important;
+        background: transparent !important;
+        background-color: transparent !important;
+    }
+    input:-webkit-autofill,
+    textarea:-webkit-autofill {
+        -webkit-box-shadow: 0 0 0px 1000px rgba(10,22,35,0.95) inset !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+        caret-color: #38c2c9 !important;
+    }
+    input::placeholder,
+    textarea::placeholder {
+        color: rgba(159,176,195,0.6) !important;
+        -webkit-text-fill-color: rgba(159,176,195,0.6) !important;
+    }
+    /* stNumberInput stepper buttons */
+    .stNumberInput div[data-baseweb='base-input'] {
+        background-color: rgba(10,22,35,0.6) !important;
+    }
+    /* Dropdown menu options */
+    ul[data-baseweb='menu'],
+    ul[data-baseweb='menu'] li {
+        background-color: rgba(10,22,35,0.95) !important;
+        color: #f5f7fb !important;
+        -webkit-text-fill-color: #f5f7fb !important;
+    }
+    ul[data-baseweb='menu'] li:hover,
+    li[aria-selected='true'] {
+        background-color: rgba(56,194,201,0.12) !important;
+    }
+
     .stSelectbox label, .stMultiSelect label, .stTextInput label, .stTextArea label,
     .stNumberInput label, .stFileUploader label, .stToggle label, .stRadio label,
     .stDateInput label { color: #c8d3df !important; font-weight: 600 !important; }
