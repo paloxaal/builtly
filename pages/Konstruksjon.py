@@ -613,8 +613,10 @@ def _quick_plan_score_v15(image: Image.Image) -> float:
     """Fast visual heuristic to score how plan-like an image is.
     Plans have balanced H/V lines and many enclosed room-like regions.
     Returns 0.0-1.0."""
-    cv2, np = optional_cv_stack()
-    if cv2 is None or np is None:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
         return 0.0
     try:
         img = copy_rgb(image)
