@@ -172,6 +172,9 @@ Returner KUN gyldig JSON med disse feltene (null for ukjente):
   "antall_enheter": 0,
   "bra_i_kvm": 0,
   "tomt_kvm": 0,
+  "gnr_bnr": "",
+  "kommune": "",
+  "planident": "",
   "tomtekost_mnok": 0.0,
   "entreprisekost_mnok": 0.0,
   "forhaandssalg_pst": 0,
@@ -182,6 +185,9 @@ Returner KUN gyldig JSON med disse feltene (null for ukjente):
   "provisjon_pst_kvartal": 0.0,
   "etableringsgebyr_nok": 0,
   "loepetid_mnd": 0,
+  "tomtelaan_mnok": 0.0,
+  "tomtelaan_tomt_takst_mnok": 0.0,
+  "infralaan_mnok": 0.0,
   "kausjoner": [],
   "vilkaar_foer_utbetaling": [],
   "covenants_liste": [],
@@ -197,6 +203,21 @@ KRITISK for kausjoner — les NØYE:
 - Hvert element: {"kausjonist": "Selskapsnavn AS", "orgnr": "XXX XXX XXX", "beloep_mnok": 70.0, "type": "Selvskyldner", "kommentar": ""}
 - "type" er alltid "Selvskyldner" med mindre "simpel" eksplisitt nevnes
 - Returner ALDRI en tom kausjoner-liste hvis det finnes kausjonister i dokumentet
+
+KRITISK for gnr/bnr og matrikkeldata:
+- Finn ALLE gnr (gårdsnummer) og bnr (bruksnummer) som nevnes som panteobjekt
+- Format: "Gnr. 81, bnr. 56, 57, 10, 154, 155, 156"
+- Disse er bankens panteobjekt og er kritisk informasjon
+
+KRITISK for finansieringsstruktur:
+- Prosjekter kan ha FLERE lånetyper: byggelån, tomtelån og infralån
+- Tomtelån: separat lån for tomtekjøp/areal som ikke bygges på ennå
+- Infralån: forskuttering av infrastruktur som betjener flere byggetrinn
+- Byggelån: lån for selve byggeprosjektet
+- "soekt_laan_mnok" = byggelånet (hovedlånet)
+- "tomtelaan_mnok" = eventuelt separat tomtelån
+- "infralaan_mnok" = eventuelt separat infralån
+- Sett laanetype til "Kombinert tomte- og byggelån" hvis begge finnes
 
 VIKTIG: BRA-i er det salgbare innendørsarealet (SBRA) brukt for entreprisekost og salgsinntekt per kvm.
 Dokumenttekst:
@@ -355,13 +376,14 @@ def lookup_company(orgnr_or_name: str) -> dict:
 
 def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     """
-    Henter regnskap fra Brreg og gjør en kort soliditetsanalyse av kausjonisten.
+    Henter regnskap fra Brreg og gjør en utvidet soliditetsanalyse av kausjonisten.
+    Inkluderer: EK-dekning, gjeldsgrad, totalkapital, lønnsomhet, trend.
     Returnerer vurdering: sterk / akseptabel / svak / ukjent.
     """
     si = lookup_company(orgnr_or_name)
     if not si.get("navn") or not si.get("regnskap"):
         return {"navn": si.get("navn", orgnr_or_name), "orgnr": si.get("orgnr", ""), "vurdering": "ukjent",
-                "farge": "#9fb0c3", "begrunnelse": "Regnskapstall ikke tilgjengelig i Brreg.", "regnskap": []}
+                "farge": "#9fb0c3", "begrunnelse": ["Regnskapstall ikke tilgjengelig i Brreg."], "regnskap": []}
 
     reg = si["regnskap"]  # siste 3 år, nyeste først
     siste = reg[0]
@@ -373,6 +395,34 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     ek_mnok    = round(ek_raw / 1_000_000, 1)
     res_mnok   = round(res_raw / 1_000_000, 1)
     omset_mnok = round(omset_raw / 1_000_000, 1)
+
+    # Parse totalkapital og gjeld fra regnskapet
+    tk_str = siste.get("totalkapital", "-")
+    gjeld_str = siste.get("gjeld", "-")
+    tk_mnok = None
+    gjeld_mnok = None
+    gjeldsgrad = None
+
+    try:
+        tk_val = tk_str.replace("MNOK", "").replace("TNOK", "").replace("kr", "").replace(",", ".").strip()
+        if "MNOK" in siste.get("totalkapital", ""):
+            tk_mnok = float(tk_val)
+        elif "TNOK" in siste.get("totalkapital", ""):
+            tk_mnok = float(tk_val) / 1000
+    except Exception:
+        pass
+
+    try:
+        gj_val = gjeld_str.replace("MNOK", "").replace("TNOK", "").replace("kr", "").replace(",", ".").strip()
+        if "MNOK" in siste.get("gjeld", ""):
+            gjeld_mnok = float(gj_val)
+        elif "TNOK" in siste.get("gjeld", ""):
+            gjeld_mnok = float(gj_val) / 1000
+    except Exception:
+        pass
+
+    if gjeld_mnok is not None and ek_mnok and ek_mnok > 0:
+        gjeldsgrad = round(gjeld_mnok / ek_mnok, 2)
 
     # Nøkkeltall
     ek_vs_kausjon = round(ek_mnok / kausjon_beloep_mnok, 1) if kausjon_beloep_mnok > 0 else None
@@ -397,6 +447,41 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     elif ek_mnok < 0:
         punkter.append(f"🔴 Negativ egenkapital {siste['egenkapital']} – kausjonisten er teknisk insolvent")
         score = max(score, 1)
+
+    # Gjeldsgrad
+    if gjeldsgrad is not None:
+        if gjeldsgrad <= 2:
+            punkter.append(f"✅ Gjeldsgrad {gjeldsgrad:.1f}x – moderat gearing")
+            score = max(score, 2)
+        elif gjeldsgrad <= 5:
+            punkter.append(f"⚠️ Gjeldsgrad {gjeldsgrad:.1f}x – høy gearing, men kan aksepteres for eiendomsselskap")
+        elif gjeldsgrad <= 10:
+            punkter.append(f"⚠️ Gjeldsgrad {gjeldsgrad:.1f}x – svært høy gearing")
+            score = min(score, 2) if score > 0 else 1
+        else:
+            punkter.append(f"🔴 Gjeldsgrad {gjeldsgrad:.1f}x – ekstremt høy gearing, svekker kausjonsverdi")
+            score = min(score, 1)
+
+    # Totalkapital (størrelse)
+    if tk_mnok is not None:
+        if tk_mnok >= 1000:
+            punkter.append(f"✅ Totalkapital {siste['totalkapital']} – stort og veletablert selskap")
+        elif tk_mnok >= 100:
+            punkter.append(f"✅ Totalkapital {siste['totalkapital']} – betydelig balanse")
+        elif tk_mnok >= 10:
+            punkter.append(f"⚠️ Totalkapital {siste['totalkapital']} – begrenset balanse relativt til kausjonsbeløp")
+
+    # Total gjeld
+    if gjeld_mnok is not None and kausjon_beloep_mnok > 0:
+        gjeld_vs_kausjon = round(gjeld_mnok / kausjon_beloep_mnok, 1) if kausjon_beloep_mnok > 0 else None
+        if gjeld_vs_kausjon and gjeld_vs_kausjon > 50:
+            punkter.append(f"⚠️ Total gjeld {siste['gjeld']} ({gjeld_vs_kausjon:.0f}x kausjonsbeløpet) – vurder eksponering mot andre forpliktelser")
+
+    # Omsetning
+    if omset_mnok > 0:
+        punkter.append(f"📊 Omsetning {siste['omsetning']} ({siste['aar']})")
+    else:
+        punkter.append(f"⚠️ Ingen rapportert omsetning ({siste['aar']}) – typisk holdingselskap")
 
     # Lønnsomhet siste år
     if res_mnok > 0:
@@ -435,6 +520,17 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
         elif ek_raw < ek_prev and ek_prev > 0:
             punkter.append(f"⚠️ EK falt fra {round(ek_prev/1e6,1)} til {ek_mnok} MNOK – negativ trend")
 
+    # Lønnsomhetstrend
+    if len(reg) >= 2:
+        res_prev = reg[1].get("_aarsresultat_nok") or 0
+        if res_raw > 0 and res_prev > 0:
+            punkter.append(f"✅ Positiv lønnsomhet i {reg[0]['aar']} og {reg[1]['aar']} – stabil inntjening")
+        elif res_raw > 0 and res_prev < 0:
+            punkter.append(f"⚠️ Snuoperasjon: negativt i {reg[1]['aar']}, positivt i {reg[0]['aar']}")
+        elif res_raw < 0 and res_prev < 0:
+            punkter.append(f"🔴 Negativt resultat to år på rad – svekker kausjonsverdi")
+            score = min(score, 1)
+
     # Konklusjon
     if score == 0:
         vurdering, farge = "ukjent", "#9fb0c3"
@@ -454,6 +550,10 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
         "regnskap": reg,
         "ek_mnok": ek_mnok,
         "ek_vs_kausjon": ek_vs_kausjon,
+        "gjeldsgrad": gjeldsgrad,
+        "gjeld_mnok": gjeld_mnok,
+        "totalkapital_mnok": tk_mnok,
+        "omsetning_mnok": omset_mnok,
         "kilde": si.get("kilde", ""),
     }
 
@@ -661,13 +761,16 @@ Prosjektinformasjon:
 - Låntaker: {project_info.get('laantaker', '')}
 - Organisasjonsnr: {project_info.get('orgnr', '')}
 - Lånetype: {project_info.get('laanetype', '')}
-- Søkt lån: {project_info.get('soekt_laan_mnok', 0)} MNOK
+- Søkt byggelån: {project_info.get('soekt_laan_mnok', 0)} MNOK
 - Totalinvestering: {project_info.get('totalinvestering_mnok', 0)} MNOK
 - Egenkapital: {project_info.get('egenkapital_mnok', 0)} MNOK
 - Prosjekttype: {project_info.get('prosjekttype', '')}
 - Antall enheter: {project_info.get('antall_enheter', '')}
 - BRA-i / SBRA: {project_info.get('bra_i_kvm', '')} kvm (salgbart innendørs areal — brukes for entreprisekost og salgsinntekt)
 - Tomt: {project_info.get('tomt_kvm', '')} kvm
+- Gnr/bnr (panteobjekt): {project_info.get('gnr_bnr', 'Ikke oppgitt')}
+- Kommune: {project_info.get('kommune', 'Ikke oppgitt')}
+- Planident: {project_info.get('planident', 'Ikke oppgitt')}
 - Reguleringsplan: {project_info.get('reguleringsplan', '')}
 - Rammegodkjenning: {project_info.get('rammegodkjenning', '')}
 - Entrepriseform: {project_info.get('entrepriseform', '')}
@@ -678,7 +781,16 @@ Prosjektinformasjon:
 - Eksisterende gjeld: {project_info.get('eksisterende_gjeld_mnok', 0)} MNOK
 - Pantesikkerhet: {project_info.get('pantesikkerhet', '')}
 - Rentevilkår: NIBOR 3MND + {project_info.get('nibor_margin_pst', 0)}% margin, provisjon {project_info.get('provisjon_pst_kvartal', 0)}% per kvartal, etablering NOK {project_info.get('etableringsgebyr_nok', 0)}, løpetid {project_info.get('loepetid_mnd', 0)} mnd
-- 85%-regelen: Bank kan finansiere maks 85% av prosjektkost = {round(float(project_info.get('totalinvestering_mnok', 0) or 0) * 0.85, 1)} MNOK. Vurder om søkt beløp {project_info.get('soekt_laan_mnok', 0)} MNOK er innenfor.
+
+Finansieringsstruktur (kan ha flere lånetyper):
+- Byggelån (søkt): {project_info.get('soekt_laan_mnok', 0)} MNOK
+- Tomtelån (separat): {project_info.get('tomtelaan_mnok', 0)} MNOK (takst/verdi tomt: {project_info.get('tomtelaan_tomt_takst_mnok', 0)} MNOK)
+- Infralån (forskuttering): {project_info.get('infralaan_mnok', 0)} MNOK
+- Tomtelån: bank finansierer normalt 50-70% av tomteverdi avhengig av kausjoner. 50% uten kausjon, 60-70% med solid kausjonist.
+- Byggelån: bank finansierer normalt 85-90% av prosjektkost.
+- 85%-regelen byggelån: Maks 85% av prosjektkost = {round(float(project_info.get('totalinvestering_mnok', 0) or 0) * 0.85, 1)} MNOK.
+
+Sikkerheter og kausjoner:
 - Kausjoner og tilleggsgarantier: {json.dumps(project_info.get('kausjoner', []), ensure_ascii=False)}
 - Selskapsinformasjon låntaker (Brreg/Proff): {json.dumps(project_info.get('selskapsinfo', {}), ensure_ascii=False)}
 - Spesielle forhold: {project_info.get('spesielle_forhold', '')}
@@ -707,7 +819,12 @@ Næring (yield-metode):
 Dokumentgrunnlag (utdrag):
 {doc_text[:40000]}
 
-Lag et komplett kredittnotat med fokus på korrekt verdivurdering basert på prosjekttype. Returner JSON.
+Lag et komplett kredittnotat med fokus på korrekt verdivurdering basert på prosjekttype.
+Husk å vurdere tomtelån og byggelån separat hvis begge er oppgitt.
+For tomtelån: vurder LTV mot tomteverdi/takst og kausjonsdekning.
+For byggelån: vurder LTV mot prosjektkost og 85%-regelen.
+Inkluder gnr/bnr i sikkerheter-seksjonen som panteobjekt.
+Returner JSON.
 """
 
     try:
@@ -968,7 +1085,27 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.key_value("Utnyttelsesgrad (BYA):", f"{safe_get(reg, 'utnyttelsesgrad_bya_pst', 0)}%")
         pdf.key_value("Tillatt vs. planlagt BTA:", safe_get(reg, "tillatt_vs_planlagt_bta", "-"))
         pdf.key_value("Rammegodkjenning:", safe_get(reg, "rammegodkjenning_status", "-"))
+        if project_info.get("gnr_bnr"):
+            pdf.key_value("Gnr/bnr (panteobjekt):", project_info["gnr_bnr"])
+        if project_info.get("kommune"):
+            pdf.key_value("Kommune:", project_info["kommune"])
+        if project_info.get("planident"):
+            pdf.key_value("Planident:", project_info["planident"])
         pdf.body_text(safe_get(reg, "kommentar", ""))
+
+    # 4b. Finansieringsstruktur (multi-lån)
+    if project_info.get("tomtelaan_mnok", 0) > 0 or project_info.get("infralaan_mnok", 0) > 0:
+        pdf.section_title("4b", "Finansieringsstruktur")
+        pdf.key_value("Byggelån (søkt):", f"{project_info.get('soekt_laan_mnok', 0)} MNOK")
+        if project_info.get("tomtelaan_mnok", 0) > 0:
+            pdf.key_value("Tomtelån (separat):", f"{project_info['tomtelaan_mnok']} MNOK")
+            if project_info.get("tomtelaan_tomt_takst_mnok", 0) > 0:
+                ltv_tomt = round(project_info["tomtelaan_mnok"] / project_info["tomtelaan_tomt_takst_mnok"] * 100, 1)
+                pdf.key_value("Takst/verdi tomt:", f"{project_info['tomtelaan_tomt_takst_mnok']} MNOK (LTV tomt: {ltv_tomt}%)")
+        if project_info.get("infralaan_mnok", 0) > 0:
+            pdf.key_value("Infralån (forskuttering):", f"{project_info['infralaan_mnok']} MNOK")
+        total_laan = project_info.get("soekt_laan_mnok", 0) + project_info.get("tomtelaan_mnok", 0) + project_info.get("infralaan_mnok", 0)
+        pdf.key_value("Sum lån:", f"{total_laan:.1f} MNOK")
 
     # 5. Økonomi
     pdf.section_title(5, "Økonomisk analyse")
@@ -1075,9 +1212,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     pdf.set_xy(14, pdf.get_y() + 5)
     pdf.cell(0, 5, "Kredittnotatet er automatisk generert og skal gjennomgås av kredittavdelingen før fremleggelse for kredittkomité.")
 
-    return pdf.output()
-
-
+    return bytes(pdf.output())
 # ────────────────────────────────────────────────────────────────
 # PREMIUM CSS (same as other Builtly modules)
 # ────────────────────────────────────────────────────────────────
@@ -1203,6 +1338,69 @@ st.markdown("""
     .status-green { color: #22c55e; font-weight: 700; }
     .status-yellow { color: #f59e0b; font-weight: 700; }
     .status-red { color: #ef4444; font-weight: 700; }
+
+    /* ══ COMPREHENSIVE DARK-THEME FIXES ══ */
+    /* DataFrames/Tables */
+    .stDataFrame [data-testid="glideDataEditor"], .dvn-scroller, .dvn-scroller div { background-color: #0c1c2c !important; }
+    .stDataFrame th, .stDataFrame [role="columnheader"], .gdg-header,
+    [data-testid="stDataFrameResizable"] [role="columnheader"] { background-color: #112236 !important; color: #c8d3df !important; border-color: rgba(120,145,170,0.18) !important; }
+    .stDataFrame td, .stDataFrame [role="gridcell"],
+    [data-testid="stDataFrameResizable"] [role="gridcell"] { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
+    .stDataFrame tr:hover td, .stDataFrame [role="row"]:hover [role="gridcell"] { background-color: #112236 !important; }
+    .gdg-cell, .gdg-cell-text { color: #f5f7fb !important; }
+    .stDataFrame [data-testid="stDataFrameResizable"] { border: 1px solid rgba(120,145,170,0.15) !important; border-radius: 12px !important; }
+
+    /* Alerts */
+    .stAlert, div[data-testid="stAlert"], .stAlert > div, div[role="alert"] { background-color: #112236 !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
+    .stAlert p, .stAlert span, .stAlert div, div[role="alert"] p, div[role="alert"] span { color: #f5f7fb !important; }
+
+    /* File uploader */
+    .stFileUploader, .stFileUploader > div, [data-testid="stFileUploader"], [data-testid="stFileUploaderDropzone"] { background-color: #0c1c2c !important; border-color: rgba(120,145,170,0.18) !important; color: #f5f7fb !important; }
+    .stFileUploader small, .stFileUploader span, [data-testid="stFileUploaderDropzone"] span, [data-testid="stFileUploaderDropzone"] small { color: #9fb0c3 !important; }
+    [data-testid="stFileUploaderFile"] { background-color: #112236 !important; color: #f5f7fb !important; }
+    [data-testid="stFileUploaderFile"] span, [data-testid="stFileUploaderFile"] small { color: #f5f7fb !important; }
+
+    /* Date picker / calendar */
+    .stDateInput input { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
+    div[data-baseweb="calendar"], div[data-baseweb="calendar"] * { background-color: #162a42 !important; color: #f5f7fb !important; }
+    div[data-baseweb="calendar"] [aria-selected="true"] { background-color: #38bdf8 !important; color: #041018 !important; }
+    div[data-baseweb="datepicker"] { background-color: #162a42 !important; }
+
+    /* Tooltips */
+    div[data-testid="stTooltipIcon"] + div, .stTooltipContent, [data-testid="stTooltipContent"],
+    div[data-baseweb="tooltip"] > div { background-color: #162a42 !important; color: #f5f7fb !important; border: 1px solid rgba(120,145,170,0.18) !important; }
+
+    /* Expander */
+    .stExpander, details[data-testid="stExpander"], .streamlit-expanderHeader,
+    details[data-testid="stExpander"] summary, details[data-testid="stExpander"] > div { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
+
+    /* Tab panel */
+    .stTabs [data-baseweb="tab-panel"], div[role="tabpanel"] { background-color: transparent !important; color: #f5f7fb !important; }
+
+    /* Number input stepper */
+    .stNumberInput button { background-color: #112236 !important; color: #c8d3df !important; border-color: rgba(120,145,170,0.18) !important; }
+
+    /* Toggle */
+    .stToggle span, .stCheckbox span, .stRadio span { color: #f5f7fb !important; }
+
+    /* Multi-select tags */
+    span[data-baseweb="tag"] { background-color: rgba(56,194,201,0.15) !important; color: #38bdf8 !important; }
+
+    /* Popover/modal */
+    div[data-baseweb="modal"] > div, div[data-baseweb="popover"], div[data-baseweb="popover"] > div { background-color: #162a42 !important; color: #f5f7fb !important; }
+
+    /* Toast */
+    div[data-baseweb="toast"], div[data-baseweb="snackbar"], .stToast, [data-testid="stToast"] { background-color: #162a42 !important; color: #f5f7fb !important; border: 1px solid rgba(120,145,170,0.18) !important; }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0c1c2c; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: rgba(120,145,170,0.3); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(120,145,170,0.5); }
+
+    /* Catch-all white backgrounds */
+    .stApp div[style*="background-color: white"], .stApp div[style*="background-color: rgb(255"],
+    .stApp div[style*="background: white"], .stApp div[style*="background: rgb(255"] { background-color: #0c1c2c !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1406,7 +1604,7 @@ with left:
                 <div style="font-size:0.72rem;color:#555;margin-top:5px;">Kilde: {si.get("kilde","")}</div>
             </div>''')
 
-    render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering og godkjenningsstatus.", "Regulering")
+    render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering, gnr/bnr og godkjenningsstatus.", "Regulering")
 
     c3, c4 = st.columns(2)
     with c3:
@@ -1416,11 +1614,48 @@ with left:
         reg_opts = ["Vedtatt", "Under behandling", "Ikke påbegynt", "Krever omregulering"]
         reguleringsplan = st.selectbox("Reguleringsplan", reg_opts)
     with c4:
+        gnr_bnr = st.text_input("Gnr/bnr (panteobjekt)", value=pf.get("gnr_bnr", ""), placeholder="Gnr. 81, bnr. 56, 57, 10, 154, 155, 156", help="Matrikkeldata — grunnlag for bankens pant")
         rg_opts = ["Godkjent", "Søkt", "Ikke søkt"]
         rammegodkjenning = st.selectbox("Rammegodkjenning / IG", rg_opts)
         byggestart = st.date_input("Planlagt byggestart", value=date(2026, 9, 1))
         ferdigstillelse = st.date_input("Planlagt ferdigstillelse", value=date(2028, 12, 31))
+
+    c3b, c4b = st.columns(2)
+    with c3b:
         forhaandssalg = st.number_input("Forhåndssalg/utleiegrad (%)", min_value=0, max_value=100, value=int(pf.get("forhaandssalg_pst", 0) or 0), step=5)
+        kommune = st.text_input("Kommune", value=pf.get("kommune", ""), placeholder="Trondheim")
+    with c4b:
+        planident = st.text_input("Planident / reg.plan", value=pf.get("planident", ""), placeholder="r20200040")
+
+    # ── Multi-lån: Tomtelån + Byggelån + Infralån ──
+    render_section("2b. Finansieringsstruktur", "Prosjekter kan ha flere lånetyper. Spesifiser alle aktuelle.", "Lån")
+
+    render_html('''<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:0.8rem 1.1rem;margin:0.6rem 0;">
+        <div style="font-weight:700;font-size:0.85rem;color:#38bdf8;margin-bottom:3px;">Flere lånetyper</div>
+        <div style="font-size:0.82rem;color:#9fb0c3;">Utviklingsprosjekter kan ha tomtelån (for ubebygd tomt), byggelån (for produksjon) og infralån (for infrastruktur som betjener flere byggetrinn). Spesifiser alle aktuelle lån.</div>
+    </div>''')
+
+    har_tomtelaan = st.toggle("Tomtelån (separat)", value=bool(pf.get("tomtelaan_mnok", 0)))
+    tomtelaan_mnok = 0.0
+    tomtelaan_tomt_takst = 0.0
+    if har_tomtelaan:
+        tl1, tl2 = st.columns(2)
+        with tl1:
+            tomtelaan_mnok = st.number_input("Tomtelån (MNOK)", min_value=0.0, value=float(pf.get("tomtelaan_mnok", 0) or 0), step=1.0, format="%.1f",
+                                              help="Separat tomtelån for arealer som ikke er del av byggelånet")
+        with tl2:
+            tomtelaan_tomt_takst = st.number_input("Takst/verdi tomt (MNOK)", min_value=0.0, value=float(pf.get("tomtelaan_tomt_takst_mnok", 0) or 0), step=1.0, format="%.1f",
+                                                    help="Takstverdi eller avtalt kjøpspris for tomten som sikkerhet for tomtelånet")
+
+    har_infralaan = st.toggle("Infralån (forskuttering)", value=bool(pf.get("infralaan_mnok", 0)))
+    infralaan_mnok = 0.0
+    if har_infralaan:
+        il1, il2 = st.columns(2)
+        with il1:
+            infralaan_mnok = st.number_input("Infralån (MNOK)", min_value=0.0, value=float(pf.get("infralaan_mnok", 0) or 0), step=1.0, format="%.1f",
+                                              help="Forskuttering av infrastruktur som betjener flere byggetrinn")
+        with il2:
+            st.info(f"Infra fordeles på fremtidige byggetrinn og refunderes etter hvert som disse realiseres.")
 
     render_section("3. Rentevilkår og finansstruktur", "Rentebetingelser fra bankens tilbud.", "Rente")
     cr1, cr2, cr3, cr4 = st.columns(4)
@@ -1541,6 +1776,7 @@ with left:
                         f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["omsetning"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:{res_color};font-weight:700;">{r["aarsresultat"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["egenkapital"]}</td>'
+                        f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r.get("gjeld", "-")}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["ek_andel"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["totalkapital"]}</td>'
                         f'</tr>'
@@ -1553,6 +1789,7 @@ with left:
                         '<th style="padding:3px 8px;text-align:right;">Omsetning</th>'
                         '<th style="padding:3px 8px;text-align:right;">Årsresultat</th>'
                         '<th style="padding:3px 8px;text-align:right;">EK</th>'
+                        '<th style="padding:3px 8px;text-align:right;">Gjeld</th>'
                         '<th style="padding:3px 8px;text-align:right;">EK-andel</th>'
                         '<th style="padding:3px 8px;text-align:right;">Totalkapital</th>'
                         '</tr>'
@@ -1568,6 +1805,12 @@ with left:
                 if ka.get("ek_vs_kausjon") is not None:
                     ek_dekning = f' · EK-dekning: <span style="color:{farge};font-weight:700;">{ka["ek_vs_kausjon"]:.1f}x kausjonsbeløpet</span>'
 
+                gjeld_info = ""
+                if ka.get("gjeldsgrad") is not None:
+                    gjeld_info = f' · Gjeldsgrad: <span style="color:#c8d3df;font-weight:600;">{ka["gjeldsgrad"]:.1f}x</span>'
+                if ka.get("totalkapital_mnok") is not None:
+                    gjeld_info += f' · Totalkapital: <span style="color:#c8d3df;font-weight:600;">{ka["totalkapital_mnok"]:.0f} MNOK</span>'
+
                 render_html(f'''
                 <div style="background:rgba(10,22,35,0.6);border:1px solid {farge}44;border-left:4px solid {farge};
                             border-radius:12px;padding:1rem 1.2rem;margin-bottom:0.8rem;">
@@ -1578,7 +1821,7 @@ with left:
                                      padding:1px 8px;font-size:0.75rem;font-weight:700;color:{farge};text-transform:uppercase;">
                             {vurd}
                         </span>
-                        <span style="font-size:0.8rem;color:#9fb0c3;">{ka.get("_type","Selvskyldner")} · {ka.get("_kausjon_beloep",0):.1f} MNOK{ek_dekning}</span>
+                        <span style="font-size:0.8rem;color:#9fb0c3;">{ka.get("_type","Selvskyldner")} · {ka.get("_kausjon_beloep",0):.1f} MNOK{ek_dekning}{gjeld_info}</span>
                     </div>
                     <div style="margin-bottom:0.5rem;">{punkter_html}</div>
                     {reg_html}
@@ -1709,6 +1952,9 @@ if run_analysis:
         "antall_enheter": antall_enheter,
         "bra_i_kvm": bra_i_kvm,
         "tomt_kvm": tomt_kvm,
+        "gnr_bnr": gnr_bnr,
+        "kommune": kommune,
+        "planident": planident,
         "reguleringsplan": reguleringsplan,
         "rammegodkjenning": rammegodkjenning,
         "byggestart": str(byggestart),
@@ -1719,6 +1965,10 @@ if run_analysis:
         "pantesikkerhet": pantesikkerhet,
         "garantier": garanti,
         "spesielle_forhold": spesielle_forhold,
+        # Multi-lån
+        "tomtelaan_mnok": tomtelaan_mnok,
+        "tomtelaan_tomt_takst_mnok": tomtelaan_tomt_takst,
+        "infralaan_mnok": infralaan_mnok,
         # Rentevilkår
         "nibor_margin_pst": nibor_margin,
         "provisjon_pst_kvartal": provisjon,
