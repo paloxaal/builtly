@@ -7884,23 +7884,29 @@ def _vision_direct_prompt_v15(mode: str, page_label: str, crop_w: int = 800, cro
         mode_guidance = f"""
 SYSTEMTYPE: Vegg-/kjernebæring (typisk norsk boligblokk)
 
-STEG 1 - IDENTIFISER BYGGETS YTTERGRENSE:
-Før du markerer noe, finn byggets YTRE KONTUR (den tykke sammenhengende linjen som avgrenser
-innendørsarealet). Alt UTENFOR denne konturen er uteareal (terrasser, balkonger, landskap).
-INGEN elementer skal plasseres utenfor byggets yttergrense.
+STEG 1 - IDENTIFISER BYGGETS INDRE FOTAVTRYKK:
+Finn byggets HOVEDREKTANGEL — den tykke sammenhengende linjen som avgrenser innendørsarealet.
+TERRASSER og BALKONGER stikker ut fra dette rektangelet, men er IKKE del av fotavtrykket.
+building_footprint skal bare dekke det INDRE boarealet (ekskl. terrasser/balkonger).
+INGEN elementer skal plasseres utenfor dette indre fotavtrykket.
+Bærevegger skal starte og slutte INNENFOR dette rektangelet.
 
 STEG 2 - FINN BÆREVEGGER (4-8 stk):
 A) LEILIGHETSSKILLEVEGGER (vertikale, 3-6 stk):
    - Se etter de TYKKE vertikale linjene som deler bygget i jevne soner.
-   - De løper fra TOPP til BUNN av byggets innvendige areal.
    - Typisk avstand: 6-8 meter (ca {int(crop_w * 0.15)}-{int(crop_w * 0.22)} piksler fra hverandre).
    - De er TYKKERE enn vanlige romvegger (2-3 piksler vs 1 piksel).
    - IKKE marker ytterveggen/fasadelinjen.
+   - VIKTIG: Veggens START- og SLUTTPUNKT skal være der veggen FAKTISK begynner
+     og slutter inne i bygget. IKKE strekk veggen ut i terrasser eller balkonger.
+   - Bruk building_footprint.y_min som øverste y og building_footprint.y_max som
+     nederste y. Vegger skal IKKE strekke seg utenfor dette.
 
 B) KORRIDORVEGG (horisontal, 1-2 stk):
    - Bygget er typisk delt i to rader av leiligheter med en korridor mellom.
    - Korridorveggen er en HORISONTAL linje som løper fra VENSTRE til HØYRE.
    - Den ligger typisk ca midt i byggets dybde.
+   - Start- og sluttpunkt skal ligge INNENFOR byggets indre fotavtrykk.
 
 STEG 3 - FINN KJERNER (1-2 stk):
 - Trappekjerner har SIKKSAKKLINJER (trappløp) inne i et rektangulært område.
@@ -8071,11 +8077,31 @@ def _vision_direct_elements_v15(
                     length_px = math.hypot(px2 - px1, py2 - py1)
                     if length_px < max(15, min(cw, ch) * 0.03):
                         continue
-                    # v15: footprint check on midpoint (span_arrows can be outside)
-                    mid_px = (px1 + px2) / 2.0
-                    mid_py = (py1 + py2) / 2.0
-                    if e_type != "span_arrow" and not _inside_footprint(mid_px, mid_py):
-                        continue
+                    # v15: TRIM wall endpoints to footprint (not just check midpoint)
+                    if e_type != "span_arrow":
+                        mid_px = (px1 + px2) / 2.0
+                        mid_py = (py1 + py2) / 2.0
+                        if not _inside_footprint(mid_px, mid_py):
+                            continue
+                        # Clip endpoints to footprint boundary
+                        is_vertical = abs(px2 - px1) < abs(py2 - py1) * 0.3
+                        is_horizontal = abs(py2 - py1) < abs(px2 - px1) * 0.3
+                        if is_vertical:
+                            # Trim y-coordinates to footprint
+                            y_top = max(min(py1, py2), fp_ymin + fp_margin * 0.5)
+                            y_bot = min(max(py1, py2), fp_ymax - fp_margin * 0.5)
+                            if y_bot - y_top < max(15, min(cw, ch) * 0.05):
+                                continue
+                            px1 = px2 = (px1 + px2) / 2.0  # straighten
+                            py1, py2 = y_top, y_bot
+                        elif is_horizontal:
+                            # Trim x-coordinates to footprint
+                            x_left = max(min(px1, px2), fp_xmin + fp_margin * 0.5)
+                            x_right = min(max(px1, px2), fp_xmax - fp_margin * 0.5)
+                            if x_right - x_left < max(15, min(cw, ch) * 0.05):
+                                continue
+                            py1 = py2 = (py1 + py2) / 2.0  # straighten
+                            px1, px2 = x_left, x_right
                     px1, py1, px2, py2 = px1 / scale, py1 / scale, px2 / scale, py2 / scale
                     nx1 = clamp((rx + px1) / max(image_w, 1), 0.0, 1.0)
                     ny1 = clamp((ry + py1) / max(image_h, 1), 0.0, 1.0)
@@ -10251,7 +10277,7 @@ def _render_static_fallback_editor_v9(
     drawing_record: Dict[str, Any],
     sketch: Dict[str, Any],
 ) -> Optional[Dict[str, float]]:
-    """Docker-compatible editor: uses builtly_click_editor if available, else static image."""
+    """Docker/Render-compatible editor using inline HTML (no declare_component needed)."""
     try:
         show_guides = bool(st.session_state.get("rib_editor_show_guides", True))
         editor_img, _ = build_editor_crop_overlay_image(drawing_record, sketch, show_guides=show_guides)
@@ -10259,23 +10285,54 @@ def _render_static_fallback_editor_v9(
         st.info("Kunne ikke bygge plansnitt-preview.")
         return None
 
-    # Try Docker-compatible click editor
-    if HAS_DOCKER_EDITOR:
-        try:
-            click = _docker_click_editor(
-                editor_img,
-                key=f"docker_editor_{sketch.get('page_index', 0)}_{st.session_state.get('rib_draft_updated_at', '')}",
-                status_text="Klikk i planutsnittet for å plassere eller flytte elementer.",
-            )
-            if click is not None:
-                return click
-            return None
-        except Exception:
-            pass
+    # v15: Use inline HTML with st.components.v1.html() — works everywhere
+    try:
+        import io as _io_editor
+        buf = _io_editor.BytesIO()
+        max_w = 1200
+        show_img = editor_img
+        if editor_img.width > max_w:
+            ratio = max_w / editor_img.width
+            show_img = editor_img.resize((max_w, int(editor_img.height * ratio)), Image.LANCZOS)
+        show_img.save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        data_url = f"data:image/jpeg;base64,{b64}"
+        nat_w, nat_h = editor_img.width, editor_img.height
 
-    # Ultimate fallback: static image
-    st.image(editor_img, use_container_width=True)
-    st.caption("Interaktiv klikk-redigering er ikke tilgjengelig i dette miljøet. Bruk tabellredigering under «Avansert tabellredigering / fallback» for å justere elementer.")
+        skey = f"inline_click_{sketch.get('page_index', 0)}_{hash(st.session_state.get('rib_draft_updated_at', '')) % 99999}"
+        html_code = f"""
+<div id="wrap_{skey}" style="width:100%;position:relative;">
+<img id="img_{skey}" src="{data_url}" style="width:100%;cursor:crosshair;border-radius:8px;display:block;" />
+<div id="status_{skey}" style="font-size:12px;color:#8899aa;padding:4px;">Klikk i bildet for å registrere punkt.</div>
+</div>
+<script>
+(function() {{
+  var img = document.getElementById('img_{skey}');
+  var status = document.getElementById('status_{skey}');
+  if (!img) return;
+  img.addEventListener('click', function(e) {{
+    var rect = img.getBoundingClientRect();
+    var scaleX = {nat_w} / Math.max(rect.width, 1);
+    var scaleY = {nat_h} / Math.max(rect.height, 1);
+    var x = Math.round((e.clientX - rect.left) * scaleX * 100) / 100;
+    var y = Math.round((e.clientY - rect.top) * scaleY * 100) / 100;
+    status.textContent = 'Siste registrerte klikk: x=' + x.toFixed(1) + ', y=' + y.toFixed(1);
+    // Store in parent for Streamlit to read
+    window.parent.postMessage({{type: 'streamlit:setComponentValue', value: {{x: x, y: y, event_id: Date.now() + '-' + Math.random().toString(36).slice(2,6)}}}}, '*');
+  }});
+}})();
+</script>
+"""
+        if components is not None:
+            components.html(html_code, height=int(show_img.height * 0.85) + 30, scrolling=False)
+            st.caption("Innebygd canvas-editor er aktiv. Klikk direkte i planutsnittet for å legge inn korrigeringer.")
+        else:
+            st.image(editor_img, use_container_width=True)
+            st.caption("Interaktiv editor er ikke tilgjengelig. Bruk tabellredigering.")
+    except Exception:
+        st.image(editor_img, use_container_width=True)
+        st.caption("Interaktiv editor feilet. Bruk tabellredigering.")
+
     return None
 
 
