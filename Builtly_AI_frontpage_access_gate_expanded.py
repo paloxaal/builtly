@@ -2063,7 +2063,7 @@ def contact_href(lang_key: str) -> str:
     params = {"contact": "open", "lang": language_slug(lang_key)}
     if assistant_query_requested() or st.session_state.get("assistant_dialog_open"):
         params["assistant"] = "open"
-    return "?" + urlparse.urlencode(params)
+    return "?" + urlparse.urlencode(params) + "#contact-form-anchor"
 
 
 def contact_close_href(lang_key: str) -> str:
@@ -4646,25 +4646,22 @@ render_html(
     <div class="integration-footer-callout">
         <a href="{contact_href(st.session_state.app_lang)}" target="_self" class="integration-footer-link">{lang['partner_line']}</a>
     </div>
-    <div id="contact-form-anchor" style="height:0;overflow:hidden;"></div>
+    <div id="contact-form-anchor" style="position:relative;top:-80px;height:1px;pointer-events:none;"></div>
     """
 )
 
 if contact_query_requested():
-    # Scroll to the contact form smoothly after Streamlit re-renders
+    # Belt-and-suspenders: JS scroll as fallback in case browser doesn't honour hash
     st.components.v1.html(
         """<script>
-        window.addEventListener('load', function() {
-            setTimeout(function() {
-                var el = document.getElementById('contact-form-anchor');
-                if (!el) {
-                    // fallback: look for the expander
-                    var expanders = document.querySelectorAll('[data-testid="stExpander"]');
-                    if (expanders.length) el = expanders[expanders.length - 1];
-                }
-                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }, 120);
-        });
+        (function tryScroll(attempts) {
+            var el = document.getElementById('contact-form-anchor');
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } else if (attempts > 0) {
+                setTimeout(function() { tryScroll(attempts - 1); }, 150);
+            }
+        })(6);
         </script>""",
         height=0,
     )
