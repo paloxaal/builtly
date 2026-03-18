@@ -182,14 +182,23 @@ Returner KUN gyldig JSON med disse feltene (null for ukjente):
   "provisjon_pst_kvartal": 0.0,
   "etableringsgebyr_nok": 0,
   "loepetid_mnd": 0,
-  "kausjoner": [
-    {"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner", "kommentar": ""}
-  ],
+  "kausjoner": [],
   "vilkaar_foer_utbetaling": [],
   "covenants_liste": [],
   "spesielle_forhold": ""
 }
-VIKTIG: BRA-i er det salgbare innendørsarealet som brukes for entreprisekost og salgsinntekt per kvm.
+
+KRITISK for kausjoner — les NØYE:
+- Finn ALLE selskaper/personer som stiller kausjon, garanti eller sikkerhet i dokumentet
+- For hvert selskap: hent fullstendig navn OG organisasjonsnummer (org.nr.) fra dokumentet
+- Eks: "Selvskyldnerkausjon fra Fredensborg Bolig AS (org.nr. 919 998 296) pålydende 70 MNOK" → en rad
+- Eks: "Selvskyldnerkausjon fra Bolig Norge AS (org.nr. 923 733 345) pålydende 70 MNOK" → en ny rad
+- Hvis to selskaper nevnes som kausjonister, skal "kausjoner" ha TO elementer i listen
+- Hvert element: {"kausjonist": "Selskapsnavn AS", "orgnr": "XXX XXX XXX", "beloep_mnok": 70.0, "type": "Selvskyldner", "kommentar": ""}
+- "type" er alltid "Selvskyldner" med mindre "simpel" eksplisitt nevnes
+- Returner ALDRI en tom kausjoner-liste hvis det finnes kausjonister i dokumentet
+
+VIKTIG: BRA-i er det salgbare innendørsarealet (SBRA) brukt for entreprisekost og salgsinntekt per kvm.
 Dokumenttekst:
 """ + doc_text[:60000]
     try:
@@ -574,7 +583,7 @@ class CreditPDF(FPDF if FPDF else object):
         self.set_y(-15)
         self._font("", 7)
         self.set_text_color(159, 176, 195)
-        self.cell(0, 8, f"Side {self.page_no()}/{{nb}} — Konfidensielt — Utkast, krever faglig kontroll", align="C")
+        self.cell(0, 8, self._safe(f"Side {self.page_no()}/{{nb}} - Konfidensielt - Utkast, krever faglig kontroll"), align="C")
 
     def cover_page(self, project_name, laantaker, laanetype):
         self.add_page()
@@ -714,7 +723,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.key_value("Beregnet verdi:", f"{safe_get(vv, 'beregnet_verdi_mnok', 0)} MNOK")
         pdf.key_value("Avvik takst vs. beregnet:", f"{safe_get(vv, 'avvik_takst_vs_beregnet_pst', 0)}%")
         takst_ok = safe_get(vv, "takst_er_rimelig", True)
-        pdf.key_value("Takst rimelig:", "Ja" if takst_ok else "NEI — se kommentar")
+        pdf.key_value("Takst rimelig:", "Ja" if takst_ok else "NEI - se kommentar")
         pdf.body_text(safe_get(vv, "kommentar_takst", ""))
 
         br = safe_get(vv, "bolig_residual", {})
@@ -733,7 +742,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.key_value("Residual tomteverdi:", f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK")
             pdf.key_value("Oppgitt tomtekost:", f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK")
             tomte_ok = safe_get(br, "tomtekost_innenfor_residual", True)
-            pdf.key_value("Tomtekost innenfor residual:", "Ja" if tomte_ok else "NEI — for høy tomtepris")
+            pdf.key_value("Tomtekost innenfor residual:", "Ja" if tomte_ok else "NEI - for høy tomtepris")
             pdf.key_value("Faktisk margin:", f"{safe_get(br, 'faktisk_margin_pst', 0)}%")
             pdf.body_text(safe_get(br, "kommentar", ""))
 
@@ -755,7 +764,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.key_value("WAULT:", f"{safe_get(ny, 'wault_aar', 0)} år")
             pdf.key_value("Vakansrisiko:", f"{safe_get(ny, 'vakansrisiko_pst', 0)}%")
             verdiskaping = safe_get(ny, "verdiskaping_positiv", True)
-            pdf.key_value("Verdiskaping:", "Positiv" if verdiskaping else "NEGATIV — yield on cost < markedsyield")
+            pdf.key_value("Verdiskaping:", "Positiv" if verdiskaping else "NEGATIV - yield on cost < markedsyield")
             pdf.body_text(safe_get(ny, "kommentar", ""))
 
         pdf.key_value("Bankens verdianslag:", f"{safe_get(vv, 'bankens_verdianslag_mnok', 0)} MNOK")
@@ -872,7 +881,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     pdf._font("B", 8)
     pdf.set_text_color(180, 120, 0)
     pdf.set_xy(14, pdf.get_y() + 2)
-    pdf.cell(0, 5, "Utkast — krever faglig kontroll")
+    pdf.cell(0, 5, "Utkast - krever faglig kontroll")
     pdf._font("", 7)
     pdf.set_xy(14, pdf.get_y() + 5)
     pdf.cell(0, 5, "Kredittnotatet er automatisk generert og skal gjennomgås av kredittavdelingen før fremleggelse for kredittkomité.")
@@ -1084,9 +1093,15 @@ if do_prefill and uploads:
             extracted = prefill_from_docs(client_type_pf, client_pf, raw_text)
         if extracted:
             st.session_state.pf = extracted
-            if extracted.get("kausjoner"):
-                st.session_state.kausjon_rows = extracted["kausjoner"]
-            st.success("✓ Data hentet fra dokumentene — kontroller og juster feltene nedenfor.")
+            # Replace kausjon rows completely – filter out empty/zero default rows first
+            kausjoner = extracted.get("kausjoner", [])
+            filled = [k for k in kausjoner if k.get("kausjonist") or k.get("beloep_mnok", 0) > 0]
+            if filled:
+                st.session_state.kausjon_rows = filled
+            else:
+                # Keep one blank row as placeholder
+                st.session_state.kausjon_rows = [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
+            st.success(f"✓ Data hentet fra dokumentene ({len(filled)} kausjon(er) funnet) — kontroller og juster feltene nedenfor.")
             st.rerun()
         else:
             st.warning("Ingen data funnet i dokumentene. Fyll inn manuelt.")
