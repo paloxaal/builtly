@@ -172,9 +172,6 @@ Returner KUN gyldig JSON med disse feltene (null for ukjente):
   "antall_enheter": 0,
   "bra_i_kvm": 0,
   "tomt_kvm": 0,
-  "gnr_bnr": "",
-  "kommune": "",
-  "planident": "",
   "tomtekost_mnok": 0.0,
   "entreprisekost_mnok": 0.0,
   "forhaandssalg_pst": 0,
@@ -185,9 +182,6 @@ Returner KUN gyldig JSON med disse feltene (null for ukjente):
   "provisjon_pst_kvartal": 0.0,
   "etableringsgebyr_nok": 0,
   "loepetid_mnd": 0,
-  "tomtelaan_mnok": 0.0,
-  "tomtelaan_tomt_takst_mnok": 0.0,
-  "infralaan_mnok": 0.0,
   "kausjoner": [],
   "vilkaar_foer_utbetaling": [],
   "covenants_liste": [],
@@ -203,21 +197,6 @@ KRITISK for kausjoner — les NØYE:
 - Hvert element: {"kausjonist": "Selskapsnavn AS", "orgnr": "XXX XXX XXX", "beloep_mnok": 70.0, "type": "Selvskyldner", "kommentar": ""}
 - "type" er alltid "Selvskyldner" med mindre "simpel" eksplisitt nevnes
 - Returner ALDRI en tom kausjoner-liste hvis det finnes kausjonister i dokumentet
-
-KRITISK for gnr/bnr og matrikkeldata:
-- Finn ALLE gnr (gårdsnummer) og bnr (bruksnummer) som nevnes som panteobjekt
-- Format: "Gnr. 81, bnr. 56, 57, 10, 154, 155, 156"
-- Disse er bankens panteobjekt og er kritisk informasjon
-
-KRITISK for finansieringsstruktur:
-- Prosjekter kan ha FLERE lånetyper: byggelån, tomtelån og infralån
-- Tomtelån: separat lån for tomtekjøp/areal som ikke bygges på ennå
-- Infralån: forskuttering av infrastruktur som betjener flere byggetrinn
-- Byggelån: lån for selve byggeprosjektet
-- "soekt_laan_mnok" = byggelånet (hovedlånet)
-- "tomtelaan_mnok" = eventuelt separat tomtelån
-- "infralaan_mnok" = eventuelt separat infralån
-- Sett laanetype til "Kombinert tomte- og byggelån" hvis begge finnes
 
 VIKTIG: BRA-i er det salgbare innendørsarealet (SBRA) brukt for entreprisekost og salgsinntekt per kvm.
 Dokumenttekst:
@@ -376,14 +355,13 @@ def lookup_company(orgnr_or_name: str) -> dict:
 
 def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     """
-    Henter regnskap fra Brreg og gjør en utvidet soliditetsanalyse av kausjonisten.
-    Inkluderer: EK-dekning, gjeldsgrad, totalkapital, lønnsomhet, trend.
+    Henter regnskap fra Brreg og gjør en kort soliditetsanalyse av kausjonisten.
     Returnerer vurdering: sterk / akseptabel / svak / ukjent.
     """
     si = lookup_company(orgnr_or_name)
     if not si.get("navn") or not si.get("regnskap"):
         return {"navn": si.get("navn", orgnr_or_name), "orgnr": si.get("orgnr", ""), "vurdering": "ukjent",
-                "farge": "#9fb0c3", "begrunnelse": ["Regnskapstall ikke tilgjengelig i Brreg."], "regnskap": []}
+                "farge": "#9fb0c3", "begrunnelse": "Regnskapstall ikke tilgjengelig i Brreg.", "regnskap": []}
 
     reg = si["regnskap"]  # siste 3 år, nyeste først
     siste = reg[0]
@@ -395,34 +373,6 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     ek_mnok    = round(ek_raw / 1_000_000, 1)
     res_mnok   = round(res_raw / 1_000_000, 1)
     omset_mnok = round(omset_raw / 1_000_000, 1)
-
-    # Parse totalkapital og gjeld fra regnskapet
-    tk_str = siste.get("totalkapital", "-")
-    gjeld_str = siste.get("gjeld", "-")
-    tk_mnok = None
-    gjeld_mnok = None
-    gjeldsgrad = None
-
-    try:
-        tk_val = tk_str.replace("MNOK", "").replace("TNOK", "").replace("kr", "").replace(",", ".").strip()
-        if "MNOK" in siste.get("totalkapital", ""):
-            tk_mnok = float(tk_val)
-        elif "TNOK" in siste.get("totalkapital", ""):
-            tk_mnok = float(tk_val) / 1000
-    except Exception:
-        pass
-
-    try:
-        gj_val = gjeld_str.replace("MNOK", "").replace("TNOK", "").replace("kr", "").replace(",", ".").strip()
-        if "MNOK" in siste.get("gjeld", ""):
-            gjeld_mnok = float(gj_val)
-        elif "TNOK" in siste.get("gjeld", ""):
-            gjeld_mnok = float(gj_val) / 1000
-    except Exception:
-        pass
-
-    if gjeld_mnok is not None and ek_mnok and ek_mnok > 0:
-        gjeldsgrad = round(gjeld_mnok / ek_mnok, 2)
 
     # Nøkkeltall
     ek_vs_kausjon = round(ek_mnok / kausjon_beloep_mnok, 1) if kausjon_beloep_mnok > 0 else None
@@ -447,41 +397,6 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
     elif ek_mnok < 0:
         punkter.append(f"🔴 Negativ egenkapital {siste['egenkapital']} – kausjonisten er teknisk insolvent")
         score = max(score, 1)
-
-    # Gjeldsgrad
-    if gjeldsgrad is not None:
-        if gjeldsgrad <= 2:
-            punkter.append(f"✅ Gjeldsgrad {gjeldsgrad:.1f}x – moderat gearing")
-            score = max(score, 2)
-        elif gjeldsgrad <= 5:
-            punkter.append(f"⚠️ Gjeldsgrad {gjeldsgrad:.1f}x – høy gearing, men kan aksepteres for eiendomsselskap")
-        elif gjeldsgrad <= 10:
-            punkter.append(f"⚠️ Gjeldsgrad {gjeldsgrad:.1f}x – svært høy gearing")
-            score = min(score, 2) if score > 0 else 1
-        else:
-            punkter.append(f"🔴 Gjeldsgrad {gjeldsgrad:.1f}x – ekstremt høy gearing, svekker kausjonsverdi")
-            score = min(score, 1)
-
-    # Totalkapital (størrelse)
-    if tk_mnok is not None:
-        if tk_mnok >= 1000:
-            punkter.append(f"✅ Totalkapital {siste['totalkapital']} – stort og veletablert selskap")
-        elif tk_mnok >= 100:
-            punkter.append(f"✅ Totalkapital {siste['totalkapital']} – betydelig balanse")
-        elif tk_mnok >= 10:
-            punkter.append(f"⚠️ Totalkapital {siste['totalkapital']} – begrenset balanse relativt til kausjonsbeløp")
-
-    # Total gjeld
-    if gjeld_mnok is not None and kausjon_beloep_mnok > 0:
-        gjeld_vs_kausjon = round(gjeld_mnok / kausjon_beloep_mnok, 1) if kausjon_beloep_mnok > 0 else None
-        if gjeld_vs_kausjon and gjeld_vs_kausjon > 50:
-            punkter.append(f"⚠️ Total gjeld {siste['gjeld']} ({gjeld_vs_kausjon:.0f}x kausjonsbeløpet) – vurder eksponering mot andre forpliktelser")
-
-    # Omsetning
-    if omset_mnok > 0:
-        punkter.append(f"📊 Omsetning {siste['omsetning']} ({siste['aar']})")
-    else:
-        punkter.append(f"⚠️ Ingen rapportert omsetning ({siste['aar']}) – typisk holdingselskap")
 
     # Lønnsomhet siste år
     if res_mnok > 0:
@@ -520,17 +435,6 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
         elif ek_raw < ek_prev and ek_prev > 0:
             punkter.append(f"⚠️ EK falt fra {round(ek_prev/1e6,1)} til {ek_mnok} MNOK – negativ trend")
 
-    # Lønnsomhetstrend
-    if len(reg) >= 2:
-        res_prev = reg[1].get("_aarsresultat_nok") or 0
-        if res_raw > 0 and res_prev > 0:
-            punkter.append(f"✅ Positiv lønnsomhet i {reg[0]['aar']} og {reg[1]['aar']} – stabil inntjening")
-        elif res_raw > 0 and res_prev < 0:
-            punkter.append(f"⚠️ Snuoperasjon: negativt i {reg[1]['aar']}, positivt i {reg[0]['aar']}")
-        elif res_raw < 0 and res_prev < 0:
-            punkter.append(f"🔴 Negativt resultat to år på rad – svekker kausjonsverdi")
-            score = min(score, 1)
-
     # Konklusjon
     if score == 0:
         vurdering, farge = "ukjent", "#9fb0c3"
@@ -550,10 +454,6 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
         "regnskap": reg,
         "ek_mnok": ek_mnok,
         "ek_vs_kausjon": ek_vs_kausjon,
-        "gjeldsgrad": gjeldsgrad,
-        "gjeld_mnok": gjeld_mnok,
-        "totalkapital_mnok": tk_mnok,
-        "omsetning_mnok": omset_mnok,
         "kilde": si.get("kilde", ""),
     }
 
@@ -761,16 +661,13 @@ Prosjektinformasjon:
 - Låntaker: {project_info.get('laantaker', '')}
 - Organisasjonsnr: {project_info.get('orgnr', '')}
 - Lånetype: {project_info.get('laanetype', '')}
-- Søkt byggelån: {project_info.get('soekt_laan_mnok', 0)} MNOK
+- Søkt lån: {project_info.get('soekt_laan_mnok', 0)} MNOK
 - Totalinvestering: {project_info.get('totalinvestering_mnok', 0)} MNOK
 - Egenkapital: {project_info.get('egenkapital_mnok', 0)} MNOK
 - Prosjekttype: {project_info.get('prosjekttype', '')}
 - Antall enheter: {project_info.get('antall_enheter', '')}
 - BRA-i / SBRA: {project_info.get('bra_i_kvm', '')} kvm (salgbart innendørs areal — brukes for entreprisekost og salgsinntekt)
 - Tomt: {project_info.get('tomt_kvm', '')} kvm
-- Gnr/bnr (panteobjekt): {project_info.get('gnr_bnr', 'Ikke oppgitt')}
-- Kommune: {project_info.get('kommune', 'Ikke oppgitt')}
-- Planident: {project_info.get('planident', 'Ikke oppgitt')}
 - Reguleringsplan: {project_info.get('reguleringsplan', '')}
 - Rammegodkjenning: {project_info.get('rammegodkjenning', '')}
 - Entrepriseform: {project_info.get('entrepriseform', '')}
@@ -781,16 +678,7 @@ Prosjektinformasjon:
 - Eksisterende gjeld: {project_info.get('eksisterende_gjeld_mnok', 0)} MNOK
 - Pantesikkerhet: {project_info.get('pantesikkerhet', '')}
 - Rentevilkår: NIBOR 3MND + {project_info.get('nibor_margin_pst', 0)}% margin, provisjon {project_info.get('provisjon_pst_kvartal', 0)}% per kvartal, etablering NOK {project_info.get('etableringsgebyr_nok', 0)}, løpetid {project_info.get('loepetid_mnd', 0)} mnd
-
-Finansieringsstruktur (kan ha flere lånetyper):
-- Byggelån (søkt): {project_info.get('soekt_laan_mnok', 0)} MNOK
-- Tomtelån (separat): {project_info.get('tomtelaan_mnok', 0)} MNOK (takst/verdi tomt: {project_info.get('tomtelaan_tomt_takst_mnok', 0)} MNOK)
-- Infralån (forskuttering): {project_info.get('infralaan_mnok', 0)} MNOK
-- Tomtelån: bank finansierer normalt 50-70% av tomteverdi avhengig av kausjoner. 50% uten kausjon, 60-70% med solid kausjonist.
-- Byggelån: bank finansierer normalt 85-90% av prosjektkost.
-- 85%-regelen byggelån: Maks 85% av prosjektkost = {round(float(project_info.get('totalinvestering_mnok', 0) or 0) * 0.85, 1)} MNOK.
-
-Sikkerheter og kausjoner:
+- 85%-regelen: Bank kan finansiere maks 85% av prosjektkost = {round(float(project_info.get('totalinvestering_mnok', 0) or 0) * 0.85, 1)} MNOK. Vurder om søkt beløp {project_info.get('soekt_laan_mnok', 0)} MNOK er innenfor.
 - Kausjoner og tilleggsgarantier: {json.dumps(project_info.get('kausjoner', []), ensure_ascii=False)}
 - Selskapsinformasjon låntaker (Brreg/Proff): {json.dumps(project_info.get('selskapsinfo', {}), ensure_ascii=False)}
 - Spesielle forhold: {project_info.get('spesielle_forhold', '')}
@@ -819,12 +707,7 @@ Næring (yield-metode):
 Dokumentgrunnlag (utdrag):
 {doc_text[:40000]}
 
-Lag et komplett kredittnotat med fokus på korrekt verdivurdering basert på prosjekttype.
-Husk å vurdere tomtelån og byggelån separat hvis begge er oppgitt.
-For tomtelån: vurder LTV mot tomteverdi/takst og kausjonsdekning.
-For byggelån: vurder LTV mot prosjektkost og 85%-regelen.
-Inkluder gnr/bnr i sikkerheter-seksjonen som panteobjekt.
-Returner JSON.
+Lag et komplett kredittnotat med fokus på korrekt verdivurdering basert på prosjekttype. Returner JSON.
 """
 
     try:
@@ -851,368 +734,613 @@ Returner JSON.
 # ────────────────────────────────────────────────────────────────
 # PDF REPORT
 # ────────────────────────────────────────────────────────────────
-class CreditPDF(FPDF if FPDF else object):
-    def __init__(self):
-        super().__init__("P", "mm", "A4")
-        self.set_auto_page_break(auto=True, margin=25)
-        self._add_fonts()
-        self.accent = (56, 194, 201)
-        self.dark = (6, 17, 26)
 
+# ── Reportlab imports (PDF engine) ──────────────────────────────────────────
+try:
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame,
+        Paragraph, Spacer, Table, TableStyle, HRFlowable, KeepTogether, Image)
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm as _mm
+    from reportlab.lib import colors as _colors
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.pdfgen import canvas as _rl_canvas
+    _HAS_RL = True
+except ImportError:
+    _HAS_RL = False
 
-    @staticmethod
-    def _safe(text: str) -> str:
-        """Strip characters outside latin-1 range so Helvetica fallback never crashes."""
-        return str(text).replace('—', '-').replace('–', '-').replace('‘', "'").replace('’', "'").replace('“', '"').replace('”', '"').encode('latin-1', errors='replace').decode('latin-1')
+def _safe_pdf(t):
+    if t is None: return "-"
+    return (str(t).replace("\u2014","-").replace("\u2013","-")
+            .replace("\u2018","'").replace("\u2019","'")
+            .replace("\u201c",'"').replace("\u201d",'"')
+            .encode("latin-1","replace").decode("latin-1"))
 
-    def _add_fonts(self):
-        for style, name in [("", "Inter-Regular.ttf"), ("B", "Inter-Bold.ttf")]:
-            path = os.path.join(os.path.dirname(__file__), name)
-            if os.path.exists(path):
-                self.add_font("Inter", style, path, uni=True)
-
-    def _font(self, style="", size=10):
-        try: self.set_font("Inter", style, size)
-        except: self.set_font("Helvetica", style, size)
-
-    def header(self):
-        self._font("B", 8)
-        self.set_text_color(159, 176, 195)
-        self.cell(0, 6, "Builtly | Kredittgrunnlag", align="L")
-        self.cell(0, 6, datetime.now().strftime("%d.%m.%Y"), align="R", new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.3)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(4)
-
-    def footer(self):
-        self.set_y(-15)
-        self._font("", 7)
-        self.set_text_color(159, 176, 195)
-        self.cell(0, 8, self._safe(f"Side {self.page_no()}/{{nb}} - Konfidensielt - Utkast, krever faglig kontroll"), align="C")
-
-    def cover_page(self, project_name, laantaker, laanetype):
-        self.add_page()
-        self.ln(50)
-        self._font("B", 11)
-        self.set_text_color(56, 194, 201)
-        self.cell(0, 8, "KONFIDENSIELT", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(5)
-        self._font("B", 28)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 14, "Kredittnotat", align="C", new_x="LMARGIN", new_y="NEXT")
-        self._font("", 14)
-        self.set_text_color(80, 100, 120)
-        self.cell(0, 10, laanetype, align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(8)
-        self._font("B", 16)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 10, project_name, align="C", new_x="LMARGIN", new_y="NEXT")
-        self._font("", 11)
-        self.set_text_color(80, 100, 120)
-        self.cell(0, 8, f"Låntaker: {laantaker}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.cell(0, 8, f"Dato: {datetime.now().strftime('%d.%m.%Y')}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(20)
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.8)
-        self.line(60, self.get_y(), 150, self.get_y())
-
-    def section_title(self, num, title):
-        self.ln(6)
-        self._font("B", 13)
-        self.set_text_color(*self.accent)
-        self.cell(0, 8, f"{num}. {title}", new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.2)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(3)
-
-    def body_text(self, text):
-        self._font("", 10)
-        self.set_text_color(40, 50, 60)
-        self.multi_cell(0, 5.5, self._safe(str(text)))
-        self.ln(2)
-
-    def key_value(self, key, value):
-        self._font("B", 9)
-        self.set_text_color(80, 100, 120)
-        self.cell(70, 5.5, key)
-        self._font("", 10)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 5.5, self._safe(str(value)), new_x="LMARGIN", new_y="NEXT")
-
-    def status_box(self, status, text):
-        color_map = {"Anbefalt innvilget": (34, 197, 94), "Anbefalt med vilkår": (245, 158, 11), "Ikke anbefalt": (239, 68, 68)}
-        color = color_map.get(status, (56, 194, 201))
-        self.ln(3)
-        self.set_draw_color(*color)
-        self.rect(10, self.get_y(), 190, 18, style="D")
-        self.set_fill_color(*color)
-        self.rect(10, self.get_y(), 4, 18, style="F")
-        self._font("B", 12)
-        self.set_text_color(*color)
-        self.set_xy(18, self.get_y() + 2)
-        self.cell(0, 7, status)
-        self._font("", 9)
-        self.set_text_color(40, 50, 60)
-        self.set_xy(18, self.get_y() + 7)
-        self.multi_cell(178, 5, text)
-        self.ln(6)
-
-
-def generate_credit_pdf(project_info, analysis) -> bytes:
-    if not FPDF:
+def generate_credit_pdf(project_info: dict, analysis: dict) -> bytes:
+    if not _HAS_RL:
         return b""
-    pdf = CreditPDF()
-    pdf.alias_nb_pages()
+    import io as _io, os as _os
 
-    # Cover
-    pdf.cover_page(
-        project_info.get("navn", "Prosjekt"),
-        project_info.get("laantaker", "-"),
-        safe_get(analysis, "laanetype", project_info.get("laanetype", "")),
-    )
+    # ── Constants ──────────────────────────────────────────────────────────
+    W, H = _A4
+    ML, MR, MT, MB = 18*_mm, 18*_mm, 42*_mm, 28*_mm
+    IW = W - ML - MR                      # inner width
+    mm = _mm
 
-    pdf.add_page()
+    # ── Palette ────────────────────────────────────────────────────────────
+    C_INK    = _colors.HexColor("#06111A")
+    C_NAVY   = _colors.HexColor("#071828")
+    C_ACCENT = _colors.HexColor("#38C2C9")
+    C_RULE   = _colors.HexColor("#D0D8E0")
+    C_MUTED  = _colors.HexColor("#607080")
+    C_SOFT   = _colors.HexColor("#384858")
+    C_PANEL  = _colors.HexColor("#F0F4F8")
+    C_HEAD   = _colors.HexColor("#0C1E2E")
+    C_WHITE  = _colors.white
+    C_GREEN  = _colors.HexColor("#16A34A")
+    C_AMBER  = _colors.HexColor("#D97706")
+    C_RED    = _colors.HexColor("#DC2626")
+    C_ORANGE = _colors.HexColor("#EA580C")
 
-    # 0. Finansieringsvurdering (trafikklys)
-    tl = project_info.get("_traffic_light", {})
-    if tl:
-        farge = tl.get("farge", "grønn")
-        tl_color_map = {
-            "grønn": (34, 197, 94), "gul": (245, 158, 11),
-            "rød-betinget": (249, 115, 22), "rød": (239, 68, 68)
-        }
-        tl_col = tl_color_map.get(farge, (56, 194, 201))
-        pdf.section_title(0, "Finansieringsvurdering")
-        pdf.set_draw_color(*tl_col); pdf.set_fill_color(*tl_col)
-        pdf.rect(10, pdf.get_y(), 5, 12, style="F")
-        pdf._font("B", 12); pdf.set_text_color(*tl_col)
-        pdf.set_xy(18, pdf.get_y())
-        pdf.cell(0, 6, tl.get("status", ""), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(2)
-        pdf._font("", 9); pdf.set_text_color(40, 50, 60)
-        pdf.key_value("85%-grense:", f"{tl.get('bank_max_mnok',0):.1f} MNOK")
-        pdf.key_value("Sum kausjoner:", f"{tl.get('total_kausjon_mnok',0):.1f} MNOK")
+    STATUS_PALETTE = {
+        "Anbefalt innvilget":  (C_GREEN,  "#ECFDF5", "#A7F3D0"),
+        "Anbefalt med vilkår": (C_AMBER,  "#FFFBEB", "#FDE68A"),
+        "Ikke anbefalt":       (C_RED,    "#FEF2F2", "#FECACA"),
+    }
+    TL_PALETTE = {
+        "grønn":        (C_GREEN,  "#ECFDF5", "#A7F3D0", "GODKJENT"),
+        "gul":          (C_AMBER,  "#FFFBEB", "#FDE68A", "BETINGET"),
+        "rød-betinget": (C_ORANGE, "#FFF7ED", "#FED7AA", "BETINGET MED TILLEGGSSIKKERHET"),
+        "rød":          (C_RED,    "#FEF2F2", "#FECACA", "IKKE ANBEFALT"),
+    }
+
+    # ── Style factory ──────────────────────────────────────────────────────
+    def S(name, **kw):
+        base = dict(fontName="Helvetica", fontSize=9.5, leading=14,
+                    textColor=C_INK, spaceAfter=2, spaceBefore=2)
+        base.update(kw)
+        return ParagraphStyle(name, **base)
+
+    # Pre-build common styles
+    s_h2  = S("h2",  fontName="Helvetica-Bold", fontSize=13, leading=17, textColor=C_ACCENT, spaceBefore=14, spaceAfter=3)
+    s_body= S("body")
+    s_kv_k= S("kvk", fontName="Helvetica-Bold", fontSize=8.5, leading=12, textColor=C_SOFT)
+    s_kv_v= S("kvv", fontSize=9, leading=12, textColor=C_INK)
+    s_th  = S("th",  fontName="Helvetica-Bold", fontSize=8, leading=11, textColor=C_WHITE)
+    s_td  = S("td",  fontSize=8.5, leading=12, textColor=C_INK)
+    s_sml = S("sml", fontSize=8, leading=11, textColor=C_MUTED)
+    s_bul = S("bul", fontSize=9, leading=13, textColor=C_INK, leftIndent=8)
+
+    # ── Logo path ──────────────────────────────────────────────────────────
+    logo_candidates = ["logo.png", "logo-white.png", "logo.jpg",
+                       "/app/logo.png", "/app/logo-white.png"]
+    logo_path = None
+    for lc in logo_candidates:
+        if _os.path.exists(lc):
+            logo_path = lc
+            break
+
+    proj_name  = _safe_pdf(project_info.get("navn", "Prosjekt"))
+    laantaker  = _safe_pdf(project_info.get("laantaker", ""))
+    laanetype  = _safe_pdf(project_info.get("laanetype", ""))
+    dato       = datetime.now().strftime("%d.%m.%Y")
+
+    # ── Numbered canvas with header/footer ────────────────────────────────
+    class _NC(_rl_canvas.Canvas):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._states = []
+        def showPage(self):
+            self._states.append(dict(self.__dict__))
+            self._startPage()
+        def save(self):
+            total = len(self._states)
+            for i, st in enumerate(self._states):
+                self.__dict__.update(st)
+                self._hf(i + 1, total)
+                super().showPage()
+            super().save()
+        def _hf(self, pg, tot):
+            self.saveState()
+            if pg > 1:
+                # Teal header bar
+                self.setFillColor(C_ACCENT)
+                self.rect(0, H - 8*mm, W, 8*mm, fill=1, stroke=0)
+                # Logo in header
+                if logo_path:
+                    try:
+                        self.drawImage(logo_path, ML, H - 7*mm,
+                                       width=24*mm, height=6*mm,
+                                       preserveAspectRatio=True, mask="auto")
+                    except Exception:
+                        pass
+                self.setFont("Helvetica-Bold", 7.5)
+                self.setFillColor(C_INK)
+                self.drawString(ML + 28*mm, H - 4.8*mm, proj_name)
+                self.setFont("Helvetica-Bold", 7)
+                self.setFillColor(_colors.HexColor("#1A3A50"))
+                self.drawRightString(W - MR, H - 4.8*mm, "KONFIDENSIELT  |  KREDITTNOTAT")
+            # Footer rule
+            self.setStrokeColor(C_RULE)
+            self.setLineWidth(0.4)
+            self.line(ML, 18*mm, W - MR, 18*mm)
+            self.setFont("Helvetica", 7)
+            self.setFillColor(C_MUTED)
+            self.drawString(ML, 13.5*mm, f"Builtly AS  |  AI-assisted engineering. Human-verified.  |  {dato}")
+            self.drawRightString(W - MR, 13.5*mm, f"Side {pg} av {tot}")
+            self.setFont("Helvetica", 6.3)
+            self.setFillColor(_colors.HexColor("#A0B0C0"))
+            self.drawCentredString(W/2, 9*mm,
+                "Utkast - automatisk generert - krever faglig gjennomgang av kredittavdelingen for fremleggelse for kredittkomite")
+            self.restoreState()
+
+    # ── Document ───────────────────────────────────────────────────────────
+    buf = _io.BytesIO()
+    doc = BaseDocTemplate(buf, pagesize=_A4, leftMargin=ML, rightMargin=MR,
+                          topMargin=MT, bottomMargin=MB)
+    frame = Frame(ML, MB, IW, H - MT - MB, id="main")
+    doc.addPageTemplates([PageTemplate(id="main", frames=[frame])])
+
+    story = []
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # COVER PAGE
+    # ═══════════════════════════════════════════════════════════════════════
+    def _cover():
+        # Navy full-bleed background via canvas drawing (via first-page override)
+        # We simulate with a big dark table
+        cov = []
+        # Spacer to push content to vertical centre
+        cov.append(Spacer(1, 28*mm))
+        # Top accent line
+        cov.append(HRFlowable(width="100%", thickness=2, color=C_ACCENT, spaceAfter=8))
+        # Confidential tag
+        cov.append(Paragraph("KONFIDENSIELT  |  KREDITTNOTAT", S("cs",
+            fontName="Helvetica-Bold", fontSize=8.5, textColor=C_ACCENT, alignment=TA_CENTER, spaceAfter=10)))
+        # Title
+        cov.append(Paragraph(proj_name.upper(), S("ct",
+            fontName="Helvetica-Bold", fontSize=30, leading=35, textColor=C_INK, alignment=TA_CENTER, spaceAfter=4)))
+        # Loan type subtitle
+        cov.append(Paragraph(laanetype, S("cst",
+            fontName="Helvetica", fontSize=14, leading=18, textColor=C_MUTED, alignment=TA_CENTER, spaceAfter=14)))
+        cov.append(HRFlowable(width="40%", thickness=0.5, color=C_RULE, spaceAfter=14))
+        # Meta block
+        meta_rows = [
+            ["Låntaker",  laantaker],
+            ["Lånetype",  laanetype],
+            ["Utarbeidet av", "Builtly AI – kredittanalysemotor"],
+            ["Dato",      dato],
+            ["Status",    "Utkast – krever faglig kontroll"],
+        ]
+        mt = Table(
+            [[Paragraph(f"<b>{k}</b>", S("mk", fontName="Helvetica-Bold", fontSize=9, textColor=C_SOFT)),
+              Paragraph(v, S("mv", fontSize=9, textColor=C_INK))]
+             for k,v in meta_rows],
+            colWidths=[50*mm, IW-50*mm],
+        )
+        mt.setStyle(TableStyle([
+            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_PANEL, C_WHITE]),
+            ("GRID",         (0,0),(-1,-1),0.3, C_RULE),
+            ("TOPPADDING",   (0,0),(-1,-1),5),
+            ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",  (0,0),(-1,-1),8),
+        ]))
+        cov.append(KeepTogether([mt]))
+        cov.append(Spacer(1, 18*mm))
+        # Logo centred at bottom
+        if logo_path:
+            try:
+                img = Image(logo_path, width=38*mm, height=10*mm)
+                img.hAlign = "CENTER"
+                cov.append(img)
+                cov.append(Spacer(1, 3*mm))
+            except Exception:
+                pass
+        cov.append(Paragraph("builtly.ai", S("url", fontSize=8, textColor=C_MUTED, alignment=TA_CENTER)))
+        cov.append(Spacer(1, 8*mm))
+        cov.append(HRFlowable(width="100%", thickness=2, color=C_ACCENT))
+        from reportlab.platypus import PageBreak
+        cov.append(PageBreak())
+        return cov
+
+    story += _cover()
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+    def heading(num, title):
+        return [
+            Spacer(1, 5*mm),
+            Paragraph(f'<font color="#38C2C9"><b>{_safe_pdf(str(num))}.</b></font>  <b>{_safe_pdf(title)}</b>', s_h2),
+            HRFlowable(width="100%", thickness=0.5, color=C_RULE, spaceAfter=3),
+        ]
+
+    def kv(rows, col1=55*mm):
+        data = [[Paragraph(_safe_pdf(k), s_kv_k), Paragraph(_safe_pdf(v), s_kv_v)] for k,v in rows]
+        t = Table(data, colWidths=[col1, IW - col1])
+        t.setStyle(TableStyle([
+            ("ROWBACKGROUNDS",(0,0),(-1,-1),[C_PANEL, C_WHITE]),
+            ("GRID",         (0,0),(-1,-1),0.3, C_RULE),
+            ("TOPPADDING",   (0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+            ("LEFTPADDING",  (0,0),(-1,-1),6),("RIGHTPADDING", (0,0),(-1,-1),6),
+            ("VALIGN",       (0,0),(-1,-1),"TOP"),
+        ]))
+        return [t, Spacer(1, 3*mm)]
+
+    def metrics(items):
+        cw = IW / len(items)
+        r_val, r_lbl, r_sub = [], [], []
+        for val, lbl, sub in items:
+            r_val.append(Paragraph(f'<b>{_safe_pdf(val)}</b>',
+                S("mv", fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=C_ACCENT, alignment=TA_CENTER)))
+            r_lbl.append(Paragraph(f'<b>{_safe_pdf(lbl)}</b>',
+                S("ml", fontName="Helvetica-Bold", fontSize=7.5, leading=10, textColor=C_SOFT, alignment=TA_CENTER)))
+            r_sub.append(Paragraph(_safe_pdf(sub),
+                S("ms", fontSize=7, leading=9, textColor=C_MUTED, alignment=TA_CENTER)))
+        t = Table([r_val, r_lbl, r_sub], colWidths=[cw]*len(items),
+                  rowHeights=[14*mm, 5*mm, 4*mm])
+        t.setStyle(TableStyle([
+            ("BOX",          (0,0),(-1,-1),0.5, C_RULE),
+            ("INNERGRID",    (0,0),(-1,-1),0.3, C_RULE),
+            ("BACKGROUND",   (0,0),(-1,-1),C_PANEL),
+            ("TOPPADDING",   (0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+            ("VALIGN",       (0,0),(-1,-1),"MIDDLE"),
+        ]))
+        return [KeepTogether([t, Spacer(1, 4*mm)])]
+
+    def status_block(status, summary):
+        col, bg, border = STATUS_PALETTE.get(status, (C_ACCENT, "#EFF8F8", "#A5E7EC"))
+        data = [
+            [Paragraph(f'<b>{_safe_pdf(status)}</b>',
+                S("sh", fontName="Helvetica-Bold", fontSize=11, leading=15, textColor=col))],
+            [Paragraph(_safe_pdf(summary),
+                S("sb", fontSize=9, leading=13, textColor=C_INK))],
+        ]
+        t = Table(data, colWidths=[IW])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1),_colors.HexColor(bg)),
+            ("BOX",          (0,0),(-1,-1),1.5, col),
+            ("LEFTPADDING",  (0,0),(-1,-1),10),("RIGHTPADDING",(0,0),(-1,-1),10),
+            ("TOPPADDING",   (0,0),(0,0),  8),("BOTTOMPADDING",(0,0),(0,0),  4),
+            ("TOPPADDING",   (0,1),(0,-1), 4),("BOTTOMPADDING",(0,1),(0,-1), 8),
+            ("LINEBELOW",    (0,0),(0,0),  0.5, col),
+        ]))
+        return [KeepTogether([t, Spacer(1, 4*mm)])]
+
+    def tl_block(tl):
+        if not tl: return []
+        farge = tl.get("farge","grønn")
+        col, bg, border, label = TL_PALETTE.get(farge, TL_PALETTE["grønn"])
+        rows = []
+        rows.append([Paragraph(f'<b>FINANSIERINGSVURDERING  |  {label}</b>',
+            S("tlh", fontName="Helvetica-Bold", fontSize=9.5, textColor=col))])
+        if tl.get("bank_max_mnok"):
+            rows.append([Paragraph(
+                f'Bankens 85%-grense: <b>{tl["bank_max_mnok"]:.1f} MNOK</b>   Sum kausjoner: <b>{tl.get("total_kausjon_mnok",0):.1f} MNOK</b>',
+                S("tls", fontSize=8.5, leading=12, textColor=C_INK))])
+        for f in tl.get("red_flags",[])+tl.get("yellow_flags",[]):
+            rows.append([Paragraph(f"  \u2022  {_safe_pdf(f)}",
+                S("tlf", fontSize=8, leading=11, textColor=C_RED if f in tl.get("red_flags",[]) else C_AMBER))])
+        for b in tl.get("betingelser",[]):
+            rows.append([Paragraph(f"  \u2192  {_safe_pdf(b)}", S("tlb", fontSize=8, leading=11, textColor=C_INK))])
         if tl.get("bankens_tilbud"):
-            pdf.key_value("Bankens tilbud:", tl.get("bankens_tilbud",""))
-        for f in tl.get("red_flags", []) + tl.get("yellow_flags", []):
-            pdf.body_text(f"• {f}")
-        for b in tl.get("betingelser", []):
-            pdf.body_text(f"→ {b}")
-        pdf.ln(3)
+            rows.append([Paragraph(f'  \u2192  <b>{_safe_pdf(tl["bankens_tilbud"])}</b>',
+                S("tltb", fontName="Helvetica-Bold", fontSize=8.5, leading=12, textColor=col))])
+        t = Table(rows, colWidths=[IW])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,-1),_colors.HexColor(bg)),
+            ("BOX",          (0,0),(-1,-1),2, col),
+            ("LEFTPADDING",  (0,0),(-1,-1),10),("RIGHTPADDING",(0,0),(-1,-1),10),
+            ("TOPPADDING",   (0,0),(0,0),  9),("BOTTOMPADDING",(0,-1),(-1,-1),9),
+            ("TOPPADDING",   (0,1),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-2),3),
+            ("LINEBELOW",    (0,0),(0,0),  0.5, col),
+        ]))
+        return [KeepTogether([t, Spacer(1, 4*mm)])]
 
-    # 1. Sammendrag
-    pdf.section_title(1, "Sammendrag og anbefaling")
-    pdf.status_box(safe_get(analysis, "anbefaling", "Ikke vurdert"), safe_get(analysis, "sammendrag", ""))
+    def dtable(headers, rows, col_widths=None):
+        if not rows: return []
+        if col_widths is None:
+            col_widths = [IW / len(headers)] * len(headers)
+        hrow = [Paragraph(f'<b>{_safe_pdf(h)}</b>', s_th) for h in headers]
+        data = [hrow] + [[Paragraph(_safe_pdf(str(c)), s_td) for c in row] for row in rows]
+        t = Table(data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,0), C_HEAD),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_PANEL, C_WHITE]),
+            ("GRID",         (0,0),(-1,-1),0.3, C_RULE),
+            ("TOPPADDING",   (0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),
+            ("LEFTPADDING",  (0,0),(-1,-1),6),("RIGHTPADDING", (0,0),(-1,-1),6),
+            ("VALIGN",       (0,0),(-1,-1),"TOP"),
+        ]))
+        return [KeepTogether([t, Spacer(1, 4*mm)])]
 
-    # 2. Nøkkeltall
-    pdf.section_title(2, "Nøkkeltall")
-    nt = safe_get(analysis, "noekkeltall", {})
+    def bullets(items, color=None):
+        color = color or C_INK
+        return [Paragraph(f"  \u2022  {_safe_pdf(item)}",
+            S(f"b{i}", fontSize=9, leading=13, textColor=color, leftIndent=8))
+                for i, item in enumerate(items) if item]
+
+    sg = safe_get  # already defined in module
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 0. TRAFIKKLYS
+    # ═══════════════════════════════════════════════════════════════════════
+    tl = project_info.get("_traffic_light", {})
+    story += tl_block(tl)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 1. SAMMENDRAG
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(1, "Sammendrag og anbefaling")
+    anbefaling = sg(analysis, "anbefaling", "Ikke vurdert")
+    sammendrag = sg(analysis, "sammendrag", "")
+    story += status_block(anbefaling, sammendrag)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 2. NØKKELTALL  (metric cards)
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(2, "Nøkkeltall")
+    nt = sg(analysis, "noekkeltall", {})
     if isinstance(nt, dict):
-        pdf.key_value("Totalinvestering:", f"{safe_get(nt, 'totalinvestering_mnok', 0)} MNOK")
-        pdf.key_value("Søkt lån:", f"{safe_get(nt, 'soekt_laan_mnok', 0)} MNOK")
-        pdf.key_value("Egenkapital:", f"{safe_get(nt, 'egenkapital_mnok', 0)} MNOK ({safe_get(nt, 'egenkapitalprosent', 0)}%)")
-        pdf.key_value("Belåningsgrad (LTV):", f"{safe_get(nt, 'belaaningsgrad_ltv', 0)}%")
-        pdf.key_value("Estimert markedsverdi:", f"{safe_get(nt, 'estimert_markedsverdi_mnok', 0)} MNOK")
-        pdf.key_value("Netto yield:", f"{safe_get(nt, 'netto_yield_pst', 0)}%")
-        pdf.key_value("DSCR:", f"{safe_get(nt, 'dscr', 0)}")
-        pdf.key_value("ICR:", f"{safe_get(nt, 'icr', 0)}")
-        pdf.key_value("Forhåndssalg/utleie:", f"{safe_get(nt, 'forhaandssalg_utleie_pst', 0)}%")
+        story += metrics([
+            (f'{sg(nt,"totalinvestering_mnok","-")} MNOK', "TOTALINVESTERING",    "Prosjektkostnad"),
+            (f'{sg(nt,"soekt_laan_mnok","-")} MNOK',       "SOKT LAN",            "Omsøkt finansiering"),
+            (f'{sg(nt,"egenkapitalprosent","-")}%',         "EGENKAPITAL",         f'{sg(nt,"egenkapital_mnok","-")} MNOK'),
+            (f'{sg(nt,"belaaningsgrad_ltv","-")}%',         "LTV",                 "Belåningsgrad"),
+        ])
+        story += metrics([
+            (f'{sg(nt,"dscr","-")}',                        "DSCR",                "Debt Service Coverage"),
+            (f'{sg(nt,"icr","-")}',                         "ICR",                 "Interest Coverage"),
+            (f'{sg(nt,"netto_yield_pst","-")}%',            "NETTO YIELD",         "Avkastning"),
+            (f'{sg(nt,"forhaandssalg_utleie_pst","-")}%',   "FORHANDSSALG",        "Utleiegrad"),
+        ])
+        story += kv([
+            ("Estimert markedsverdi:", f'{sg(nt,"estimert_markedsverdi_mnok","-")} MNOK'),
+        ])
 
-    # 3. Verdivurdering
-    pdf.section_title(3, "Verdivurdering")
-    vv = safe_get(analysis, "verdivurdering", {})
+    # ═══════════════════════════════════════════════════════════════════════
+    # 3. VERDIVURDERING
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(3, "Verdivurdering")
+    vv = sg(analysis, "verdivurdering", {})
     if isinstance(vv, dict):
-        pdf.key_value("Metode:", safe_get(vv, "metode", "-"))
-        pdf.key_value("Oppgitt takst:", f"{safe_get(vv, 'oppgitt_takst_mnok', 0)} MNOK")
-        pdf.key_value("Beregnet verdi:", f"{safe_get(vv, 'beregnet_verdi_mnok', 0)} MNOK")
-        pdf.key_value("Avvik takst vs. beregnet:", f"{safe_get(vv, 'avvik_takst_vs_beregnet_pst', 0)}%")
-        takst_ok = safe_get(vv, "takst_er_rimelig", True)
-        pdf.key_value("Takst rimelig:", "Ja" if takst_ok else "NEI - se kommentar")
-        pdf.body_text(safe_get(vv, "kommentar_takst", ""))
+        story += kv([
+            ("Metode:",              sg(vv, "metode", "-")),
+            ("Oppgitt takst:",       f'{sg(vv,"oppgitt_takst_mnok",0)} MNOK'),
+            ("Beregnet verdi:",      f'{sg(vv,"beregnet_verdi_mnok",0)} MNOK'),
+            ("Avvik takst/beregnet:",f'{sg(vv,"avvik_takst_vs_beregnet_pst",0)}%'),
+            ("Takst rimelig:",       "Ja" if sg(vv,"takst_er_rimelig",True) else "NEI - se kommentar"),
+            ("Bankens verdianslag:", f'{sg(vv,"bankens_verdianslag_mnok",0)} MNOK'),
+            ("Forsiktig verdi 70%:", f'{sg(vv,"forsiktig_verdi_70pst_mnok",0)} MNOK'),
+            ("LTV mot beregnet:",    f'{sg(vv,"ltv_mot_beregnet_verdi_pst",0)}%'),
+        ])
+        if sg(vv, "kommentar_takst", ""):
+            story.append(Paragraph(_safe_pdf(sg(vv, "kommentar_takst", "")), s_body))
+            story.append(Spacer(1, 3*mm))
 
-        br = safe_get(vv, "bolig_residual", {})
-        if isinstance(br, dict) and safe_get(br, "residual_tomteverdi_mnok", 0):
-            pdf.ln(2)
-            pdf._font("B", 10)
-            pdf.set_text_color(56, 194, 201)
-            pdf.cell(0, 6, "Residualverdiberegning (Bolig)", new_x="LMARGIN", new_y="NEXT")
-            pdf._font("", 9)
-            pdf.set_text_color(40, 50, 60)
-            pdf.key_value("Forventet salgsverdi:", f"{safe_get(br, 'forventet_salgsverdi_mnok', 0)} MNOK")
-            pdf.key_value("Salgspris per kvm BRA:", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr")
-            pdf.key_value("Byggekost per kvm BTA:", f"{safe_get(br, 'byggekost_per_kvm_bta', 0)} kr")
-            pdf.key_value("Utbyggingskost eks. tomt:", f"{safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0)} MNOK")
-            pdf.key_value("Min. margin (12%):", f"{safe_get(br, 'minimummargin_12pst_mnok', 0)} MNOK")
-            pdf.key_value("Residual tomteverdi:", f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK")
-            pdf.key_value("Oppgitt tomtekost:", f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK")
-            tomte_ok = safe_get(br, "tomtekost_innenfor_residual", True)
-            pdf.key_value("Tomtekost innenfor residual:", "Ja" if tomte_ok else "NEI - for høy tomtepris")
-            pdf.key_value("Faktisk margin:", f"{safe_get(br, 'faktisk_margin_pst', 0)}%")
-            pdf.body_text(safe_get(br, "kommentar", ""))
+        # Bolig residual
+        br = sg(vv, "bolig_residual", {})
+        if isinstance(br, dict) and sg(br, "residual_tomteverdi_mnok", 0):
+            story.append(Paragraph("<b>Residualverdiberegning (Bolig / BRA-i)</b>",
+                S("brt", fontName="Helvetica-Bold", fontSize=9.5, textColor=C_ACCENT, spaceAfter=3)))
+            story += dtable(
+                ["Post", "Verdi"],
+                [
+                    ["Forventet salgsverdi",  f'{sg(br,"forventet_salgsverdi_mnok",0)} MNOK'],
+                    ["Salgspris per kvm BRA-i", f'{sg(br,"salgsverdi_per_kvm_bra",0)} kr'],
+                    ["Entreprisekost per kvm BRA-i", f'{sg(br,"byggekost_per_kvm_bra_i",sg(br,"byggekost_per_kvm_bta",0))} kr'],
+                    ["Utbyggingskost ekskl. tomt", f'{sg(br,"total_utbyggingskost_eks_tomt_mnok",0)} MNOK'],
+                    ["Minimummargin 12%",       f'{sg(br,"minimummargin_12pst_mnok",0)} MNOK'],
+                    ["Residual tomteverdi",     f'{sg(br,"residual_tomteverdi_mnok",0)} MNOK'],
+                    ["Oppgitt tomtekostnad",    f'{sg(br,"oppgitt_tomtekost_mnok",0)} MNOK'],
+                    ["Innenfor residual",        "Ja" if sg(br,"tomtekost_innenfor_residual",True) else "NEI"],
+                    ["Faktisk margin",           f'{sg(br,"faktisk_margin_pst",0)}%'],
+                ],
+                col_widths=[90*mm, IW-90*mm],
+            )
 
-        ny = safe_get(vv, "naering_yield", {})
-        if isinstance(ny, dict) and safe_get(ny, "yield_on_cost_pst", 0):
-            pdf.ln(2)
-            pdf._font("B", 10)
-            pdf.set_text_color(245, 158, 11)
-            pdf.cell(0, 6, "Yield-analyse (Næring)", new_x="LMARGIN", new_y="NEXT")
-            pdf._font("", 9)
-            pdf.set_text_color(40, 50, 60)
-            pdf.key_value("Brutto leieinntekt:", f"{safe_get(ny, 'brutto_leieinntekt_mnok', 0)} MNOK/år")
-            pdf.key_value("Eierkostnader:", f"{safe_get(ny, 'eierkostnader_mnok', 0)} MNOK/år")
-            pdf.key_value("Netto leieinntekt:", f"{safe_get(ny, 'netto_leieinntekt_mnok', 0)} MNOK/år")
-            pdf.key_value("Yield on cost:", f"{safe_get(ny, 'yield_on_cost_pst', 0)}%")
-            pdf.key_value("Antatt markedsyield:", f"{safe_get(ny, 'antatt_markedsyield_pst', 0)}%")
-            pdf.key_value("Yield spread:", f"{safe_get(ny, 'yield_spread_pst', 0)}%")
-            pdf.key_value("Verdi ved markedsyield:", f"{safe_get(ny, 'verdi_ved_markedsyield_mnok', 0)} MNOK")
-            pdf.key_value("WAULT:", f"{safe_get(ny, 'wault_aar', 0)} år")
-            pdf.key_value("Vakansrisiko:", f"{safe_get(ny, 'vakansrisiko_pst', 0)}%")
-            verdiskaping = safe_get(ny, "verdiskaping_positiv", True)
-            pdf.key_value("Verdiskaping:", "Positiv" if verdiskaping else "NEGATIV - yield on cost < markedsyield")
-            pdf.body_text(safe_get(ny, "kommentar", ""))
+        # Næring yield
+        ny = sg(vv, "naering_yield", {})
+        if isinstance(ny, dict) and sg(ny, "yield_on_cost_pst", 0):
+            story.append(Paragraph("<b>Yield-analyse (Næring)</b>",
+                S("nyt", fontName="Helvetica-Bold", fontSize=9.5, textColor=C_AMBER, spaceAfter=3)))
+            story += dtable(
+                ["Post", "Verdi"],
+                [
+                    ["Brutto leieinntekt",    f'{sg(ny,"brutto_leieinntekt_mnok",0)} MNOK/ar'],
+                    ["Eierkostnader",         f'{sg(ny,"eierkostnader_mnok",0)} MNOK/ar'],
+                    ["Netto leieinntekt",     f'{sg(ny,"netto_leieinntekt_mnok",0)} MNOK/ar'],
+                    ["Yield on cost",         f'{sg(ny,"yield_on_cost_pst",0)}%'],
+                    ["Markedsyield",          f'{sg(ny,"antatt_markedsyield_pst",0)}%'],
+                    ["Yield spread",          f'{sg(ny,"yield_spread_pst",0)}%'],
+                    ["Verdi ved markedsyield",f'{sg(ny,"verdi_ved_markedsyield_mnok",0)} MNOK'],
+                    ["WAULT",                 f'{sg(ny,"wault_aar",0)} ar'],
+                    ["Vakansrisiko",          f'{sg(ny,"vakansrisiko_pst",0)}%'],
+                    ["Verdiskaping",          "Positiv" if sg(ny,"verdiskaping_positiv",True) else "NEGATIV"],
+                ],
+                col_widths=[90*mm, IW-90*mm],
+            )
 
-        pdf.key_value("Bankens verdianslag:", f"{safe_get(vv, 'bankens_verdianslag_mnok', 0)} MNOK")
-        pdf.key_value("Forsiktig verdi (70%):", f"{safe_get(vv, 'forsiktig_verdi_70pst_mnok', 0)} MNOK")
-        pdf.key_value("LTV mot beregnet verdi:", f"{safe_get(vv, 'ltv_mot_beregnet_verdi_pst', 0)}%")
-
-    # 4. Regulering
-    pdf.section_title(4, "Regulering og tomt")
-    reg = safe_get(analysis, "regulering_og_tomt", {})
+    # ═══════════════════════════════════════════════════════════════════════
+    # 4. REGULERING
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(4, "Regulering og tomt")
+    reg = sg(analysis, "regulering_og_tomt", {})
     if isinstance(reg, dict):
-        pdf.key_value("Reguleringsplan:", safe_get(reg, "reguleringsplan", "-"))
-        pdf.key_value("Utnyttelsesgrad (BYA):", f"{safe_get(reg, 'utnyttelsesgrad_bya_pst', 0)}%")
-        pdf.key_value("Tillatt vs. planlagt BTA:", safe_get(reg, "tillatt_vs_planlagt_bta", "-"))
-        pdf.key_value("Rammegodkjenning:", safe_get(reg, "rammegodkjenning_status", "-"))
-        if project_info.get("gnr_bnr"):
-            pdf.key_value("Gnr/bnr (panteobjekt):", project_info["gnr_bnr"])
-        if project_info.get("kommune"):
-            pdf.key_value("Kommune:", project_info["kommune"])
-        if project_info.get("planident"):
-            pdf.key_value("Planident:", project_info["planident"])
-        pdf.body_text(safe_get(reg, "kommentar", ""))
+        story += kv([
+            ("Reguleringsplan:",       sg(reg,"reguleringsplan","-")),
+            ("Utnyttelsesgrad BYA:",   f'{sg(reg,"utnyttelsesgrad_bya_pst",0)}%'),
+            ("Tillatt vs. planlagt:",  sg(reg,"tillatt_vs_planlagt_bta","-")),
+            ("Rammegodkjenning:",      sg(reg,"rammegodkjenning_status","-")),
+        ])
+        if sg(reg, "kommentar", ""):
+            story.append(Paragraph(_safe_pdf(sg(reg,"kommentar","")), s_body))
 
-    # 4b. Finansieringsstruktur (multi-lån)
-    if project_info.get("tomtelaan_mnok", 0) > 0 or project_info.get("infralaan_mnok", 0) > 0:
-        pdf.section_title("4b", "Finansieringsstruktur")
-        pdf.key_value("Byggelån (søkt):", f"{project_info.get('soekt_laan_mnok', 0)} MNOK")
-        if project_info.get("tomtelaan_mnok", 0) > 0:
-            pdf.key_value("Tomtelån (separat):", f"{project_info['tomtelaan_mnok']} MNOK")
-            if project_info.get("tomtelaan_tomt_takst_mnok", 0) > 0:
-                ltv_tomt = round(project_info["tomtelaan_mnok"] / project_info["tomtelaan_tomt_takst_mnok"] * 100, 1)
-                pdf.key_value("Takst/verdi tomt:", f"{project_info['tomtelaan_tomt_takst_mnok']} MNOK (LTV tomt: {ltv_tomt}%)")
-        if project_info.get("infralaan_mnok", 0) > 0:
-            pdf.key_value("Infralån (forskuttering):", f"{project_info['infralaan_mnok']} MNOK")
-        total_laan = project_info.get("soekt_laan_mnok", 0) + project_info.get("tomtelaan_mnok", 0) + project_info.get("infralaan_mnok", 0)
-        pdf.key_value("Sum lån:", f"{total_laan:.1f} MNOK")
-
-    # 5. Økonomi
-    pdf.section_title(5, "Økonomisk analyse")
-    oek = safe_get(analysis, "oekonomisk_analyse", {})
+    # ═══════════════════════════════════════════════════════════════════════
+    # 5. OKONOMI
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(5, "Okonomisk analyse")
+    oek = sg(analysis, "oekonomisk_analyse", {})
     if isinstance(oek, dict):
-        pdf.key_value("Totalkostnadskalkyle:", f"{safe_get(oek, 'totalkostnadskalkyle_mnok', 0)} MNOK")
-        pdf.key_value("Entreprisekostnad:", f"{safe_get(oek, 'entreprisekostnad_mnok', 0)} MNOK")
-        pdf.key_value("Tomtekostnad:", f"{safe_get(oek, 'tomtekostnad_mnok', 0)} MNOK")
-        pdf.key_value("Offentlige avgifter:", f"{safe_get(oek, 'offentlige_avgifter_mnok', 0)} MNOK")
-        pdf.key_value("Prosjektkostnader:", f"{safe_get(oek, 'prosjektkostnader_mnok', 0)} MNOK")
-        pdf.key_value("Finanskostnader:", f"{safe_get(oek, 'finanskostnader_mnok', 0)} MNOK")
-        pdf.key_value("Forventet salgsverdi:", f"{safe_get(oek, 'forventet_salgsverdi_mnok', 0)} MNOK")
-        pdf.key_value("Forventet resultat:", f"{safe_get(oek, 'forventet_resultat_mnok', 0)} MNOK")
-        pdf.key_value("Resultatmargin:", f"{safe_get(oek, 'resultatmargin_pst', 0)}%")
+        story += dtable(
+            ["Post", "MNOK"],
+            [
+                ["Totalkostnadskalkyle",  sg(oek,"totalkostnadskalkyle_mnok","-")],
+                ["Entreprisekostnad",     sg(oek,"entreprisekostnad_mnok","-")],
+                ["Tomtekostnad",          sg(oek,"tomtekostnad_mnok","-")],
+                ["Offentlige avgifter",   sg(oek,"offentlige_avgifter_mnok","-")],
+                ["Prosjektkostnader",     sg(oek,"prosjektkostnader_mnok","-")],
+                ["Finanskostnader",       sg(oek,"finanskostnader_mnok","-")],
+                ["Forventet salgsverdi",  sg(oek,"forventet_salgsverdi_mnok","-")],
+                ["Forventet resultat",    sg(oek,"forventet_resultat_mnok","-")],
+                ["Resultatmargin",        f'{sg(oek,"resultatmargin_pst","-")}%'],
+            ],
+            col_widths=[120*mm, IW-120*mm],
+        )
 
-    # 6. Rentesensitivitet
-    pdf.section_title(6, "Rentesensitivitet")
-    rente = safe_get(analysis, "rentesensitivitet", [])
+    # ═══════════════════════════════════════════════════════════════════════
+    # 6. RENTESENSITIVITET
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(6, "Rentesensitivitet")
+    rente = sg(analysis, "rentesensitivitet", [])
     if rente:
-        pdf._font("B", 8)
-        pdf.set_fill_color(240, 244, 248)
-        pdf.set_text_color(80, 100, 120)
-        pdf.cell(40, 7, "Rentenivå", border=1, fill=True)
-        pdf.cell(50, 7, "Årsresultat (MNOK)", border=1, fill=True)
-        pdf.cell(30, 7, "DSCR", border=1, fill=True)
-        pdf.cell(0, 7, "Betjeningsevne", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
-        pdf._font("", 9)
-        pdf.set_text_color(40, 50, 60)
+        rs_rows = []
         for r in rente:
             if isinstance(r, dict):
-                pdf.cell(40, 6, safe_get(r, "rentenivaa", "-"), border=1)
-                pdf.cell(50, 6, str(safe_get(r, "aarsresultat_mnok", 0)), border=1)
-                pdf.cell(30, 6, str(safe_get(r, "dscr", 0)), border=1)
-                be = safe_get(r, "betjeningsevne", "-")
-                be_color = {"God": (34, 197, 94), "Akseptabel": (245, 158, 11), "Svak": (239, 68, 68)}.get(be, (40, 50, 60))
-                pdf.set_text_color(*be_color)
-                pdf.cell(0, 6, be, border=1, new_x="LMARGIN", new_y="NEXT")
-                pdf.set_text_color(40, 50, 60)
+                be = sg(r,"betjeningsevne","-")
+                rs_rows.append([sg(r,"rentenivaa","-"), sg(r,"aarsresultat_mnok","-"), sg(r,"dscr","-"), be])
+        story += dtable(
+            ["Renteniva", "Arsresultat (MNOK)", "DSCR", "Betjeningsevne"],
+            rs_rows,
+            col_widths=[40*mm, 55*mm, 40*mm, IW-135*mm],
+        )
 
-    # 7. Sikkerheter
-    pdf.section_title(7, "Sikkerheter og pant")
-    for s in safe_get(analysis, "sikkerheter", []):
-        if isinstance(s, dict):
-            pdf.key_value(f"{safe_get(s, 'type', '')} ({safe_get(s, 'prioritet', '')})",
-                          f"{safe_get(s, 'verdi_mnok', 0)} MNOK — {safe_get(s, 'kommentar', '')}")
+    # ═══════════════════════════════════════════════════════════════════════
+    # 7. SIKKERHETER
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(7, "Sikkerheter og pant")
+    sik = sg(analysis, "sikkerheter", [])
+    if sik:
+        sik_rows = [[sg(s,"type","-"), sg(s,"prioritet","-"),
+                     f'{sg(s,"verdi_mnok",0)} MNOK', sg(s,"kommentar","-")]
+                    for s in sik if isinstance(s, dict)]
+        story += dtable(
+            ["Type", "Prioritet", "Verdi", "Kommentar"],
+            sik_rows,
+            col_widths=[50*mm, 32*mm, 25*mm, IW-107*mm],
+        )
 
-    # 8. Risikovurdering
-    pdf.section_title(8, "Risikovurdering")
-    for r in safe_get(analysis, "risikovurdering", []):
-        if isinstance(r, dict):
-            pdf.key_value(safe_get(r, "risiko", ""), f"S: {safe_get(r, 'sannsynlighet', '-')} / K: {safe_get(r, 'konsekvens', '-')}")
-            pdf.body_text(f"  Mitigering: {safe_get(r, 'mitigering', '-')}")
+    # Kausjoner
+    kausjoner = project_info.get("kausjoner", [])
+    if kausjoner:
+        story.append(Paragraph("<b>Kausjoner og morselskapsgarantier</b>",
+            S("kh", fontName="Helvetica-Bold", fontSize=9.5, textColor=C_ACCENT, spaceAfter=3)))
+        kaus_rows = [[sg(k,"kausjonist","-"), sg(k,"type","Selvskyldner"),
+                      f'{sg(k,"beloep_mnok",0):.1f} MNOK', sg(k,"orgnr","-")]
+                     for k in kausjoner if isinstance(k, dict)]
+        story += dtable(
+            ["Kausjonist", "Type", "Belop", "Org.nr."],
+            kaus_rows,
+            col_widths=[80*mm, 35*mm, 30*mm, IW-145*mm],
+        )
 
-    # 9. Styrker / svakheter
-    pdf.section_title(9, "Styrker og svakheter")
-    pdf._font("B", 10)
-    pdf.set_text_color(34, 197, 94)
-    pdf.cell(0, 6, "Styrker:", new_x="LMARGIN", new_y="NEXT")
-    pdf._font("", 9)
-    pdf.set_text_color(40, 50, 60)
-    for s in safe_get(analysis, "styrker", []):
-        pdf.body_text(f"+ {s}")
-    pdf._font("B", 10)
-    pdf.set_text_color(239, 68, 68)
-    pdf.cell(0, 6, "Svakheter:", new_x="LMARGIN", new_y="NEXT")
-    pdf._font("", 9)
-    pdf.set_text_color(40, 50, 60)
-    for s in safe_get(analysis, "svakheter", []):
-        pdf.body_text(f"- {s}")
+    # ═══════════════════════════════════════════════════════════════════════
+    # 8. RISIKOVURDERING
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(8, "Risikovurdering")
+    risiko = sg(analysis, "risikovurdering", [])
+    if risiko:
+        risk_rows = [[sg(r,"risiko","-"), sg(r,"sannsynlighet","-"),
+                      sg(r,"konsekvens","-"), sg(r,"mitigering","-")]
+                     for r in risiko if isinstance(r, dict)]
+        story += dtable(
+            ["Risiko", "Sannsynlighet", "Konsekvens", "Mitigering"],
+            risk_rows,
+            col_widths=[55*mm, 28*mm, 28*mm, IW-111*mm],
+        )
 
-    # 10. Vilkår
-    pdf.section_title(10, "Foreslåtte vilkår")
-    for i, v in enumerate(safe_get(analysis, "vilkaar", []), 1):
-        pdf.body_text(f"{i}. {v}")
+    # ═══════════════════════════════════════════════════════════════════════
+    # 9. STYRKER / SVAKHETER
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(9, "Styrker og svakheter")
+    styrker  = sg(analysis, "styrker", [])
+    svakheter = sg(analysis, "svakheter", [])
 
-    # 11. Covenants
-    pdf.section_title(11, "Covenants")
-    cov = safe_get(analysis, "covenants", [])
-    if cov:
-        pdf._font("B", 8)
-        pdf.set_fill_color(240, 244, 248)
-        pdf.set_text_color(80, 100, 120)
-        pdf.cell(70, 7, "Covenant", border=1, fill=True)
-        pdf.cell(50, 7, "Grenseverdi", border=1, fill=True)
-        pdf.cell(0, 7, "Målefrekvens", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
-        pdf._font("", 9)
-        pdf.set_text_color(40, 50, 60)
-        for c in cov:
-            if isinstance(c, dict):
-                pdf.cell(70, 6, safe_get(c, "covenant", ""), border=1)
-                pdf.cell(50, 6, safe_get(c, "grenseverdi", ""), border=1)
-                pdf.cell(0, 6, safe_get(c, "maalefrekvens", ""), border=1, new_x="LMARGIN", new_y="NEXT")
+    sw_data = []
+    max_rows = max(len(styrker), len(svakheter))
+    for i in range(max_rows):
+        s_txt = f"+ {_safe_pdf(styrker[i])}"  if i < len(styrker)   else ""
+        w_txt = f"- {_safe_pdf(svakheter[i])}" if i < len(svakheter) else ""
+        sw_data.append([
+            Paragraph(s_txt, S(f"ss{i}", fontSize=8.5, leading=12, textColor=C_GREEN)) if s_txt else Paragraph("", s_td),
+            Paragraph(w_txt, S(f"sw{i}", fontSize=8.5, leading=12, textColor=C_RED))   if w_txt else Paragraph("", s_td),
+        ])
+    if sw_data:
+        # Header
+        sw_head = [
+            Paragraph("<b>Styrker</b>", S("sh", fontName="Helvetica-Bold", fontSize=8.5, textColor=C_WHITE)),
+            Paragraph("<b>Svakheter</b>", S("swh", fontName="Helvetica-Bold", fontSize=8.5, textColor=C_WHITE)),
+        ]
+        t = Table([sw_head]+sw_data, colWidths=[IW/2, IW/2])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",   (0,0),(-1,0), C_HEAD),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[C_PANEL, C_WHITE]),
+            ("GRID",         (0,0),(-1,-1),0.3, C_RULE),
+            ("TOPPADDING",   (0,0),(-1,-1),5),("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",  (0,0),(-1,-1),8),("RIGHTPADDING", (0,0),(-1,-1),8),
+            ("VALIGN",       (0,0),(-1,-1),"TOP"),
+        ]))
+        story += [KeepTogether([t, Spacer(1, 4*mm)])]
 
-    # Disclaimer
-    pdf.ln(10)
-    pdf.set_fill_color(255, 248, 230)
-    pdf.set_draw_color(245, 158, 11)
-    pdf.rect(10, pdf.get_y(), 190, 14, style="DF")
-    pdf._font("B", 8)
-    pdf.set_text_color(180, 120, 0)
-    pdf.set_xy(14, pdf.get_y() + 2)
-    pdf.cell(0, 5, "Utkast - krever faglig kontroll")
-    pdf._font("", 7)
-    pdf.set_xy(14, pdf.get_y() + 5)
-    pdf.cell(0, 5, "Kredittnotatet er automatisk generert og skal gjennomgås av kredittavdelingen før fremleggelse for kredittkomité.")
+    # ═══════════════════════════════════════════════════════════════════════
+    # 10. VILKAR
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(10, "Foreslatte vilkar")
+    vilkaar = sg(analysis, "vilkaar", [])
+    for i, v in enumerate(vilkaar, 1):
+        story.append(Paragraph(f"<b>{i}.</b>  {_safe_pdf(v)}",
+            S(f"v{i}", fontSize=9, leading=13, textColor=C_INK, leftIndent=6, spaceAfter=3)))
 
-    return bytes(pdf.output())
+    # ═══════════════════════════════════════════════════════════════════════
+    # 11. COVENANTS
+    # ═══════════════════════════════════════════════════════════════════════
+    story += heading(11, "Covenants")
+    cov_list = sg(analysis, "covenants", [])
+    if cov_list:
+        cov_rows = [[sg(c,"covenant","-"), sg(c,"grenseverdi","-"), sg(c,"maalefrekvens","-")]
+                    for c in cov_list if isinstance(c, dict)]
+        story += dtable(
+            ["Covenant", "Grenseverdi", "Malefrekvens"],
+            cov_rows,
+            col_widths=[100*mm, 50*mm, IW-150*mm],
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DISCLAIMER BOX
+    # ═══════════════════════════════════════════════════════════════════════
+    story.append(Spacer(1, 8*mm))
+    disc_data = [[
+        Paragraph("<b>UTKAST - KREVER FAGLIG KONTROLL</b>",
+            S("dt", fontName="Helvetica-Bold", fontSize=8.5, textColor=C_AMBER)),
+        Paragraph(
+            "Dette kredittnotatet er automatisk generert av Builtly AI og skal gjennomgaes av "
+            "ansvarlig kredittanalytiker foer fremleggelse for kredittkomite. Builtly AS paatar seg "
+            "ikke ansvar for eventuelle feil eller mangler i det automatisk genererte innholdet.",
+            S("db", fontSize=8, leading=12, textColor=C_SOFT)),
+    ]]
+    disc_t = Table(disc_data, colWidths=[60*mm, IW-60*mm])
+    disc_t.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0),(-1,-1), _colors.HexColor("#FFFBEB")),
+        ("BOX",         (0,0),(-1,-1), 1, _colors.HexColor("#FDE68A")),
+        ("LEFTPADDING", (0,0),(-1,-1), 10),("RIGHTPADDING",(0,0),(-1,-1),10),
+        ("TOPPADDING",  (0,0),(-1,-1), 8), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+        ("VALIGN",      (0,0),(-1,-1), "TOP"),
+    ]))
+    story.append(disc_t)
+
+    # ── Build ──────────────────────────────────────────────────────────────
+    doc.build(story, canvasmaker=lambda *a, **kw: _NC(*a, **kw))
+    return buf.getvalue()
+
+
 # ────────────────────────────────────────────────────────────────
 # PREMIUM CSS (same as other Builtly modules)
 # ────────────────────────────────────────────────────────────────
@@ -1338,69 +1466,6 @@ st.markdown("""
     .status-green { color: #22c55e; font-weight: 700; }
     .status-yellow { color: #f59e0b; font-weight: 700; }
     .status-red { color: #ef4444; font-weight: 700; }
-
-    /* ══ COMPREHENSIVE DARK-THEME FIXES ══ */
-    /* DataFrames/Tables */
-    .stDataFrame [data-testid="glideDataEditor"], .dvn-scroller, .dvn-scroller div { background-color: #0c1c2c !important; }
-    .stDataFrame th, .stDataFrame [role="columnheader"], .gdg-header,
-    [data-testid="stDataFrameResizable"] [role="columnheader"] { background-color: #112236 !important; color: #c8d3df !important; border-color: rgba(120,145,170,0.18) !important; }
-    .stDataFrame td, .stDataFrame [role="gridcell"],
-    [data-testid="stDataFrameResizable"] [role="gridcell"] { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
-    .stDataFrame tr:hover td, .stDataFrame [role="row"]:hover [role="gridcell"] { background-color: #112236 !important; }
-    .gdg-cell, .gdg-cell-text { color: #f5f7fb !important; }
-    .stDataFrame [data-testid="stDataFrameResizable"] { border: 1px solid rgba(120,145,170,0.15) !important; border-radius: 12px !important; }
-
-    /* Alerts */
-    .stAlert, div[data-testid="stAlert"], .stAlert > div, div[role="alert"] { background-color: #112236 !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
-    .stAlert p, .stAlert span, .stAlert div, div[role="alert"] p, div[role="alert"] span { color: #f5f7fb !important; }
-
-    /* File uploader */
-    .stFileUploader, .stFileUploader > div, [data-testid="stFileUploader"], [data-testid="stFileUploaderDropzone"] { background-color: #0c1c2c !important; border-color: rgba(120,145,170,0.18) !important; color: #f5f7fb !important; }
-    .stFileUploader small, .stFileUploader span, [data-testid="stFileUploaderDropzone"] span, [data-testid="stFileUploaderDropzone"] small { color: #9fb0c3 !important; }
-    [data-testid="stFileUploaderFile"] { background-color: #112236 !important; color: #f5f7fb !important; }
-    [data-testid="stFileUploaderFile"] span, [data-testid="stFileUploaderFile"] small { color: #f5f7fb !important; }
-
-    /* Date picker / calendar */
-    .stDateInput input { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
-    div[data-baseweb="calendar"], div[data-baseweb="calendar"] * { background-color: #162a42 !important; color: #f5f7fb !important; }
-    div[data-baseweb="calendar"] [aria-selected="true"] { background-color: #38bdf8 !important; color: #041018 !important; }
-    div[data-baseweb="datepicker"] { background-color: #162a42 !important; }
-
-    /* Tooltips */
-    div[data-testid="stTooltipIcon"] + div, .stTooltipContent, [data-testid="stTooltipContent"],
-    div[data-baseweb="tooltip"] > div { background-color: #162a42 !important; color: #f5f7fb !important; border: 1px solid rgba(120,145,170,0.18) !important; }
-
-    /* Expander */
-    .stExpander, details[data-testid="stExpander"], .streamlit-expanderHeader,
-    details[data-testid="stExpander"] summary, details[data-testid="stExpander"] > div { background-color: #0c1c2c !important; color: #f5f7fb !important; border-color: rgba(120,145,170,0.18) !important; }
-
-    /* Tab panel */
-    .stTabs [data-baseweb="tab-panel"], div[role="tabpanel"] { background-color: transparent !important; color: #f5f7fb !important; }
-
-    /* Number input stepper */
-    .stNumberInput button { background-color: #112236 !important; color: #c8d3df !important; border-color: rgba(120,145,170,0.18) !important; }
-
-    /* Toggle */
-    .stToggle span, .stCheckbox span, .stRadio span { color: #f5f7fb !important; }
-
-    /* Multi-select tags */
-    span[data-baseweb="tag"] { background-color: rgba(56,194,201,0.15) !important; color: #38bdf8 !important; }
-
-    /* Popover/modal */
-    div[data-baseweb="modal"] > div, div[data-baseweb="popover"], div[data-baseweb="popover"] > div { background-color: #162a42 !important; color: #f5f7fb !important; }
-
-    /* Toast */
-    div[data-baseweb="toast"], div[data-baseweb="snackbar"], .stToast, [data-testid="stToast"] { background-color: #162a42 !important; color: #f5f7fb !important; border: 1px solid rgba(120,145,170,0.18) !important; }
-
-    /* Scrollbars */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: #0c1c2c; border-radius: 4px; }
-    ::-webkit-scrollbar-thumb { background: rgba(120,145,170,0.3); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(120,145,170,0.5); }
-
-    /* Catch-all white backgrounds */
-    .stApp div[style*="background-color: white"], .stApp div[style*="background-color: rgb(255"],
-    .stApp div[style*="background: white"], .stApp div[style*="background: rgb(255"] { background-color: #0c1c2c !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1604,7 +1669,7 @@ with left:
                 <div style="font-size:0.72rem;color:#555;margin-top:5px;">Kilde: {si.get("kilde","")}</div>
             </div>''')
 
-    render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering, gnr/bnr og godkjenningsstatus.", "Regulering")
+    render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering og godkjenningsstatus.", "Regulering")
 
     c3, c4 = st.columns(2)
     with c3:
@@ -1614,48 +1679,11 @@ with left:
         reg_opts = ["Vedtatt", "Under behandling", "Ikke påbegynt", "Krever omregulering"]
         reguleringsplan = st.selectbox("Reguleringsplan", reg_opts)
     with c4:
-        gnr_bnr = st.text_input("Gnr/bnr (panteobjekt)", value=pf.get("gnr_bnr", ""), placeholder="Gnr. 81, bnr. 56, 57, 10, 154, 155, 156", help="Matrikkeldata — grunnlag for bankens pant")
         rg_opts = ["Godkjent", "Søkt", "Ikke søkt"]
         rammegodkjenning = st.selectbox("Rammegodkjenning / IG", rg_opts)
         byggestart = st.date_input("Planlagt byggestart", value=date(2026, 9, 1))
         ferdigstillelse = st.date_input("Planlagt ferdigstillelse", value=date(2028, 12, 31))
-
-    c3b, c4b = st.columns(2)
-    with c3b:
         forhaandssalg = st.number_input("Forhåndssalg/utleiegrad (%)", min_value=0, max_value=100, value=int(pf.get("forhaandssalg_pst", 0) or 0), step=5)
-        kommune = st.text_input("Kommune", value=pf.get("kommune", ""), placeholder="Trondheim")
-    with c4b:
-        planident = st.text_input("Planident / reg.plan", value=pf.get("planident", ""), placeholder="r20200040")
-
-    # ── Multi-lån: Tomtelån + Byggelån + Infralån ──
-    render_section("2b. Finansieringsstruktur", "Prosjekter kan ha flere lånetyper. Spesifiser alle aktuelle.", "Lån")
-
-    render_html('''<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:0.8rem 1.1rem;margin:0.6rem 0;">
-        <div style="font-weight:700;font-size:0.85rem;color:#38bdf8;margin-bottom:3px;">Flere lånetyper</div>
-        <div style="font-size:0.82rem;color:#9fb0c3;">Utviklingsprosjekter kan ha tomtelån (for ubebygd tomt), byggelån (for produksjon) og infralån (for infrastruktur som betjener flere byggetrinn). Spesifiser alle aktuelle lån.</div>
-    </div>''')
-
-    har_tomtelaan = st.toggle("Tomtelån (separat)", value=bool(pf.get("tomtelaan_mnok", 0)))
-    tomtelaan_mnok = 0.0
-    tomtelaan_tomt_takst = 0.0
-    if har_tomtelaan:
-        tl1, tl2 = st.columns(2)
-        with tl1:
-            tomtelaan_mnok = st.number_input("Tomtelån (MNOK)", min_value=0.0, value=float(pf.get("tomtelaan_mnok", 0) or 0), step=1.0, format="%.1f",
-                                              help="Separat tomtelån for arealer som ikke er del av byggelånet")
-        with tl2:
-            tomtelaan_tomt_takst = st.number_input("Takst/verdi tomt (MNOK)", min_value=0.0, value=float(pf.get("tomtelaan_tomt_takst_mnok", 0) or 0), step=1.0, format="%.1f",
-                                                    help="Takstverdi eller avtalt kjøpspris for tomten som sikkerhet for tomtelånet")
-
-    har_infralaan = st.toggle("Infralån (forskuttering)", value=bool(pf.get("infralaan_mnok", 0)))
-    infralaan_mnok = 0.0
-    if har_infralaan:
-        il1, il2 = st.columns(2)
-        with il1:
-            infralaan_mnok = st.number_input("Infralån (MNOK)", min_value=0.0, value=float(pf.get("infralaan_mnok", 0) or 0), step=1.0, format="%.1f",
-                                              help="Forskuttering av infrastruktur som betjener flere byggetrinn")
-        with il2:
-            st.info(f"Infra fordeles på fremtidige byggetrinn og refunderes etter hvert som disse realiseres.")
 
     render_section("3. Rentevilkår og finansstruktur", "Rentebetingelser fra bankens tilbud.", "Rente")
     cr1, cr2, cr3, cr4 = st.columns(4)
@@ -1776,7 +1804,6 @@ with left:
                         f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["omsetning"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:{res_color};font-weight:700;">{r["aarsresultat"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#f5f7fb;">{r["egenkapital"]}</td>'
-                        f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r.get("gjeld", "-")}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["ek_andel"]}</td>'
                         f'<td style="padding:3px 8px;text-align:right;color:#9fb0c3;">{r["totalkapital"]}</td>'
                         f'</tr>'
@@ -1789,7 +1816,6 @@ with left:
                         '<th style="padding:3px 8px;text-align:right;">Omsetning</th>'
                         '<th style="padding:3px 8px;text-align:right;">Årsresultat</th>'
                         '<th style="padding:3px 8px;text-align:right;">EK</th>'
-                        '<th style="padding:3px 8px;text-align:right;">Gjeld</th>'
                         '<th style="padding:3px 8px;text-align:right;">EK-andel</th>'
                         '<th style="padding:3px 8px;text-align:right;">Totalkapital</th>'
                         '</tr>'
@@ -1805,12 +1831,6 @@ with left:
                 if ka.get("ek_vs_kausjon") is not None:
                     ek_dekning = f' · EK-dekning: <span style="color:{farge};font-weight:700;">{ka["ek_vs_kausjon"]:.1f}x kausjonsbeløpet</span>'
 
-                gjeld_info = ""
-                if ka.get("gjeldsgrad") is not None:
-                    gjeld_info = f' · Gjeldsgrad: <span style="color:#c8d3df;font-weight:600;">{ka["gjeldsgrad"]:.1f}x</span>'
-                if ka.get("totalkapital_mnok") is not None:
-                    gjeld_info += f' · Totalkapital: <span style="color:#c8d3df;font-weight:600;">{ka["totalkapital_mnok"]:.0f} MNOK</span>'
-
                 render_html(f'''
                 <div style="background:rgba(10,22,35,0.6);border:1px solid {farge}44;border-left:4px solid {farge};
                             border-radius:12px;padding:1rem 1.2rem;margin-bottom:0.8rem;">
@@ -1821,7 +1841,7 @@ with left:
                                      padding:1px 8px;font-size:0.75rem;font-weight:700;color:{farge};text-transform:uppercase;">
                             {vurd}
                         </span>
-                        <span style="font-size:0.8rem;color:#9fb0c3;">{ka.get("_type","Selvskyldner")} · {ka.get("_kausjon_beloep",0):.1f} MNOK{ek_dekning}{gjeld_info}</span>
+                        <span style="font-size:0.8rem;color:#9fb0c3;">{ka.get("_type","Selvskyldner")} · {ka.get("_kausjon_beloep",0):.1f} MNOK{ek_dekning}</span>
                     </div>
                     <div style="margin-bottom:0.5rem;">{punkter_html}</div>
                     {reg_html}
@@ -1952,9 +1972,6 @@ if run_analysis:
         "antall_enheter": antall_enheter,
         "bra_i_kvm": bra_i_kvm,
         "tomt_kvm": tomt_kvm,
-        "gnr_bnr": gnr_bnr,
-        "kommune": kommune,
-        "planident": planident,
         "reguleringsplan": reguleringsplan,
         "rammegodkjenning": rammegodkjenning,
         "byggestart": str(byggestart),
@@ -1965,10 +1982,6 @@ if run_analysis:
         "pantesikkerhet": pantesikkerhet,
         "garantier": garanti,
         "spesielle_forhold": spesielle_forhold,
-        # Multi-lån
-        "tomtelaan_mnok": tomtelaan_mnok,
-        "tomtelaan_tomt_takst_mnok": tomtelaan_tomt_takst,
-        "infralaan_mnok": infralaan_mnok,
         # Rentevilkår
         "nibor_margin_pst": nibor_margin,
         "provisjon_pst_kvartal": provisjon,
