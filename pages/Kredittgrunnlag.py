@@ -222,51 +222,135 @@ Dokumenttekst:
 
 
 def lookup_company(orgnr_or_name: str) -> dict:
-    """Søk opp selskapsinfo fra proff.no / Brreg."""
+    """
+    Slår opp selskapsinfo fra Brønnøysundregistrenes åpne API-er:
+    - Enhetsregisteret: navn, bransje, adresse, stiftelsesdato, konkurs/avvikling
+    - Regnskapsregisteret: siste 2 år med omsetning, driftsresultat, årsresultat, EK, totalkapital
+    - Roller: styreleder, daglig leder
+    Ingen API-nøkkel nødvendig – alle API-er er åpne.
+    """
     import urllib.request, urllib.parse
-    result = {"navn": "", "orgnr": "", "bransje": "", "ansatte": "", "omsetning": "", "resultat": "", "egenkapital_selskap": "", "kilde": ""}
+    result = {
+        "navn": "", "orgnr": "", "organisasjonsform": "", "bransje": "",
+        "adresse": "", "stiftelsesaar": "", "ansatte": "",
+        "konkurs": False, "under_avvikling": False,
+        "regnskap": [],          # liste med årsregnskap
+        "styreleder": "", "daglig_leder": "",
+        "kilde": "", "feil": "",
+    }
     if not orgnr_or_name.strip():
         return result
-    # Try Brreg open API first (reliable)
-    try:
-        clean = re.sub(r"\s", "", orgnr_or_name.strip())
-        if clean.isdigit() and len(clean) == 9:
-            url = f"https://data.brreg.no/enhetsregisteret/api/enheter/{clean}"
-        else:
-            q = urllib.parse.quote(orgnr_or_name.strip())
-            url = f"https://data.brreg.no/enhetsregisteret/api/enheter?navn={q}&size=1"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode())
-        if "_embedded" in data:
-            enheter = data.get("_embedded", {}).get("enheter", [])
-            if enheter: data = enheter[0]
-        result["navn"] = data.get("navn", "")
-        result["orgnr"] = str(data.get("organisasjonsnummer", ""))
-        result["bransje"] = data.get("naeringskode1", {}).get("beskrivelse", "") if isinstance(data.get("naeringskode1"), dict) else ""
-        result["ansatte"] = str(data.get("antallAnsatte", ""))
-        result["kilde"] = "Brreg"
-    except Exception:
-        pass
-    # Try proff.no for financial data
-    try:
-        q = urllib.parse.quote(result.get("navn", "") or orgnr_or_name.strip())
-        url = f"https://www.proff.no/roller/{q}/-/-/"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-        # Extract financials from meta tags / structured data
-        omsetning_m = re.search(r"omsetning[^>]*>\s*([\d\s]+)\s*kr", html, re.I)
-        resultat_m = re.search(r"(?:resultat|årsresultat)[^>]*>\s*(-?[\d\s]+)\s*kr", html, re.I)
-        ek_m = re.search(r"egenkapital[^>]*>\s*(-?[\d\s]+)\s*kr", html, re.I)
-        if omsetning_m: result["omsetning"] = omsetning_m.group(1).strip() + " kr"
-        if resultat_m: result["resultat"] = resultat_m.group(1).strip() + " kr"
-        if ek_m: result["egenkapital_selskap"] = ek_m.group(1).strip() + " kr"
-        if result.get("kilde") != "Brreg": result["kilde"] = "proff.no"
-        else: result["kilde"] += " + proff.no"
-    except Exception:
-        pass
+
+    headers = {"Accept": "application/json",
+               "User-Agent": "Builtly-Kredittgrunnlag/1.0 (kontakt@builtly.ai)"}
+
+    def _get(url: str) -> dict | list | None:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            return None
+
+    def _fmt_nok(val) -> str:
+        """Formater NOK-beløp fra Brreg (i hele kroner) til lesbar streng."""
+        if val is None:
+            return "-"
+        try:
+            v = int(val)
+            if abs(v) >= 1_000_000:
+                return f"{v/1_000_000:.1f} MNOK"
+            elif abs(v) >= 1_000:
+                return f"{v/1_000:.0f} TNOK"
+            return f"{v} kr"
+        except Exception:
+            return str(val)
+
+    # ── 1. Enhetsregisteret ─────────────────────────────────────────────────
+    clean = re.sub(r"\s", "", orgnr_or_name.strip())
+    if clean.isdigit() and len(clean) == 9:
+        enhet = _get(f"https://data.brreg.no/enhetsregisteret/api/enheter/{clean}")
+    else:
+        q = urllib.parse.quote(orgnr_or_name.strip())
+        resp = _get(f"https://data.brreg.no/enhetsregisteret/api/enheter?navn={q}&size=1")
+        enheter = (resp or {}).get("_embedded", {}).get("enheter", [])
+        enhet = enheter[0] if enheter else None
+
+    if not enhet:
+        result["feil"] = "Fant ikke selskap i Enhetsregisteret"
+        return result
+
+    orgnr_found = str(enhet.get("organisasjonsnummer", ""))
+    result["navn"]              = enhet.get("navn", "")
+    result["orgnr"]             = orgnr_found
+    result["organisasjonsform"] = enhet.get("organisasjonsform", {}).get("beskrivelse", "") if isinstance(enhet.get("organisasjonsform"), dict) else ""
+    result["bransje"]           = enhet.get("naeringskode1", {}).get("beskrivelse", "") if isinstance(enhet.get("naeringskode1"), dict) else ""
+    result["ansatte"]           = str(enhet.get("antallAnsatte", "") or "")
+    result["konkurs"]           = bool(enhet.get("konkurs"))
+    result["under_avvikling"]   = bool(enhet.get("underAvvikling"))
+    result["stiftelsesaar"]     = str(enhet.get("stiftelsesdato", "") or "")[:4]
+    adr = enhet.get("forretningsadresse", {})
+    if isinstance(adr, dict):
+        parts = [", ".join(adr.get("adresse", [])), adr.get("postnummer", ""), adr.get("poststed", ""), adr.get("kommune", "")]
+        result["adresse"] = " ".join(p for p in parts if p).strip()
+    result["kilde"] = "Brreg Enhetsregisteret"
+
+    # ── 2. Regnskapsregisteret ─────────────────────────────────────────────
+    regnskap_data = _get(f"https://data.brreg.no/regnskapsregisteret/regnskap/{orgnr_found}")
+    if regnskap_data and isinstance(regnskap_data, list):
+        # Sort by year descending, take last 3
+        def _year(r):
+            try: return int(str(r.get("regnskapsperiode", {}).get("tilOgMed", "0"))[:4])
+            except: return 0
+        sorted_r = sorted(regnskap_data, key=_year, reverse=True)[:3]
+        parsed_regnskap = []
+        for r in sorted_r:
+            aar = str(r.get("regnskapsperiode", {}).get("tilOgMed", ""))[:4]
+            res_r = r.get("resultatregnskapResultat", {}) or {}
+            bal_r = r.get("balanseregnskapSumVerdier", {}) or {}
+            drift = res_r.get("driftsresultat", {}) or {}
+            omsetning_raw = res_r.get("sumInntekter") or res_r.get("driftsinntekter", {}).get("sumDriftsinntekter") if isinstance(res_r.get("driftsinntekter"), dict) else res_r.get("sumInntekter")
+            aarsresultat_raw = res_r.get("aarsresultat") or res_r.get("ordinaertResultatFoerSkattekostnad")
+            driftsresultat_raw = drift.get("driftsresultat") if isinstance(drift, dict) else None
+            ek_raw = bal_r.get("sumEgenkapital")
+            totalkapital_raw = bal_r.get("sumEgenkapitalOgGjeld") or bal_r.get("sumGjeldOgEgenkapital")
+            gjeld_raw = bal_r.get("sumGjeld")
+
+            parsed_regnskap.append({
+                "aar": aar,
+                "omsetning": _fmt_nok(omsetning_raw),
+                "driftsresultat": _fmt_nok(driftsresultat_raw),
+                "aarsresultat": _fmt_nok(aarsresultat_raw),
+                "egenkapital": _fmt_nok(ek_raw),
+                "totalkapital": _fmt_nok(totalkapital_raw),
+                "gjeld": _fmt_nok(gjeld_raw),
+                "ek_andel": f"{round(int(ek_raw or 0)/int(totalkapital_raw or 1)*100, 1)}%" if ek_raw and totalkapital_raw else "-",
+                # Raw values for compute_traffic_light
+                "_omsetning_nok": omsetning_raw,
+                "_ek_nok": ek_raw,
+                "_aarsresultat_nok": aarsresultat_raw,
+            })
+        result["regnskap"] = parsed_regnskap
+        if parsed_regnskap:
+            result["kilde"] += " + Regnskapsregisteret"
+
+    # ── 3. Roller (styreleder + daglig leder) ─────────────────────────────
+    roller_data = _get(f"https://data.brreg.no/enhetsregisteret/api/enheter/{orgnr_found}/roller")
+    if roller_data and isinstance(roller_data, dict):
+        roller_list = roller_data.get("rollegrupper", [])
+        for gruppe in roller_list:
+            kode = gruppe.get("type", {}).get("kode", "")
+            for rolle in gruppe.get("roller", []):
+                person = rolle.get("person", {}) or {}
+                navn_p = person.get("navn", {}) or {}
+                fullt = f"{navn_p.get('fornavn', '')} {navn_p.get('etternavn', '')}".strip()
+                if kode == "STYR" and not result["styreleder"]:
+                    result["styreleder"] = fullt
+                elif kode == "DAGL" and not result["daglig_leder"]:
+                    result["daglig_leder"] = fullt
+
     return result
+
 
 
 def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
@@ -1097,7 +1181,19 @@ if do_prefill and uploads:
             kausjoner = extracted.get("kausjoner", [])
             filled = [k for k in kausjoner if k.get("kausjonist") or k.get("beloep_mnok", 0) > 0]
             if filled:
-                st.session_state.kausjon_rows = filled
+                # Auto-lookup missing org.nr from Brreg for each kausjonist
+                enriched = []
+                for k in filled:
+                    if not k.get("orgnr") and k.get("kausjonist"):
+                        try:
+                            info = lookup_company(k["kausjonist"])
+                            if info.get("orgnr"):
+                                k["orgnr"] = info["orgnr"]
+                                k["kausjonist"] = info.get("navn", k["kausjonist"]) or k["kausjonist"]
+                        except Exception:
+                            pass
+                    enriched.append(k)
+                st.session_state.kausjon_rows = enriched
             else:
                 # Keep one blank row as placeholder
                 st.session_state.kausjon_rows = [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
@@ -1149,20 +1245,61 @@ with left:
     with col_lu_btn:
         do_lookup = st.button("🔎 Søk", use_container_width=True)
     if do_lookup and lu_query:
-        with st.spinner("Søker..."):
+        with st.spinner("Søker i Brønnøysundregistrene..."):
             st.session_state.selskap_info = lookup_company(lu_query)
     if st.session_state.selskap_info:
         si = st.session_state.selskap_info
-        cols_si = [f"**{si.get('navn','')}**", f"Org.nr: {si.get('orgnr','-')}", f"Bransje: {si.get('bransje','-')}", f"Ansatte: {si.get('ansatte','-')}"]
-        fin_si = []
-        if si.get("omsetning"): fin_si.append(f"Omsetning: {si['omsetning']}")
-        if si.get("resultat"): fin_si.append(f"Resultat: {si['resultat']}")
-        if si.get("egenkapital_selskap"): fin_si.append(f"EK: {si['egenkapital_selskap']}")
-        render_html(f'''<div style="background:rgba(56,194,201,0.05);border:1px solid rgba(56,194,201,0.18);border-radius:10px;padding:0.7rem 1rem;margin:0.5rem 0;font-size:0.85rem;">
-            <span style="color:#38bdf8;">{"  ·  ".join(cols_si)}</span><br>
-            <span style="color:#9fb0c3;">{" · ".join(fin_si) if fin_si else "Regnskapstall ikke tilgjengelig"}</span>
-            <span style="color:#555;font-size:0.75rem;"> (kilde: {si.get("kilde","")})</span>
-        </div>''')
+        if si.get("feil"):
+            st.warning(f"Selskapssøk: {si['feil']}")
+        else:
+            # Header line
+            konkurs_tag = ' <span style="background:#ef4444;color:#fff;padding:1px 6px;border-radius:4px;font-size:0.72rem;font-weight:700;">KONKURS</span>' if si.get("konkurs") else ""
+            avv_tag = ' <span style="background:#f59e0b;color:#fff;padding:1px 6px;border-radius:4px;font-size:0.72rem;font-weight:700;">UNDER AVVIKLING</span>' if si.get("under_avvikling") else ""
+            meta = []
+            if si.get("orgnr"): meta.append(f"Org.nr: {si['orgnr']}")
+            if si.get("organisasjonsform"): meta.append(si["organisasjonsform"])
+            if si.get("bransje"): meta.append(si["bransje"])
+            if si.get("ansatte"): meta.append(f"{si['ansatte']} ansatte")
+            if si.get("stiftelsesaar"): meta.append(f"Stiftet {si['stiftelsesaar']}")
+            if si.get("adresse"): meta.append(si["adresse"])
+            roller_str = " · ".join(filter(None, [
+                f"Styreleder: {si['styreleder']}" if si.get("styreleder") else "",
+                f"Daglig leder: {si['daglig_leder']}" if si.get("daglig_leder") else "",
+            ]))
+
+            # Regnskap table
+            reg_rows = si.get("regnskap", [])
+            reg_html = ""
+            if reg_rows:
+                reg_html = '<table style="width:100%;border-collapse:collapse;margin-top:0.5rem;font-size:0.82rem;">'
+                reg_html += '<tr style="color:#9fb0c3;border-bottom:1px solid rgba(120,145,170,0.2);">'
+                for col in ["År", "Omsetning", "Driftsres.", "Årsres.", "EK", "EK-andel", "Totalkapital"]:
+                    reg_html += f'<th style="text-align:right;padding:3px 8px;font-weight:600;">{col}</th>'
+                reg_html += "</tr>"
+                for r in reg_rows:
+                    aarsres_raw = r.get("_aarsresultat_nok") or 0
+                    res_color = "#22c55e" if (aarsres_raw or 0) >= 0 else "#ef4444"
+                    reg_html += f'<tr style="border-bottom:1px solid rgba(120,145,170,0.1);">'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#c8d3df;font-weight:600;">{r["aar"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#f5f7fb;">{r["omsetning"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#f5f7fb;">{r["driftsresultat"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:{res_color};font-weight:700;">{r["aarsresultat"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#f5f7fb;">{r["egenkapital"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#9fb0c3;">{r["ek_andel"]}</td>'
+                    reg_html += f'<td style="text-align:right;padding:3px 8px;color:#9fb0c3;">{r["totalkapital"]}</td>'
+                    reg_html += "</tr>"
+                reg_html += '</table>'
+
+            render_html(f'''
+            <div style="background:rgba(56,194,201,0.04);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:0.9rem 1.1rem;margin:0.5rem 0;">
+                <div style="font-size:0.98rem;font-weight:700;color:#f5f7fb;margin-bottom:3px;">
+                    {si.get("navn","")}{konkurs_tag}{avv_tag}
+                </div>
+                <div style="font-size:0.82rem;color:#9fb0c3;margin-bottom:2px;">{" · ".join(meta)}</div>
+                {f'<div style="font-size:0.8rem;color:#9fb0c3;margin-bottom:4px;">{roller_str}</div>' if roller_str else ""}
+                {reg_html if reg_html else '<div style="font-size:0.8rem;color:#9fb0c3;margin-top:4px;">Regnskapstall ikke tilgjengelig i Regnskapsregisteret</div>'}
+                <div style="font-size:0.72rem;color:#555;margin-top:5px;">Kilde: {si.get("kilde","")}</div>
+            </div>''')
 
     render_section("2. Tomt og regulering", "Tomt, BRA-i, regulering og godkjenningsstatus.", "Regulering")
 
@@ -1210,20 +1347,38 @@ with left:
     kausjon_rows = st.session_state.kausjon_rows
     updated_rows = []
     for i, row in enumerate(kausjon_rows):
-        kc1, kc2, kc3, kc4, kc5 = st.columns([3, 2, 1.5, 1.5, 0.7])
+        # Header row labels only for first row
+        kc1, kc2, kc3, kc4, kc5, kc6 = st.columns([3, 2, 1.5, 1.5, 0.5, 0.5])
         with kc1:
-            kn = st.text_input(f"Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{i}", placeholder="Fredensborg Bolig AS", label_visibility="collapsed" if i > 0 else "visible")
+            kn = st.text_input("Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{i}", placeholder="Fredensborg Bolig AS", label_visibility="collapsed" if i > 0 else "visible")
         with kc2:
-            ko = st.text_input(f"Org.nr.", value=row.get("orgnr", ""), key=f"ko_{i}", placeholder="919 998 296", label_visibility="collapsed" if i > 0 else "visible")
+            ko_val = row.get("orgnr", "")
+            ko = st.text_input("Org.nr.", value=ko_val, key=f"ko_{i}", placeholder="919 998 296", label_visibility="collapsed" if i > 0 else "visible")
         with kc3:
-            kb = st.number_input("Beløp (MNOK)", value=float(row.get("beloep_mnok", 0) or 0), key=f"kb_{i}", step=5.0, format="%.1f", label_visibility="collapsed" if i > 0 else "visible")
+            kb = st.number_input("Beloep (MNOK)", value=float(row.get("beloep_mnok", 0) or 0), key=f"kb_{i}", step=5.0, format="%.1f", label_visibility="collapsed" if i > 0 else "visible")
         with kc4:
             kt_opts = ["Selvskyldner", "Simpel"]
             kt = st.selectbox("Type", kt_opts, key=f"kt_{i}", index=0 if row.get("type", "Selvskyldner") == "Selvskyldner" else 1, label_visibility="collapsed" if i > 0 else "visible")
         with kc5:
+            # Lookup org.nr button – visible when name is filled but no org.nr yet
+            lookup_label = "🔎" if i > 0 else "Søk"
+            if st.button(lookup_label, key=f"klu_{i}", use_container_width=True, help="Slå opp org.nr. fra Brreg"):
+                if kn:
+                    try:
+                        info = lookup_company(kn)
+                        if info.get("orgnr"):
+                            st.session_state.kausjon_rows[i]["orgnr"] = info["orgnr"]
+                            st.session_state.kausjon_rows[i]["kausjonist"] = info.get("navn", kn) or kn
+                            st.rerun()
+                    except Exception:
+                        pass
+        with kc6:
+            del_label = "✕" if i > 0 else " "
             if i > 0 and st.button("✕", key=f"kdel_{i}", use_container_width=True):
                 kausjon_rows.pop(i); st.session_state.kausjon_rows = kausjon_rows; st.rerun()
-        updated_rows.append({"kausjonist": kn, "orgnr": ko, "beloep_mnok": kb, "type": kt})
+        # Use latest lookup result for orgnr if it was just updated
+        ko_final = st.session_state.kausjon_rows[i].get("orgnr", ko) if i < len(st.session_state.kausjon_rows) else ko
+        updated_rows.append({"kausjonist": kn, "orgnr": ko_final, "beloep_mnok": kb, "type": kt})
 
     st.session_state.kausjon_rows = updated_rows
     if st.button("+ Legg til kausjon", use_container_width=True):
