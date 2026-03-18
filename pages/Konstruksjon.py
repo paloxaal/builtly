@@ -3752,6 +3752,96 @@ def dedupe_region_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str,
     return final_keep
 
 
+def _try_split_wide_region_v15(
+    mask,
+    region_bbox: Tuple[int, int, int, int],
+    page_width: int,
+    page_height: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Split a wide region into left/right sub-plans by finding a vertical gap."""
+    cv2, np = optional_cv_stack()
+    if cv2 is None or np is None:
+        return None
+    rx, ry, rw, rh = region_bbox
+    if rw < page_width * 0.55 or rh < page_height * 0.25:
+        return None
+    crop = mask[ry:ry + rh, rx:rx + rw]
+    if crop.size == 0:
+        return None
+
+    col_density = np.sum(crop > 0, axis=0).astype(float)
+    kernel_size = max(5, int(rw * 0.015)) | 1  # ensure odd
+    smoothed = np.convolve(col_density, np.ones(kernel_size) / kernel_size, mode='same')
+
+    search_start = int(rw * 0.20)
+    search_end = int(rw * 0.80)
+    if search_end <= search_start + int(rw * 0.05):
+        return None
+    search_zone = smoothed[search_start:search_end]
+    if len(search_zone) == 0:
+        return None
+
+    avg_density = float(np.mean(smoothed))
+    if avg_density <= 0:
+        return None
+    gap_threshold = avg_density * 0.30
+
+    below = (search_zone < gap_threshold).astype(np.uint8)
+    min_gap_px = max(5, int(rw * 0.03))
+
+    best_start = best_end = -1
+    best_w = 0
+    cur_start = -1
+    for i in range(len(below)):
+        if below[i]:
+            if cur_start < 0:
+                cur_start = i
+        else:
+            if cur_start >= 0:
+                w = i - cur_start
+                if w > best_w:
+                    best_w = w
+                    best_start = cur_start
+                    best_end = i
+                cur_start = -1
+    if cur_start >= 0:
+        w = len(below) - cur_start
+        if w > best_w:
+            best_w = w
+            best_start = cur_start
+            best_end = len(below)
+
+    if best_w < min_gap_px:
+        return None
+
+    gap_left = search_start + best_start
+    gap_right = search_start + best_end
+    left_w = gap_left
+    right_w = rw - gap_right
+    min_panel = int(rw * 0.22)
+    if left_w < min_panel or right_w < min_panel:
+        return None
+
+    margin = max(3, best_w // 4)
+    left_bbox = (rx, ry, max(20, gap_left - margin), rh)
+    right_bbox = (rx + gap_right + margin, ry, max(20, right_w - margin), rh)
+
+    sub = []
+    for bbox in [left_bbox, right_bbox]:
+        bx, by, bw, bh = bbox
+        sub_crop = mask[by:by + bh, bx:bx + bw]
+        d = float(np.mean(sub_crop > 0)) if sub_crop.size > 0 else 0.0
+        if d > 0.02:
+            sub.append({
+                "bbox_px": bbox,
+                "bbox_norm": px_bbox_to_norm(bbox, page_width, page_height),
+                "score": float(bw * bh) * d,
+                "density": d,
+                "split_source": "vertical_gap_v15",
+            })
+    return sub if len(sub) >= 2 else None
+
+
 def detect_plan_regions_grounded(image: Image.Image) -> List[Dict[str, Any]]:
     cv2, np = optional_cv_stack()
     if cv2 is None or np is None:
@@ -3787,6 +3877,18 @@ def detect_plan_regions_grounded(image: Image.Image) -> List[Dict[str, Any]]:
         )
 
     candidates = base_candidates + nested_candidates
+
+    # v15: Try splitting wide regions that may contain side-by-side plans
+    split_candidates: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        x, y, w, h = candidate["bbox_px"]
+        if w > width * 0.55 and h > height * 0.25:
+            sub = _try_split_wide_region_v15(base_mask, (x, y, w, h), width, height)
+            if sub:
+                split_candidates.extend(sub)
+    if split_candidates:
+        candidates = candidates + split_candidates
+
     enriched: List[Dict[str, Any]] = []
     for candidate in candidates:
         bbox = candidate["bbox_px"]
@@ -3799,12 +3901,20 @@ def detect_plan_regions_grounded(image: Image.Image) -> List[Dict[str, Any]]:
         titleblock_penalty = 0.55 if (x > width * 0.72 and y > height * 0.50) else 1.0
         bottom_penalty = 0.60 if y > height * 0.78 else 1.0
         huge_penalty = 0.45 if (w > width * 0.88 and h > height * 0.72) else 1.0
-        candidate["score"] = float(w * h) * candidate.get("density", 0.1) * centrality * titleblock_penalty * bottom_penalty * huge_penalty
+        split_bonus = 2.5 if candidate.get("split_source") else 1.0
+        candidate["score"] = float(w * h) * candidate.get("density", 0.1) * centrality * titleblock_penalty * bottom_penalty * huge_penalty * split_bonus
         candidate["bbox_norm"] = px_bbox_to_norm(bbox, width, height)
         enriched.append(candidate)
 
     deduped = dedupe_region_candidates(enriched)
     deduped.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+
+    # v15: When splits exist, drop full-width parent regions
+    has_splits = any(item.get("split_source") for item in deduped)
+    if has_splits:
+        deduped = [item for item in deduped if item.get("split_source") or item["bbox_px"][2] < width * 0.80]
+        if not deduped:
+            deduped = [item for item in enriched if item.get("split_source")]
 
     if not deduped and width > 0 and height > 0:
         fallback_bbox = (
@@ -3815,7 +3925,7 @@ def detect_plan_regions_grounded(image: Image.Image) -> List[Dict[str, Any]]:
         )
         return [{"bbox_px": fallback_bbox, "bbox_norm": px_bbox_to_norm(fallback_bbox, width, height), "score": 1.0}]
 
-    return deduped[:3]
+    return deduped[:4]
 
 
 def build_plan_footprint_from_binary(bw) -> Any:
@@ -9143,7 +9253,13 @@ def _refine_sketch_with_geometry_v9_impl(
     )
     if refined is None:
         return None
-    if isinstance(cue, dict) and isinstance(cue.get("plan_bbox"), dict):
+    # v15: forced_region (from sub-plan splitting) overrides page_cue's full-width bbox
+    if forced_region is not None:
+        if isinstance(forced_region.get("bbox_norm"), dict):
+            refined["plan_bbox"] = forced_region.get("bbox_norm")
+        elif isinstance(forced_region.get("bbox_px"), (list, tuple)):
+            refined["plan_bbox"] = px_bbox_to_norm(forced_region["bbox_px"], record["image"].size[0], record["image"].size[1])
+    elif isinstance(cue, dict) and isinstance(cue.get("plan_bbox"), dict):
         refined["plan_bbox"] = cue.get("plan_bbox")
     mode = clean_pdf_text(refined.get("grounded_mode", "")).lower()
     if mode == "wall_core" and not is_basement_like_record_v6(record, refined):
