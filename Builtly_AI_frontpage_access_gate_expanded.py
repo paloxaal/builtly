@@ -3596,6 +3596,27 @@ st.markdown(
         background-color: rgba(12,24,38,0.98) !important;
     }
 
+    /* Expander clickable header row */
+    div[data-testid="stExpander"] details > summary,
+    div[data-testid="stExpander"] details summary {
+        background: rgba(12,24,38,0.98) !important;
+        background-color: rgba(12,24,38,0.98) !important;
+        border-radius: 18px !important;
+        color: #c8d3df !important;
+        padding: 0.85rem 1.1rem !important;
+    }
+
+    div[data-testid="stExpander"] details[open] > summary {
+        border-radius: 18px 18px 0 0 !important;
+    }
+
+    div[data-testid="stExpander"] details > summary span,
+    div[data-testid="stExpander"] details > summary p,
+    div[data-testid="stExpander"] details > summary svg {
+        color: #c8d3df !important;
+        fill: #9fb0c3 !important;
+    }
+
     /* Expander content area – the inner div Streamlit wraps content in */
     div[data-testid="stExpander"] > div,
     div[data-testid="stExpander"] > div > div,
@@ -4625,10 +4646,28 @@ render_html(
     <div class="integration-footer-callout">
         <a href="{contact_href(st.session_state.app_lang)}" target="_self" class="integration-footer-link">{lang['partner_line']}</a>
     </div>
+    <div id="contact-form-anchor" style="height:0;overflow:hidden;"></div>
     """
 )
 
 if contact_query_requested():
+    # Scroll to the contact form smoothly after Streamlit re-renders
+    st.components.v1.html(
+        """<script>
+        window.addEventListener('load', function() {
+            setTimeout(function() {
+                var el = document.getElementById('contact-form-anchor');
+                if (!el) {
+                    // fallback: look for the expander
+                    var expanders = document.querySelectorAll('[data-testid="stExpander"]');
+                    if (expanders.length) el = expanders[expanders.length - 1];
+                }
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 120);
+        });
+        </script>""",
+        height=0,
+    )
     with st.expander(lang["contact_form_title"], expanded=True):
         col_info, col_close = st.columns([0.82, 0.18], gap="small")
         with col_info:
