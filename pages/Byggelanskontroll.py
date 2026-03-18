@@ -1518,7 +1518,7 @@ with col1:
     totalbudsjett = st.number_input(
         "Totalbudsjett (MNOK)",
         min_value=0.0,
-        value=round(default_budget, 1),
+        value=float(round(default_budget, 1)),
         step=1.0, format="%.1f",
         help="🟢 Auto-fylt fra kalkyle" if 'totalbudsjett' in confidence else "🟡 Fyll inn manuelt"
     )
@@ -1527,7 +1527,7 @@ with col1:
     byggelaan = st.number_input(
         "Byggelån innvilget (MNOK)",
         min_value=0.0,
-        value=round(default_loan, 1),
+        value=float(round(default_loan, 1)),
         step=1.0, format="%.1f",
         help="🟢 Auto-fylt fra opptrekk" if 'byggelaan' in confidence else "🟡 Fyll inn manuelt"
     )
@@ -1537,7 +1537,7 @@ with col2:
     tidligere_utbetalt = st.number_input(
         "Tidligere utbetalt (MNOK)",
         min_value=0.0,
-        value=round(default_prev, 1),
+        value=float(round(default_prev, 1)),
         step=1.0, format="%.1f",
         help="🟢 Auto-fylt fra opptrekk" if 'tidligere_utbetalt' in confidence else "🟡 Fyll inn manuelt"
     )
@@ -1546,7 +1546,7 @@ with col2:
     forespurt_trekk = st.number_input(
         "Forespurt trekk dette (MNOK)",
         min_value=0.0,
-        value=round(default_trekk, 2),
+        value=float(round(default_trekk, 2)),
         step=0.5, format="%.2f",
         help="🟢 Auto-fylt fra opptrekk" if 'forespurt_trekk' in confidence else "🟡 Fyll inn manuelt"
     )
