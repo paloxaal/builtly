@@ -213,13 +213,14 @@ KRITISK for finansieringsstruktur:
 - Prosjekter kan ha FLERE lånetyper: byggelån, tomtelån og infralån
 - Tomtelån: separat lån for tomtekjøp/areal som ikke bygges på ennå
 - Infralån: forskuttering av infrastruktur som betjener flere byggetrinn
-  Banken behandler infralån som tomtelån (tilbakebetales prorata ved ferdigstillelse av trinn)
+  Banken behandler infralån som tomtelån — egen trekkramme, trekkes løpende, samlet LTV med tomtelån maks 70%
 - Byggelån: lån for selve byggeprosjektet (produksjon)
 - VIKTIG: Infra-andelen kan ligge INNENFOR byggelånet i søknaden!
   Eks: "Byggelån BT3 NOK 532 000 000, hvor av forskuttering infra utgjør 77,357m"
-  → soekt_laan_mnok = 532 (hele byggelånet inkl infra, som søkt)
-  → infralaan_mnok = 77.357 (infra-andelen som skilles ut)
-- "soekt_laan_mnok" = byggelånet (hovedlånet, kan inkludere infra)
+  → soekt_laan_mnok = 532 (hele søkte byggelånet som det står i søknaden, INKL infra)
+  → infralaan_mnok = 77.357 (infra-andelen som banken skiller ut og behandler som tomtelån)
+  → Reelt byggelån for LTV-beregning = 532 - 77.357 = 454.643 MNOK
+- "soekt_laan_mnok" = hele søkte beløpet som oppgitt i søknaden (kan inkludere infra)
 - "tomtelaan_mnok" = eventuelt separat tomtelån
 - "infralaan_mnok" = infra-andel (enten separat eller utskilt fra byggelånet)
 - Sett laanetype til "Kombinert tomte- og byggelån" hvis flere lånetyper finnes
@@ -634,17 +635,17 @@ def analyse_kausjonist(orgnr_or_name: str, kausjon_beloep_mnok: float) -> dict:
 
 
 def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
-    """Beregn finansieringsstatus. 85%-regel byggelån, 50-70% tomte-/infralån."""
+    """Beregn finansieringsstatus. 85%-regel byggelån (ekskl infra), 50-70% tomte-/infralån."""
     nt = safe_get(analysis, "noekkeltall", {})
     oek = safe_get(analysis, "oekonomisk_analyse", {})
     anbefaling = safe_get(analysis, "anbefaling", "")
 
     total = float(safe_get(nt, "totalinvestering_mnok", 0) or project_info.get("totalinvestering_mnok", 0) or 0)
-    soekt = float(safe_get(nt, "soekt_laan_mnok", 0) or project_info.get("soekt_laan_mnok", 0) or 0)
+    soekt_raw = float(safe_get(nt, "soekt_laan_mnok", 0) or project_info.get("soekt_laan_mnok", 0) or 0)
     ek_pst = float(safe_get(nt, "egenkapitalprosent", 0) or 0)
-    ltv = float(safe_get(nt, "belaaningsgrad_ltv", 0) or 0)
     margin_pst = float(safe_get(oek, "resultatmargin_pst", 0) or 0)
     forhaandssalg = int(project_info.get("forhaandssalg_pst", 0) or 0)
+    markedsverdi = float(safe_get(nt, "estimert_markedsverdi_mnok", 0) or 0)
 
     # Separate loan types
     tomtelaan = float(project_info.get("tomtelaan_mnok", 0) or 0)
@@ -652,9 +653,18 @@ def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
     tomt_takst = float(project_info.get("tomtelaan_tomt_takst_mnok", 0) or 0)
     tomt_infra_sum = tomtelaan + infralaan
 
-    # 85%-regel for byggelån (ekskl. tomt/infra)
+    # Pure byggelån = søkt minus infra (infra behandles som tomtelån)
+    soekt_bygg = soekt_raw - infralaan if infralaan > 0 else soekt_raw
+
+    # LTV for byggelån: rent byggelån / markedsverdi
+    if markedsverdi > 0:
+        ltv = round(soekt_bygg / markedsverdi * 100, 1)
+    else:
+        ltv = float(safe_get(nt, "belaaningsgrad_ltv", 0) or 0)
+
+    # 85%-regel for byggelån (rent byggelån ekskl infra)
     bank_max = round(total * 0.85, 1) if total > 0 else 0
-    soekt_ok = soekt <= bank_max if bank_max > 0 and soekt > 0 else True
+    soekt_ok = soekt_bygg <= bank_max if bank_max > 0 and soekt_bygg > 0 else True
 
     kausjoner = project_info.get("kausjoner", [])
     total_kausjon = sum(float(k.get("beloep_mnok", 0) or 0) for k in kausjoner if isinstance(k, dict))
@@ -666,15 +676,15 @@ def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
     if ek_pst > 0 and ek_pst < 15:
         red_flags.append(f"Egenkapital {ek_pst:.1f}% under minimumskravet 15%")
     if ltv > 90:
-        red_flags.append(f"LTV {ltv:.1f}% er over bankens øvre grense 90%")
+        red_flags.append(f"LTV byggelån {ltv:.1f}% er over bankens øvre grense 90%")
     if anbefaling == "Ikke anbefalt":
         red_flags.append("AI-analyse anbefaler ikke innvilgelse basert på dokumentgrunnlaget")
 
-    if not soekt_ok and soekt > 0:
-        yellow_flags.append(f"Søkt byggelån {soekt:.1f} MNOK over 85%-grensen {bank_max:.1f} MNOK")
-        betingelser.append(f"Banken kan tilby inntil {bank_max:.1f} MNOK byggelån (85% av {total:.1f} MNOK). Resterende {round(soekt-bank_max,1)} MNOK må dekkes av egenkapital eller kausjon.")
+    if not soekt_ok and soekt_bygg > 0:
+        yellow_flags.append(f"Rent byggelån {soekt_bygg:.1f} MNOK over 85%-grensen {bank_max:.1f} MNOK")
+        betingelser.append(f"Banken kan tilby inntil {bank_max:.1f} MNOK byggelån (85% av {total:.1f} MNOK). Resterende {round(soekt_bygg-bank_max,1)} MNOK må dekkes av egenkapital eller kausjon.")
     if ltv > 80 and ltv <= 90:
-        yellow_flags.append(f"LTV {ltv:.1f}% over anbefalt 80% — krever tilleggssikkerhet")
+        yellow_flags.append(f"LTV byggelån {ltv:.1f}% over anbefalt 80% — krever tilleggssikkerhet")
         betingelser.append("LTV over 80% krever kausjon eller annen tilleggssikkerhet for overskytende del")
     if forhaandssalg > 0 and forhaandssalg < 60:
         yellow_flags.append(f"Forhåndssalg {forhaandssalg}% under anbefalt 60%")
@@ -692,12 +702,17 @@ def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
             elif tomt_ltv > 50:
                 betingelser.append(f"Tomtelån LTV {tomt_ltv:.0f}% innenfor norm med kausjon (50-70% av tomteverdi)")
         if infralaan > 0:
-            betingelser.append(f"Infralån {infralaan:.1f} MNOK behandles som tomtelån. Tilbakebetales prorata ved ferdigstillelse av etterfølgende byggetrinn.")
+            betingelser.append(f"Infralån {infralaan:.1f} MNOK er en egen trekkramme som behandles som tomtelån (maks 70% LTV samlet med tomtelånet). Trekkes etter hvert som infraarbeid utføres. Nedkvitteres i takt med salg/overlevering.")
+            if tomt_takst > 0:
+                infra_tomt_ltv = round((tomtelaan + infralaan) / tomt_takst * 100, 1)
+                if infra_tomt_ltv > 70:
+                    yellow_flags.append(f"Sum tomte-/infralån {tomt_infra_sum:.1f} MNOK mot tomteverdi {tomt_takst:.1f} MNOK (LTV {infra_tomt_ltv:.0f}%) — over 70%-norm")
+                betingelser.append(f"Sum tomte-/infralån {tomt_infra_sum:.1f} MNOK mot tomteverdi {tomt_takst:.1f} MNOK (samlet LTV {infra_tomt_ltv:.0f}%). Banknorm maks 70%.")
 
     # Kausjon kan løfte rød til gul
     kan_kausjon_loefte = False
     if red_flags and total_kausjon > 0:
-        gap = soekt - bank_max if soekt > bank_max else 0
+        gap = soekt_raw - bank_max if soekt_raw > bank_max else 0
         if total_kausjon >= gap * 0.5:
             kan_kausjon_loefte = True
             betingelser.append(f"Kausjoner totalt {total_kausjon:.1f} MNOK kan delvis mitigere — innvilgelse mulig med forsterkede vilkår")
@@ -725,12 +740,17 @@ def compute_traffic_light(project_info: dict, analysis: dict) -> dict:
         if tomt_infra_sum > 0:
             bankens_tilbud += f". Tomte-/infralån {tomt_infra_sum:.1f} MNOK i tillegg."
 
+    # Add infra explanation if LTV was corrected
+    if infralaan > 0 and soekt_bygg != soekt_raw:
+        betingelser.insert(0, f"LTV byggelån beregnet på rent byggelån {soekt_bygg:.1f} MNOK (søkt {soekt_raw:.1f} minus infra {infralaan:.1f}). LTV = {ltv:.1f}%.")
+
     return {
         "farge": farge, "status": status, "red_flags": red_flags,
         "yellow_flags": yellow_flags, "betingelser": betingelser,
         "bank_max_mnok": bank_max, "total_kausjon_mnok": total_kausjon,
         "kan_tilby": kan_tilby, "bankens_tilbud": bankens_tilbud,
         "tomt_infra_sum_mnok": tomt_infra_sum,
+        "ltv_bygg_pst": ltv, "soekt_bygg_mnok": soekt_bygg,
     }
 
 def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) -> dict:
@@ -748,7 +768,10 @@ def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) 
       Infra-andel kan ligge "innenfor" byggelånet i søknaden (f.eks. "byggelån 532m hvorav infra utgjør 77m"),
       men skal skilles ut som egen post i analysen.
     Hvis dokumentene viser flere lånetyper, sett lånetype til "Kombinert tomte- og byggelån".
-    I nøkkeltall: soekt_laan_mnok = byggelånet ekskl. infra. Tomtelån og infralån nevnes separat i sammendraget.
+    I nøkkeltall:
+    - soekt_laan_mnok = det rene byggelånet EKSKL infra-andelen. Hvis søkt 532 MNOK inkl 77.4 infra, sett soekt_laan_mnok = 454.6.
+    - belaaningsgrad_ltv = (soekt_laan_mnok / estimert_markedsverdi_mnok) × 100. Bruk det RENE byggelånet ekskl infra.
+    - Tomtelån og infralån nevnes separat i sammendraget, de er IKKE del av byggelånets LTV.
     Beregn EK-grad separat: byggelån mot prosjektkost, tomtelån+infralån mot tomt/infraverdi.
 
     VIKTIG OM VERDIVURDERING:
@@ -909,7 +932,7 @@ Finansieringsstruktur (kan ha flere lånetyper):
 - Byggelån (søkt): {project_info.get('soekt_laan_mnok', 0)} MNOK
 - Tomtelån (separat): {project_info.get('tomtelaan_mnok', 0)} MNOK (takst/verdi tomt: {project_info.get('tomtelaan_tomt_takst_mnok', 0)} MNOK)
 - Infralån (forskuttering): {project_info.get('infralaan_mnok', 0)} MNOK
-- NB: Infralån behandles av banken som tomtelån (50-70% LTV). Tilbakebetales prorata når etterfølgende byggetrinn ferdigstilles.
+- NB: Infralån er en egen trekkramme som behandles som tomtelån. Tomtelån utbetales dag 1, infralån trekkes løpende. Samlet LTV for tomt+infra maks 70%. Nedkvitteres i takt med salg.
 - NB: Hvis byggelånet inkluderer en infra-andel ("hvorav infra utgjør X"), skal denne skilles ut som infralån.
 - Tomtelån+infralån: bank finansierer normalt 50-70% av verdi, avhengig av kausjoner. 50% uten kausjon, 60-70% med solid kausjonist.
 - Byggelån: bank finansierer normalt 85-90% av prosjektkost (ekskl. infra).
@@ -1064,12 +1087,12 @@ class CreditPDF(FPDF if FPDF else object):
         y0 = 8
         if self._logo_path:
             try:
-                self.image(self._logo_path, 10, y0, 22)
+                self.image(self._logo_path, 10, y0, 28)
             except Exception:
-                self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
+                self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(28, 5, "BUILTLY")
         else:
-            self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
-        self._font("B", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(36, y0+1); self.cell(100, 5, self._safe("KREDITTNOTAT"))
+            self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(28, 5, "BUILTLY")
+        self._font("B", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(42, y0+1); self.cell(100, 5, self._safe("KREDITTNOTAT"))
         self._font("", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(150, y0+1); self.cell(50, 5, datetime.now().strftime("%d.%m.%Y"), align="R")
         self.set_draw_color(*self.TEAL); self.set_line_width(0.6); self.line(10, y0+7, 200, y0+7)
         self.set_draw_color(220, 225, 235); self.set_line_width(0.15); self.line(10, y0+7.8, 200, y0+7.8)
@@ -1093,7 +1116,7 @@ class CreditPDF(FPDF if FPDF else object):
         cover_logo = self._logo_white_path or self._logo_path
         if cover_logo:
             try:
-                self.image(cover_logo, 20, 25, 35)
+                self.image(cover_logo, 20, 22, 45)
             except Exception:
                 self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
         else:
@@ -1138,23 +1161,39 @@ class CreditPDF(FPDF if FPDF else object):
 
     def key_value(self, key, value, highlight=False):
         if self.get_y() > 265: self.add_page()
+        safe_val = self._safe(str(value))
         if highlight:
             self.set_fill_color(*self.TABLE_ALT); self.rect(10, self.get_y(), 190, 5.5, style="F")
-        self._font("B", 8.5); self.set_text_color(*self.DARK_GRAY); self.cell(72, 5.5, self._safe(key))
-        self._font("", 9.5); self.set_text_color(*self.NAVY); self.cell(0, 5.5, self._safe(str(value)), new_x="LMARGIN", new_y="NEXT")
+        self._font("B", 8.5); self.set_text_color(*self.DARK_GRAY)
+        self.cell(72, 5.5, self._safe(key))
+        self._font("", 9.5); self.set_text_color(*self.NAVY)
+        # Use multi_cell for long values to avoid overflow
+        if len(safe_val) > 60:
+            x_save = self.get_x(); y_save = self.get_y()
+            self.set_xy(82, y_save)
+            self.multi_cell(118, 5, safe_val)
+            self.ln(0.5)
+        else:
+            self.cell(118, 5.5, safe_val, new_x="LMARGIN", new_y="NEXT")
 
     def status_box(self, status, text):
-        if self.get_y() > 235: self.add_page()
+        if self.get_y() > 220: self.add_page()
         color_map = {"Anbefalt innvilget": self.GREEN, "Anbefalt med vilkår": self.WARM, "Anbefalt med vilkar": self.WARM, "Anbefalt med vilkaar": self.WARM, "Ikke anbefalt": self.RED}
         color = color_map.get(status, self.TEAL)
+        safe_text = self._safe(text)
+        # Estimate height: ~3.2 chars per mm at 8.5pt, width 176mm
+        text_lines = max(1, -(-len(safe_text) // 560))  # ~176mm * 3.2
+        box_h = 15 + text_lines * 5
         self.ln(3); y = self.get_y()
+        if y + box_h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*color); self.rect(10, y, 190, 1.5, style="F")
         self.set_fill_color(min(color[0]+220,255), min(color[1]+220,255), min(color[2]+220,255))
-        self.rect(10, y+1.5, 190, 22, style="F")
-        self.set_draw_color(*color); self.set_line_width(0.3); self.rect(10, y, 190, 23.5, style="D")
-        self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(0, 7, self._safe(status))
-        self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+12)
-        self.multi_cell(176, 4.5, self._safe(text)); self.set_y(y + 27)
+        self.rect(10, y+1.5, 190, box_h - 1.5, style="F")
+        self.set_draw_color(*color); self.set_line_width(0.3); self.rect(10, y, 190, box_h, style="D")
+        self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(170, 7, self._safe(status))
+        self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+13)
+        self.multi_cell(172, 4.5, safe_text)
+        self.set_y(y + box_h + 3)
 
     def metric_row(self, metrics):
         if self.get_y() > 240: self.add_page()
@@ -1236,14 +1275,19 @@ class CreditPDF(FPDF if FPDF else object):
         self.line(x_start, self.get_y(), x_start + 190, self.get_y()); self.ln(2)
 
     def callout(self, title, text, tone="blue"):
-        if self.get_y() > 250: self.add_page()
+        if self.get_y() > 245: self.add_page()
         tmap = {"blue":(self.TEAL,(230,248,250)), "green":(self.GREEN,(235,250,240)), "yellow":(self.WARM,(255,248,230)), "red":(self.RED,(255,235,235))}
         accent, bg = tmap.get(tone, tmap["blue"])
-        y = self.get_y(); h = 16
+        safe_text = self._safe(text)
+        text_lines = max(1, -(-len(safe_text) // 560))
+        h = max(16, 10 + text_lines * 5)
+        y = self.get_y()
+        if y + h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*bg); self.set_draw_color(*accent); self.set_line_width(0.3); self.rect(10, y, 190, h, style="DF")
         self.set_fill_color(*accent); self.rect(10, y, 3, h, style="F")
-        self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(0, 5, self._safe(title))
-        self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+7.5); self.multi_cell(178, 4, self._safe(text))
+        self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(170, 5, self._safe(title))
+        self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+8)
+        self.multi_cell(178, 4, safe_text)
         self.set_y(y + h + 3)
 
 
@@ -1282,7 +1326,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     tl = project_info.get("_traffic_light", {})
     if tl:
         farge = tl.get("farge", "gronn")
-        pdf.section_title(0, "Finansieringsvurdering")
+        pdf.section_title(1, "Finansieringsvurdering")
         all_details = []
         pdf.key_value("85%-grense:", f"{tl.get('bank_max_mnok',0):.1f} MNOK", highlight=True)
         pdf.key_value("Sum kausjoner:", f"{tl.get('total_kausjon_mnok',0):.1f} MNOK")
@@ -1298,11 +1342,11 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.ln(3)
 
     # 1. Sammendrag
-    pdf.section_title(1, "Sammendrag og anbefaling")
+    pdf.section_title(2, "Sammendrag og anbefaling")
     pdf.status_box(safe_get(analysis, "anbefaling", "Ikke vurdert"), safe_get(analysis, "sammendrag", ""))
 
     # 2. Nøkkeltall (dual metric dashboards)
-    pdf.section_title(2, "Nøkkeltall")
+    pdf.section_title(3, "Nøkkeltall")
     nt = safe_get(analysis, "noekkeltall", {})
     if isinstance(nt, dict):
         pdf.metric_row([
@@ -1320,7 +1364,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.key_value("Estimert markedsverdi:", _fmt_v(safe_get(nt, 'estimert_markedsverdi_mnok', 0)), highlight=True)
 
     # 3. Verdivurdering
-    pdf.section_title(3, "Verdivurdering")
+    pdf.section_title(4, "Verdivurdering")
     vv = safe_get(analysis, "verdivurdering", {})
     if isinstance(vv, dict):
         pdf.key_value("Metode:", safe_get(vv, "metode", "-"))
@@ -1377,7 +1421,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.key_value("LTV mot beregnet verdi:", f"{safe_get(vv, 'ltv_mot_beregnet_verdi_pst', 0)}%", highlight=True)
 
     # 4. Regulering
-    pdf.section_title(4, "Regulering og tomt")
+    pdf.section_title(5, "Regulering og tomt")
     reg = safe_get(analysis, "regulering_og_tomt", {})
     if isinstance(reg, dict):
         pdf.key_value("Reguleringsplan:", safe_get(reg, "reguleringsplan", "-"))
@@ -1394,7 +1438,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
 
     # 4b. Finansieringsstruktur (multi-lån)
     if project_info.get("tomtelaan_mnok", 0) > 0 or project_info.get("infralaan_mnok", 0) > 0:
-        pdf.section_title("4b", "Finansieringsstruktur")
+        pdf.section_title("5b", "Finansieringsstruktur")
         pdf.key_value("Byggelån (søkt):", f"{project_info.get('soekt_laan_mnok', 0)} MNOK")
         if project_info.get("tomtelaan_mnok", 0) > 0:
             pdf.key_value("Tomtelån (separat):", f"{project_info['tomtelaan_mnok']} MNOK", highlight=True)
@@ -1403,7 +1447,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
                 pdf.key_value("Takst/verdi tomt:", f"{project_info['tomtelaan_tomt_takst_mnok']} MNOK (LTV tomt: {ltv_tomt}%)")
         if project_info.get("infralaan_mnok", 0) > 0:
             pdf.key_value("Infralån (forskuttering):", f"{project_info['infralaan_mnok']} MNOK", highlight=True)
-            pdf.body_text("Infralån behandles som tomtelån (50-70% LTV). Tilbakebetales prorata ved ferdigstillelse av etterfølgende byggetrinn.")
+            pdf.body_text("Infralån er en egen trekkramme som behandles som tomtelån (maks 70% LTV samlet med tomtelånet). Trekkes etter hvert som infraarbeid utføres, nedkvitteres i takt med salg.")
         # Sum tomtelån + infralån
         tomt_infra_sum = project_info.get("tomtelaan_mnok", 0) + project_info.get("infralaan_mnok", 0)
         if tomt_infra_sum > 0:
@@ -1412,7 +1456,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.key_value("Sum alle lån:", f"{total_laan:.1f} MNOK", highlight=True)
 
     # 5. Økonomi
-    pdf.section_title(5, "Økonomisk analyse")
+    pdf.section_title(6, "Økonomisk analyse")
     oek = safe_get(analysis, "oekonomisk_analyse", {})
     if isinstance(oek, dict):
         oek_rows = [
@@ -1429,7 +1473,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.pro_table(["Post", "MNOK"], oek_rows, [120, 70])
 
     # 6. Rentesensitivitet
-    pdf.section_title(6, "Rentesensitivitet")
+    pdf.section_title(7, "Rentesensitivitet")
     rente = safe_get(analysis, "rentesensitivitet", [])
     if rente:
         headers = ["Rentenivå", "Årsresultat (MNOK)", "DSCR", "Betjeningsevne"]
@@ -1451,7 +1495,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.pro_table(headers, rows, [45, 50, 35, 60])
 
     # 7. Sikkerheter
-    pdf.section_title(7, "Sikkerheter og pant")
+    pdf.section_title(8, "Sikkerheter og pant")
     if project_info.get("gnr_bnr"):
         pdf.callout("Panteobjekt", f"Matrikkel: {project_info['gnr_bnr']}" + (f" - {project_info.get('kommune', '')}" if project_info.get('kommune') else ""), "blue")
     sikkerheter = safe_get(analysis, "sikkerheter", [])
@@ -1473,7 +1517,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.pro_table(["Kausjonist", "Type", "Beløp", "Org.nr."], kausk_rows, [60, 40, 35, 55])
 
     # 8. Risikovurdering
-    pdf.section_title(8, "Risikovurdering")
+    pdf.section_title(9, "Risikovurdering")
     risiko_list = safe_get(analysis, "risikovurdering", [])
     if risiko_list:
         risk_rows = []
@@ -1484,7 +1528,7 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.pro_table(["Risiko", "Sannsynlighet", "Konsekvens", "Mitigering"], risk_rows, [50, 28, 28, 84])
 
     # 9. Styrker / svakheter
-    pdf.section_title(9, "Styrker og svakheter")
+    pdf.section_title(10, "Styrker og svakheter")
     styrker = safe_get(analysis, "styrker", [])
     svakheter = safe_get(analysis, "svakheter", [])
     max_rows = max(len(styrker), len(svakheter))
@@ -1497,12 +1541,12 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         pdf.pro_table(["Styrker", "Svakheter"], ss_rows, [95, 95])
 
     # 10. Vilkår
-    pdf.section_title(10, "Foreslåtte vilkår")
+    pdf.section_title(11, "Foreslåtte vilkår")
     for i, v in enumerate(safe_get(analysis, "vilkaar", []), 1):
         pdf.body_text(f"{i}. {v}")
 
     # 11. Covenants
-    pdf.section_title(11, "Covenants")
+    pdf.section_title(12, "Covenants")
     cov = safe_get(analysis, "covenants", [])
     if cov:
         cov_rows = []
@@ -1967,7 +2011,7 @@ with left:
         with il2:
             render_html('''<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.18);border-radius:10px;padding:0.6rem 0.9rem;margin-top:1.4rem;">
                 <div style="font-size:0.78rem;color:#f59e0b;font-weight:700;">Bankbehandling</div>
-                <div style="font-size:0.76rem;color:#9fb0c3;line-height:1.4;">Infralån behandles som tomtelån (50-70% LTV). Tilbakebetales prorata ved ferdigstillelse av etterfølgende byggetrinn.</div>
+                <div style="font-size:0.76rem;color:#9fb0c3;line-height:1.4;">Infralån er en egen trekkramme som behandles som tomtelån (maks 70% LTV samlet med tomtelånet). Trekkes etter hvert som infraarbeid utføres, nedkvitteres i takt med salg.</div>
             </div>''')
 
     render_section("3. Rentevilkår og finansstruktur", "Rentebetingelser fra bankens tilbud.", "Rente")
