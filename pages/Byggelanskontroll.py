@@ -1044,132 +1044,188 @@ Vurder trekkforespørselen og returner JSON.
 # PDF REPORT
 # ────────────────────────────────────────────────────────────────
 class LoanControlPDF(FPDF if FPDF else object):
-    """PDF-rapport for byggelånskontroll."""
+    """Corporate-grade PDF — McKinsey/BCG style for byggelånskontroll."""
+
+    NAVY = (6, 17, 36); DARK_NAVY = (3, 10, 22); TEAL = (56, 194, 201)
+    WARM = (245, 158, 11); GREEN = (34, 197, 94); RED = (239, 68, 68)
+    WHITE = (255, 255, 255); LIGHT_GRAY = (245, 247, 251); MID_GRAY = (159, 176, 195)
+    DARK_GRAY = (80, 100, 120); BODY_TEXT = (30, 40, 55); TABLE_HEAD = (12, 28, 50); TABLE_ALT = (240, 244, 250)
 
     def __init__(self):
         super().__init__("P", "mm", "A4")
-        self.set_auto_page_break(auto=True, margin=25)
-        self._add_fonts()
-        self.accent = (56, 194, 201)
-        self.dark = (6, 17, 26)
-        self.muted = (159, 176, 195)
+        self.set_auto_page_break(auto=True, margin=28)
+        self._has_unicode = self._add_fonts()
+        self._logo_path = self._find_logo()
+        self.accent = self.TEAL
+
+    def _safe(self, text):
+        if not text: return ""
+        import unicodedata
+        s = unicodedata.normalize('NFC', str(text))
+        for old, new in [('\u2014','-'),('\u2013','-'),('\u2018',"'"),('\u2019',"'"),('\u201c','"'),('\u201d','"'),('\u2022','-')]:
+            s = s.replace(old, new)
+        return s if self._has_unicode else s.encode('latin-1', errors='replace').decode('latin-1')
 
     def _add_fonts(self):
-        self.add_font("Inter", "", os.path.join(os.path.dirname(__file__), "Inter-Regular.ttf"), uni=True) if os.path.exists(os.path.join(os.path.dirname(__file__), "Inter-Regular.ttf")) else None
-        self.add_font("Inter", "B", os.path.join(os.path.dirname(__file__), "Inter-Bold.ttf"), uni=True) if os.path.exists(os.path.join(os.path.dirname(__file__), "Inter-Bold.ttf")) else None
+        found = False
+        for style, name in [("", "Inter-Regular.ttf"), ("B", "Inter-Bold.ttf")]:
+            path = os.path.join(os.path.dirname(__file__), name)
+            if os.path.exists(path):
+                self.add_font("Inter", style, path, uni=True); found = True
+        return found
+
+    def _find_logo(self):
+        for p in ["logo.png", os.path.join(os.path.dirname(__file__), "logo.png"), "/app/logo.png"]:
+            if os.path.exists(p): return p
+        return ""
 
     def _font(self, style="", size=10):
-        try:
-            self.set_font("Inter", style, size)
-        except Exception:
-            self.set_font("Helvetica", style, size)
+        try: self.set_font("Inter", style, size)
+        except: self.set_font("Helvetica", style, size)
 
     def header(self):
-        self._font("B", 8)
-        self.set_text_color(159, 176, 195)
-        self.cell(0, 6, "Builtly | Byggelånskontroll", align="L")
-        self.cell(0, 6, datetime.now().strftime("%d.%m.%Y"), align="R", new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.3)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(4)
+        if self.page_no() <= 1: return
+        y0 = 8
+        if self._logo_path:
+            try: self.image(self._logo_path, 10, y0, 22)
+            except: self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
+        else:
+            self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
+        self._font("B", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(36, y0+1); self.cell(100, 5, self._safe("BYGGELÅNSKONTROLL"))
+        self._font("", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(150, y0+1); self.cell(50, 5, datetime.now().strftime("%d.%m.%Y"), align="R")
+        self.set_draw_color(*self.TEAL); self.set_line_width(0.6); self.line(10, y0+7, 200, y0+7)
+        self.set_draw_color(220, 225, 235); self.set_line_width(0.15); self.line(10, y0+7.8, 200, y0+7.8)
+        self.set_y(y0 + 12)
 
     def footer(self):
-        self.set_y(-15)
-        self._font("", 7)
-        self.set_text_color(159, 176, 195)
-        self.cell(0, 8, f"Side {self.page_no()}/{{nb}} — Utkast, krever faglig kontroll", align="C")
+        self.set_y(-18)
+        self.set_draw_color(200, 210, 225); self.set_line_width(0.15); self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(2); self._font("", 6.5); self.set_text_color(*self.MID_GRAY)
+        self.cell(120, 4, self._safe("KONFIDENSIELT - Kun for intern bruk"), align="L")
+        pg = self.page_no() - 1
+        if pg > 0: self.cell(0, 4, self._safe(f"Side {pg}"), align="R")
+        self.ln(3); self._font("", 5.5); self.set_text_color(180, 190, 205)
+        self.cell(0, 3, self._safe("Generert av Builtly | builtly.ai - Utkast, krever kvalitetssikring"), align="L")
 
     def cover_page(self, project_name, utbygger, trekk_nr):
         self.add_page()
-        self.ln(60)
-        self._font("B", 28)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 14, "Byggelånskontroll", align="C", new_x="LMARGIN", new_y="NEXT")
-        self._font("", 14)
-        self.set_text_color(80, 100, 120)
-        self.cell(0, 10, f"Trekkforespørsel #{trekk_nr}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(8)
-        self._font("B", 16)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 10, project_name, align="C", new_x="LMARGIN", new_y="NEXT")
-        self._font("", 11)
-        self.set_text_color(80, 100, 120)
-        self.cell(0, 8, f"Utbygger: {utbygger}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.cell(0, 8, f"Dato: {datetime.now().strftime('%d.%m.%Y')}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.ln(20)
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.8)
-        self.line(60, self.get_y(), 150, self.get_y())
+        self.set_fill_color(*self.DARK_NAVY); self.rect(0, 0, 210, 297, style="F")
+        self.set_fill_color(*self.TEAL); self.rect(0, 0, 210, 4, style="F")
+        if self._logo_path:
+            try: self.image(self._logo_path, 20, 25, 35)
+            except: self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
+        else:
+            self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
+        self.set_xy(20, 60); self.set_fill_color(*self.TEAL); self._font("B", 8); self.set_text_color(*self.DARK_NAVY)
+        self.cell(42, 7, "  KONFIDENSIELT  ", fill=True, align="C")
+        self.set_xy(20, 80); self._font("B", 32); self.set_text_color(*self.WHITE); self.cell(0, 14, self._safe("Byggelånskontroll"))
+        self.set_xy(20, 98); self._font("", 14); self.set_text_color(*self.TEAL); self.cell(0, 8, self._safe(f"Trekkforespørsel #{trekk_nr}"))
+        self.set_draw_color(*self.TEAL); self.set_line_width(1.2); self.line(20, 113, 90, 113)
+        self.set_xy(20, 123); self._font("B", 20); self.set_text_color(*self.WHITE); self.multi_cell(170, 10, self._safe(project_name))
+        y = self.get_y() + 8
+        self.set_xy(20, y); self._font("", 11); self.set_text_color(*self.MID_GRAY); self.cell(0, 6, self._safe(f"Utbygger: {utbygger}"))
+        # Info box
+        box_y = 210
+        self.set_fill_color(15, 30, 50); self.rect(20, box_y, 170, 40, style="F")
+        self.set_draw_color(40, 60, 85); self.rect(20, box_y, 170, 40, style="D")
+        items = [("Dato", datetime.now().strftime("%d.%m.%Y")), ("Klassifisering", "Konfidensielt"),
+                 ("Utarbeidet av", "Builtly AI-assistert kontroll"), ("Status", "Utkast - krever faglig gjennomgang")]
+        for i, (label, val) in enumerate(items):
+            col_x = 25 + (i % 2) * 85; row_y = box_y + 6 + (i // 2) * 16
+            self._font("B", 7); self.set_text_color(*self.TEAL); self.set_xy(col_x, row_y); self.cell(80, 4, label.upper())
+            self._font("", 9); self.set_text_color(*self.WHITE); self.set_xy(col_x, row_y+5); self.cell(80, 4, self._safe(val))
+        self.set_fill_color(*self.TEAL); self.rect(0, 293, 210, 4, style="F")
 
     def section_title(self, num, title):
-        self.ln(6)
-        self._font("B", 13)
-        self.set_text_color(*self.accent)
-        self.cell(0, 8, f"{num}. {title}", new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(*self.accent)
-        self.set_line_width(0.2)
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(3)
+        if self.get_y() > 225: self.add_page()
+        self.ln(8)
+        self._font("B", 8); self.set_fill_color(*self.TEAL); self.set_text_color(*self.WHITE)
+        num_str = str(num); pill_w = max(8, len(num_str) * 3.5 + 5)
+        self.cell(pill_w, 6, f" {num_str} ", fill=True, align="C"); self.cell(3, 6, "")
+        self._font("B", 13); self.set_text_color(*self.NAVY)
+        self.cell(0, 6, self._safe(title), new_x="LMARGIN", new_y="NEXT")
+        self.set_draw_color(*self.TEAL); self.set_line_width(0.5); self.line(10, self.get_y()+1, 200, self.get_y()+1)
+        self.ln(4)
 
     def body_text(self, text):
-        self._font("", 10)
-        self.set_text_color(40, 50, 60)
-        self.multi_cell(0, 5.5, text)
-        self.ln(2)
+        if self.get_y() > 260: self.add_page()
+        self._font("", 9.5); self.set_text_color(*self.BODY_TEXT)
+        self.multi_cell(0, 5, self._safe(str(text))); self.ln(1.5)
 
-    def key_value(self, key, value):
-        self._font("B", 9)
-        self.set_text_color(80, 100, 120)
-        self.cell(65, 5.5, key)
-        self._font("", 10)
-        self.set_text_color(6, 17, 26)
-        self.cell(0, 5.5, str(value), new_x="LMARGIN", new_y="NEXT")
+    def key_value(self, key, value, highlight=False):
+        if self.get_y() > 265: self.add_page()
+        if highlight:
+            self.set_fill_color(*self.TABLE_ALT); self.rect(10, self.get_y(), 190, 5.5, style="F")
+        self._font("B", 8.5); self.set_text_color(*self.DARK_GRAY); self.cell(72, 5.5, self._safe(key))
+        self._font("", 9.5); self.set_text_color(*self.NAVY); self.cell(0, 5.5, self._safe(str(value)), new_x="LMARGIN", new_y="NEXT")
 
     def status_box(self, status, text):
-        color_map = {"Anbefalt godkjent": (34, 197, 94), "Anbefalt med forbehold": (245, 158, 11), "Ikke anbefalt": (239, 68, 68)}
-        color = color_map.get(status, (56, 194, 201))
-        self.ln(3)
-        self.set_fill_color(*color)
-        self.set_draw_color(*color)
-        self.rect(10, self.get_y(), 190, 18, style="D")
-        self.set_fill_color(color[0], color[1], color[2])
-        self.rect(10, self.get_y(), 4, 18, style="F")
-        self._font("B", 12)
-        self.set_text_color(*color)
-        self.set_xy(18, self.get_y() + 2)
-        self.cell(0, 7, status)
-        self._font("", 9)
-        self.set_text_color(40, 50, 60)
-        self.set_xy(18, self.get_y() + 7)
-        self.cell(0, 5, text)
-        self.ln(22)
+        if self.get_y() > 235: self.add_page()
+        color_map = {"Anbefalt godkjent": self.GREEN, "Anbefalt med forbehold": self.WARM, "Ikke anbefalt": self.RED}
+        color = color_map.get(status, self.TEAL)
+        self.ln(3); y = self.get_y()
+        self.set_fill_color(*color); self.rect(10, y, 190, 1.5, style="F")
+        self.set_fill_color(min(color[0]+220,255), min(color[1]+220,255), min(color[2]+220,255))
+        self.rect(10, y+1.5, 190, 22, style="F")
+        self.set_draw_color(*color); self.set_line_width(0.3); self.rect(10, y, 190, 23.5, style="D")
+        self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(0, 7, self._safe(status))
+        self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+12)
+        self.multi_cell(176, 4.5, self._safe(text)); self.set_y(y + 27)
+
+    def metric_row(self, metrics):
+        if self.get_y() > 240: self.add_page()
+        n = len(metrics)
+        if n == 0: return
+        card_w = (190 - (n-1)*4) / n; y = self.get_y()
+        for i, (value, label, sublabel) in enumerate(metrics):
+            x = 10 + i * (card_w + 4)
+            self.set_fill_color(*self.LIGHT_GRAY); self.set_draw_color(220,225,235); self.set_line_width(0.2)
+            self.rect(x, y, card_w, 22, style="DF")
+            self.set_fill_color(*self.TEAL); self.rect(x, y, card_w, 1, style="F")
+            self._font("B", 14); self.set_text_color(*self.NAVY); self.set_xy(x+4, y+3); self.cell(card_w-8, 7, self._safe(str(value)))
+            self._font("B", 7); self.set_text_color(*self.DARK_GRAY); self.set_xy(x+4, y+11); self.cell(card_w-8, 4, self._safe(label.upper()))
+            self._font("", 6.5); self.set_text_color(*self.MID_GRAY); self.set_xy(x+4, y+15.5); self.cell(card_w-8, 4, self._safe(sublabel))
+        self.set_y(y + 26)
+
+    def pro_table(self, headers, rows, col_widths=None):
+        if self.get_y() > 240: self.add_page()
+        n = len(headers)
+        if col_widths is None: col_widths = [190/n]*n
+        self.set_fill_color(*self.TABLE_HEAD); self.set_text_color(*self.WHITE); self._font("B", 8)
+        for i, h in enumerate(headers):
+            self.cell(col_widths[i], 7, self._safe(h), border=0, fill=True, align="C" if i>0 else "L")
+        self.ln(); self._font("", 8.5)
+        for ri, row in enumerate(rows):
+            if self.get_y() > 265: self.add_page()
+            self.set_fill_color(*(self.TABLE_ALT if ri%2==0 else self.WHITE)); self.set_text_color(*self.BODY_TEXT)
+            for i, cell in enumerate(row):
+                cs = self._safe(str(cell))
+                if any(k in cs.lower() for k in ["god","sterk","positiv","godkjent","anbefalt"]): self.set_text_color(*self.GREEN)
+                elif any(k in cs.lower() for k in ["svak","negativ","ikke","kritisk"]): self.set_text_color(*self.RED)
+                elif any(k in cs.lower() for k in ["akseptabel","middels","forbehold"]): self.set_text_color(*self.WARM)
+                else: self.set_text_color(*self.BODY_TEXT)
+                self.cell(col_widths[i], 6.5, cs, border=0, fill=True, align="R" if i>0 else "L")
+            self.ln()
+        self.set_draw_color(200,210,225); self.set_line_width(0.3); self.line(10, self.get_y(), 200, self.get_y()); self.ln(2)
+
+    def callout(self, title, text, tone="blue"):
+        if self.get_y() > 250: self.add_page()
+        tmap = {"blue":(self.TEAL,(230,248,250)), "green":(self.GREEN,(235,250,240)), "yellow":(self.WARM,(255,248,230)), "red":(self.RED,(255,235,235))}
+        accent, bg = tmap.get(tone, tmap["blue"])
+        y = self.get_y(); h = 16
+        self.set_fill_color(*bg); self.set_draw_color(*accent); self.set_line_width(0.3); self.rect(10, y, 190, h, style="DF")
+        self.set_fill_color(*accent); self.rect(10, y, 3, h, style="F")
+        self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(0, 5, self._safe(title))
+        self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+7.5); self.multi_cell(178, 4, self._safe(text))
+        self.set_y(y + h + 3)
 
     def risk_table(self, risks):
-        self._font("B", 8)
-        self.set_fill_color(240, 244, 248)
-        self.set_text_color(80, 100, 120)
-        self.cell(70, 7, "Risiko", border=1, fill=True)
-        self.cell(25, 7, "Alvorlighet", border=1, fill=True)
-        self.cell(0, 7, "Tiltak", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
-        self._font("", 8)
-        self.set_text_color(40, 50, 60)
+        headers = ["Risiko", "Alvorlighet", "Tiltak"]
+        rows = []
         for r in risks:
-            y_start = self.get_y()
-            self.multi_cell(70, 5, safe_get(r, "risiko", "-"), border="LR")
-            y1 = self.get_y()
-            self.set_xy(80, y_start)
-            sev = safe_get(r, "alvorlighet", "-")
-            sev_color = {"Kritisk": (239, 68, 68), "Høy": (245, 158, 11), "Middels": (56, 194, 201), "Lav": (34, 197, 94)}.get(sev, (80, 100, 120))
-            self.set_text_color(*sev_color)
-            self.multi_cell(25, 5, sev, border="LR")
-            y2 = self.get_y()
-            self.set_text_color(40, 50, 60)
-            self.set_xy(105, y_start)
-            self.multi_cell(0, 5, safe_get(r, "tiltak", "-"), border="LR")
-            y3 = self.get_y()
-            max_y = max(y1, y2, y3)
-            self.set_y(max_y)
+            rows.append([safe_get(r, "risiko", "-"), safe_get(r, "alvorlighet", "-"), safe_get(r, "tiltak", "-")])
+        if rows:
+            self.pro_table(headers, rows, [70, 25, 95])
 
 
 def generate_loan_control_pdf(project_info, analysis) -> bytes:
@@ -1189,30 +1245,45 @@ def generate_loan_control_pdf(project_info, analysis) -> bytes:
     status = safe_get(analysis, "godkjenningsstatus", "Ikke vurdert")
     pdf.status_box(status, safe_get(analysis, "sammendrag", ""))
 
-    # 2. Budsjett vs påløpt
+    # 2. Budsjett vs påløpt — with metric cards
     pdf.section_title(2, "Budsjett vs. påløpt")
     bvp = safe_get(analysis, "budsjett_vs_paloept", {})
     if isinstance(bvp, dict):
-        pdf.key_value("Totalbudsjett:", f"{safe_get(bvp, 'totalbudsjett_mnok', 0)} MNOK")
+        pdf.metric_row([
+            (f"{safe_get(bvp, 'totalbudsjett_mnok', 0)} MNOK", "Totalbudsjett", "Samlet prosjektkost"),
+            (f"{safe_get(bvp, 'dette_trekk_mnok', 0)} MNOK", "Forespurt trekk", "Dette trekk"),
+            (f"{safe_get(bvp, 'forbruksprosent', 0)}%", "Forbruksprosent", "Andel forbrukt"),
+            (f"{safe_get(bvp, 'gjenstaaende_etter_trekk_mnok', 0)} MNOK", "Gjenstående", "Etter dette trekk"),
+        ])
         pdf.key_value("Påløpt før dette trekk:", f"{safe_get(bvp, 'paloept_foer_trekk_mnok', 0)} MNOK")
-        pdf.key_value("Forespurt trekk:", f"{safe_get(bvp, 'dette_trekk_mnok', 0)} MNOK")
-        pdf.key_value("Gjenstående etter trekk:", f"{safe_get(bvp, 'gjenstaaende_etter_trekk_mnok', 0)} MNOK")
-        pdf.key_value("Forbruksprosent:", f"{safe_get(bvp, 'forbruksprosent', 0)}%")
+        pdf.key_value("Anbefalt tilbakehold:", f"{safe_get(bvp, 'anbefalt_tilbakehold_mnok', 0)} MNOK", highlight=True)
 
     # 3. Fremdrift
     pdf.section_title(3, "Fremdriftsvurdering")
     fv = safe_get(analysis, "fremdriftsvurdering", {})
     if isinstance(fv, dict):
-        pdf.key_value("Planlagt fremdrift:", f"{safe_get(fv, 'planlagt_fremdrift_pst', 0)}%")
-        pdf.key_value("Estimert faktisk:", f"{safe_get(fv, 'estimert_faktisk_fremdrift_pst', 0)}%")
-        pdf.body_text(safe_get(fv, "avvik_kommentar", ""))
+        planlagt = safe_get(fv, 'planlagt_fremdrift_pst', 0)
+        faktisk = safe_get(fv, 'estimert_faktisk_fremdrift_pst', 0)
+        pdf.metric_row([
+            (f"{planlagt}%", "Planlagt fremdrift", "Iht. tidsplan"),
+            (f"{faktisk}%", "Faktisk fremdrift", "Estimert status"),
+        ])
+        avvik = safe_get(fv, "avvik_kommentar", "")
+        if avvik:
+            tone = "green" if faktisk >= planlagt else ("yellow" if faktisk >= planlagt * 0.85 else "red")
+            pdf.callout("Fremdriftsavvik", avvik, tone)
 
-    # 4. Kontrollpunkter
+    # 4. Kontrollpunkter — as professional table
     pdf.section_title(4, "Kontrollpunkter")
-    for kp in safe_get(analysis, "kontrollpunkter", []):
-        if isinstance(kp, dict):
-            s = safe_get(kp, "status", "?")
-            pdf.key_value(f"[{s}] {safe_get(kp, 'punkt', '')}", safe_get(kp, "kommentar", ""))
+    kp_list = safe_get(analysis, "kontrollpunkter", [])
+    if kp_list:
+        headers = ["Kontrollpunkt", "Status", "Kommentar"]
+        rows = []
+        for kp in kp_list:
+            if isinstance(kp, dict):
+                rows.append([safe_get(kp, "punkt", ""), safe_get(kp, "status", "?"), safe_get(kp, "kommentar", "")])
+        if rows:
+            pdf.pro_table(headers, rows, [70, 25, 95])
 
     # 5. Risikoer
     pdf.section_title(5, "Risikovurdering")
@@ -1222,34 +1293,39 @@ def generate_loan_control_pdf(project_info, analysis) -> bytes:
 
     # 6. Dokumentasjonskontroll
     pdf.section_title(6, "Dokumentasjonskontroll")
-    for d in safe_get(analysis, "dokumentasjonskontroll", []):
-        if isinstance(d, dict):
-            icon = "✓" if safe_get(d, "mottatt", False) else "✗"
-            pdf.key_value(f"{icon} {safe_get(d, 'dokument', '')}", safe_get(d, "kommentar", ""))
+    dok_list = safe_get(analysis, "dokumentasjonskontroll", [])
+    if dok_list:
+        headers = ["Dokument", "Status", "Kommentar"]
+        rows = []
+        for d in dok_list:
+            if isinstance(d, dict):
+                status_txt = "Mottatt" if safe_get(d, "mottatt", False) else "Ikke mottatt"
+                rows.append([safe_get(d, "dokument", ""), status_txt, safe_get(d, "kommentar", "")])
+        if rows:
+            pdf.pro_table(headers, rows, [60, 30, 100])
 
     # 7. Vilkår og anbefalinger
     pdf.section_title(7, "Vilkår for utbetaling")
-    for v in safe_get(analysis, "vilkaar_for_utbetaling", []):
-        pdf.body_text(f"• {v}")
+    vilkaar = safe_get(analysis, "vilkaar_for_utbetaling", [])
+    if vilkaar:
+        for i, v in enumerate(vilkaar, 1):
+            pdf.body_text(f"{i}. {v}")
 
     pdf.section_title(8, "Anbefalinger")
-    for a in safe_get(analysis, "anbefalinger", []):
-        pdf.body_text(f"• {a}")
+    anbefalinger = safe_get(analysis, "anbefalinger", [])
+    if anbefalinger:
+        for i, a in enumerate(anbefalinger, 1):
+            pdf.body_text(f"{i}. {a}")
 
     # Disclaimer
     pdf.ln(10)
-    pdf.set_fill_color(255, 248, 230)
-    pdf.set_draw_color(245, 158, 11)
-    pdf.rect(10, pdf.get_y(), 190, 14, style="DF")
-    pdf._font("B", 8)
-    pdf.set_text_color(180, 120, 0)
-    pdf.set_xy(14, pdf.get_y() + 2)
-    pdf.cell(0, 5, "Utkast — krever faglig kontroll")
-    pdf._font("", 7)
-    pdf.set_xy(14, pdf.get_y() + 5)
-    pdf.cell(0, 5, "Analysen er automatisk generert og skal gjennomgås av kvalifisert byggelånskontrollør før bruk.")
+    pdf.callout(
+        "UTKAST - KREVER FAGLIG KONTROLL",
+        "Analysen er automatisk generert av Builtly og skal gjennomgås av kvalifisert byggelånskontrollør før bruk.",
+        "yellow"
+    )
 
-    return pdf.output()
+    return bytes(pdf.output())
 
 
 # ────────────────────────────────────────────────────────────────
@@ -1341,12 +1417,51 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
         color: #041018 !important; border: none !important; font-weight: 750 !important;
         border-radius: 12px !important; padding: 12px 24px !important; font-size: 1.05rem !important; }
+    button[kind="secondary"] { background-color: rgba(255,255,255,0.04) !important; color: #c8d3df !important;
+        border: 1px solid rgba(120,145,170,0.25) !important; border-radius: 10px !important; font-weight: 600 !important; }
     .stDownloadButton > button { background-color: rgba(255,255,255,0.04) !important; color: #c8d3df !important;
         border: 1px solid rgba(120,145,170,0.25) !important; border-radius: 10px !important; font-weight: 600 !important; }
 
     /* DataFrame */
     .stDataFrame { border-radius: 12px; overflow: hidden; }
     .stDataFrame [data-testid="stDataFrameResizable"] { border: 1px solid rgba(120,145,170,0.15) !important; border-radius: 12px !important; }
+    .stDataFrame [data-testid="glideDataEditor"], .dvn-scroller, .dvn-scroller div { background-color: #0c1c2c !important; }
+    .stDataFrame th, .stDataFrame [role="columnheader"] { background-color: #112236 !important; color: #c8d3df !important; }
+    .stDataFrame td, .stDataFrame [role="gridcell"] { background-color: #0c1c2c !important; color: #f5f7fb !important; }
+
+    /* Alerts */
+    .stAlert, div[data-testid="stAlert"], div[role="alert"] { background-color: #112236 !important; color: #f5f7fb !important; }
+    .stAlert p, .stAlert span, div[role="alert"] p, div[role="alert"] span { color: #f5f7fb !important; }
+
+    /* File uploader */
+    [data-testid="stFileUploaderDropzone"] { background-color: #0c1c2c !important; border-color: rgba(120,145,170,0.18) !important; color: #f5f7fb !important; }
+    [data-testid="stFileUploaderFile"] { background-color: #112236 !important; color: #f5f7fb !important; }
+    [data-testid="stFileUploaderFile"] span { color: #f5f7fb !important; }
+
+    /* Date picker */
+    div[data-baseweb="calendar"], div[data-baseweb="calendar"] * { background-color: #162a42 !important; color: #f5f7fb !important; }
+    div[data-baseweb="datepicker"] { background-color: #162a42 !important; }
+
+    /* Tooltips/popups */
+    div[data-baseweb="tooltip"] > div, div[data-baseweb="popover"] > div { background-color: #162a42 !important; color: #f5f7fb !important; }
+
+    /* Expander */
+    details[data-testid="stExpander"], details[data-testid="stExpander"] summary,
+    details[data-testid="stExpander"] > div { background-color: #0c1c2c !important; color: #f5f7fb !important; }
+
+    /* Number input stepper */
+    .stNumberInput button { background-color: #112236 !important; color: #c8d3df !important; }
+
+    /* Toggle/checkbox/radio */
+    .stToggle span, .stCheckbox span, .stRadio span { color: #f5f7fb !important; }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0c1c2c; }
+    ::-webkit-scrollbar-thumb { background: rgba(120,145,170,0.3); border-radius: 4px; }
+
+    /* Catch-all white backgrounds */
+    .stApp div[style*="background-color: white"], .stApp div[style*="background: rgb(255"] { background-color: #0c1c2c !important; }
 
     /* Disclaimer */
     .disclaimer-banner { background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.25); border-radius: 14px; padding: 1.1rem 1.4rem; margin-top: 2rem; }
@@ -1502,7 +1617,7 @@ with col1:
     prosjekt_navn = st.text_input(
         field_label("Prosjektnavn", "prosjektnavn"),
         value=default_name,
-        placeholder="F.eks. Steinan Park BT3",
+        placeholder="Prosjektnavn",
         help="🟢 Auto-fylt" if 'prosjektnavn' in confidence else "🟡 Fyll inn manuelt"
     )
 
@@ -1514,7 +1629,7 @@ with col1:
         help="🟢 Auto-fylt" if 'utbygger' in confidence else "🟡 Fyll inn manuelt"
     )
 
-    default_budget = proj.get('totalbudsjett', 0) / 1_000_000 if proj.get('totalbudsjett', 0) > 1000 else proj.get('totalbudsjett', 0)
+    default_budget = proj.get('totalbudsjett', 0) / 1_000_000 if proj.get('totalbudsjett', 0) > 100_000 else proj.get('totalbudsjett', 0)
     totalbudsjett = st.number_input(
         "Totalbudsjett (MNOK)",
         min_value=0.0,
@@ -1523,7 +1638,7 @@ with col1:
         help="🟢 Auto-fylt fra kalkyle" if 'totalbudsjett' in confidence else "🟡 Fyll inn manuelt"
     )
 
-    default_loan = proj.get('byggelaan', 0) / 1_000_000 if proj.get('byggelaan', 0) > 1000 else proj.get('byggelaan', 0)
+    default_loan = proj.get('byggelaan', 0) / 1_000_000 if proj.get('byggelaan', 0) > 100_000 else proj.get('byggelaan', 0)
     byggelaan = st.number_input(
         "Byggelån innvilget (MNOK)",
         min_value=0.0,
@@ -1533,7 +1648,7 @@ with col1:
     )
 
 with col2:
-    default_prev = proj.get('tidligere_utbetalt', 0) / 1_000_000 if proj.get('tidligere_utbetalt', 0) > 1000 else proj.get('tidligere_utbetalt', 0)
+    default_prev = proj.get('tidligere_utbetalt', 0) / 1_000_000 if proj.get('tidligere_utbetalt', 0) > 100_000 else proj.get('tidligere_utbetalt', 0)
     tidligere_utbetalt = st.number_input(
         "Tidligere utbetalt (MNOK)",
         min_value=0.0,
@@ -1542,7 +1657,7 @@ with col2:
         help="🟢 Auto-fylt fra opptrekk" if 'tidligere_utbetalt' in confidence else "🟡 Fyll inn manuelt"
     )
 
-    default_trekk = proj.get('forespurt_trekk', 0) / 1_000_000 if proj.get('forespurt_trekk', 0) > 1000 else proj.get('forespurt_trekk', 0)
+    default_trekk = proj.get('forespurt_trekk', 0) / 1_000_000 if proj.get('forespurt_trekk', 0) > 100_000 else proj.get('forespurt_trekk', 0)
     forespurt_trekk = st.number_input(
         "Forespurt trekk dette (MNOK)",
         min_value=0.0,
@@ -1603,8 +1718,43 @@ if extracted_data and extracted_data.get('bilag'):
             st.markdown(f"**Sum bilag: {fmt_nok(total)}**")
         st.dataframe(display_df, use_container_width=True, hide_index=True)
 
-# STEP 4: Additional context
-render_section("4. Tilleggsinformasjon", "Eventuelle spesielle forhold byggelånskontrollør bør være oppmerksom på.", "Kontekst")
+# STEP 4: Byggeplassbilder
+render_section("4. Byggeplassbilder", "Last opp bilder fra byggeplassen som dokumenterer fremdrift.", "Bilder")
+
+render_html('''<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:0.7rem 1.1rem;margin-bottom:0.8rem;">
+    <div style="font-size:0.82rem;color:#9fb0c3;">Byggeplassbilder underbygger fremdriftsvurderingen og inkluderes i rapporten.
+    Bilder kan også lastes opp sammen med øvrig dokumentasjon i steg 1.</div>
+</div>''')
+
+# Collect images from uploads + dedicated uploader
+byggeplass_bilder = []
+if uploads:
+    for f in uploads:
+        if f.name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+            byggeplass_bilder.append(f)
+
+ekstra_bilder = st.file_uploader(
+    "Last opp byggeplassbilder",
+    type=["jpg", "jpeg", "png", "gif", "webp"],
+    accept_multiple_files=True,
+    key="byggeplass_bilder",
+    label_visibility="collapsed",
+)
+if ekstra_bilder:
+    byggeplass_bilder.extend(ekstra_bilder)
+
+if byggeplass_bilder:
+    render_html(f'<div style="font-size:0.82rem;color:#38bdf8;font-weight:600;margin-bottom:0.5rem;">{len(byggeplass_bilder)} bilde(r) lastet opp</div>')
+    # Display in grid
+    img_cols = st.columns(min(len(byggeplass_bilder), 3))
+    for idx, img_file in enumerate(byggeplass_bilder):
+        with img_cols[idx % 3]:
+            st.image(img_file, caption=img_file.name, use_container_width=True)
+
+st.session_state["_byggeplass_bilder"] = byggeplass_bilder
+
+# STEP 5: Additional context
+render_section("5. Tilleggsinformasjon", "Eventuelle spesielle forhold byggelånskontrollør bør være oppmerksom på.", "Kontekst")
 
 fokus = st.text_area(
     "Spesielle forhold å fokusere på",
