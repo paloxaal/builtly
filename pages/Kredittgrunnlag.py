@@ -756,11 +756,18 @@ def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) 
     En takst alene er IKKE tilstrekkelig — du må vurdere om taksten er rimelig gitt underliggende økonomi.
 
     For BOLIG (salg):
-    - Bruk residualverdimetoden: Tomteverdi = Forventet salgsverdi - Total utbyggingskost - Utviklermargin (min. 12%)
-    - En tomt er aldri verdt mer enn det som gir utbygger minst 12% margin på prosjektet
-    - Vurder: Antall enheter × pris per kvm vs. total prosjektkost
-    - Flagg dersom oppgitt tomteverdi/takst overstiger residualverdi
-    - LTV skal beregnes mot residualverdi, IKKE bare oppgitt takst
+    - Bruk residualverdimetoden for å vurdere om tomtekostnaden er rimelig:
+      Residual tomteverdi = Forventet salgsverdi - Utbyggingskost EKSKL tomt - Utviklermargin (min. 12% av salgsverdi)
+    - KRITISK: "total_utbyggingskost_eks_tomt_mnok" = Sum prosjektkostnader MINUS tomtekostnad.
+      Eksempel: Hvis sum prosjektkost = 503 MNOK og tomtekost = 94 MNOK, da er utbyggingskost eks tomt = 409 MNOK.
+      IKKE bruk totalkostnaden som utbyggingskost eks tomt — da trekker du tomt fra to ganger!
+    - minimummargin_12pst_mnok = forventet_salgsverdi_mnok × 0.12
+    - residual_tomteverdi_mnok = forventet_salgsverdi_mnok - total_utbyggingskost_eks_tomt_mnok - minimummargin_12pst_mnok
+    - Sammenlign residual med oppgitt tomtekost. Hvis oppgitt tomtekost ≈ residual (innenfor 5%), er det rimelig.
+    - faktisk_margin_pst = (salgsverdi - sum_prosjektkostnader_inkl_tomt) / salgsverdi × 100
+    - En tomt er aldri verdt mer enn det som gir utbygger minst 12% margin
+    - Flagg dersom oppgitt tomteverdi/takst overstiger residualverdi vesentlig (>10%)
+    - LTV skal beregnes mot beregnet verdi (salgsverdi), IKKE bare oppgitt takst
 
     For NÆRING (utleie — kontor, handel, logistikk, hotell):
     - Bruk yield-basert verdi: Verdi = Netto leieinntekt / Markedsyield
@@ -773,7 +780,9 @@ def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) 
     - Del opp i bolig- og næringsdel, verdivurder hver for seg
     - Summer delene og sammenlign med totalinvestering
 
-    Returner KUN gyldig JSON med denne strukturen:
+    Returner KUN gyldig JSON med denne strukturen.
+    VIKTIG: Rund alle MNOK-beløp til maks 1 desimal (f.eks. 580.4 MNOK, ikke 580.368225 MNOK).
+    Rund prosenter til maks 1 desimal. Bruk hele tall for kr/kvm.
     {
         "sammendrag": "Kort oppsummering for kredittkomité (3-4 setninger)",
         "anbefaling": "Anbefalt innvilget | Anbefalt med vilkår | Ikke anbefalt",
@@ -916,6 +925,7 @@ Verdivurdering og dokumentasjon:
 - Takstkilde: {project_info.get('takst_kilde', 'Ikke oppgitt')}
 - Betalt/avtalt tomtepris: {project_info.get('tomtekost_mnok', 0)} MNOK
 - Entreprisekost: {project_info.get('entreprisekost_mnok', 0)} MNOK
+- BEREGNET utbyggingskost eks tomt: {round(float(project_info.get('totalinvestering_mnok', 0) or 0) - float(project_info.get('tomtekost_mnok', 0) or 0), 2)} MNOK (= totalinvestering {project_info.get('totalinvestering_mnok', 0)} - tomtekost {project_info.get('tomtekost_mnok', 0)})
 
 Bolig (residualverdi):
 - Forventet salgspris: {project_info.get('forventet_salgspris_kvm', 0)} kr/kvm BRA-i
@@ -1163,27 +1173,58 @@ class CreditPDF(FPDF if FPDF else object):
             self.set_x(14); self.multi_cell(180, 4.5, self._safe(f"  {d}")); self.ln(1)
 
     def pro_table(self, headers, rows, col_widths=None):
-        # Check if at least header + 2 rows fit (~30mm)
+        """Professional table with text wrapping and consistent alignment."""
         if self.get_y() > 240: self.add_page()
         n = len(headers)
         if col_widths is None: col_widths = [190/n]*n
-        self.set_fill_color(*self.TABLE_HEAD); self.set_text_color(*self.WHITE); self._font("B", 8)
+        x_start = 10
+
+        # Header row
+        self.set_fill_color(*self.TABLE_HEAD); self.set_text_color(*self.WHITE); self._font("B", 7.5)
         for i, h in enumerate(headers):
-            self.cell(col_widths[i], 7, self._safe(h), border=0, fill=True, align="C" if i>0 else "L")
+            self.cell(col_widths[i], 7, self._safe(h), border=0, fill=True, align="L")
         self.ln()
-        self._font("", 8.5)
+
+        # Data rows with text wrapping
+        self._font("", 8)
+        row_h = 5.5
         for ri, row in enumerate(rows):
-            if self.get_y() > 265: self.add_page()
-            self.set_fill_color(*(self.TABLE_ALT if ri%2==0 else self.WHITE)); self.set_text_color(*self.BODY_TEXT)
-            for i, cell in enumerate(row):
-                cs = self._safe(str(cell))
-                if any(k in cs.lower() for k in ["god","sterk","positiv"]): self.set_text_color(*self.GREEN)
-                elif any(k in cs.lower() for k in ["svak","negativ","ikke"]): self.set_text_color(*self.RED)
-                elif "akseptabel" in cs.lower(): self.set_text_color(*self.WARM)
+            if self.get_y() > 260: self.add_page()
+            y_start = self.get_y()
+            bg = self.TABLE_ALT if ri % 2 == 0 else self.WHITE
+
+            # First pass: calculate max height needed
+            max_lines = 1
+            for i, cell_val in enumerate(row):
+                cs = self._safe(str(cell_val))
+                # Estimate lines needed (approx 3.5 chars per mm at 8pt)
+                chars_per_line = max(1, int(col_widths[i] * 3.2))
+                lines = max(1, -(-len(cs) // chars_per_line))  # ceiling division
+                max_lines = max(max_lines, lines)
+            cell_h = max_lines * row_h
+
+            # Background fill for entire row
+            self.set_fill_color(*bg)
+            self.rect(x_start, y_start, 190, cell_h, style="F")
+
+            # Draw cells
+            for i, cell_val in enumerate(row):
+                cs = self._safe(str(cell_val))
+                # Color coding
+                if any(k in cs.lower() for k in ["god","sterk","positiv","godkjent","mottatt","ja"]): self.set_text_color(*self.GREEN)
+                elif any(k in cs.lower() for k in ["svak","negativ","ikke","kritisk","nei"]): self.set_text_color(*self.RED)
+                elif any(k in cs.lower() for k in ["akseptabel","middels","forbehold"]): self.set_text_color(*self.WARM)
                 else: self.set_text_color(*self.BODY_TEXT)
-                self.cell(col_widths[i], 6.5, cs, border=0, fill=True, align="R" if i>0 else "L")
-            self.ln()
-        self.set_draw_color(200,210,225); self.set_line_width(0.3); self.line(10, self.get_y(), 200, self.get_y()); self.ln(2)
+
+                x_pos = x_start + sum(col_widths[:i])
+                self.set_xy(x_pos, y_start)
+                self.multi_cell(col_widths[i], row_h, cs, border=0, align="L")
+
+            self.set_y(y_start + cell_h)
+
+        # Bottom line
+        self.set_draw_color(200,210,225); self.set_line_width(0.3)
+        self.line(x_start, self.get_y(), x_start + 190, self.get_y()); self.ln(2)
 
     def callout(self, title, text, tone="blue"):
         if self.get_y() > 250: self.add_page()
@@ -1195,6 +1236,22 @@ class CreditPDF(FPDF if FPDF else object):
         self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(0, 5, self._safe(title))
         self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+7.5); self.multi_cell(178, 4, self._safe(text))
         self.set_y(y + h + 3)
+
+
+def _fmt_v(val, suffix="MNOK"):
+    """Format value for PDF display - round MNOK to 1 decimal, percentages to 1 decimal."""
+    try:
+        v = float(val)
+        if suffix == "MNOK":
+            return f"{v:.1f} MNOK"
+        elif suffix == "%":
+            return f"{v:.1f}%"
+        elif suffix == "kr":
+            return f"{int(v):,} kr".replace(",", " ")
+        else:
+            return f"{v:.1f} {suffix}" if v != int(v) else f"{int(v)} {suffix}"
+    except (ValueError, TypeError):
+        return str(val)
 
 
 def generate_credit_pdf(project_info, analysis) -> bytes:
@@ -1240,9 +1297,9 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     nt = safe_get(analysis, "noekkeltall", {})
     if isinstance(nt, dict):
         pdf.metric_row([
-            (f"{safe_get(nt, 'totalinvestering_mnok', 0)} MNOK", "Totalinvestering", "Sum prosjektkost"),
-            (f"{safe_get(nt, 'soekt_laan_mnok', 0)} MNOK", "Søkt lån", "Omsøkt finansiering"),
-            (f"{safe_get(nt, 'egenkapitalprosent', 0)}%", "Egenkapitalandel", f"{safe_get(nt, 'egenkapital_mnok', 0)} MNOK"),
+            (_fmt_v(safe_get(nt, 'totalinvestering_mnok', 0)), "Totalinvestering", "Sum prosjektkost"),
+            (_fmt_v(safe_get(nt, 'soekt_laan_mnok', 0)), "Søkt lån", "Omsøkt finansiering"),
+            (f"{safe_get(nt, 'egenkapitalprosent', 0)}%", "Egenkapitalandel", _fmt_v(safe_get(nt, 'egenkapital_mnok', 0))),
             (f"{safe_get(nt, 'belaaningsgrad_ltv', 0)}%", "LTV", "Belåningsgrad"),
         ])
         pdf.metric_row([
@@ -1251,15 +1308,15 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             (f"{safe_get(nt, 'netto_yield_pst', 0)}%", "Netto yield", "Avkastning"),
             (f"{safe_get(nt, 'forhaandssalg_utleie_pst', 0)}%", "Forhåndssalg", "Salgs-/utleiegrad"),
         ])
-        pdf.key_value("Estimert markedsverdi:", f"{safe_get(nt, 'estimert_markedsverdi_mnok', 0)} MNOK", highlight=True)
+        pdf.key_value("Estimert markedsverdi:", _fmt_v(safe_get(nt, 'estimert_markedsverdi_mnok', 0)), highlight=True)
 
     # 3. Verdivurdering
     pdf.section_title(3, "Verdivurdering")
     vv = safe_get(analysis, "verdivurdering", {})
     if isinstance(vv, dict):
         pdf.key_value("Metode:", safe_get(vv, "metode", "-"))
-        pdf.key_value("Oppgitt takst:", f"{safe_get(vv, 'oppgitt_takst_mnok', 0)} MNOK")
-        pdf.key_value("Beregnet verdi:", f"{safe_get(vv, 'beregnet_verdi_mnok', 0)} MNOK")
+        pdf.key_value("Oppgitt takst:", _fmt_v(safe_get(vv, 'oppgitt_takst_mnok', 0)))
+        pdf.key_value("Beregnet verdi:", _fmt_v(safe_get(vv, 'beregnet_verdi_mnok', 0)))
         pdf.key_value("Avvik takst vs. beregnet:", f"{safe_get(vv, 'avvik_takst_vs_beregnet_pst', 0)}%")
         takst_ok = safe_get(vv, "takst_er_rimelig", True)
         pdf.key_value("Takst rimelig:", "Ja" if takst_ok else "NEI - se kommentar")
@@ -1269,13 +1326,13 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         if isinstance(br, dict) and safe_get(br, "residual_tomteverdi_mnok", 0):
             pdf.callout("Residualverdiberegning (Bolig / BRA-i)", "Tomteverdi = Salgsverdi - Utbyggingskost - Utviklermargin (min 12%)", "blue")
             residual_rows = [
-                ["Forventet salgsverdi", f"{safe_get(br, 'forventet_salgsverdi_mnok', 0)} MNOK"],
-                ["Salgspris per kvm BRA-i", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr"],
-                ["Entreprisekost per kvm BRA-i", f"{safe_get(br, 'byggekost_per_kvm_bta', 0)} kr"],
-                ["Utbyggingskost ekskl. tomt", f"{safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0)} MNOK"],
-                ["Minimummargin 12%", f"{safe_get(br, 'minimummargin_12pst_mnok', 0)} MNOK"],
-                ["Residual tomteverdi", f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK"],
-                ["Oppgitt tomtekostnad", f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK"],
+                ["Forventet salgsverdi", _fmt_v(safe_get(br, 'forventet_salgsverdi_mnok', 0))],
+                ["Salgspris per kvm BRA-i", _fmt_v(safe_get(br, 'salgsverdi_per_kvm_bra', 0), "kr")],
+                ["Entreprisekost per kvm BRA-i", _fmt_v(safe_get(br, 'byggekost_per_kvm_bta', 0), "kr")],
+                ["Utbyggingskost ekskl. tomt", _fmt_v(safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0))],
+                ["Minimummargin 12%", _fmt_v(safe_get(br, 'minimummargin_12pst_mnok', 0))],
+                ["Residual tomteverdi", _fmt_v(safe_get(br, 'residual_tomteverdi_mnok', 0))],
+                ["Oppgitt tomtekostnad", _fmt_v(safe_get(br, 'oppgitt_tomtekost_mnok', 0))],
                 ["Innenfor residual", "Ja" if safe_get(br, "tomtekost_innenfor_residual", True) else "NEI"],
                 ["Faktisk margin", f"{safe_get(br, 'faktisk_margin_pst', 0)}%"],
             ]
@@ -1291,13 +1348,13 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.cell(0, 6, "Yield-analyse (Næring)", new_x="LMARGIN", new_y="NEXT")
             pdf._font("", 9)
             pdf.set_text_color(40, 50, 60)
-            pdf.key_value("Brutto leieinntekt:", f"{safe_get(ny, 'brutto_leieinntekt_mnok', 0)} MNOK/år")
-            pdf.key_value("Eierkostnader:", f"{safe_get(ny, 'eierkostnader_mnok', 0)} MNOK/år")
-            pdf.key_value("Netto leieinntekt:", f"{safe_get(ny, 'netto_leieinntekt_mnok', 0)} MNOK/år")
+            pdf.key_value("Brutto leieinntekt:", _fmt_v(safe_get(ny, 'brutto_leieinntekt_mnok', 0)))
+            pdf.key_value("Eierkostnader:", _fmt_v(safe_get(ny, 'eierkostnader_mnok', 0)))
+            pdf.key_value("Netto leieinntekt:", _fmt_v(safe_get(ny, 'netto_leieinntekt_mnok', 0)))
             pdf.key_value("Yield on cost:", f"{safe_get(ny, 'yield_on_cost_pst', 0)}%")
             pdf.key_value("Antatt markedsyield:", f"{safe_get(ny, 'antatt_markedsyield_pst', 0)}%")
             pdf.key_value("Yield spread:", f"{safe_get(ny, 'yield_spread_pst', 0)}%")
-            pdf.key_value("Verdi ved markedsyield:", f"{safe_get(ny, 'verdi_ved_markedsyield_mnok', 0)} MNOK")
+            pdf.key_value("Verdi ved markedsyield:", _fmt_v(safe_get(ny, 'verdi_ved_markedsyield_mnok', 0)))
             pdf.key_value("WAULT:", f"{safe_get(ny, 'wault_aar', 0)} år")
             pdf.key_value("Vakansrisiko:", f"{safe_get(ny, 'vakansrisiko_pst', 0)}%")
             verdiskaping = safe_get(ny, "verdiskaping_positiv", True)
@@ -1305,8 +1362,8 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.body_text(safe_get(ny, "kommentar", ""))
 
         pdf.metric_row([
-            (f"{safe_get(vv, 'bankens_verdianslag_mnok', 0)} MNOK", "Bankens verdianslag", "Anbefalt verdi for belåning"),
-            (f"{safe_get(vv, 'forsiktig_verdi_70pst_mnok', 0)} MNOK", "Forsiktig verdi (70%)", "Konservativt scenario"),
+            (_fmt_v(safe_get(vv, 'bankens_verdianslag_mnok', 0)), "Bankens verdianslag", "Anbefalt verdi for belåning"),
+            (_fmt_v(safe_get(vv, 'forsiktig_verdi_70pst_mnok', 0)), "Forsiktig verdi (70%)", "Konservativt scenario"),
         ])
         pdf.key_value("LTV mot beregnet verdi:", f"{safe_get(vv, 'ltv_mot_beregnet_verdi_pst', 0)}%", highlight=True)
 
@@ -1350,14 +1407,14 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     oek = safe_get(analysis, "oekonomisk_analyse", {})
     if isinstance(oek, dict):
         oek_rows = [
-            ["Totalkostnadskalkyle", f"{safe_get(oek, 'totalkostnadskalkyle_mnok', 0)} MNOK"],
-            ["Entreprisekostnad", f"{safe_get(oek, 'entreprisekostnad_mnok', 0)} MNOK"],
-            ["Tomtekostnad", f"{safe_get(oek, 'tomtekostnad_mnok', 0)} MNOK"],
-            ["Offentlige avgifter", f"{safe_get(oek, 'offentlige_avgifter_mnok', 0)} MNOK"],
-            ["Prosjektkostnader", f"{safe_get(oek, 'prosjektkostnader_mnok', 0)} MNOK"],
-            ["Finanskostnader", f"{safe_get(oek, 'finanskostnader_mnok', 0)} MNOK"],
-            ["Forventet salgsverdi", f"{safe_get(oek, 'forventet_salgsverdi_mnok', 0)} MNOK"],
-            ["Forventet resultat", f"{safe_get(oek, 'forventet_resultat_mnok', 0)} MNOK"],
+            ["Totalkostnadskalkyle", _fmt_v(safe_get(oek, 'totalkostnadskalkyle_mnok', 0))],
+            ["Entreprisekostnad", _fmt_v(safe_get(oek, 'entreprisekostnad_mnok', 0))],
+            ["Tomtekostnad", _fmt_v(safe_get(oek, 'tomtekostnad_mnok', 0))],
+            ["Offentlige avgifter", _fmt_v(safe_get(oek, 'offentlige_avgifter_mnok', 0))],
+            ["Prosjektkostnader", _fmt_v(safe_get(oek, 'prosjektkostnader_mnok', 0))],
+            ["Finanskostnader", _fmt_v(safe_get(oek, 'finanskostnader_mnok', 0))],
+            ["Forventet salgsverdi", _fmt_v(safe_get(oek, 'forventet_salgsverdi_mnok', 0))],
+            ["Forventet resultat", _fmt_v(safe_get(oek, 'forventet_resultat_mnok', 0))],
             ["Resultatmargin", f"{safe_get(oek, 'resultatmargin_pst', 0)}%"],
         ]
         pdf.pro_table(["Post", "MNOK"], oek_rows, [120, 70])
@@ -1370,9 +1427,14 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         rows = []
         for r in rente:
             if isinstance(r, dict):
+                aarsres = safe_get(r, "aarsresultat_mnok", 0)
+                try:
+                    aarsres = f"{float(aarsres):.1f}"
+                except (ValueError, TypeError):
+                    aarsres = str(aarsres)
                 rows.append([
                     safe_get(r, "rentenivaa", "-"),
-                    str(safe_get(r, "aarsresultat_mnok", 0)),
+                    aarsres,
                     str(safe_get(r, "dscr", 0)),
                     safe_get(r, "betjeningsevne", "-"),
                 ])
@@ -1388,9 +1450,9 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
         sik_rows = []
         for s in sikkerheter:
             if isinstance(s, dict):
-                sik_rows.append([safe_get(s, 'type', ''), safe_get(s, 'prioritet', ''), f"{safe_get(s, 'verdi_mnok', 0)} MNOK", safe_get(s, 'kommentar', '')])
+                sik_rows.append([safe_get(s, 'type', ''), safe_get(s, 'prioritet', ''), _fmt_v(safe_get(s, 'verdi_mnok', 0)), safe_get(s, 'kommentar', '')])
         if sik_rows:
-            pdf.pro_table(["Type", "Prioritet", "Verdi", "Kommentar"], sik_rows, [55, 30, 35, 70])
+            pdf.pro_table(["Type", "Prioritet", "Verdi", "Kommentar"], sik_rows, [50, 25, 30, 85])
 
     kausjoner = project_info.get("kausjoner", [])
     aktive = [k for k in kausjoner if isinstance(k, dict) and k.get("kausjonist")]
@@ -1939,7 +2001,8 @@ with left:
     for i, row in enumerate(kausjon_rows):
         uid = row.get("_uid", str(i))
         is_first = (i == 0)
-        kc1, kc2, kc3, kc4, kc5, kc6 = st.columns([3, 2, 1.5, 1.5, 0.5, 0.5])
+        n_rows = len(kausjon_rows)
+        kc1, kc2, kc3, kc4, kc5, kc6 = st.columns([3, 2, 1.2, 1.5, 0.6, 0.6])
         with kc1:
             kn = st.text_input("Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{uid}",
                                placeholder="Selskapsnavn AS", label_visibility="collapsed" if not is_first else "visible")
@@ -1955,8 +2018,9 @@ with left:
             kt = st.selectbox("Type", kt_opts, key=f"kt_{uid}", index=kt_idx,
                               label_visibility="collapsed" if not is_first else "visible")
         with kc5:
-            lookup_label = "🔎" if not is_first else "Søk"
-            if st.button(lookup_label, key=f"klu_{uid}", use_container_width=True, help="Slå opp org.nr. fra Brreg"):
+            if is_first:
+                st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
+            if st.button("🔎", key=f"klu_{uid}", use_container_width=True, help="Slå opp org.nr. fra Brreg"):
                 if kn:
                     try:
                         info = lookup_company(kn)
@@ -1967,11 +2031,13 @@ with left:
                     except Exception:
                         pass
         with kc6:
-            if not is_first:
+            if is_first:
+                st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
+            if n_rows > 1:
                 if st.button("✕", key=f"kdel_{uid}", use_container_width=True):
                     rows_to_delete.append(uid)
             else:
-                st.write("")  # Empty placeholder for alignment
+                st.write("")
 
         # Use latest lookup result if orgnr was just updated via button
         ko_final = row.get("orgnr", ko) if row.get("orgnr") and row["orgnr"] != ko else ko
@@ -2391,20 +2457,54 @@ if "credit_analysis" in st.session_state:
 
             # Bolig residual
             br = safe_get(vv, "bolig_residual", {})
-            if isinstance(br, dict) and safe_get(br, "residual_tomteverdi_mnok", 0):
+            if isinstance(br, dict) and (safe_get(br, "residual_tomteverdi_mnok", 0) or safe_get(br, "forventet_salgsverdi_mnok", 0)):
                 st.markdown("---")
                 st.markdown("**Residualverdiberegning (Bolig)**")
                 tomte_ok = safe_get(br, "tomtekost_innenfor_residual", True)
+
+                # Full calculation breakdown
+                salgsverdi = float(safe_get(br, 'forventet_salgsverdi_mnok', 0) or 0)
+                utbygg_eks_tomt = float(safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0) or 0)
+                margin_12 = float(safe_get(br, 'minimummargin_12pst_mnok', 0) or 0)
+                residual = float(safe_get(br, 'residual_tomteverdi_mnok', 0) or 0)
+                tomtekost = float(safe_get(br, 'oppgitt_tomtekost_mnok', 0) or 0)
+                faktisk_margin = float(safe_get(br, 'faktisk_margin_pst', 0) or 0)
+
+                render_html(f'''<div style="background:rgba(56,194,201,0.06);border:1px solid rgba(56,194,201,0.18);border-radius:12px;padding:1rem 1.2rem;margin:0.6rem 0;">
+                    <div style="font-weight:700;font-size:0.85rem;color:#38bdf8;margin-bottom:8px;">Beregning: Residual tomteverdi</div>
+                    <table style="width:100%;font-size:0.85rem;color:#c8d3df;border-collapse:collapse;">
+                        <tr><td style="padding:3px 0;">Forventet salgsverdi</td><td style="text-align:right;font-weight:600;">{salgsverdi} MNOK</td></tr>
+                        <tr><td style="padding:3px 0;color:#9fb0c3;">− Utbyggingskost ekskl. tomt</td><td style="text-align:right;color:#9fb0c3;">− {utbygg_eks_tomt} MNOK</td></tr>
+                        <tr><td style="padding:3px 0;color:#9fb0c3;">− Minimum utviklermargin (12%)</td><td style="text-align:right;color:#9fb0c3;">− {margin_12} MNOK</td></tr>
+                        <tr style="border-top:1px solid rgba(120,145,170,0.3);"><td style="padding:5px 0;font-weight:700;color:#38bdf8;">= Residual tomteverdi</td><td style="text-align:right;font-weight:700;color:#38bdf8;">{residual} MNOK</td></tr>
+                        <tr style="border-top:1px solid rgba(120,145,170,0.15);"><td style="padding:5px 0;">Oppgitt tomtekostnad</td><td style="text-align:right;font-weight:600;">{tomtekost} MNOK</td></tr>
+                        <tr><td style="padding:3px 0;">Faktisk utviklermargin</td><td style="text-align:right;font-weight:600;color:{"#22c55e" if faktisk_margin >= 12 else "#f59e0b" if faktisk_margin >= 10 else "#ef4444"};">{faktisk_margin}%</td></tr>
+                    </table>
+                </div>''')
+
                 render_metric_cards([
-                    (f"{safe_get(br, 'forventet_salgsverdi_mnok', 0)} MNOK", "Forventet salgsverdi", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr/kvm BRA"),
-                    (f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK", "Residual tomteverdi", "Maks tomteverdi med 12% margin"),
-                    (f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK", "Oppgitt tomtekost", "✓ OK" if tomte_ok else "⚠ Over residual"),
-                    (f"{safe_get(br, 'faktisk_margin_pst', 0)}%", "Faktisk margin", "Minimum 12% for boligutvikling"),
+                    (f"{salgsverdi} MNOK", "Forventet salgsverdi", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr/kvm BRA"),
+                    (f"{residual} MNOK", "Residual tomteverdi", "Maks tomteverdi med 12% margin"),
+                    (f"{tomtekost} MNOK", "Oppgitt tomtekost", "✓ OK" if tomte_ok else "⚠ Over residual"),
+                    (f"{faktisk_margin}%", "Faktisk margin", "Minimum 12% for boligutvikling"),
                 ])
+
                 if not tomte_ok:
-                    render_html("""<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:12px;padding:0.8rem 1rem;margin:0.5rem 0;">
-                        <div style="font-size:0.85rem;color:#ef4444;font-weight:700;">⚠ Tomtekost overstiger residualverdi — prosjektet har for lav margin</div>
+                    diff = round(tomtekost - residual, 1) if residual else 0
+                    render_html(f"""<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:12px;padding:0.8rem 1rem;margin:0.5rem 0;">
+                        <div style="font-size:0.85rem;color:#f59e0b;font-weight:700;">⚠ Tomtekost {tomtekost} MNOK overstiger residualverdi {residual} MNOK med {diff} MNOK</div>
+                        <div style="font-size:0.82rem;color:#9fb0c3;margin-top:4px;">
+                            Residualverdimetoden tilsier at tomten er verdt maks {residual} MNOK for å oppnå 12% margin.
+                            Faktisk margin er {faktisk_margin}%. {"Marginen er akseptabel men under 12%-kravet." if faktisk_margin >= 10 else "Marginen er for lav — vurder om kausjoner kompenserer."}
+                            Bankrådgiver bør vurdere om avviket er akseptabelt gitt prosjektets øvrige styrker (forhåndssalg, kausjoner, beliggenhet).
+                        </div>
                     </div>""")
+                else:
+                    render_html(f"""<div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:12px;padding:0.8rem 1rem;margin:0.5rem 0;">
+                        <div style="font-size:0.85rem;color:#22c55e;font-weight:700;">✓ Tomtekost innenfor residualverdi</div>
+                        <div style="font-size:0.82rem;color:#9fb0c3;margin-top:4px;">Oppgitt tomtekost {tomtekost} MNOK er innenfor residualverdi {residual} MNOK. Faktisk margin {faktisk_margin}%.</div>
+                    </div>""")
+
                 st.markdown(safe_get(br, "kommentar", ""))
 
             # Næring yield
