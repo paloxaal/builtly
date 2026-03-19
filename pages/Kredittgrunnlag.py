@@ -758,13 +758,14 @@ def run_credit_analysis(client_type, client, project_info: dict, doc_text: str) 
     For BOLIG (salg):
     - Bruk residualverdimetoden for å vurdere om tomtekostnaden er rimelig:
       Residual tomteverdi = Forventet salgsverdi - Utbyggingskost EKSKL tomt - Utviklermargin (min. 12% av salgsverdi)
-    - KRITISK: "total_utbyggingskost_eks_tomt_mnok" = Sum prosjektkostnader MINUS tomtekostnad.
-      Eksempel: Hvis sum prosjektkost = 503 MNOK og tomtekost = 94 MNOK, da er utbyggingskost eks tomt = 409 MNOK.
-      IKKE bruk totalkostnaden som utbyggingskost eks tomt — da trekker du tomt fra to ganger!
+    - KRITISK: "total_utbyggingskost_eks_tomt_mnok" = Alle prosjektkostnader UNNTATT tomtekjøp og UNNTATT finanskostnader.
+      Det er: entreprise + offentlige gebyrer + prosjektledelse + honorarer + infrastruktur + uforutsett + diverse.
+      Eksempel Steinan: Sum prosjektkost 503 MNOK (fra kalkyle) - tomt 94 MNOK = utbyggingskost eks tomt 409 MNOK.
+      FEIL: Bruk ALDRI "totalinvestering" (som inkluderer finanskostnader/renter) som basis for utbyggingskost.
     - minimummargin_12pst_mnok = forventet_salgsverdi_mnok × 0.12
     - residual_tomteverdi_mnok = forventet_salgsverdi_mnok - total_utbyggingskost_eks_tomt_mnok - minimummargin_12pst_mnok
     - Sammenlign residual med oppgitt tomtekost. Hvis oppgitt tomtekost ≈ residual (innenfor 5%), er det rimelig.
-    - faktisk_margin_pst = (salgsverdi - sum_prosjektkostnader_inkl_tomt) / salgsverdi × 100
+    - faktisk_margin_pst = (salgsverdi - (utbyggingskost_eks_tomt + tomtekost)) / salgsverdi × 100
     - En tomt er aldri verdt mer enn det som gir utbygger minst 12% margin
     - Flagg dersom oppgitt tomteverdi/takst overstiger residualverdi vesentlig (>10%)
     - LTV skal beregnes mot beregnet verdi (salgsverdi), IKKE bare oppgitt takst
@@ -925,7 +926,15 @@ Verdivurdering og dokumentasjon:
 - Takstkilde: {project_info.get('takst_kilde', 'Ikke oppgitt')}
 - Betalt/avtalt tomtepris: {project_info.get('tomtekost_mnok', 0)} MNOK
 - Entreprisekost: {project_info.get('entreprisekost_mnok', 0)} MNOK
-- BEREGNET utbyggingskost eks tomt: {round(float(project_info.get('totalinvestering_mnok', 0) or 0) - float(project_info.get('tomtekost_mnok', 0) or 0), 2)} MNOK (= totalinvestering {project_info.get('totalinvestering_mnok', 0)} - tomtekost {project_info.get('tomtekost_mnok', 0)})
+- Totalinvestering (inkl finans og infra): {project_info.get('totalinvestering_mnok', 0)} MNOK
+
+KRITISK for residualberegning:
+- "total_utbyggingskost_eks_tomt_mnok" er ALLE prosjektkostnader UNNTATT tomtekjøpet.
+  Det inkluderer entreprise, offentlige avgifter, prosjektledelse, honorarer, infrastruktur, uforutsett — men IKKE tomtekost og IKKE finanskostnader (renter/provisjon).
+- FEIL: totalinvestering - tomtekost (dette inkluderer finanskostnader og gir for høy utbyggingskost)
+- RIKTIG: Bruk sum av entreprise + offentlige avgifter + prosjektledelse + honorarer + infra + diverse + uforutsett fra kalkylen.
+  Alternativt: "Sum prosjektkostnader" fra kalkylen minus tomtekostnaden.
+- Residual = Forventet salgsverdi - Utbyggingskost eks tomt - (12% × Salgsverdi)
 
 Bolig (residualverdi):
 - Forventet salgspris: {project_info.get('forventet_salgspris_kvm', 0)} kr/kvm BRA-i
