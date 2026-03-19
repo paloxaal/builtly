@@ -7,7 +7,7 @@ Self-contained Streamlit module – no external builtly_* dependencies.
 from __future__ import annotations
 
 import base64, io, json, os, re, textwrap
-from datetime import datetime,  date
+from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1172,12 +1172,14 @@ class LoanControlPDF(FPDF if FPDF else object):
             self.cell(118, 5.5, safe_val, new_x="LMARGIN", new_y="NEXT")
 
     def status_box(self, status, text):
-        if self.get_y() > 220: self.add_page()
+        if self.get_y() > 210: self.add_page()
         color_map = {"Anbefalt godkjent": self.GREEN, "Anbefalt med forbehold": self.WARM, "Ikke anbefalt": self.RED}
         color = color_map.get(status, self.TEAL)
         safe_text = self._safe(text)
-        text_lines = max(1, -(-len(safe_text) // 560))
-        box_h = 15 + text_lines * 5
+        chars_per_line = 82
+        text_lines = max(1, -(-len(safe_text) // chars_per_line))
+        text_h = text_lines * 4.5
+        box_h = 16 + text_h
         self.ln(3); y = self.get_y()
         if y + box_h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*color); self.rect(10, y, 190, 1.5, style="F")
@@ -1187,7 +1189,8 @@ class LoanControlPDF(FPDF if FPDF else object):
         self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(170, 7, self._safe(status))
         self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+13)
         self.multi_cell(172, 4.5, safe_text)
-        self.set_y(y + box_h + 3)
+        actual_end = self.get_y()
+        self.set_y(max(y + box_h, actual_end) + 3)
 
     def metric_row(self, metrics):
         if self.get_y() > 240: self.add_page()
@@ -1229,7 +1232,7 @@ class LoanControlPDF(FPDF if FPDF else object):
             max_lines = 1
             for i, cell_val in enumerate(row):
                 cs = self._safe(str(cell_val))
-                chars_per_line = max(1, int(col_widths[i] * 3.2))
+                chars_per_line = max(1, int(col_widths[i] / 2.0))  # ~2mm per char at 8pt
                 lines = max(1, -(-len(cs) // chars_per_line))
                 max_lines = max(max_lines, lines)
             cell_h = max_lines * row_h
@@ -1257,12 +1260,13 @@ class LoanControlPDF(FPDF if FPDF else object):
         self.line(x_start, self.get_y(), x_start + 190, self.get_y()); self.ln(2)
 
     def callout(self, title, text, tone="blue"):
-        if self.get_y() > 245: self.add_page()
+        if self.get_y() > 240: self.add_page()
         tmap = {"blue":(self.TEAL,(230,248,250)), "green":(self.GREEN,(235,250,240)), "yellow":(self.WARM,(255,248,230)), "red":(self.RED,(255,235,235))}
         accent, bg = tmap.get(tone, tmap["blue"])
         safe_text = self._safe(text)
-        text_lines = max(1, -(-len(safe_text) // 560))
-        h = max(16, 10 + text_lines * 5)
+        text_lines = max(1, -(-len(safe_text) // 90))
+        text_h = text_lines * 4
+        h = max(16, 10 + text_h)
         y = self.get_y()
         if y + h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*bg); self.set_draw_color(*accent); self.set_line_width(0.3); self.rect(10, y, 190, h, style="DF")
@@ -1270,7 +1274,8 @@ class LoanControlPDF(FPDF if FPDF else object):
         self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(170, 5, self._safe(title))
         self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+8)
         self.multi_cell(178, 4, safe_text)
-        self.set_y(y + h + 3)
+        actual_end = self.get_y()
+        self.set_y(max(y + h, actual_end) + 3)
 
     def risk_table(self, risks):
         headers = ["Risiko", "Alvorlighet", "Tiltak"]
