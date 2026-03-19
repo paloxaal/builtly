@@ -1194,25 +1194,56 @@ class LoanControlPDF(FPDF if FPDF else object):
         self.set_y(y + 26)
 
     def pro_table(self, headers, rows, col_widths=None):
+        """Professional table with text wrapping and consistent alignment."""
         if self.get_y() > 240: self.add_page()
         n = len(headers)
         if col_widths is None: col_widths = [190/n]*n
-        self.set_fill_color(*self.TABLE_HEAD); self.set_text_color(*self.WHITE); self._font("B", 8)
+        x_start = 10
+
+        # Header row
+        self.set_fill_color(*self.TABLE_HEAD); self.set_text_color(*self.WHITE); self._font("B", 7.5)
         for i, h in enumerate(headers):
-            self.cell(col_widths[i], 7, self._safe(h), border=0, fill=True, align="C" if i>0 else "L")
-        self.ln(); self._font("", 8.5)
+            self.cell(col_widths[i], 7, self._safe(h), border=0, fill=True, align="L")
+        self.ln()
+
+        # Data rows with text wrapping
+        self._font("", 8)
+        row_h = 5.5
         for ri, row in enumerate(rows):
-            if self.get_y() > 265: self.add_page()
-            self.set_fill_color(*(self.TABLE_ALT if ri%2==0 else self.WHITE)); self.set_text_color(*self.BODY_TEXT)
-            for i, cell in enumerate(row):
-                cs = self._safe(str(cell))
-                if any(k in cs.lower() for k in ["god","sterk","positiv","godkjent","anbefalt"]): self.set_text_color(*self.GREEN)
-                elif any(k in cs.lower() for k in ["svak","negativ","ikke","kritisk"]): self.set_text_color(*self.RED)
+            if self.get_y() > 260: self.add_page()
+            y_start = self.get_y()
+            bg = self.TABLE_ALT if ri % 2 == 0 else self.WHITE
+
+            # Calculate max height
+            max_lines = 1
+            for i, cell_val in enumerate(row):
+                cs = self._safe(str(cell_val))
+                chars_per_line = max(1, int(col_widths[i] * 3.2))
+                lines = max(1, -(-len(cs) // chars_per_line))
+                max_lines = max(max_lines, lines)
+            cell_h = max_lines * row_h
+
+            # Background
+            self.set_fill_color(*bg)
+            self.rect(x_start, y_start, 190, cell_h, style="F")
+
+            # Draw cells with multi_cell for wrapping
+            for i, cell_val in enumerate(row):
+                cs = self._safe(str(cell_val))
+                if any(k in cs.lower() for k in ["god","sterk","positiv","godkjent","mottatt","ja"]): self.set_text_color(*self.GREEN)
+                elif any(k in cs.lower() for k in ["svak","negativ","ikke","kritisk","nei"]): self.set_text_color(*self.RED)
                 elif any(k in cs.lower() for k in ["akseptabel","middels","forbehold"]): self.set_text_color(*self.WARM)
                 else: self.set_text_color(*self.BODY_TEXT)
-                self.cell(col_widths[i], 6.5, cs, border=0, fill=True, align="R" if i>0 else "L")
-            self.ln()
-        self.set_draw_color(200,210,225); self.set_line_width(0.3); self.line(10, self.get_y(), 200, self.get_y()); self.ln(2)
+
+                x_pos = x_start + sum(col_widths[:i])
+                self.set_xy(x_pos, y_start)
+                self.multi_cell(col_widths[i], row_h, cs, border=0, align="L")
+
+            self.set_y(y_start + cell_h)
+
+        # Bottom line
+        self.set_draw_color(200,210,225); self.set_line_width(0.3)
+        self.line(x_start, self.get_y(), x_start + 190, self.get_y()); self.ln(2)
 
     def callout(self, title, text, tone="blue"):
         if self.get_y() > 250: self.add_page()
