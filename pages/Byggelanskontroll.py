@@ -1056,6 +1056,7 @@ class LoanControlPDF(FPDF if FPDF else object):
         self.set_auto_page_break(auto=True, margin=28)
         self._has_unicode = self._add_fonts()
         self._logo_path = self._find_logo()
+        self._logo_white_path = self._find_logo_white()
         self.accent = self.TEAL
 
     def _safe(self, text):
@@ -1078,6 +1079,11 @@ class LoanControlPDF(FPDF if FPDF else object):
         for p in ["logo.png", os.path.join(os.path.dirname(__file__), "logo.png"), "/app/logo.png"]:
             if os.path.exists(p): return p
         return ""
+
+    def _find_logo_white(self):
+        for p in ["logo-white.png", os.path.join(os.path.dirname(__file__), "logo-white.png"), "/app/logo-white.png"]:
+            if os.path.exists(p): return p
+        return self._logo_path
 
     def _font(self, style="", size=10):
         try: self.set_font("Inter", style, size)
@@ -1110,9 +1116,10 @@ class LoanControlPDF(FPDF if FPDF else object):
     def cover_page(self, project_name, utbygger, trekk_nr):
         self.add_page()
         self.set_fill_color(*self.DARK_NAVY); self.rect(0, 0, 210, 297, style="F")
-        self.set_fill_color(*self.TEAL); self.rect(0, 0, 210, 4, style="F")
-        if self._logo_path:
-            try: self.image(self._logo_path, 20, 25, 35)
+        # White logo on dark background
+        cover_logo = self._logo_white_path or self._logo_path
+        if cover_logo:
+            try: self.image(cover_logo, 20, 25, 35)
             except: self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
         else:
             self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
@@ -1124,7 +1131,6 @@ class LoanControlPDF(FPDF if FPDF else object):
         self.set_xy(20, 123); self._font("B", 20); self.set_text_color(*self.WHITE); self.multi_cell(170, 10, self._safe(project_name))
         y = self.get_y() + 8
         self.set_xy(20, y); self._font("", 11); self.set_text_color(*self.MID_GRAY); self.cell(0, 6, self._safe(f"Utbygger: {utbygger}"))
-        # Info box
         box_y = 210
         self.set_fill_color(15, 30, 50); self.rect(20, box_y, 170, 40, style="F")
         self.set_draw_color(40, 60, 85); self.rect(20, box_y, 170, 40, style="D")
