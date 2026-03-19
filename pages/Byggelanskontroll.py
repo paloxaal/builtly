@@ -7,7 +7,7 @@ Self-contained Streamlit module – no external builtly_* dependencies.
 from __future__ import annotations
 
 import base64, io, json, os, re, textwrap
-from datetime import datetime, date
+from datetime import datetime,  date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1093,11 +1093,11 @@ class LoanControlPDF(FPDF if FPDF else object):
         if self.page_no() <= 1: return
         y0 = 8
         if self._logo_path:
-            try: self.image(self._logo_path, 10, y0, 22)
+            try: self.image(self._logo_path, 10, y0, 28)
             except: self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
         else:
             self._font("B", 8); self.set_text_color(*self.TEAL); self.set_xy(10, y0+1); self.cell(22, 5, "BUILTLY")
-        self._font("B", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(36, y0+1); self.cell(100, 5, self._safe("BYGGELÅNSKONTROLL"))
+        self._font("B", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(42, y0+1); self.cell(100, 5, self._safe("BYGGELÅNSKONTROLL"))
         self._font("", 7); self.set_text_color(*self.MID_GRAY); self.set_xy(150, y0+1); self.cell(50, 5, datetime.now().strftime("%d.%m.%Y"), align="R")
         self.set_draw_color(*self.TEAL); self.set_line_width(0.6); self.line(10, y0+7, 200, y0+7)
         self.set_draw_color(220, 225, 235); self.set_line_width(0.15); self.line(10, y0+7.8, 200, y0+7.8)
@@ -1119,7 +1119,7 @@ class LoanControlPDF(FPDF if FPDF else object):
         # White logo on dark background
         cover_logo = self._logo_white_path or self._logo_path
         if cover_logo:
-            try: self.image(cover_logo, 20, 25, 35)
+            try: self.image(cover_logo, 20, 22, 45)
             except: self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
         else:
             self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
@@ -1160,23 +1160,34 @@ class LoanControlPDF(FPDF if FPDF else object):
 
     def key_value(self, key, value, highlight=False):
         if self.get_y() > 265: self.add_page()
+        safe_val = self._safe(str(value))
         if highlight:
             self.set_fill_color(*self.TABLE_ALT); self.rect(10, self.get_y(), 190, 5.5, style="F")
         self._font("B", 8.5); self.set_text_color(*self.DARK_GRAY); self.cell(72, 5.5, self._safe(key))
-        self._font("", 9.5); self.set_text_color(*self.NAVY); self.cell(0, 5.5, self._safe(str(value)), new_x="LMARGIN", new_y="NEXT")
+        self._font("", 9.5); self.set_text_color(*self.NAVY)
+        if len(safe_val) > 60:
+            self.set_xy(82, self.get_y())
+            self.multi_cell(118, 5, safe_val); self.ln(0.5)
+        else:
+            self.cell(118, 5.5, safe_val, new_x="LMARGIN", new_y="NEXT")
 
     def status_box(self, status, text):
-        if self.get_y() > 235: self.add_page()
+        if self.get_y() > 220: self.add_page()
         color_map = {"Anbefalt godkjent": self.GREEN, "Anbefalt med forbehold": self.WARM, "Ikke anbefalt": self.RED}
         color = color_map.get(status, self.TEAL)
+        safe_text = self._safe(text)
+        text_lines = max(1, -(-len(safe_text) // 560))
+        box_h = 15 + text_lines * 5
         self.ln(3); y = self.get_y()
+        if y + box_h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*color); self.rect(10, y, 190, 1.5, style="F")
         self.set_fill_color(min(color[0]+220,255), min(color[1]+220,255), min(color[2]+220,255))
-        self.rect(10, y+1.5, 190, 22, style="F")
-        self.set_draw_color(*color); self.set_line_width(0.3); self.rect(10, y, 190, 23.5, style="D")
-        self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(0, 7, self._safe(status))
-        self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+12)
-        self.multi_cell(176, 4.5, self._safe(text)); self.set_y(y + 27)
+        self.rect(10, y+1.5, 190, box_h - 1.5, style="F")
+        self.set_draw_color(*color); self.set_line_width(0.3); self.rect(10, y, 190, box_h, style="D")
+        self._font("B", 13); self.set_text_color(*color); self.set_xy(16, y+4); self.cell(170, 7, self._safe(status))
+        self._font("", 8.5); self.set_text_color(*self.BODY_TEXT); self.set_xy(16, y+13)
+        self.multi_cell(172, 4.5, safe_text)
+        self.set_y(y + box_h + 3)
 
     def metric_row(self, metrics):
         if self.get_y() > 240: self.add_page()
@@ -1246,14 +1257,19 @@ class LoanControlPDF(FPDF if FPDF else object):
         self.line(x_start, self.get_y(), x_start + 190, self.get_y()); self.ln(2)
 
     def callout(self, title, text, tone="blue"):
-        if self.get_y() > 250: self.add_page()
+        if self.get_y() > 245: self.add_page()
         tmap = {"blue":(self.TEAL,(230,248,250)), "green":(self.GREEN,(235,250,240)), "yellow":(self.WARM,(255,248,230)), "red":(self.RED,(255,235,235))}
         accent, bg = tmap.get(tone, tmap["blue"])
-        y = self.get_y(); h = 16
+        safe_text = self._safe(text)
+        text_lines = max(1, -(-len(safe_text) // 560))
+        h = max(16, 10 + text_lines * 5)
+        y = self.get_y()
+        if y + h > 270: self.add_page(); y = self.get_y()
         self.set_fill_color(*bg); self.set_draw_color(*accent); self.set_line_width(0.3); self.rect(10, y, 190, h, style="DF")
         self.set_fill_color(*accent); self.rect(10, y, 3, h, style="F")
-        self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(0, 5, self._safe(title))
-        self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+7.5); self.multi_cell(178, 4, self._safe(text))
+        self._font("B", 8.5); self.set_text_color(*accent); self.set_xy(17, y+2); self.cell(170, 5, self._safe(title))
+        self._font("", 8); self.set_text_color(*self.BODY_TEXT); self.set_xy(17, y+8)
+        self.multi_cell(178, 4, safe_text)
         self.set_y(y + h + 3)
 
     def risk_table(self, risks):
