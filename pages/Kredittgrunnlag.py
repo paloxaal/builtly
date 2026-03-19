@@ -1224,22 +1224,23 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     pdf.section_title(1, "Sammendrag og anbefaling")
     pdf.status_box(safe_get(analysis, "anbefaling", "Ikke vurdert"), safe_get(analysis, "sammendrag", ""))
 
-    # 2. Nøkkeltall (with metric cards)
-    pdf.section_title(2, "Nokkeltall")
+    # 2. Nøkkeltall (dual metric dashboards)
+    pdf.section_title(2, "Nøkkeltall")
     nt = safe_get(analysis, "noekkeltall", {})
     if isinstance(nt, dict):
-        # Metric cards for key numbers
         pdf.metric_row([
             (f"{safe_get(nt, 'totalinvestering_mnok', 0)} MNOK", "Totalinvestering", "Sum prosjektkost"),
-            (f"{safe_get(nt, 'soekt_laan_mnok', 0)} MNOK", "Sokt lan", "Forespurt belop"),
+            (f"{safe_get(nt, 'soekt_laan_mnok', 0)} MNOK", "Søkt lån", "Omsøkt finansiering"),
             (f"{safe_get(nt, 'egenkapitalprosent', 0)}%", "Egenkapitalandel", f"{safe_get(nt, 'egenkapital_mnok', 0)} MNOK"),
-            (f"{safe_get(nt, 'belaaningsgrad_ltv', 0)}%", "LTV", "Belaningsgrad"),
+            (f"{safe_get(nt, 'belaaningsgrad_ltv', 0)}%", "LTV", "Belåningsgrad"),
         ])
-        pdf.key_value("Estimert markedsverdi:", f"{safe_get(nt, 'estimert_markedsverdi_mnok', 0)} MNOK")
-        pdf.key_value("Netto yield:", f"{safe_get(nt, 'netto_yield_pst', 0)}%")
-        pdf.key_value("DSCR:", f"{safe_get(nt, 'dscr', 0)}")
-        pdf.key_value("ICR:", f"{safe_get(nt, 'icr', 0)}")
-        pdf.key_value("Forhandssalg/utleie:", f"{safe_get(nt, 'forhaandssalg_utleie_pst', 0)}%", highlight=True)
+        pdf.metric_row([
+            (f"{safe_get(nt, 'dscr', 0)}", "DSCR", "Debt Service Coverage"),
+            (f"{safe_get(nt, 'icr', 0)}", "ICR", "Interest Coverage"),
+            (f"{safe_get(nt, 'netto_yield_pst', 0)}%", "Netto yield", "Avkastning"),
+            (f"{safe_get(nt, 'forhaandssalg_utleie_pst', 0)}%", "Forhåndssalg", "Salgs-/utleiegrad"),
+        ])
+        pdf.key_value("Estimert markedsverdi:", f"{safe_get(nt, 'estimert_markedsverdi_mnok', 0)} MNOK", highlight=True)
 
     # 3. Verdivurdering
     pdf.section_title(3, "Verdivurdering")
@@ -1255,23 +1256,21 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
 
         br = safe_get(vv, "bolig_residual", {})
         if isinstance(br, dict) and safe_get(br, "residual_tomteverdi_mnok", 0):
-            pdf.ln(2)
-            pdf._font("B", 10)
-            pdf.set_text_color(56, 194, 201)
-            pdf.cell(0, 6, "Residualverdiberegning (Bolig)", new_x="LMARGIN", new_y="NEXT")
-            pdf._font("", 9)
-            pdf.set_text_color(40, 50, 60)
-            pdf.key_value("Forventet salgsverdi:", f"{safe_get(br, 'forventet_salgsverdi_mnok', 0)} MNOK")
-            pdf.key_value("Salgspris per kvm BRA:", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr")
-            pdf.key_value("Byggekost per kvm BTA:", f"{safe_get(br, 'byggekost_per_kvm_bta', 0)} kr")
-            pdf.key_value("Utbyggingskost eks. tomt:", f"{safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0)} MNOK")
-            pdf.key_value("Min. margin (12%):", f"{safe_get(br, 'minimummargin_12pst_mnok', 0)} MNOK")
-            pdf.key_value("Residual tomteverdi:", f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK")
-            pdf.key_value("Oppgitt tomtekost:", f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK")
-            tomte_ok = safe_get(br, "tomtekost_innenfor_residual", True)
-            pdf.key_value("Tomtekost innenfor residual:", "Ja" if tomte_ok else "NEI - for høy tomtepris")
-            pdf.key_value("Faktisk margin:", f"{safe_get(br, 'faktisk_margin_pst', 0)}%")
-            pdf.body_text(safe_get(br, "kommentar", ""))
+            pdf.callout("Residualverdiberegning (Bolig / BRA-i)", "Tomteverdi = Salgsverdi - Utbyggingskost - Utviklermargin (min 12%)", "blue")
+            residual_rows = [
+                ["Forventet salgsverdi", f"{safe_get(br, 'forventet_salgsverdi_mnok', 0)} MNOK"],
+                ["Salgspris per kvm BRA-i", f"{safe_get(br, 'salgsverdi_per_kvm_bra', 0)} kr"],
+                ["Entreprisekost per kvm BRA-i", f"{safe_get(br, 'byggekost_per_kvm_bta', 0)} kr"],
+                ["Utbyggingskost ekskl. tomt", f"{safe_get(br, 'total_utbyggingskost_eks_tomt_mnok', 0)} MNOK"],
+                ["Minimummargin 12%", f"{safe_get(br, 'minimummargin_12pst_mnok', 0)} MNOK"],
+                ["Residual tomteverdi", f"{safe_get(br, 'residual_tomteverdi_mnok', 0)} MNOK"],
+                ["Oppgitt tomtekostnad", f"{safe_get(br, 'oppgitt_tomtekost_mnok', 0)} MNOK"],
+                ["Innenfor residual", "Ja" if safe_get(br, "tomtekost_innenfor_residual", True) else "NEI"],
+                ["Faktisk margin", f"{safe_get(br, 'faktisk_margin_pst', 0)}%"],
+            ]
+            pdf.pro_table(["Post", "Verdi"], residual_rows, [100, 90])
+            if safe_get(br, "kommentar"):
+                pdf.body_text(safe_get(br, "kommentar", ""))
 
         ny = safe_get(vv, "naering_yield", {})
         if isinstance(ny, dict) and safe_get(ny, "yield_on_cost_pst", 0):
@@ -1294,9 +1293,11 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
             pdf.key_value("Verdiskaping:", "Positiv" if verdiskaping else "NEGATIV - yield on cost < markedsyield")
             pdf.body_text(safe_get(ny, "kommentar", ""))
 
-        pdf.key_value("Bankens verdianslag:", f"{safe_get(vv, 'bankens_verdianslag_mnok', 0)} MNOK")
-        pdf.key_value("Forsiktig verdi (70%):", f"{safe_get(vv, 'forsiktig_verdi_70pst_mnok', 0)} MNOK")
-        pdf.key_value("LTV mot beregnet verdi:", f"{safe_get(vv, 'ltv_mot_beregnet_verdi_pst', 0)}%")
+        pdf.metric_row([
+            (f"{safe_get(vv, 'bankens_verdianslag_mnok', 0)} MNOK", "Bankens verdianslag", "Anbefalt verdi for belåning"),
+            (f"{safe_get(vv, 'forsiktig_verdi_70pst_mnok', 0)} MNOK", "Forsiktig verdi (70%)", "Konservativt scenario"),
+        ])
+        pdf.key_value("LTV mot beregnet verdi:", f"{safe_get(vv, 'ltv_mot_beregnet_verdi_pst', 0)}%", highlight=True)
 
     # 4. Regulering
     pdf.section_title(4, "Regulering og tomt")
@@ -1337,21 +1338,24 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     pdf.section_title(5, "Økonomisk analyse")
     oek = safe_get(analysis, "oekonomisk_analyse", {})
     if isinstance(oek, dict):
-        pdf.key_value("Totalkostnadskalkyle:", f"{safe_get(oek, 'totalkostnadskalkyle_mnok', 0)} MNOK")
-        pdf.key_value("Entreprisekostnad:", f"{safe_get(oek, 'entreprisekostnad_mnok', 0)} MNOK")
-        pdf.key_value("Tomtekostnad:", f"{safe_get(oek, 'tomtekostnad_mnok', 0)} MNOK")
-        pdf.key_value("Offentlige avgifter:", f"{safe_get(oek, 'offentlige_avgifter_mnok', 0)} MNOK")
-        pdf.key_value("Prosjektkostnader:", f"{safe_get(oek, 'prosjektkostnader_mnok', 0)} MNOK")
-        pdf.key_value("Finanskostnader:", f"{safe_get(oek, 'finanskostnader_mnok', 0)} MNOK")
-        pdf.key_value("Forventet salgsverdi:", f"{safe_get(oek, 'forventet_salgsverdi_mnok', 0)} MNOK")
-        pdf.key_value("Forventet resultat:", f"{safe_get(oek, 'forventet_resultat_mnok', 0)} MNOK")
-        pdf.key_value("Resultatmargin:", f"{safe_get(oek, 'resultatmargin_pst', 0)}%")
+        oek_rows = [
+            ["Totalkostnadskalkyle", f"{safe_get(oek, 'totalkostnadskalkyle_mnok', 0)} MNOK"],
+            ["Entreprisekostnad", f"{safe_get(oek, 'entreprisekostnad_mnok', 0)} MNOK"],
+            ["Tomtekostnad", f"{safe_get(oek, 'tomtekostnad_mnok', 0)} MNOK"],
+            ["Offentlige avgifter", f"{safe_get(oek, 'offentlige_avgifter_mnok', 0)} MNOK"],
+            ["Prosjektkostnader", f"{safe_get(oek, 'prosjektkostnader_mnok', 0)} MNOK"],
+            ["Finanskostnader", f"{safe_get(oek, 'finanskostnader_mnok', 0)} MNOK"],
+            ["Forventet salgsverdi", f"{safe_get(oek, 'forventet_salgsverdi_mnok', 0)} MNOK"],
+            ["Forventet resultat", f"{safe_get(oek, 'forventet_resultat_mnok', 0)} MNOK"],
+            ["Resultatmargin", f"{safe_get(oek, 'resultatmargin_pst', 0)}%"],
+        ]
+        pdf.pro_table(["Post", "MNOK"], oek_rows, [120, 70])
 
     # 6. Rentesensitivitet
     pdf.section_title(6, "Rentesensitivitet")
     rente = safe_get(analysis, "rentesensitivitet", [])
     if rente:
-        headers = ["Renteniva", "Arsresultat (MNOK)", "DSCR", "Betjeningsevne"]
+        headers = ["Rentenivå", "Årsresultat (MNOK)", "DSCR", "Betjeningsevne"]
         rows = []
         for r in rente:
             if isinstance(r, dict):
@@ -1366,41 +1370,49 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
 
     # 7. Sikkerheter
     pdf.section_title(7, "Sikkerheter og pant")
-    # Gnr/bnr as primary property info
     if project_info.get("gnr_bnr"):
         pdf.callout("Panteobjekt", f"Matrikkel: {project_info['gnr_bnr']}" + (f" - {project_info.get('kommune', '')}" if project_info.get('kommune') else ""), "blue")
-    for s in safe_get(analysis, "sikkerheter", []):
-        if isinstance(s, dict):
-            pdf.key_value(f"{safe_get(s, 'type', '')} ({safe_get(s, 'prioritet', '')})",
-                          f"{safe_get(s, 'verdi_mnok', 0)} MNOK - {safe_get(s, 'kommentar', '')}")
+    sikkerheter = safe_get(analysis, "sikkerheter", [])
+    if sikkerheter:
+        sik_rows = []
+        for s in sikkerheter:
+            if isinstance(s, dict):
+                sik_rows.append([safe_get(s, 'type', ''), safe_get(s, 'prioritet', ''), f"{safe_get(s, 'verdi_mnok', 0)} MNOK", safe_get(s, 'kommentar', '')])
+        if sik_rows:
+            pdf.pro_table(["Type", "Prioritet", "Verdi", "Kommentar"], sik_rows, [55, 30, 35, 70])
+
+    kausjoner = project_info.get("kausjoner", [])
+    aktive = [k for k in kausjoner if isinstance(k, dict) and k.get("kausjonist")]
+    if aktive:
+        pdf.callout("Kausjoner og morselskapsgarantier", f"{len(aktive)} kausjonist(er), sum {sum(float(k.get('beloep_mnok',0) or 0) for k in aktive):.1f} MNOK", "yellow")
+        kausk_rows = []
+        for k in aktive:
+            kausk_rows.append([k.get("kausjonist", ""), k.get("type", "Selvskyldner"), f"{float(k.get('beloep_mnok', 0) or 0):.1f} MNOK", k.get("orgnr", "")])
+        pdf.pro_table(["Kausjonist", "Type", "Beløp", "Org.nr."], kausk_rows, [60, 40, 35, 55])
 
     # 8. Risikovurdering
     pdf.section_title(8, "Risikovurdering")
     risiko_list = safe_get(analysis, "risikovurdering", [])
     if risiko_list:
-        headers = ["Risiko", "Sannsynlighet", "Konsekvens"]
-        rows = []
+        risk_rows = []
         for r in risiko_list:
             if isinstance(r, dict):
-                rows.append([safe_get(r, "risiko", ""), safe_get(r, "sannsynlighet", "-"), safe_get(r, "konsekvens", "-")])
-        if rows:
-            pdf.pro_table(headers, rows, [100, 40, 50])
-        for r in risiko_list:
-            if isinstance(r, dict) and safe_get(r, "mitigering"):
-                pdf.body_text(f"Mitigering ({safe_get(r, 'risiko', '')}): {safe_get(r, 'mitigering', '-')}")
+                risk_rows.append([safe_get(r, "risiko", ""), safe_get(r, "sannsynlighet", "-"), safe_get(r, "konsekvens", "-"), safe_get(r, "mitigering", "-")])
+        if risk_rows:
+            pdf.pro_table(["Risiko", "Sannsynlighet", "Konsekvens", "Mitigering"], risk_rows, [50, 28, 28, 84])
 
     # 9. Styrker / svakheter
     pdf.section_title(9, "Styrker og svakheter")
     styrker = safe_get(analysis, "styrker", [])
-    if styrker:
-        pdf.callout("Styrker", " | ".join(styrker[:3]) if len(styrker) <= 3 else styrker[0], "green")
-        for s in styrker:
-            pdf.body_text(f"+ {s}")
     svakheter = safe_get(analysis, "svakheter", [])
-    if svakheter:
-        pdf.callout("Svakheter", " | ".join(svakheter[:3]) if len(svakheter) <= 3 else svakheter[0], "red")
-        for s in svakheter:
-            pdf.body_text(f"- {s}")
+    max_rows = max(len(styrker), len(svakheter))
+    if max_rows > 0:
+        ss_rows = []
+        for i in range(max_rows):
+            s = f"+ {styrker[i]}" if i < len(styrker) else ""
+            w = f"- {svakheter[i]}" if i < len(svakheter) else ""
+            ss_rows.append([s, w])
+        pdf.pro_table(["Styrker", "Svakheter"], ss_rows, [95, 95])
 
     # 10. Vilkår
     pdf.section_title(10, "Foreslåtte vilkår")
@@ -1411,25 +1423,18 @@ def generate_credit_pdf(project_info, analysis) -> bytes:
     pdf.section_title(11, "Covenants")
     cov = safe_get(analysis, "covenants", [])
     if cov:
-        pdf._font("B", 8)
-        pdf.set_fill_color(240, 244, 248)
-        pdf.set_text_color(80, 100, 120)
-        pdf.cell(70, 7, "Covenant", border=1, fill=True)
-        pdf.cell(50, 7, "Grenseverdi", border=1, fill=True)
-        pdf.cell(0, 7, "Målefrekvens", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
-        pdf._font("", 9)
-        pdf.set_text_color(40, 50, 60)
+        cov_rows = []
         for c in cov:
             if isinstance(c, dict):
-                pdf.cell(70, 6, safe_get(c, "covenant", ""), border=1)
-                pdf.cell(50, 6, safe_get(c, "grenseverdi", ""), border=1)
-                pdf.cell(0, 6, safe_get(c, "maalefrekvens", ""), border=1, new_x="LMARGIN", new_y="NEXT")
+                cov_rows.append([safe_get(c, "covenant", ""), safe_get(c, "grenseverdi", ""), safe_get(c, "maalefrekvens", "")])
+        if cov_rows:
+            pdf.pro_table(["Covenant", "Grenseverdi", "Målefrekvens"], cov_rows, [80, 55, 55])
 
     # Disclaimer
     pdf.ln(10)
     pdf.callout(
-        "UTKAST - KREVER FAGLIG KONTROLL",
-        "Kredittnotatet er automatisk generert av Builtly og skal gjennomgas og kvalitetssikres av kredittavdelingen for fremleggelse for kredittkomite. Alle nokkeltall, vurderinger og anbefalinger ma verifiseres mot faktiske forhold.",
+        "UTKAST — KREVER FAGLIG KONTROLL",
+        "Kredittnotatet er automatisk generert av Builtly og skal gjennomgås og kvalitetssikres av kredittavdelingen før fremleggelse for kredittkomité. Alle nøkkeltall, vurderinger og anbefalinger må verifiseres mot faktiske forhold.",
         "yellow"
     )
 
@@ -1666,7 +1671,7 @@ render_hero(
 for _k, _v in {
     "pf": {},           # prefill data
     "selskap_info": {}, # company lookup result
-    "kausjon_rows": [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}],
+    "kausjon_rows": [{"_uid": "default0", "kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}],
 }.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -1690,7 +1695,7 @@ with col_clr:
     if st.button("Nullstill skjema", use_container_width=True):
         st.session_state.pf = {}
         st.session_state.selskap_info = {}
-        st.session_state.kausjon_rows = [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
+        st.session_state.kausjon_rows = [{"_uid": "reset0", "kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
         st.rerun()
 
 if do_prefill and uploads:
@@ -1706,6 +1711,7 @@ if do_prefill and uploads:
             filled = [k for k in kausjoner if k.get("kausjonist") or k.get("beloep_mnok", 0) > 0]
             if filled:
                 # Auto-lookup missing org.nr from Brreg for each kausjonist
+                import uuid as _uuid
                 enriched = []
                 for k in filled:
                     if not k.get("orgnr") and k.get("kausjonist"):
@@ -1716,11 +1722,12 @@ if do_prefill and uploads:
                                 k["kausjonist"] = info.get("navn", k["kausjonist"]) or k["kausjonist"]
                         except Exception:
                             pass
+                    k["_uid"] = str(_uuid.uuid4())[:8]
                     enriched.append(k)
                 st.session_state.kausjon_rows = enriched
             else:
                 # Keep one blank row as placeholder
-                st.session_state.kausjon_rows = [{"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
+                st.session_state.kausjon_rows = [{"_uid": "pf_empty", "kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
             st.success(f"✓ Data hentet fra dokumentene ({len(filled)} kausjon(er) funnet) — kontroller og juster feltene nedenfor.")
             st.rerun()
         else:
@@ -1909,44 +1916,69 @@ with left:
     </div>''')
 
     kausjon_rows = st.session_state.kausjon_rows
+    # Ensure all rows have unique IDs
+    for row in kausjon_rows:
+        if "_uid" not in row:
+            import uuid as _uuid
+            row["_uid"] = str(_uuid.uuid4())[:8]
+
+    rows_to_delete = []
     updated_rows = []
+
     for i, row in enumerate(kausjon_rows):
-        # Header row labels only for first row
+        uid = row.get("_uid", str(i))
+        is_first = (i == 0)
         kc1, kc2, kc3, kc4, kc5, kc6 = st.columns([3, 2, 1.5, 1.5, 0.5, 0.5])
         with kc1:
-            kn = st.text_input("Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{i}", placeholder="Selskap AS", label_visibility="collapsed" if i > 0 else "visible")
+            kn = st.text_input("Kausjonist", value=row.get("kausjonist", ""), key=f"kn_{uid}",
+                               placeholder="Selskapsnavn AS", label_visibility="collapsed" if not is_first else "visible")
         with kc2:
-            ko_val = row.get("orgnr", "")
-            ko = st.text_input("Org.nr.", value=ko_val, key=f"ko_{i}", placeholder="999 888 777", label_visibility="collapsed" if i > 0 else "visible")
+            ko = st.text_input("Org.nr.", value=row.get("orgnr", ""), key=f"ko_{uid}",
+                               placeholder="999 888 777", label_visibility="collapsed" if not is_first else "visible")
         with kc3:
-            kb = st.number_input("Beloep (MNOK)", value=float(row.get("beloep_mnok", 0) or 0), key=f"kb_{i}", step=5.0, format="%.1f", label_visibility="collapsed" if i > 0 else "visible")
+            kb = st.number_input("Beløp (MNOK)", value=float(row.get("beloep_mnok", 0) or 0), key=f"kb_{uid}",
+                                 step=5.0, format="%.1f", label_visibility="collapsed" if not is_first else "visible")
         with kc4:
             kt_opts = ["Selvskyldner", "Simpel"]
-            kt = st.selectbox("Type", kt_opts, key=f"kt_{i}", index=0 if row.get("type", "Selvskyldner") == "Selvskyldner" else 1, label_visibility="collapsed" if i > 0 else "visible")
+            kt_idx = 0 if row.get("type", "Selvskyldner") == "Selvskyldner" else 1
+            kt = st.selectbox("Type", kt_opts, key=f"kt_{uid}", index=kt_idx,
+                              label_visibility="collapsed" if not is_first else "visible")
         with kc5:
-            # Lookup org.nr button – visible when name is filled but no org.nr yet
-            lookup_label = "🔎" if i > 0 else "Søk"
-            if st.button(lookup_label, key=f"klu_{i}", use_container_width=True, help="Slå opp org.nr. fra Brreg"):
+            lookup_label = "🔎" if not is_first else "Søk"
+            if st.button(lookup_label, key=f"klu_{uid}", use_container_width=True, help="Slå opp org.nr. fra Brreg"):
                 if kn:
                     try:
                         info = lookup_company(kn)
                         if info.get("orgnr"):
-                            st.session_state.kausjon_rows[i]["orgnr"] = info["orgnr"]
-                            st.session_state.kausjon_rows[i]["kausjonist"] = info.get("navn", kn) or kn
+                            row["orgnr"] = info["orgnr"]
+                            row["kausjonist"] = info.get("navn", kn) or kn
                             st.rerun()
                     except Exception:
                         pass
         with kc6:
-            del_label = "✕" if i > 0 else " "
-            if i > 0 and st.button("✕", key=f"kdel_{i}", use_container_width=True):
-                kausjon_rows.pop(i); st.session_state.kausjon_rows = kausjon_rows; st.rerun()
-        # Use latest lookup result for orgnr if it was just updated
-        ko_final = st.session_state.kausjon_rows[i].get("orgnr", ko) if i < len(st.session_state.kausjon_rows) else ko
-        updated_rows.append({"kausjonist": kn, "orgnr": ko_final, "beloep_mnok": kb, "type": kt})
+            if not is_first:
+                if st.button("✕", key=f"kdel_{uid}", use_container_width=True):
+                    rows_to_delete.append(uid)
+            else:
+                st.write("")  # Empty placeholder for alignment
+
+        # Use latest lookup result if orgnr was just updated via button
+        ko_final = row.get("orgnr", ko) if row.get("orgnr") and row["orgnr"] != ko else ko
+        updated_rows.append({"_uid": uid, "kausjonist": kn, "orgnr": ko_final, "beloep_mnok": kb, "type": kt})
+
+    # Apply deletes AFTER the loop (not during iteration)
+    if rows_to_delete:
+        updated_rows = [r for r in updated_rows if r.get("_uid") not in rows_to_delete]
+        if not updated_rows:
+            import uuid as _uuid
+            updated_rows = [{"_uid": str(_uuid.uuid4())[:8], "kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"}]
+        st.session_state.kausjon_rows = updated_rows
+        st.rerun()
 
     st.session_state.kausjon_rows = updated_rows
     if st.button("+ Legg til kausjon", use_container_width=True):
-        st.session_state.kausjon_rows.append({"kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"})
+        import uuid as _uuid
+        st.session_state.kausjon_rows.append({"_uid": str(_uuid.uuid4())[:8], "kausjonist": "", "orgnr": "", "beloep_mnok": 0.0, "type": "Selvskyldner"})
         st.rerun()
 
     total_kausjon_display = sum(r.get("beloep_mnok", 0) or 0 for r in updated_rows if r.get("kausjonist"))
@@ -2199,7 +2231,7 @@ if run_analysis:
         "etableringsgebyr_nok": etablering,
         "loepetid_mnd": loepetid,
         # Kausjoner
-        "kausjoner": [r for r in st.session_state.kausjon_rows if r.get("kausjonist")],
+        "kausjoner": [{k: v for k, v in r.items() if k != "_uid"} for r in st.session_state.kausjon_rows if r.get("kausjonist")],
         # Selskapssøk-resultat
         "selskapsinfo": st.session_state.selskap_info,
         # Verdivurdering
