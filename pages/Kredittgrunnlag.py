@@ -992,6 +992,7 @@ class CreditPDF(FPDF if FPDF else object):
         self.set_auto_page_break(auto=True, margin=28)
         self._has_unicode_font = self._add_fonts()
         self._logo_path = self._find_logo()
+        self._logo_white_path = self._find_logo_white()
         self.accent = self.TEAL
         self.dark = self.NAVY
 
@@ -1019,10 +1020,18 @@ class CreditPDF(FPDF if FPDF else object):
         return found
 
     def _find_logo(self):
-        for p in ["logo.png", os.path.join(os.path.dirname(__file__), "logo.png"), "/app/logo.png", "logo-white.png"]:
+        """Find regular logo for header pages."""
+        for p in ["logo.png", os.path.join(os.path.dirname(__file__), "logo.png"), "/app/logo.png"]:
             if os.path.exists(p):
                 return p
         return ""
+
+    def _find_logo_white(self):
+        """Find white logo for dark cover page."""
+        for p in ["logo-white.png", os.path.join(os.path.dirname(__file__), "logo-white.png"), "/app/logo-white.png"]:
+            if os.path.exists(p):
+                return p
+        return self._logo_path  # fallback to regular logo
 
     def _font(self, style="", size=10):
         try:
@@ -1061,10 +1070,11 @@ class CreditPDF(FPDF if FPDF else object):
     def cover_page(self, project_name, laantaker, laanetype):
         self.add_page()
         self.set_fill_color(*self.DARK_NAVY); self.rect(0, 0, 210, 297, style="F")
-        self.set_fill_color(*self.TEAL); self.rect(0, 0, 210, 4, style="F")
-        if self._logo_path:
+        # White logo on dark background
+        cover_logo = self._logo_white_path or self._logo_path
+        if cover_logo:
             try:
-                self.image(self._logo_path, 20, 25, 35)
+                self.image(cover_logo, 20, 25, 35)
             except Exception:
                 self._font("B", 14); self.set_text_color(*self.TEAL); self.set_xy(20, 25); self.cell(35, 10, "BUILTLY")
         else:
@@ -1076,7 +1086,7 @@ class CreditPDF(FPDF if FPDF else object):
         self.set_draw_color(*self.TEAL); self.set_line_width(1.2); self.line(20, 115, 90, 115)
         self.set_xy(20, 125); self._font("B", 20); self.set_text_color(*self.WHITE); self.multi_cell(170, 10, self._safe(project_name))
         y = self.get_y() + 8
-        self.set_xy(20, y); self._font("", 11); self.set_text_color(*self.MID_GRAY); self.cell(0, 6, self._safe(f"Lantaker: {laantaker}"))
+        self.set_xy(20, y); self._font("", 11); self.set_text_color(*self.MID_GRAY); self.cell(0, 6, self._safe(f"L\u00e5ntaker: {laantaker}"))
         box_y = 210
         self.set_fill_color(15, 30, 50); self.rect(20, box_y, 170, 40, style="F")
         self.set_draw_color(40, 60, 85); self.rect(20, box_y, 170, 40, style="D")
@@ -1086,6 +1096,7 @@ class CreditPDF(FPDF if FPDF else object):
             col_x = 25 + (i % 2) * 85; row_y = box_y + 6 + (i // 2) * 16
             self._font("B", 7); self.set_text_color(*self.TEAL); self.set_xy(col_x, row_y); self.cell(80, 4, label.upper())
             self._font("", 9); self.set_text_color(*self.WHITE); self.set_xy(col_x, row_y+5); self.cell(80, 4, self._safe(val))
+        # Bottom teal accent stripe only
         self.set_fill_color(*self.TEAL); self.rect(0, 293, 210, 4, style="F")
 
     def section_title(self, num, title):
