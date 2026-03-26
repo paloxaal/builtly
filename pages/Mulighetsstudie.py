@@ -2279,7 +2279,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
                     
     if st.session_state.get("auto_site_polygon") is not None:
         st.success(f"✅ **Klar til bruk!** {st.session_state.get('auto_site_msg')} (Nøyaktig areal via UTM33: ca {int(st.session_state.auto_site_polygon.area)} m²)")
-        if st.button("Tøm hentet tomt", size="small"):
+        if st.button("Tøm hentet tomt", type="secondary"):
             st.session_state.auto_site_polygon = None
             st.rerun()
 
