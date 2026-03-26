@@ -58,11 +58,7 @@ except ImportError:
     fitz = None
 
 try:
-    from geodata_client import (
-        GeodataOnlineClient,
-        geodata_buildings_to_neighbors,
-        regulation_to_parsed_hints,
-    )
+    from geodata_client import GeodataOnlineClient, geodata_buildings_to_neighbors
     HAS_GEODATA_ONLINE = True
 except ImportError:
     HAS_GEODATA_ONLINE = False
@@ -83,11 +79,9 @@ if llm_available:
     except Exception:
         llm_available = False
 
-# --- Geodata Online ---
 gdo = GeodataOnlineClient() if HAS_GEODATA_ONLINE else None
-geodata_online_available = gdo is not None and gdo.is_available()
 geodata_token_ok = False
-if geodata_online_available:
+if gdo is not None and gdo.is_available():
     try:
         gdo.get_token()
         geodata_token_ok = True
@@ -262,17 +256,14 @@ def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str, bounds: Optional[Tuple[float, float, float, float]] = None, _gdo_client: Any = None) -> Tuple[Optional[Image.Image], str]:
-    # 0. HØYESTE PRIORITET: Geodata Online HD-ortofoto
+    # 0. Geodata Online ortofoto (foerstevalg)
     if bounds is not None and _gdo_client is not None:
         try:
-            img, source = _gdo_client.fetch_map_image(
-                bbox=bounds, srid=25833, width=1200, height=1200,
-                map_type="ortofoto", buffer_m=80.0,
-            )
+            img, source = _gdo_client.fetch_ortofoto(bbox=bounds, buffer_m=80.0, width=1200, height=1200)
             if img:
                 return img, source
         except Exception:
-            pass  # Fall gjennom til GeoNorge
+            pass
 
     # 1. HØYESTE PRIORITET: Bruk eksakte koordinater hvis tomt er hentet!
     if bounds is not None:
@@ -372,7 +363,7 @@ def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
     return []
 
 def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
-    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket (fallback)."""
+    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket."""
     knr = get_kommunenummer(kommune_input)
     if not knr:
         return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Skriv f.eks. 'Oslo' eller '0301'."
@@ -384,61 +375,58 @@ def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, st
         gnr_clean = str(gnr).strip()
         bnr_clean = str(bnr).strip()
         
-        # Kartverkets WFS servere (oppdatert mars 2026)
+        # Kartverkets WFS servere (fallback innebygd)
         services = [
-            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-eiendomskart-teig", "matrikkelen-eiendomskart-teig:Teig"),
-            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-eiendomskart-teig", "Teig"),
             ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
-            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig"),
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig")
         ]
         
-        cql_variants = [
-            f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}",
-            f"KOMMUNENUMMER='{knr}' AND GARDSNUMMER={gnr_clean} AND BRUKSNUMMER={bnr_clean}",
-        ]
+        # VIKTIG: Ingen fnutter (') rundt tallene i CQL! GeoServer krasjer hvis Gnr (int) har fnutter.
+        cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
         
         success_for_this_parcel = False
         last_error = ""
 
         for url, layer in services:
-            if success_for_this_parcel:
-                break
-            for cql in cql_variants:
-                if success_for_this_parcel:
-                    break
-                for out_fmt in ["application/json", "json"]:
-                    if success_for_this_parcel:
-                        break
-                    params = {
-                        "service": "WFS",
-                        "version": "2.0.0",
-                        "request": "GetFeature",
-                        "typenames": layer,
-                        "srsName": "EPSG:25833",
-                        "outputFormat": out_fmt,
-                        "cql_filter": cql,
-                    }
+            if success_for_this_parcel: break
+            
+            params = {
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typenames": layer,
+                "srsName": "EPSG:25833",
+                "outputFormat": "application/json",
+                "cql_filter": cql
+            }
+            
+            try:
+                resp = requests.get(url, params=params, timeout=12)
+                # Hvis application/json feiler, prøv bare "json"
+                if resp.status_code != 200:
+                    params["outputFormat"] = "json"
+                    resp = requests.get(url, params=params, timeout=12)
+
+                if resp.status_code == 200:
                     try:
-                        resp = requests.get(url, params=params, timeout=12)
-                        if resp.status_code == 200:
-                            try:
-                                data = resp.json()
-                                features = extract_geojson_features(data)
-                                if features:
-                                    for feature in features:
-                                        geom = shape(feature["geometry"])
-                                        poly = largest_polygon(geom)
-                                        if poly:
-                                            polygoner.append(poly)
-                                    success_for_this_parcel = True
-                                else:
-                                    last_error = "Ingen polygon funnet."
-                            except json.JSONDecodeError:
-                                last_error = "Server returnerte ikke gyldig JSON."
+                        data = resp.json()
+                        features = extract_geojson_features(data)
+                        if features:
+                            for feature in features:
+                                geom = shape(feature["geometry"])
+                                poly = largest_polygon(geom)
+                                if poly:
+                                    polygoner.append(poly)
+                            success_for_this_parcel = True
+                            break
                         else:
-                            last_error = f"API-feil (Kode: {resp.status_code})"
-                    except Exception as e:
-                        last_error = f"Nettverksfeil: {str(e)[:30]}"
+                            last_error = "Ingen polygon funnet på dette Gnr/Bnr i matrikkelen."
+                    except json.JSONDecodeError:
+                        last_error = "Server returnerte ikke gyldig JSON."
+                else:
+                    last_error = f"API-feil (Kode: {resp.status_code})"
+            except Exception as e:
+                last_error = f"Nettverksfeil: {str(e)[:30]}"
                 
         if not success_for_this_parcel:
             feil.append(f"{gnr}/{bnr} ({last_error})")
@@ -1685,9 +1673,7 @@ def build_deterministic_report(
     options: List[OptionResult],
     parsed_hints: Dict[str, float],
     has_visual_input: bool,
-    gdo_regulation: Optional[Dict[str, Any]] = None,
 ) -> str:
-    gdo_regulation = gdo_regulation or {}
     if not options:
         return (
             "# 1. OPPSUMMERING\n"
@@ -1737,12 +1723,6 @@ def build_deterministic_report(
         lines.append(f"- CRS / projeksjon for polygon: {site.polygon_crs}")
     if parsed_hints:
         lines.append(f"- Tolket fra fritekst: {json.dumps(parsed_hints, ensure_ascii=False)}")
-    if gdo_regulation:
-        lines.append(f"- Reguleringsplan (Geodata Online): {gdo_regulation.get('plannavn', 'Ukjent')} - "
-                     f"Arealformaal: {gdo_regulation.get('arealformaal', 'Ikke funnet')}")
-        if gdo_regulation.get('utnyttelsesgrad'):
-            lines.append(f"- Utnyttelsesgrad fra plan: {gdo_regulation['utnyttelsesgrad']}% "
-                         f"({gdo_regulation.get('utnyttelsesgrad_type', 'BYA')})")
     lines.append("")
     lines.append("# 3. VIKTIGSTE FORUTSETNINGER")
     lines.append("- Analysen er deterministisk og skjematisk; den erstatter ikke detaljert reguleringstolkning.")
@@ -1811,11 +1791,7 @@ def build_deterministic_report(
     lines.append("")
     lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
     lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
-    if any(n.get("source") == "Geodata Online FKB" for n in (geodata_context.get("neighbors", []) if 'geodata_context' in dir() else [])):
-        lines.append("- Nabohoyder er hentet fra FKB (Geodata Online) og er vesentlig mer palitelige enn OSM, "
-                     "men bor fortsatt verifiseres mot faktisk situasjon for naerliggende bygg.")
-    else:
-        lines.append("- Nabohoyder fra GeoJSON/OSM ma kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
+    lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
     lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag hvis prosjektet går videre til konkret skisse.")
     lines.append("")
     lines.append("# 10. ANBEFALING / NESTE STEG")
@@ -2214,11 +2190,9 @@ for geo_note in geo_runtime_notes():
     st.warning(geo_note)
 
 if geodata_token_ok:
-    st.success("Geodata Online tilkoblet — FKB-bygninger, reguleringsplan, HD-ortofoto og DTM er tilgjengelig.")
-elif geodata_online_available:
-    st.warning("Geodata Online credentials satt, men token-generering feilet. Sjekk brukernavn/passord i Render.")
-elif HAS_GEODATA_ONLINE:
-    st.info("Geodata Online er ikke konfigurert. Sett GEODATA_ONLINE_USER og GEODATA_ONLINE_PASS for FKB, regulering og DTM.")
+    st.success("Geodata Online tilkoblet — tomtehenting, nabobygg, ortofoto tilgjengelig via GeomapMatrikkel.")
+elif HAS_GEODATA_ONLINE and gdo is not None and gdo.is_available():
+    st.warning("Geodata Online: token-generering feilet. Sjekk brukernavn/passord.")
 
 
 # --- 9. INPUT UI ---
@@ -2265,62 +2239,43 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     max_height_m = r4.number_input("Maks hoyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
 with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
-    st.markdown("##### 1. Hent eiendom automatisk (Geodata Online / Kartverket)")
-    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4). Motoren slår dem automatisk sammen til ett byggeklart polygon.")
-    
+    st.markdown("##### 1. Hent eiendom fra Geodata Online")
+    if not geodata_token_ok:
+        st.warning("Geodata Online er ikke tilkoblet. Sett GEODATA_ONLINE_USER og GEODATA_ONLINE_PASS.")
+    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4).")
+
     c_k, c_g = st.columns(2)
     kommune_nr_input = c_k.text_input("Kommune (Navn eller 4-sifret nummer)", value=pd_state.get('kommune', ''))
-    
+
     default_gnr_bnr = ""
     if pd_state.get('gnr') and pd_state.get('bnr'):
         default_gnr_bnr = f"{pd_state.get('gnr')}/{pd_state.get('bnr')}"
-        
+
     gnr_bnr_input = c_g.text_input("Gnr/Bnr (Bruk komma for flere)", value=default_gnr_bnr)
 
     if st.button("Sok opp og lagre tomt", type="secondary"):
         if not kommune_nr_input or not gnr_bnr_input:
-            st.warning("Fyll inn både kommune og Gnr/Bnr.")
+            st.warning("Fyll inn baade kommune og Gnr/Bnr.")
+        elif not geodata_token_ok:
+            st.error("Geodata Online er ikke tilkoblet. Kan ikke hente tomt.")
         else:
             pairs = []
             for part in gnr_bnr_input.split(","):
                 if "/" in part:
                     g, b = part.split("/")
                     pairs.append((g.strip(), b.strip()))
-
             if not pairs:
-                st.warning("Ugyldig format på Gnr/Bnr. Bruk formatet 15/2.")
+                st.warning("Ugyldig format. Bruk formatet 15/2.")
             else:
-                poly = None
-                msg = ""
-
-                # A) Prov Geodata Online forst (best datakvalitet)
-                if geodata_token_ok:
-                    with st.spinner("Soker via Geodata Online Matrikkel..."):
-                        try:
-                            knr = get_kommunenummer(kommune_nr_input) or kommune_nr_input.strip().zfill(4)
-                            poly, msg = gdo.fetch_tomt_polygon(knr, pairs, srid=25833)
-                        except Exception as exc:
-                            msg = f"Geodata Online feilet: {exc}"
-                            poly = None
-
-                # B) Fallback til GeoNorge WFS
-                if poly is None:
-                    with st.spinner("Geodata Online traff ikke — prover Kartverket WFS..."):
-                        try:
-                            poly, msg_gn = hent_tomt_fra_geonorge(kommune_nr_input, pairs)
-                            if poly:
-                                msg = msg_gn
-                            else:
-                                msg = f"Geodata Online: {msg} | Kartverket: {msg_gn}"
-                        except Exception as exc:
-                            msg = f"{msg} | Kartverket WFS feilet: {exc}"
-
-                if poly:
-                    st.session_state.auto_site_polygon = poly
-                    st.session_state.auto_site_msg = msg
-                    st.rerun()
-                else:
-                    st.error(f"Kunne ikke hente tomt: {msg}")
+                with st.spinner("Henter tomt fra Geodata Online (DekTeigFlate)..."):
+                    knr = get_kommunenummer(kommune_nr_input) or kommune_nr_input.strip().zfill(4)
+                    poly, msg = gdo.fetch_tomt_polygon(knr, pairs)
+                    if poly:
+                        st.session_state.auto_site_polygon = poly
+                        st.session_state.auto_site_msg = msg
+                        st.rerun()
+                    else:
+                        st.error(f"Feilet: {msg}")
                     
     if st.session_state.get("auto_site_polygon") is not None:
         st.success(f"✅ **Klar til bruk!** {st.session_state.get('auto_site_msg')} (Nøyaktig areal via UTM33: ca {int(st.session_state.auto_site_polygon.area)} m²)")
@@ -2371,44 +2326,6 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
     st.caption(
         "GeoJSON for tomt/naboer kan ligge i lon/lat eller i meter. Terreng kan lastes opp som punktfil med x,y,z eller georeferert raster."
     )
-
-    if geodata_token_ok:
-        st.markdown("---")
-        st.markdown("##### 3. Geodata Online — Avanserte data (krever lisens)")
-
-        gdo_cols = st.columns(3)
-        use_fkb_buildings = gdo_cols[0].checkbox(
-            "Hent nabobygg fra FKB",
-            value=True,
-            help="Erstatter OSM med FKB-Bygning (ekte hoyder, komplette fotavtrykk)",
-        )
-        use_regulation = gdo_cols[1].checkbox(
-            "Hent reguleringsdata",
-            value=True,
-            help="Automatisk arealformaal, BYA, hoyde og etasjer fra gjeldende plan",
-        )
-        use_dtm = gdo_cols[2].checkbox(
-            "Hent DTM-terreng",
-            value=True,
-            help="Hoyopplost terrengmodell i stedet for manuell CSV",
-        )
-        use_hd_map = st.checkbox(
-            "Bruk HD-ortofoto fra Geodata Online (erstatter GeoNorge WMS)",
-            value=True,
-        )
-
-        st.session_state.gdo_use_fkb = use_fkb_buildings
-        st.session_state.gdo_use_regulation = use_regulation
-        st.session_state.gdo_use_dtm = use_dtm
-        st.session_state.gdo_use_hd_map = use_hd_map
-
-        with st.expander("Geodata Online — Se tilgjengelige tjenester", expanded=False):
-            if st.button("List tjenester", type="secondary", key="gdo_discover"):
-                with st.spinner("Scanner Geodata Online..."):
-                    discovery = gdo.discover_all()
-                    st.json(discovery)
-            token_info = gdo.token_status()
-            st.caption(f"Token gyldig: {token_info['valid']} | Gjenstar: {token_info['remaining_minutes']} min")
 
 with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
 
@@ -2496,13 +2413,12 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
 with st.expander("5. Hva modulen faktisk gjor na", expanded=False):
     st.markdown(
         """
-- Leser **ekte tomtepolygon** via Kartverket WFS, GeoJSON eller koordinatliste.
+- Leser **ekte tomtepolygon** via Geodata Online (GeomapMatrikkel/FeatureServer), GeoJSON eller koordinatliste.
 - Regner **3 volumalternativer** (lamell, punkthus, tun/U-form) innenfor faktisk byggefelt.
-- Leser **nabobebyggelse** via FKB/Geodata Online, GeoJSON eller OSM og bruker hoyder i sol/skygge.
-- Leser **reguleringsplan** automatisk via Geodata Online (arealformaal, BYA, hoyde, etasjer).
-- Leser **terreng** via Geodata Online DTM, punktfil eller raster og estimerer fall/relieff.
+- Leser **nabobebyggelse** via Geodata Online ByggFlate, GeoJSON eller OSM og bruker hoyder i sol/skygge.
 - Henter **HD-ortofoto** fra Geodata Online for bedre kartgrunnlag i rapporten.
-- Degraderer kontrollert til fallback hvis Geodata Online eller geostacken mangler.
+- Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
+- Degraderer kontrollert til fallback hvis geostacken i deployen mangler pyproj eller rasterio.
 - Regner **fotavtrykk, BTA, salgbarhetsareal, boligantall, leilighetsmiks og parkeringstrykk**.
 - Bruker eventuelt AI bare til a forklare funnene. Tallene kommer fra motoren.
 """
@@ -2536,74 +2452,30 @@ if run_analysis:
     latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
     longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
 
-    # === GEODATA ONLINE INTEGRASJON ===
-    gdo_regulation = {}
-    gdo_reg_meta = {}
-
-    # A) Reguleringsplan fra Geodata Online
-    if geodata_token_ok and st.session_state.get("gdo_use_regulation", False):
-        if site_polygon_input is not None:
-            with st.spinner("Henter reguleringsdata fra Geodata Online..."):
-                try:
-                    gdo_regulation, gdo_reg_meta = gdo.fetch_reguleringsplan(
-                        bbox=site_polygon_input.bounds, srid=25833,
-                    )
-                    if gdo_regulation:
-                        gdo_hints = regulation_to_parsed_hints(gdo_regulation)
-                        for key, value in gdo_hints.items():
-                            if key not in parsed or parsed[key] == 0:
-                                parsed[key] = value
-                        formaal = gdo_regulation.get("arealformaal", "")
-                        plannavn = gdo_regulation.get("plannavn", "")
-                        if formaal:
-                            st.success(f"Regulering: {formaal}" + (f" - {plannavn}" if plannavn else ""))
-                        if gdo_hints:
-                            st.caption(f"Hentet fra plan: {gdo_hints}")
-                except Exception as exc:
-                    st.warning(f"Reguleringsoppslag feilet: {exc}")
-
-    # B) HD-kartbilde fra Geodata Online
-    if geodata_token_ok and st.session_state.get("gdo_use_hd_map", False):
-        if site_polygon_input is not None and st.session_state.ark_kart is None:
-            with st.spinner("Henter HD-ortofoto fra Geodata Online..."):
-                try:
-                    hd_img, hd_source = gdo.fetch_map_image(
-                        bbox=site_polygon_input.bounds, srid=25833,
-                        width=1400, height=1400, map_type="ortofoto", buffer_m=100.0,
-                    )
-                    if hd_img:
-                        st.session_state.ark_kart = hd_img
-                        images_for_context.append(hd_img)
-                        st.success(f"HD-ortofoto hentet: {hd_source}")
-                except Exception as exc:
-                    st.caption(f"HD-ortofoto feilet: {exc}. Bruker GeoNorge-fallback.")
-
     neighbor_inputs: List[Dict[str, Any]] = []
     neighbor_meta: Dict[str, Any] = {"source": "Ingen naboer"}
 
-    # C) FKB-Bygning fra Geodata Online (erstatter OSM)
-    fkb_used = False
-    if geodata_token_ok and st.session_state.get("gdo_use_fkb", False):
-        if site_polygon_input is not None:
-            with st.spinner("Henter nabobygg fra FKB via Geodata Online..."):
-                try:
-                    fkb_buildings, fkb_meta = gdo.fetch_fkb_buildings(
-                        bbox=site_polygon_input.bounds, srid=25833,
-                        buffer_m=float(neighbor_radius_m),
+    # Geodata Online ByggFlate som foerstevalg for nabobygg
+    if geodata_token_ok and site_polygon_input is not None and neighbor_mode != "Ingen":
+        with st.spinner("Henter nabobygg fra Geodata Online ByggFlate..."):
+            try:
+                fkb_buildings, fkb_meta = gdo.fetch_byggflater(
+                    bbox=site_polygon_input.bounds,
+                    buffer_m=float(neighbor_radius_m),
+                )
+                if fkb_buildings:
+                    neighbor_inputs = geodata_buildings_to_neighbors(
+                        fkb_buildings,
+                        site_polygon=site_polygon_input,
+                        max_distance_m=float(neighbor_radius_m) + 20,
                     )
-                    if fkb_buildings:
-                        neighbor_inputs = geodata_buildings_to_neighbors(
-                            fkb_buildings, site_polygon=site_polygon_input,
-                            max_distance_m=float(neighbor_radius_m) + 20,
-                        )
-                        neighbor_meta = fkb_meta
-                        fkb_used = True
-                        st.success(f"Hentet {len(neighbor_inputs)} nabobygg med ekte hoyder fra FKB")
-                except Exception as exc:
-                    st.warning(f"FKB-bygningshenting feilet: {exc}. Faller tilbake til OSM/manuell.")
+                    neighbor_meta = fkb_meta
+                    st.success(f"Hentet {len(neighbor_inputs)} nabobygg fra Geodata Online ByggFlate")
+            except Exception as exc:
+                st.warning(f"ByggFlate feilet: {exc}. Faller tilbake til manuell/OSM.")
 
-    # Fallback til OSM/GeoJSON hvis FKB ikke brukt
-    if not fkb_used:
+    # Fallback til GeoJSON/OSM hvis GDO ikke ga resultat
+    if not neighbor_inputs:
         if neighbor_mode == "Last opp GeoJSON":
             neighbor_inputs, neighbor_meta = load_neighbors_from_geojson(
                 neighbor_geojson,
@@ -2622,25 +2494,6 @@ if run_analysis:
             )
 
     terrain_ctx, terrain_meta = load_terrain_input(terrain_upload, site_polygon_input, site_crs)
-
-    # D) DTM-terreng fra Geodata Online (erstatter manuell)
-    if geodata_token_ok and st.session_state.get("gdo_use_dtm", False):
-        if site_polygon_input is not None and terrain_ctx is None:
-            with st.spinner("Henter terrengmodell fra Geodata Online DTM..."):
-                try:
-                    gdo_terrain, gdo_terrain_meta = gdo.fetch_terrain_profile(
-                        bbox=site_polygon_input.bounds, srid=25833, grid_size=8,
-                    )
-                    if gdo_terrain:
-                        terrain_ctx = gdo_terrain
-                        terrain_meta = gdo_terrain_meta
-                        st.success(
-                            f"DTM hentet: {gdo_terrain['point_count']} punkter, "
-                            f"fall {gdo_terrain['slope_pct']:.1f}%, "
-                            f"relieff {gdo_terrain['relief_m']:.1f} m"
-                        )
-                except Exception as exc:
-                    st.warning(f"DTM-henting feilet: {exc}")
 
     site = SiteInputs(
         site_area_m2=site_area_m2,
@@ -2692,7 +2545,7 @@ if run_analysis:
         st.stop()
 
     option_images = [render_plan_diagram(site, option) for option in options]
-    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), gdo_regulation=gdo_regulation)
+    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context))
     final_report_text = deterministic_report
 
     if llm_available:
@@ -2709,8 +2562,6 @@ if run_analysis:
                     "polygon_meta": polygon_meta,
                     "neighbor_meta": neighbor_meta,
                     "terrain_meta": terrain_meta,
-                    "geodata_online_regulation": gdo_regulation if gdo_regulation else None,
-                    "geodata_online_reg_meta": gdo_reg_meta if gdo_reg_meta else None,
                 }
                 prompt = f"""
 Du er senior arkitekt og utviklingsradgiver. Du far et ferdig, deterministisk analysegrunnlag i JSON.
@@ -2783,8 +2634,6 @@ KRAV:
         "polygon_meta": polygon_meta,
         "neighbor_meta": neighbor_meta,
         "terrain_meta": terrain_meta,
-        "gdo_regulation": gdo_regulation,
-        "gdo_reg_meta": gdo_reg_meta,
     }
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
@@ -2838,20 +2687,6 @@ if "analysis_results" in st.session_state:
             meta_lines.append(f"Terreng-feil: {terrain_meta.get('error')}")
     if meta_lines:
         st.caption(" | ".join(meta_lines))
-
-    # Vis reguleringsdata fra Geodata Online hvis tilgjengelig
-    gdo_reg = result.get("gdo_regulation", {})
-    if gdo_reg and gdo_reg.get("arealformaal"):
-        reg_parts = [f"Arealformaal: {gdo_reg['arealformaal']}"]
-        if gdo_reg.get("plannavn"):
-            reg_parts.append(f"Plan: {gdo_reg['plannavn']}")
-        if gdo_reg.get("utnyttelsesgrad"):
-            reg_parts.append(f"Utnyttelse: {gdo_reg['utnyttelsesgrad']}%")
-        if gdo_reg.get("maks_hoyde_m"):
-            reg_parts.append(f"Maks hoyde: {gdo_reg['maks_hoyde_m']} m")
-        if gdo_reg.get("maks_etasjer"):
-            reg_parts.append(f"Maks etasjer: {gdo_reg['maks_etasjer']}")
-        st.info(" | ".join(reg_parts))
 
     st.markdown("### Alternativsammenligning")
     comparison_df = pd.DataFrame(
