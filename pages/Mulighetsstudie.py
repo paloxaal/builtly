@@ -2812,10 +2812,25 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
             st.error("Geodata Online er ikke tilkoblet. Kan ikke hente tomt.")
         else:
             pairs = []
-            for part in gnr_bnr_input.split(","):
-                if "/" in part:
-                    g, b = part.split("/")
-                    pairs.append((g.strip(), b.strip()))
+            # Stoett komma-separert ("57/270, 57/156") og slash-separert ("57/270/57/156")
+            raw = gnr_bnr_input.replace(" ", "")
+            # Splitt paa komma foerst
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                segments = part.split("/")
+                if len(segments) == 2:
+                    # Standard: "57/270"
+                    pairs.append((segments[0], segments[1]))
+                elif len(segments) >= 4 and len(segments) % 2 == 0:
+                    # Flere par i ett: "57/270/57/156" -> (57,270), (57,156)
+                    for i in range(0, len(segments), 2):
+                        pairs.append((segments[i], segments[i + 1]))
+                elif len(segments) == 1 and segments[0].isdigit():
+                    continue  # Bare et tall, ignorer
+                else:
+                    st.warning(f"Kunne ikke tolke '{part}'. Bruk formatet Gnr/Bnr (f.eks. 57/270).")
             if not pairs:
                 st.warning("Ugyldig format. Bruk formatet 15/2.")
             else:
