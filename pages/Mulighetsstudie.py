@@ -2024,10 +2024,10 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
 
     def darken(c, f):
-        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), c[3] if len(c)>3 else 255)
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), int(c[3]) if len(c)>3 else 255)
 
     def lighten(c, a):
-        return (min(255,c[0]+a), min(255,c[1]+a), min(255,c[2]+a), c[3] if len(c)>3 else 255)
+        return (min(255,int(c[0]+a)), min(255,int(c[1]+a)), min(255,int(c[2]+a)), int(c[3]) if len(c)>3 else 255)
 
     def draw_iso_flat(coords, z, fill, outline, w=1):
         pts = iso_pts(coords, z)
@@ -2117,9 +2117,10 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(220,alpha+30)), 1)
         else:
             base = vol.get('color', (34,197,94,200))
+            base = tuple(int(v) if v > 1 else int(v * 255) for v in base)  # handle 0.0-1.0 alpha
             if len(base) < 4:
                 base = (base[0], base[1], base[2], 220)
-            draw_extruded(coords, h, (base[0],base[1],base[2],230), darken(base, 0.72), lighten(base, 50), 2)
+            draw_extruded(coords, h, (int(base[0]),int(base[1]),int(base[2]),230), darken(base, 0.72), lighten(base, 50), 2)
             # Hoyde-label
             avg_x = sum(p[0] for p in coords) / len(coords)
             avg_y = sum(p[1] for p in coords) / len(coords)
