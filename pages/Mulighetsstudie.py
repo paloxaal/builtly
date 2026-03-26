@@ -1975,8 +1975,8 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    canvas_w, canvas_h = 900, 620
-    margin = 60
+    canvas_w, canvas_h = 1000, 720
+    margin = 65
     img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
     font = ImageFont.load_default()
@@ -1986,31 +1986,44 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     footprint_coords = option.geometry.get('footprint_polygon_coords') or []
     shadow_coords = option.geometry.get('winter_shadow_polygon_coords') or []
     neighbor_polys = option.geometry.get('neighbor_polygons', [])
+    massing_parts = option.geometry.get('massing_parts', []) or []
     terrain_summary = option.geometry.get('terrain_summary', {})
 
-    all_coords: List[List[float]] = []
-    all_coords.extend(flatten_coord_groups(site_coords))
-    for item in neighbor_polys[:20]:
-        all_coords.extend(flatten_coord_groups(item.get('coords', [])))
-    all_coords.extend(flatten_coord_groups(shadow_coords))
-    if not all_coords:
-        all_coords = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    # Samle koordinater for viewport — fokuser paa TOMTEN, ikke alle naboer
+    site_pts: List[List[float]] = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
 
-    xs = [pt[0] for pt in all_coords]
-    ys = [pt[1] for pt in all_coords]
-    minx, maxx = min(xs), max(xs)
-    miny, maxy = min(ys), max(ys)
-    width = max(1.0, maxx - minx)
-    height = max(1.0, maxy - miny)
-    scale = min((canvas_w - (2 * margin)) / width, (canvas_h - (2 * margin)) / height)
+    sxs = [pt[0] for pt in site_pts]
+    sys_ = [pt[1] for pt in site_pts]
+    site_minx, site_maxx = min(sxs), max(sxs)
+    site_miny, site_maxy = min(sys_), max(sys_)
+    site_w = max(1.0, site_maxx - site_minx)
+    site_h = max(1.0, site_maxy - site_miny)
+
+    # Buffer rundt tomten: 30% av stoerste dimensjon, nok til aa vise naernaboer
+    view_buf = max(site_w, site_h) * 0.30
+    minx = site_minx - view_buf
+    maxx = site_maxx + view_buf
+    miny = site_miny - view_buf
+    maxy = site_maxy + view_buf
+    data_w = max(1.0, maxx - minx)
+    data_h = max(1.0, maxy - miny)
+    draw_area_w = canvas_w - (2 * margin)
+    draw_area_h = canvas_h - margin - 90
+    scale = min(draw_area_w / data_w, draw_area_h / data_h) * 0.92
+
+    cx_data = (minx + maxx) / 2.0
+    cy_data = (miny + maxy) / 2.0
+    cx_canvas = margin + draw_area_w / 2.0
+    cy_canvas = 45 + draw_area_h / 2.0
 
     def map_pt(pt: List[float]) -> Tuple[float, float]:
-        x, y = pt
-        px = margin + ((x - minx) * scale)
-        py = canvas_h - margin - ((y - miny) * scale)
+        px = cx_canvas + (pt[0] - cx_data) * scale
+        py = cy_canvas - (pt[1] - cy_data) * scale
         return px, py
 
-    def draw_groups(groups: Any, fill: Tuple[int, int, int, int], outline: Tuple[int, int, int, int], width_px: int = 2) -> None:
+    def draw_groups(groups: Any, fill: Tuple, outline: Tuple, width_px: int = 2) -> None:
         if not groups:
             return
         if isinstance(groups, list) and groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
@@ -2025,28 +2038,107 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             if width_px > 1:
                 draw.line(pts + [pts[0]], fill=outline, width=width_px)
 
-    draw_groups(site_coords, fill=(13, 24, 36, 255), outline=(130, 151, 178, 255), width_px=3)
-    draw_groups(buildable_coords, fill=(56, 189, 248, 28), outline=(56, 189, 248, 230), width_px=2)
-    for neighbor in neighbor_polys[:20]:
-        draw_groups(neighbor.get('coords', []), fill=(120, 130, 145, 120), outline=(180, 190, 205, 220), width_px=1)
-    draw_groups(shadow_coords, fill=(255, 213, 79, 45), outline=(255, 213, 79, 150), width_px=1)
-    draw_groups(footprint_coords, fill=(34, 197, 94, 215), outline=(220, 252, 231, 255), width_px=2)
+    def centroid_of_group(coords: List[List[float]]) -> Tuple[float, float]:
+        if not coords:
+            return (0, 0)
+        flat = flatten_coord_groups(coords) if isinstance(coords[0][0], list) else coords
+        if not flat:
+            return (0, 0)
+        ax = sum(p[0] for p in flat) / len(flat)
+        ay = sum(p[1] for p in flat) / len(flat)
+        return map_pt([ax, ay])
 
-    arrow_x = canvas_w - 70
-    arrow_y = 70
-    draw.line((arrow_x, arrow_y + 30, arrow_x, arrow_y - 20), fill=(245, 247, 251, 255), width=4)
-    draw.polygon([(arrow_x, arrow_y - 32), (arrow_x - 10, arrow_y - 8), (arrow_x + 10, arrow_y - 8)], fill=(245, 247, 251, 255))
-    draw.text((arrow_x - 7, arrow_y + 36), 'N', fill=(245, 247, 251, 255), font=font)
-    draw.text((arrow_x - 30, arrow_y + 52), f'rot {site.north_rotation_deg:.0f}°', fill=(159, 176, 195, 255), font=font)
+    # 1. TOMTEGRENSE (svak outline)
+    draw_groups(site_coords, fill=(13, 24, 36, 255), outline=(90, 110, 135, 200), width_px=2)
 
+    # 2. BYGGEFELT (lys blaa flate)
+    draw_groups(buildable_coords, fill=(56, 189, 248, 22), outline=(56, 189, 248, 180), width_px=2)
+
+    # 3. NABOBYGG — kun de som er innenfor viewporten, hoydeavhengig farge
+    visible_neighbors = []
+    for neighbor in neighbor_polys[:80]:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
+            continue
+        # Sjekk om noen punkter er innenfor viewport
+        in_view = any(minx <= pt[0] <= maxx and miny <= pt[1] <= maxy for pt in ncoords)
+        if in_view:
+            visible_neighbors.append(neighbor)
+
+    max_neighbor_h = max((float(n.get('height_m', 3)) for n in visible_neighbors), default=9.0)
+    for neighbor in visible_neighbors:
+        h = float(neighbor.get('height_m', 9.0))
+        intensity = int(80 + 80 * min(h / max(max_neighbor_h, 1.0), 1.0))
+        fill_c = (intensity, intensity + 5, intensity + 10, 100)
+        outline_c = (intensity + 40, intensity + 45, intensity + 50, 180)
+        draw_groups(neighbor.get('coords', []), fill=fill_c, outline=outline_c, width_px=1)
+
+    # 4. VINTERSKYGGE
+    draw_groups(shadow_coords, fill=(255, 213, 79, 35), outline=(255, 213, 79, 120), width_px=1)
+
+    # 5. MASSING PARTS — individuelle deler med typologifarger og hoyde-label
+    PART_COLORS = {
+        'Lamell':        (34, 197, 94),
+        'Punkthus':      (56, 189, 248),
+        'Tun':           (168, 130, 240),
+        'Rekke':         (250, 180, 60),
+        'Podium + Tårn': (220, 80, 120),
+        'Karré':         (100, 200, 180),
+        'Tårn':          (56, 140, 248),
+        'Podium':        (160, 160, 175),
+        'Hovedfloey':    (168, 130, 240),
+    }
+
+    if massing_parts:
+        for part in massing_parts:
+            part_name = part.get('name', '')
+            color_key = part_name.split(' ')[0] if part_name else option.typology
+            base = PART_COLORS.get(color_key, PART_COLORS.get(option.typology, (34, 197, 94)))
+            fill_c = (base[0], base[1], base[2], 200)
+            outline_c = (min(255, base[0] + 60), min(255, base[1] + 60), min(255, base[2] + 60), 255)
+            draw_groups(part.get('coords', []), fill=fill_c, outline=outline_c, width_px=2)
+
+            # Hoyde-label paa hver del
+            h = part.get('height_m', 0)
+            floors = part.get('floors', 0)
+            cx_part, cy_part = centroid_of_group(part.get('coords', []))
+            if cx_part > 0 and h > 0:
+                label = f"{floors}et/{h:.0f}m"
+                draw.text((cx_part - 18, cy_part - 6), label, fill=(255, 255, 255, 230), font=font)
+    else:
+        # Fallback: tegn fotavtrykket som en enkel blokk
+        draw_groups(footprint_coords, fill=(34, 197, 94, 200), outline=(220, 252, 231, 255), width_px=2)
+
+    # 6. NORDPIL
+    arrow_x = canvas_w - 60
+    arrow_y = 55
+    draw.line((arrow_x, arrow_y + 25, arrow_x, arrow_y - 18), fill=(245, 247, 251, 220), width=3)
+    draw.polygon([(arrow_x, arrow_y - 28), (arrow_x - 8, arrow_y - 8), (arrow_x + 8, arrow_y - 8)], fill=(245, 247, 251, 220))
+    draw.text((arrow_x - 5, arrow_y + 30), 'N', fill=(245, 247, 251, 200), font=font)
+
+    # 7. TEKST-PANEL
     placement = option.geometry.get('placement', {})
-    massing_parts = option.geometry.get('massing_parts', []) or []
-    part_text = f" | deler {len(massing_parts)}" if massing_parts else ''
-    draw.text((margin, 16), f"{option.name} | {option.typology}{part_text}", fill=(245, 247, 251, 255), font=font)
-    draw.text((margin, canvas_h - 60), f"Tomt via {option.geometry.get('site_source', 'geometri')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count}", fill=(200, 211, 223, 255), font=font)
-    draw.text((margin, canvas_h - 40), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Høyde {option.building_height_m:.1f} m | Vinterskygge kl 12 ca. {option.winter_noon_shadow_m:.0f} m", fill=(200, 211, 223, 255), font=font)
-    terrain_line = (f"Terreng fall {terrain_summary.get('slope_pct', 0):.1f}% | Relieff {terrain_summary.get('relief_m', 0):.1f} m" if terrain_summary.get('point_count', 0) > 0 else f"Plasseringstilpasning {placement.get('fit_scale', 1.0):.2f} | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}%")
-    draw.text((margin, canvas_h - 20), terrain_line, fill=(159, 176, 195, 255), font=font)
+    n_parts = len(massing_parts)
+    y_text = canvas_h - 82
+
+    draw.rectangle([(0, y_text - 6), (canvas_w, canvas_h)], fill=(6, 17, 26, 220))
+
+    title_text = f"{option.name} | {option.typology}"
+    if n_parts > 1:
+        title_text += f" | {n_parts} deler"
+    draw.text((margin, y_text), title_text, fill=(245, 247, 251, 255), font=font)
+
+    draw.text((margin, y_text + 16),
+              f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} etasjer | Hoyde {option.building_height_m:.1f} m",
+              fill=(200, 211, 223, 255), font=font)
+
+    draw.text((margin, y_text + 32),
+              f"Tomt {option.geometry.get('site_source', '-')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count} | Sol {option.solar_score:.0f}/100",
+              fill=(159, 176, 195, 255), font=font)
+
+    draw.text((margin, y_text + 48),
+              f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}% | Vinterskygge {option.winter_noon_shadow_m:.0f} m",
+              fill=(130, 145, 165, 255), font=font)
 
     return img.convert('RGB')
 
@@ -2117,19 +2209,28 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
       'esri/Graphic',
       'esri/geometry/Polygon',
       'esri/geometry/SpatialReference',
-      'esri/geometry/Extent'
-    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, SpatialReference, Extent) {
+      'esri/geometry/Extent',
+      'esri/identity/IdentityManager'
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, SpatialReference, Extent, IdentityManager) {
       const sr = new SpatialReference({ wkid: 4326 });
       const sc = payload.scene_config || {};
       const services = sc.services || {};
-      const map = new Map({ basemap: 'satellite', ground: 'world-elevation' });
-      if (services.elevation_url) {
-        map.ground.layers.add(new ElevationLayer({ url: services.elevation_url + '?token=' + encodeURIComponent(sc.token || '') }));
-      } else if (services.terrain_cache_url) {
-        map.ground.layers.add(new ElevationLayer({ url: services.terrain_cache_url + '?token=' + encodeURIComponent(sc.token || '') }));
+      const tkn = sc.token || '';
+
+      // Pre-register token for all Geodata Online services
+      if (tkn) {
+        IdentityManager.registerToken({
+          server: 'https://services.geodataonline.no/arcgis',
+          token: tkn
+        });
       }
-      if (services.imagery_latest_url) {
-        map.add(new ImageryLayer({ url: services.imagery_latest_url, opacity: 0.92 }));
+
+      const map = new Map({ basemap: 'satellite', ground: 'world-elevation' });
+      if (services.elevation_url && tkn) {
+        map.ground.layers.add(new ElevationLayer({ url: services.elevation_url, customParameters: { token: tkn } }));
+      }
+      if (services.imagery_latest_url && tkn) {
+        map.add(new ImageryLayer({ url: services.imagery_latest_url, opacity: 0.92, customParameters: { token: tkn } }));
       }
       const graphicsLayer = new GraphicsLayer();
       map.add(graphicsLayer);
