@@ -545,7 +545,9 @@ def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: A
     if auto_polygon is not None:
         poly_local, _, info = normalize_polygon_to_local(auto_polygon)
         crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
-        info["source"] = "Kartverket API (Eksakt polygon)"
+        info["source"] = st.session_state.get("auto_site_msg", "Geodata Online (Eksakt polygon)")
+        if "Geodata Online" not in info["source"]:
+            info["source"] = "Eksakt polygon"
         info["crs"] = "EPSG:25833"
         return poly_local, crs_obj, info
 
@@ -1791,8 +1793,15 @@ def build_deterministic_report(
     lines.append("")
     lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
     lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
-    lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
-    lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag hvis prosjektet går videre til konkret skisse.")
+    if best.neighbor_count > 0 and "Geodata Online" in site.site_geometry_source:
+        lines.append("- Nabohoyder er hentet fra Geodata Online ByggFlate og baserer seg paa registrerte etasjer i matrikkelen. "
+                     "Verifiser mot faktisk situasjon for naerliggende bygg.")
+    elif best.neighbor_count > 0:
+        lines.append("- Nabohoyder fra GeoJSON/OSM maa kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
+    else:
+        lines.append("- Ingen nabobygg er lagt inn. Skyggevurderingen gjelder kun eget volum. "
+                     "For mer realistisk analyse, sjekk at Geodata Online er tilkoblet og at sokeradius er tilstrekkelig.")
+    lines.append("- Terrengmodellen er forenklet og boer erstattes med detaljert kotegrunnlag hvis prosjektet gaar videre til konkret skisse.")
     lines.append("")
     lines.append("# 10. ANBEFALING / NESTE STEG")
     lines.append(
@@ -2443,7 +2452,7 @@ if run_analysis:
             centroid = auto_poly.centroid
             transformer = Transformer.from_crs(CRS.from_epsg(25833), CRS.from_epsg(4326), always_xy=True)
             lon_geocoded, lat_geocoded = transformer.transform(centroid.x, centroid.y)
-            geo_source = "Kartverket Polygon"
+            geo_source = "Geodata Online" if geodata_token_ok else "Kartverket Polygon"
         except:
             lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
     else:
@@ -2452,11 +2461,12 @@ if run_analysis:
     latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
     longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
 
+    # === GEODATA ONLINE: AUTOMATISK HENTING AV ALT ===
     neighbor_inputs: List[Dict[str, Any]] = []
     neighbor_meta: Dict[str, Any] = {"source": "Ingen naboer"}
 
-    # Geodata Online ByggFlate som foerstevalg for nabobygg
-    if geodata_token_ok and site_polygon_input is not None and neighbor_mode != "Ingen":
+    # A) Nabobygg fra ByggFlate — ALLTID naar GDO er tilkoblet og tomt finnes
+    if geodata_token_ok and site_polygon_input is not None:
         with st.spinner("Henter nabobygg fra Geodata Online ByggFlate..."):
             try:
                 fkb_buildings, fkb_meta = gdo.fetch_byggflater(
@@ -2471,10 +2481,12 @@ if run_analysis:
                     )
                     neighbor_meta = fkb_meta
                     st.success(f"Hentet {len(neighbor_inputs)} nabobygg fra Geodata Online ByggFlate")
+                else:
+                    st.info("Ingen nabobygg funnet i ByggFlate innenfor sokeradius.")
             except Exception as exc:
-                st.warning(f"ByggFlate feilet: {exc}. Faller tilbake til manuell/OSM.")
+                st.warning(f"ByggFlate feilet: {exc}")
 
-    # Fallback til GeoJSON/OSM hvis GDO ikke ga resultat
+    # B) Fallback til GeoJSON/OSM KUN hvis GDO ikke ga resultat
     if not neighbor_inputs:
         if neighbor_mode == "Last opp GeoJSON":
             neighbor_inputs, neighbor_meta = load_neighbors_from_geojson(
@@ -2492,6 +2504,23 @@ if run_analysis:
                 neighbor_radius_m,
                 default_neighbor_height_m,
             )
+
+    # C) Ortofoto — AUTOMATISK naar GDO er tilkoblet og tomt finnes
+    if geodata_token_ok and site_polygon_input is not None and st.session_state.ark_kart is None:
+        with st.spinner("Henter HD-ortofoto fra Geodata Online..."):
+            try:
+                hd_img, hd_source = gdo.fetch_ortofoto(
+                    bbox=site_polygon_input.bounds,
+                    buffer_m=100.0,
+                    width=1400,
+                    height=1400,
+                )
+                if hd_img:
+                    st.session_state.ark_kart = hd_img
+                    images_for_context.append(hd_img)
+                    st.success(f"HD-ortofoto hentet: {hd_source}")
+            except Exception as exc:
+                st.caption(f"Ortofoto-henting feilet: {exc}")
 
     terrain_ctx, terrain_meta = load_terrain_input(terrain_upload, site_polygon_input, site_crs)
 
