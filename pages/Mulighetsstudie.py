@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 from shapely import affinity
@@ -62,6 +63,16 @@ try:
     HAS_GEODATA_ONLINE = True
 except ImportError:
     HAS_GEODATA_ONLINE = False
+
+try:
+    from site_intelligence import (
+        apply_site_intelligence_to_options,
+        build_site_intelligence_bundle,
+        build_site_intelligence_markdown,
+    )
+    HAS_SITE_INTELLIGENCE = True
+except ImportError:
+    HAS_SITE_INTELLIGENCE = False
 
 
 # --- 1. TEKNISK OPPSETT ---
@@ -464,7 +475,76 @@ def largest_polygon(geom: Any) -> Optional[Polygon]:
 def polygon_to_coords(poly: Optional[Polygon], precision: int = 2) -> List[List[float]]:
     if poly is None or poly.is_empty:
         return []
+    if isinstance(poly, MultiPolygon):
+        largest = max(poly.geoms, key=lambda g: g.area, default=None)
+        if largest is None:
+            return []
+        poly = largest
     return [[round(float(x), precision), round(float(y), precision)] for x, y in list(poly.exterior.coords)]
+
+
+def geometry_to_coord_groups(geom: Any, precision: int = 2) -> List[List[List[float]]]:
+    if geom is None or getattr(geom, 'is_empty', True):
+        return []
+    if isinstance(geom, Polygon):
+        return [polygon_to_coords(geom, precision=precision)]
+    if isinstance(geom, MultiPolygon):
+        groups: List[List[List[float]]] = []
+        for part in geom.geoms:
+            coords = polygon_to_coords(part, precision=precision)
+            if coords:
+                groups.append(coords)
+        return groups
+    if getattr(geom, 'geom_type', '') == 'Polygon':
+        return [polygon_to_coords(geom, precision=precision)]
+    return []
+
+
+def flatten_coord_groups(groups: Any) -> List[List[float]]:
+    flat: List[List[float]] = []
+    if not groups:
+        return flat
+    if isinstance(groups, list) and groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
+        return groups
+    for group in groups:
+        if not group:
+            continue
+        if isinstance(group, list) and group and isinstance(group[0], list) and group[0] and isinstance(group[0][0], (int, float)):
+            flat.extend(group)
+    return flat
+
+
+def project_coord_groups_to_lonlat(groups: List[List[List[float]]], src_crs: str = 'EPSG:25833') -> List[List[List[float]]]:
+    if not groups:
+        return []
+    if not HAS_PYPROJ:
+        return groups
+    try:
+        transformer = Transformer.from_crs(CRS.from_string(src_crs), CRS.from_epsg(4326), always_xy=True)
+    except Exception:
+        try:
+            transformer = Transformer.from_crs(25833, 4326, always_xy=True)
+        except Exception:
+            return groups
+    projected: List[List[List[float]]] = []
+    for group in groups:
+        ring: List[List[float]] = []
+        for x, y in group:
+            lon, lat = transformer.transform(float(x), float(y))
+            ring.append([round(float(lon), 7), round(float(lat), 7)])
+        if ring:
+            projected.append(ring)
+    return projected
+
+
+def split_geometry_to_polygons(geom: Any) -> List[Polygon]:
+    if geom is None or getattr(geom, 'is_empty', True):
+        return []
+    if isinstance(geom, Polygon):
+        return [geom.buffer(0)]
+    if isinstance(geom, MultiPolygon):
+        return [part.buffer(0) for part in geom.geoms if not part.is_empty]
+    return []
 
 
 def bounds_look_like_lonlat(bounds: Tuple[float, float, float, float]) -> bool:
@@ -825,10 +905,25 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
     else:
         site_polygon = largest_polygon(site_polygon_input)
         source = polygon_meta.get("source", "Tomtepolygon")
-        buildable_polygon = site_polygon.buffer(-max(0.0, polygon_setback_m)) if polygon_setback_m > 0 else site_polygon
+
+        # ADAPTIV BUFFER: reduser buffer hvis den spiser for mye av smal dimensjon
+        major, minor, _ = minimum_rotated_dims(site_polygon)
+        effective_setback = polygon_setback_m
+        if minor > 0 and polygon_setback_m > 0:
+            # Buffer paa begge sider = 2x setback. Behold maks 35% av smal side.
+            max_allowed = minor * 0.175  # 17.5% per side = 35% totalt
+            effective_setback = min(polygon_setback_m, max(1.5, max_allowed))
+
+        buildable_polygon = site_polygon.buffer(-effective_setback) if effective_setback > 0 else site_polygon
         buildable_polygon = largest_polygon(buildable_polygon)
         if buildable_polygon is None or buildable_polygon.is_empty or buildable_polygon.area < 20.0:
-            buildable_polygon = largest_polygon(site_polygon.buffer(-max(0.5, polygon_setback_m * 0.35))) or site_polygon
+            # Progressiv fallback: proev halvert buffer, deretter 1.5m, deretter 0
+            for fallback_buf in [effective_setback * 0.5, 1.5, 0.5, 0.0]:
+                buildable_polygon = largest_polygon(site_polygon.buffer(-fallback_buf))
+                if buildable_polygon is not None and not buildable_polygon.is_empty and buildable_polygon.area >= 20.0:
+                    break
+            if buildable_polygon is None or buildable_polygon.is_empty:
+                buildable_polygon = site_polygon
 
     site_width, site_depth, orientation_deg = minimum_rotated_dims(site_polygon)
     buildable_area = float(buildable_polygon.area) if buildable_polygon is not None else 0.0
@@ -871,160 +966,326 @@ def rects_to_polygon(rects: List[Dict[str, float]]) -> Polygon:
     return unary_union(polys).buffer(0)
 
 
-def fit_footprint_into_polygon(footprint: Polygon, container: Polygon) -> Tuple[Polygon, float, float]:
-    if container.contains(footprint):
-        return footprint, 1.0, 1.0
+# --- POLYGON-NATIVE FOTAVTRYKK-MOTOR (erstatter gammel bounding-box-logikk) ---
 
-    footprint = affinity.translate(
-        footprint,
-        xoff=container.centroid.x - footprint.centroid.x,
-        yoff=container.centroid.y - footprint.centroid.y,
-    )
-    best = footprint
-    best_ratio = footprint.intersection(container).area / max(footprint.area, 1e-6)
-
-    minx, miny, maxx, maxy = container.bounds
-    step_x = max((maxx - minx) / 8.0, 2.0)
-    step_y = max((maxy - miny) / 8.0, 2.0)
-    offsets = [(i * step_x, j * step_y) for i in range(-2, 3) for j in range(-2, 3)]
-    for dx, dy in offsets:
-        candidate = affinity.translate(footprint, xoff=dx, yoff=dy)
-        ratio = candidate.intersection(container).area / max(candidate.area, 1e-6)
-        if container.contains(candidate):
-            return candidate, 1.0, 1.0
-        if ratio > best_ratio:
-            best = candidate
-            best_ratio = ratio
-
-    contained = None
-    lo, hi = 0.22, 1.0
-    base = best
-    for _ in range(24):
-        mid = (lo + hi) / 2.0
-        scaled = affinity.scale(base, xfact=mid, yfact=mid, origin=base.centroid)
-        if container.contains(scaled):
-            contained = scaled
-            lo = mid
-        else:
-            hi = mid
-    if contained is not None:
-        return contained, lo, 1.0
-    fallback = affinity.scale(base, xfact=0.55, yfact=0.55, origin=base.centroid)
-    return fallback.intersection(container).buffer(0), 0.55, best_ratio
-
-
-
-def build_typology_geometry(
-    typology: str,
-    target_footprint_m2: float,
-    buildable_width_m: float,
-    buildable_depth_m: float,
-) -> Dict[str, Any]:
-    rects: List[Dict[str, float]] = []
-
-    if typology == "Lamell":
-        depth = clamp(14.0, 10.0, max(10.0, buildable_depth_m * 0.75))
-        depth = min(depth, buildable_depth_m * 0.75)
-        depth = max(10.0, min(depth, buildable_depth_m))
-        width = min(buildable_width_m, max(18.0, target_footprint_m2 / max(depth, 1.0)))
-        if width * depth > target_footprint_m2 * 1.08:
-            width = target_footprint_m2 / max(depth, 1.0)
-        width = min(width, buildable_width_m)
-        x = (buildable_width_m - width) / 2.0
-        y = (buildable_depth_m - depth) / 2.0
-        rects = [{"x": x, "y": y, "w": width, "h": depth}]
-        area = width * depth
-        return {
-            "rects": rects,
-            "footprint_width_m": width,
-            "footprint_depth_m": depth,
-            "footprint_area_m2": area,
-            "clear_south_m": max(4.0, y),
-            "courtyard_width_m": 0.0,
-        }
-
-    if typology == "Punkthus":
-        side = min(buildable_width_m * 0.82, buildable_depth_m * 0.82, math.sqrt(max(target_footprint_m2, 1.0)))
-        side = max(14.0, side)
-        x = (buildable_width_m - side) / 2.0
-        y = (buildable_depth_m - side) / 2.0
-        rects = [{"x": x, "y": y, "w": side, "h": side}]
-        area = side * side
-        return {
-            "rects": rects,
-            "footprint_width_m": side,
-            "footprint_depth_m": side,
-            "footprint_area_m2": area,
-            "clear_south_m": max(6.0, y),
-            "courtyard_width_m": 0.0,
-        }
-
-    wing = min(11.5, buildable_width_m * 0.22, buildable_depth_m * 0.22)
-    outer_w = min(buildable_width_m, max(24.0, buildable_width_m * 0.82))
-    outer_d = min(buildable_depth_m, max(22.0, buildable_depth_m * 0.78))
-    x0 = (buildable_width_m - outer_w) / 2.0
-    y0 = (buildable_depth_m - outer_d) / 2.0
-
-    rects = [
-        {"x": x0, "y": y0, "w": outer_w, "h": wing},
-        {"x": x0, "y": y0, "w": wing, "h": outer_d},
-        {"x": x0 + outer_w - wing, "y": y0, "w": wing, "h": outer_d},
-    ]
-    area = sum(rect["w"] * rect["h"] for rect in rects)
-    if area > max(target_footprint_m2, 1.0):
-        scale = math.sqrt(target_footprint_m2 / area)
-        center_x = buildable_width_m / 2.0
-        center_y = buildable_depth_m / 2.0
-        scaled_rects = []
-        for rect in rects:
-            cx = rect["x"] + rect["w"] / 2.0
-            cy = rect["y"] + rect["h"] / 2.0
-            new_w = rect["w"] * scale
-            new_h = rect["h"] * scale
-            new_cx = center_x + (cx - center_x) * scale
-            new_cy = center_y + (cy - center_y) * scale
-            scaled_rects.append(
-                {
-                    "x": new_cx - new_w / 2.0,
-                    "y": new_cy - new_h / 2.0,
-                    "w": new_w,
-                    "h": new_h,
-                }
-            )
-        rects = scaled_rects
-        area = sum(rect["w"] * rect["h"] for rect in rects)
-
-    width = max(rect["x"] + rect["w"] for rect in rects) - min(rect["x"] for rect in rects)
-    depth = max(rect["y"] + rect["h"] for rect in rects) - min(rect["y"] for rect in rects)
-    courtyard_width = max(0.0, width - (2.0 * wing))
-    clear_south = max(6.0, depth - wing)
+def _analyze_polygon(poly: Polygon) -> Dict[str, Any]:
+    """Analyser tomtens form: aspektratio, orientering, kompakthet."""
+    major, minor, angle = minimum_rotated_dims(poly)
+    aspect = major / max(minor, 1.0)
+    # Kompakthet: 1.0 = sirkel, lavere = mer irregulaer
+    compactness = (4.0 * math.pi * poly.area) / max(poly.length ** 2, 1.0)
+    # Rektangularitet: hvor mye av bounding-boksen fylles
+    rect_area = major * minor
+    rectangularity = poly.area / max(rect_area, 1.0)
     return {
-        "rects": rects,
-        "footprint_width_m": width,
-        "footprint_depth_m": depth,
-        "footprint_area_m2": area,
-        "clear_south_m": clear_south,
-        "courtyard_width_m": courtyard_width,
+        "major_m": major,
+        "minor_m": minor,
+        "orientation_deg": angle,
+        "aspect_ratio": aspect,
+        "compactness": compactness,
+        "rectangularity": rectangularity,
+        "area_m2": poly.area,
+        "is_elongated": aspect > 2.2,
+        "is_very_elongated": aspect > 3.5,
+        "is_narrow": minor < 18.0,
+        "is_compact": aspect < 1.8 and compactness > 0.6,
     }
+
+
+def _find_inscribed_rect(poly: Polygon, target_depth_m: float, angle_deg: float,
+                         max_width_m: float = 200.0) -> Optional[Polygon]:
+    """
+    Finn det stoerste rektangelet med gitt dybde som passer inne i polygonet
+    orientert langs angle_deg. Bruker binaert soek paa bredde.
+    """
+    rad = math.radians(angle_deg)
+    cx, cy = poly.centroid.x, poly.centroid.y
+
+    # Soek langs hovedaksen for beste plassering
+    best_rect = None
+    best_area = 0.0
+
+    # Proev forskjellige posisjoner langs aksen
+    for offset_frac in [0.0, -0.1, 0.1, -0.2, 0.2, -0.3, 0.3]:
+        ox = cx + offset_frac * poly.length * 0.15 * math.cos(rad)
+        oy = cy + offset_frac * poly.length * 0.15 * math.sin(rad)
+
+        # Binaert soek paa bredde
+        lo, hi = 8.0, max_width_m
+        best_w = 0.0
+        for _ in range(20):
+            mid = (lo + hi) / 2.0
+            hw, hd = mid / 2.0, target_depth_m / 2.0
+            corners = [
+                (ox + hw * math.cos(rad) - hd * math.sin(rad),
+                 oy + hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) - hd * math.sin(rad),
+                 oy - hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) + hd * math.sin(rad),
+                 oy - hw * math.sin(rad) - hd * math.cos(rad)),
+                (ox + hw * math.cos(rad) + hd * math.sin(rad),
+                 oy + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            candidate = Polygon(corners)
+            if poly.contains(candidate):
+                best_w = mid
+                lo = mid
+            else:
+                hi = mid
+
+        if best_w >= 8.0:
+            hw, hd = best_w / 2.0, target_depth_m / 2.0
+            corners = [
+                (ox + hw * math.cos(rad) - hd * math.sin(rad),
+                 oy + hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) - hd * math.sin(rad),
+                 oy - hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) + hd * math.sin(rad),
+                 oy - hw * math.sin(rad) - hd * math.cos(rad)),
+                (ox + hw * math.cos(rad) + hd * math.sin(rad),
+                 oy + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            rect = Polygon(corners)
+            if rect.area > best_area:
+                best_rect = rect
+                best_area = rect.area
+
+    return best_rect
+
+
+def _place_multi_buildings(poly: Polygon, building_depth_m: float, angle_deg: float,
+                           spacing_m: float = 12.0, max_buildings: int = 4,
+                           max_footprint_m2: float = 9999.0) -> List[Polygon]:
+    """Plasser flere bygninger langs polygonet med gitt mellomrom."""
+    rad = math.radians(angle_deg)
+    perp_rad = rad + math.pi / 2.0
+    cx, cy = poly.centroid.x, poly.centroid.y
+
+    # Finn major-akse-lengden
+    major, minor, _ = minimum_rotated_dims(poly)
+
+    # Beregn hvor mange bygninger som faar plass
+    # Start fra ene enden og jobb seg utover
+    buildings: List[Polygon] = []
+    total_area = 0.0
+
+    # Beregn startpunkt og slutt langs aksen
+    half_major = major / 2.0
+    step = building_depth_m + spacing_m
+
+    # Sentrer gruppen
+    n_max = max(1, min(max_buildings, int((major - building_depth_m) / step) + 1))
+    total_span = (n_max - 1) * step + building_depth_m
+    start_offset = -total_span / 2.0 + building_depth_m / 2.0
+
+    for i in range(n_max):
+        if total_area >= max_footprint_m2:
+            break
+        offset = start_offset + i * step
+        bx = cx + offset * math.cos(perp_rad)
+        by = cy + offset * math.sin(perp_rad)
+
+        # Finn maks bredde paa denne posisjonen
+        remaining = max_footprint_m2 - total_area
+        max_w_for_this = remaining / max(building_depth_m, 1.0)
+
+        lo, hi = 6.0, min(minor * 0.85, max_w_for_this)
+        best_w = 0.0
+        for _ in range(18):
+            mid = (lo + hi) / 2.0
+            hw, hd = mid / 2.0, building_depth_m / 2.0
+            corners = [
+                (bx + hw * math.cos(rad) - hd * math.sin(rad),
+                 by + hw * math.sin(rad) + hd * math.cos(rad)),
+                (bx - hw * math.cos(rad) - hd * math.sin(rad),
+                 by - hw * math.sin(rad) + hd * math.cos(rad)),
+                (bx - hw * math.cos(rad) + hd * math.sin(rad),
+                 by - hw * math.sin(rad) - hd * math.cos(rad)),
+                (bx + hw * math.cos(rad) + hd * math.sin(rad),
+                 by + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            candidate = Polygon(corners)
+            if poly.contains(candidate):
+                best_w = mid
+                lo = mid
+            else:
+                hi = mid
+
+        if best_w >= 6.0:
+            hw, hd = best_w / 2.0, building_depth_m / 2.0
+            corners = [
+                (bx + hw * math.cos(rad) - hd * math.sin(rad),
+                 by + hw * math.sin(rad) + hd * math.cos(rad)),
+                (bx - hw * math.cos(rad) - hd * math.sin(rad),
+                 by - hw * math.sin(rad) + hd * math.cos(rad)),
+                (bx - hw * math.cos(rad) + hd * math.sin(rad),
+                 by - hw * math.sin(rad) - hd * math.cos(rad)),
+                (bx + hw * math.cos(rad) + hd * math.sin(rad),
+                 by + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            bld = Polygon(corners)
+            buildings.append(bld)
+            total_area += bld.area
+
+    return buildings
+
 
 def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_footprint_m2: float) -> Tuple[Polygon, Dict[str, Any]]:
-    width, depth, orientation_deg = minimum_rotated_dims(buildable_polygon)
-    rotated = affinity.rotate(buildable_polygon, -orientation_deg, origin=buildable_polygon.centroid)
-    minx, miny, maxx, maxy = rotated.bounds
-    geom = build_typology_geometry(typology, target_footprint_m2, maxx - minx, maxy - miny)
-    footprint = rects_to_polygon(geom["rects"])
-    footprint = affinity.translate(footprint, xoff=minx, yoff=miny)
-    footprint, fit_scale, containment_ratio = fit_footprint_into_polygon(footprint, rotated)
-    footprint = affinity.rotate(footprint, orientation_deg, origin=buildable_polygon.centroid).buffer(0)
-    rotated_footprint = affinity.rotate(footprint, -orientation_deg, origin=buildable_polygon.centroid)
-    fx0, fy0, fx1, fy1 = rotated_footprint.bounds
-    return footprint, {
-        "fit_scale": round(float(fit_scale), 3),
-        "containment_ratio": round(float(containment_ratio), 3),
-        "footprint_width_m": round(float(fx1 - fx0), 1),
-        "footprint_depth_m": round(float(fy1 - fy0), 1),
-        "orientation_deg": round(float(orientation_deg), 1),
+    """
+    Polygon-native volumfotavtrykk med sterkere støtte for flere typologier.
+
+    Støtter nå lamell, karré, punkthus, tårn, podium+tårn, tun og rekke.
+    """
+    shape_info = _analyze_polygon(buildable_polygon)
+    major = shape_info['major_m']
+    minor = shape_info['minor_m']
+    angle = shape_info['orientation_deg']
+    area = shape_info['area_m2']
+
+    target_footprint_m2 = min(target_footprint_m2, area * 0.92)
+    placement_info = {
+        'fit_scale': 1.0,
+        'containment_ratio': 1.0,
+        'footprint_width_m': 0.0,
+        'footprint_depth_m': 0.0,
+        'orientation_deg': round(angle, 1),
+        'polygon_shape': 'elongated' if shape_info['is_elongated'] else 'compact',
+        'n_buildings': 1,
     }
+
+    footprint: Any = None
+
+    if typology == 'Lamell':
+        ideal_depth = clamp(14.0, 10.0, minor * 0.65)
+        if shape_info['is_narrow']:
+            ideal_depth = clamp(minor * 0.55, 8.0, 13.0)
+        if shape_info['is_very_elongated'] and target_footprint_m2 > ideal_depth * 25:
+            buildings = _place_multi_buildings(
+                buildable_polygon,
+                ideal_depth,
+                angle,
+                spacing_m=max(10.0, ideal_depth * 0.9),
+                max_buildings=3,
+                max_footprint_m2=target_footprint_m2,
+            )
+            if buildings:
+                footprint = unary_union(buildings).buffer(0)
+                placement_info['n_buildings'] = len(buildings)
+        if footprint is None:
+            footprint = _find_inscribed_rect(
+                buildable_polygon,
+                ideal_depth,
+                angle,
+                max_width_m=min(major * 0.9, target_footprint_m2 / max(ideal_depth, 1.0)),
+            )
+
+    elif typology == 'Punkthus':
+        side = min(minor * 0.65, math.sqrt(target_footprint_m2), 20.0)
+        side = max(12.0, side)
+        footprint = _find_inscribed_rect(buildable_polygon, side, angle, max_width_m=side * 1.25)
+        if footprint is None or footprint.area < 100:
+            footprint = _find_inscribed_rect(buildable_polygon, min(side, major * 0.22), angle + 90, max_width_m=min(side * 1.3, minor * 0.65))
+
+    elif typology == 'Rekke':
+        unit_depth = clamp(10.0, 8.0, minor * 0.55)
+        buildings = _place_multi_buildings(
+            buildable_polygon,
+            unit_depth,
+            angle,
+            spacing_m=0.0,
+            max_buildings=min(10, int(target_footprint_m2 / max(65.0, unit_depth * 6.0)) + 1),
+            max_footprint_m2=target_footprint_m2,
+        )
+        if buildings:
+            footprint = unary_union(buildings).buffer(0)
+            placement_info['n_buildings'] = len(buildings)
+
+    elif typology == 'Tun':
+        wing_depth = clamp(11.0, 8.0, minor * 0.35)
+        main_rect = _find_inscribed_rect(
+            buildable_polygon,
+            wing_depth,
+            angle,
+            max_width_m=min(major * 0.7, target_footprint_m2 * 0.45 / max(wing_depth, 1.0)),
+        )
+        if main_rect is not None:
+            remaining_poly = buildable_polygon.difference(main_rect.buffer(3.0))
+            wings: List[Polygon] = []
+            for wing_angle in [angle + 90, angle - 90]:
+                wr = _find_inscribed_rect(
+                    remaining_poly,
+                    wing_depth,
+                    wing_angle,
+                    max_width_m=min(minor * 0.5, target_footprint_m2 * 0.25 / max(wing_depth, 1.0)),
+                )
+                if wr is not None and wr.area > 30:
+                    wings.append(wr)
+                    remaining_poly = remaining_poly.difference(wr.buffer(2.0))
+            footprint = unary_union([main_rect] + wings).buffer(0) if wings else main_rect
+            placement_info['n_buildings'] = 1 + len(wings)
+
+    elif typology == 'Karré':
+        if major > 28.0 and minor > 22.0:
+            outer = _find_inscribed_rect(buildable_polygon, min(minor * 0.82, 28.0), angle, max_width_m=min(major * 0.86, 42.0))
+            if outer is not None and outer.area > 220:
+                inner_scale = 0.42 if outer.area > 900 else 0.35
+                inner = affinity.scale(outer, xfact=inner_scale, yfact=inner_scale, origin=outer.centroid).buffer(0)
+                footprint = outer.difference(inner).buffer(0)
+                placement_info['courtyard_area_m2'] = round(float(inner.area), 1)
+                placement_info['n_buildings'] = max(1, len(split_geometry_to_polygons(footprint)))
+        if footprint is None:
+            ring_depth = clamp(10.0, 8.0, minor * 0.28)
+            main = _find_inscribed_rect(buildable_polygon, ring_depth, angle, max_width_m=min(major * 0.75, target_footprint_m2 * 0.36 / max(ring_depth, 1.0)))
+            if main is not None:
+                remaining = buildable_polygon.difference(main.buffer(3.0))
+                wings: List[Polygon] = []
+                for wing_angle in [angle + 90, angle - 90]:
+                    wr = _find_inscribed_rect(remaining, ring_depth, wing_angle, max_width_m=min(minor * 0.55, target_footprint_m2 * 0.22 / max(ring_depth, 1.0)))
+                    if wr is not None and wr.area > 35:
+                        wings.append(wr)
+                        remaining = remaining.difference(wr.buffer(2.0))
+                tail = _find_inscribed_rect(remaining, ring_depth, angle + 180, max_width_m=min(major * 0.55, target_footprint_m2 * 0.18 / max(ring_depth, 1.0)))
+                parts = [main] + wings + ([tail] if tail is not None and tail.area > 35 else [])
+                footprint = unary_union(parts).buffer(0)
+                placement_info['n_buildings'] = len(parts)
+
+    elif typology == 'Tårn':
+        podium_depth = clamp(18.0, 12.0, minor * 0.62)
+        footprint = _find_inscribed_rect(buildable_polygon, podium_depth, angle, max_width_m=min(major * 0.55, math.sqrt(target_footprint_m2) * 1.15, 28.0))
+        if footprint is None:
+            footprint = _find_inscribed_rect(buildable_polygon, min(16.0, minor * 0.55), angle + 90, max_width_m=min(22.0, major * 0.42))
+
+    elif typology == 'Podium + Tårn':
+        podium_depth = clamp(20.0, 13.0, minor * 0.7)
+        footprint = _find_inscribed_rect(buildable_polygon, podium_depth, angle, max_width_m=min(major * 0.82, target_footprint_m2 / max(podium_depth, 1.0)))
+        if footprint is None:
+            footprint = _find_inscribed_rect(buildable_polygon, min(16.0, minor * 0.58), angle + 90, max_width_m=min(major * 0.65, 26.0))
+
+    if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
+        for depth_try in [14.0, 12.0, 10.0, 8.0, 6.0]:
+            if depth_try > minor * 0.85:
+                continue
+            footprint = _find_inscribed_rect(buildable_polygon, depth_try, angle)
+            if footprint is not None and not footprint.is_empty and float(getattr(footprint, 'area', 0.0)) >= 30:
+                break
+
+    if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
+        scale_factor = math.sqrt(min(target_footprint_m2, area * 0.5) / max(area, 1.0))
+        footprint = affinity.scale(buildable_polygon, xfact=scale_factor, yfact=scale_factor, origin=buildable_polygon.centroid).buffer(0)
+
+    fp_parts = split_geometry_to_polygons(footprint)
+    if fp_parts:
+        fp_major = max(minimum_rotated_dims(part)[0] for part in fp_parts)
+        fp_minor = max(minimum_rotated_dims(part)[1] for part in fp_parts)
+    else:
+        fp_major, fp_minor, _ = minimum_rotated_dims(largest_polygon(footprint) or buildable_polygon)
+    placement_info['footprint_width_m'] = round(float(fp_major), 1)
+    placement_info['footprint_depth_m'] = round(float(fp_minor), 1)
+    placement_info['fit_scale'] = round(float(getattr(footprint, 'area', 0.0) / max(target_footprint_m2, 1.0)), 3)
+    placement_info['containment_ratio'] = round(float(footprint.intersection(buildable_polygon).area / max(getattr(footprint, 'area', 1.0), 1.0)), 3)
+    placement_info['component_count'] = len(fp_parts)
+
+    return footprint.buffer(0), placement_info
 
 
 def sample_points_in_polygon(poly: Polygon, spacing_m: float = 6.0, max_points: int = 180) -> List[Point]:
@@ -1088,7 +1349,7 @@ def serialize_neighbor_geometries(neighbors: List[Dict[str, Any]], max_neighbors
     for neighbor in neighbors[:max_neighbors]:
         serialized.append(
             {
-                "coords": polygon_to_coords(neighbor.get("polygon")),
+                "coords": geometry_to_coord_groups(neighbor.get("polygon")),
                 "height_m": round(float(neighbor.get("height_m", 0.0)), 1),
                 "distance_m": round(float(neighbor.get("distance_m", 0.0)), 1),
             }
@@ -1371,7 +1632,7 @@ def evaluate_solar(
     equinox_shadow = adjusted_shadow_length_m(building_height_m, equinox_alt, terrain, equinox_shadow_az)
     summer_shadow = adjusted_shadow_length_m(building_height_m, summer_alt, terrain, summer_shadow_az)
 
-    typology_bonus = {"Punkthus": 0.06, "Lamell": 0.04, "Tun": -0.02}.get(typology, 0.0)
+    typology_bonus = {"Punkthus": 0.06, "Lamell": 0.04, "Tun": -0.02, "Rekke": 0.05}.get(typology, 0.0)
     neighbor_penalty = min(0.12, 0.012 * len(neighbors))
     solar_score = 100.0 * clamp(
         (0.54 * mean_equinox) + (0.26 * winter_noon_frac) + (0.14 * noon_equinox_frac) + typology_bonus - neighbor_penalty,
@@ -1423,9 +1684,13 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         return []
 
     templates = [
-        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.74, "floor_bias": 0, "eff_adj": 0.02},
-        {"name": "Alt B - Punkthus", "typology": "Punkthus", "coverage": 0.56, "floor_bias": 1, "eff_adj": -0.01},
-        {"name": "Alt C - Tun", "typology": "Tun", "coverage": 0.84, "floor_bias": -1, "eff_adj": -0.03},
+        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.78, "floor_bias": 0, "eff_adj": 0.02},
+        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.84, "floor_bias": 0, "eff_adj": 0.00},
+        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.52, "floor_bias": 2, "eff_adj": -0.01},
+        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.36, "floor_bias": 4, "eff_adj": -0.03},
+        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.58, "floor_bias": 3, "eff_adj": -0.02},
+        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.82, "floor_bias": -1, "eff_adj": -0.02},
+        {"name": "Alt G - Rekke", "typology": "Rekke", "coverage": 0.68, "floor_bias": -1, "eff_adj": 0.04},
     ]
 
     options: List[OptionResult] = []
@@ -1450,11 +1715,18 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         floors = clamp(floors_needed + template["floor_bias"], 2, allowed_floors)
         floors = int(floors)
 
+        if typology == "Tårn":
+            floors = int(clamp(max(floors, min(allowed_floors, 8)), 4, allowed_floors))
+        elif typology == "Podium + Tårn":
+            floors = int(clamp(max(floors, min(allowed_floors, 7)), 4, allowed_floors))
+        elif typology == "Karré":
+            floors = int(clamp(max(floors, 3), 2, allowed_floors))
+
         gross_bta = footprint_area * floors
         if site.max_bra_m2 > 0:
             gross_bta = min(gross_bta, site.max_bra_m2)
 
-        actual_efficiency = clamp(site.efficiency_ratio + template["eff_adj"], 0.66, 0.88)
+        actual_efficiency = clamp(site.efficiency_ratio + template["eff_adj"], 0.64, 0.88)
         saleable_area = gross_bta * actual_efficiency
 
         mix_counts, _ = allocate_unit_mix(saleable_area, mix_specs)
@@ -1505,10 +1777,18 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         if typology == "Lamell":
             notes.append("Lamell er som regel sterkest på effektivitet, dagslys og repetérbar boliglogikk.")
+        elif typology == "Karré":
+            notes.append("Karré gir tydelig byrom og robust kvartalsstruktur, men krever mer presis kontroll på gårdsrom, lys og innkjøring.")
         elif typology == "Punkthus":
             notes.append("Punkthus gir ofte best lys og sikt, men taper gjerne litt effektivitet og kjerneøkonomi.")
+        elif typology == "Tårn":
+            notes.append("Tårn kan gi høy måloppnåelse på små fotavtrykk, men er mest sårbart for regulering, kjerneøkonomi og vind/skygge.")
+        elif typology == "Podium + Tårn":
+            notes.append("Podium + tårn kombinerer urbant gategrep med høyde, men krever presis kontroll på sokkel, uteareal og planrisiko.")
+        elif typology == "Rekke":
+            notes.append("Rekkehus gir flest enheter, lav byggehoeyde og effektiv arealbruk, men gir lavere BTA per tomt enn blokk.")
         else:
-            notes.append("Tun/U-form gir høy arealutnyttelse og tydelig uterom, men er mest sårbar for skygge fra egne fløyer og naboer.")
+            notes.append("Tun/U-form gir hoey arealutnyttelse og tydelig uterom, men er mest saarbar for skygge fra egne floeyer og naboer.")
 
         score = rank_score(
             target_fit_pct=target_fit_pct,
@@ -1522,15 +1802,18 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         winter_az = (solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) % 360.0
         winter_shadow_poly = build_shadow_polygon(footprint_polygon, height_m, winter_az, winter_alt, terrain)
 
+        massing_parts = build_massing_parts(footprint_polygon, typology, floors, site.floor_to_floor_m)
         geometry = {
-            "site_polygon_coords": polygon_to_coords(site_polygon),
-            "buildable_polygon_coords": polygon_to_coords(buildable_polygon),
-            "footprint_polygon_coords": polygon_to_coords(footprint_polygon),
-            "winter_shadow_polygon_coords": polygon_to_coords(winter_shadow_poly) if winter_shadow_poly is not None else [],
+            "site_polygon_coords": geometry_to_coord_groups(site_polygon),
+            "buildable_polygon_coords": geometry_to_coord_groups(buildable_polygon),
+            "footprint_polygon_coords": geometry_to_coord_groups(footprint_polygon),
+            "winter_shadow_polygon_coords": geometry_to_coord_groups(winter_shadow_poly) if winter_shadow_poly is not None else [],
             "neighbor_polygons": serialized_neighbors,
             "terrain_summary": terrain_summary,
             "placement": placement,
             "site_source": geodata_context.get("source", "Tomt"),
+            "massing_parts": massing_parts,
+            "component_count": len(split_geometry_to_polygons(footprint_polygon)),
         }
 
         options.append(
@@ -1575,22 +1858,22 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     canvas_w, canvas_h = 900, 620
     margin = 60
-    img = Image.new("RGBA", (canvas_w, canvas_h), (6, 17, 26, 255))
-    draw = ImageDraw.Draw(img, "RGBA")
+    img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
     font = ImageFont.load_default()
 
-    site_coords = option.geometry.get("site_polygon_coords") or polygon_to_coords(box(0, 0, site.site_width_m, site.site_depth_m))
-    buildable_coords = option.geometry.get("buildable_polygon_coords") or site_coords
-    footprint_coords = option.geometry.get("footprint_polygon_coords") or []
-    shadow_coords = option.geometry.get("winter_shadow_polygon_coords") or []
-    neighbor_polys = option.geometry.get("neighbor_polygons", [])
-    terrain_summary = option.geometry.get("terrain_summary", {})
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    footprint_coords = option.geometry.get('footprint_polygon_coords') or []
+    shadow_coords = option.geometry.get('winter_shadow_polygon_coords') or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+    terrain_summary = option.geometry.get('terrain_summary', {})
 
-    all_coords = list(site_coords)
+    all_coords: List[List[float]] = []
+    all_coords.extend(flatten_coord_groups(site_coords))
     for item in neighbor_polys[:20]:
-        all_coords.extend(item.get("coords", []))
-    if shadow_coords:
-        all_coords.extend(shadow_coords)
+        all_coords.extend(flatten_coord_groups(item.get('coords', [])))
+    all_coords.extend(flatten_coord_groups(shadow_coords))
     if not all_coords:
         all_coords = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
 
@@ -1608,58 +1891,189 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         py = canvas_h - margin - ((y - miny) * scale)
         return px, py
 
-    def draw_poly(coords: List[List[float]], fill: Tuple[int, int, int, int], outline: Tuple[int, int, int, int], width_px: int = 2) -> None:
-        if not coords:
+    def draw_groups(groups: Any, fill: Tuple[int, int, int, int], outline: Tuple[int, int, int, int], width_px: int = 2) -> None:
+        if not groups:
             return
-        pts = [map_pt(pt) for pt in coords]
-        if len(pts) < 3:
-            return
-        draw.polygon(pts, fill=fill, outline=outline)
-        if width_px > 1:
-            draw.line(pts + [pts[0]], fill=outline, width=width_px)
+        if isinstance(groups, list) and groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
+            groups = [groups]
+        for coords in groups:
+            if not coords:
+                continue
+            pts = [map_pt(pt) for pt in coords]
+            if len(pts) < 3:
+                continue
+            draw.polygon(pts, fill=fill, outline=outline)
+            if width_px > 1:
+                draw.line(pts + [pts[0]], fill=outline, width=width_px)
 
-    draw_poly(site_coords, fill=(13, 24, 36, 255), outline=(130, 151, 178, 255), width_px=3)
-    draw_poly(buildable_coords, fill=(56, 189, 248, 28), outline=(56, 189, 248, 230), width_px=2)
-
+    draw_groups(site_coords, fill=(13, 24, 36, 255), outline=(130, 151, 178, 255), width_px=3)
+    draw_groups(buildable_coords, fill=(56, 189, 248, 28), outline=(56, 189, 248, 230), width_px=2)
     for neighbor in neighbor_polys[:20]:
-        draw_poly(neighbor.get("coords", []), fill=(120, 130, 145, 120), outline=(180, 190, 205, 220), width_px=1)
-
-    if shadow_coords:
-        draw_poly(shadow_coords, fill=(255, 213, 79, 45), outline=(255, 213, 79, 150), width_px=1)
-    draw_poly(footprint_coords, fill=(34, 197, 94, 215), outline=(220, 252, 231, 255), width_px=2)
+        draw_groups(neighbor.get('coords', []), fill=(120, 130, 145, 120), outline=(180, 190, 205, 220), width_px=1)
+    draw_groups(shadow_coords, fill=(255, 213, 79, 45), outline=(255, 213, 79, 150), width_px=1)
+    draw_groups(footprint_coords, fill=(34, 197, 94, 215), outline=(220, 252, 231, 255), width_px=2)
 
     arrow_x = canvas_w - 70
     arrow_y = 70
     draw.line((arrow_x, arrow_y + 30, arrow_x, arrow_y - 20), fill=(245, 247, 251, 255), width=4)
-    draw.polygon(
-        [(arrow_x, arrow_y - 32), (arrow_x - 10, arrow_y - 8), (arrow_x + 10, arrow_y - 8)],
-        fill=(245, 247, 251, 255),
-    )
-    draw.text((arrow_x - 7, arrow_y + 36), "N", fill=(245, 247, 251, 255), font=font)
-    draw.text((arrow_x - 30, arrow_y + 52), f"rot {site.north_rotation_deg:.0f}°", fill=(159, 176, 195, 255), font=font)
+    draw.polygon([(arrow_x, arrow_y - 32), (arrow_x - 10, arrow_y - 8), (arrow_x + 10, arrow_y - 8)], fill=(245, 247, 251, 255))
+    draw.text((arrow_x - 7, arrow_y + 36), 'N', fill=(245, 247, 251, 255), font=font)
+    draw.text((arrow_x - 30, arrow_y + 52), f'rot {site.north_rotation_deg:.0f}°', fill=(159, 176, 195, 255), font=font)
 
-    placement = option.geometry.get("placement", {})
-    draw.text((margin, 16), f"{option.name} | {option.typology}", fill=(245, 247, 251, 255), font=font)
-    draw.text(
-        (margin, canvas_h - 60),
-        f"Tomt via {option.geometry.get('site_source', 'geometri')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count}",
-        fill=(200, 211, 223, 255),
-        font=font,
-    )
-    draw.text(
-        (margin, canvas_h - 40),
-        f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Høyde {option.building_height_m:.1f} m | Vinterskygge kl 12 ca. {option.winter_noon_shadow_m:.0f} m",
-        fill=(200, 211, 223, 255),
-        font=font,
-    )
-    terrain_line = (
-        f"Terreng fall {terrain_summary.get('slope_pct', 0):.1f}% | Relieff {terrain_summary.get('relief_m', 0):.1f} m"
-        if terrain_summary.get("point_count", 0) > 0
-        else f"Plasseringstilpasning {placement.get('fit_scale', 1.0):.2f} | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}%"
-    )
+    placement = option.geometry.get('placement', {})
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    part_text = f" | deler {len(massing_parts)}" if massing_parts else ''
+    draw.text((margin, 16), f"{option.name} | {option.typology}{part_text}", fill=(245, 247, 251, 255), font=font)
+    draw.text((margin, canvas_h - 60), f"Tomt via {option.geometry.get('site_source', 'geometri')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count}", fill=(200, 211, 223, 255), font=font)
+    draw.text((margin, canvas_h - 40), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Høyde {option.building_height_m:.1f} m | Vinterskygge kl 12 ca. {option.winter_noon_shadow_m:.0f} m", fill=(200, 211, 223, 255), font=font)
+    terrain_line = (f"Terreng fall {terrain_summary.get('slope_pct', 0):.1f}% | Relieff {terrain_summary.get('relief_m', 0):.1f} m" if terrain_summary.get('point_count', 0) > 0 else f"Plasseringstilpasning {placement.get('fit_scale', 1.0):.2f} | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}%")
     draw.text((margin, canvas_h - 20), terrain_line, fill=(159, 176, 195, 255), font=font)
 
-    return img.convert("RGB")
+    return img.convert('RGB')
+
+
+def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
+    geometry = option.geometry or {}
+    src_crs = site.polygon_crs or 'EPSG:25833'
+    site_rings = project_coord_groups_to_lonlat(geometry.get('site_polygon_coords') or [], src_crs=src_crs)
+    buildable_rings = project_coord_groups_to_lonlat(geometry.get('buildable_polygon_coords') or [], src_crs=src_crs)
+    footprint_rings = project_coord_groups_to_lonlat(geometry.get('footprint_polygon_coords') or [], src_crs=src_crs)
+
+    massing_parts = []
+    for part in geometry.get('massing_parts', []) or []:
+        massing_parts.append({
+            'name': part.get('name', option.typology),
+            'height_m': float(part.get('height_m', option.building_height_m)),
+            'floors': int(part.get('floors', option.floors)),
+            'color': part.get('color', [34, 197, 94, 0.80]),
+            'rings': project_coord_groups_to_lonlat(part.get('coords') or [], src_crs=src_crs),
+        })
+
+    neighbors = []
+    for neighbor in geometry.get('neighbor_polygons', []) or []:
+        neighbors.append({
+            'height_m': float(neighbor.get('height_m', 9.0)),
+            'distance_m': float(neighbor.get('distance_m', 0.0)),
+            'rings': project_coord_groups_to_lonlat(neighbor.get('coords') or [], src_crs=src_crs),
+        })
+
+    return {
+        'site_name': option.name,
+        'typology': option.typology,
+        'scene_config': scene_config,
+        'site': {'rings': site_rings},
+        'buildable': {'rings': buildable_rings},
+        'footprint': {'rings': footprint_rings, 'height_m': float(option.building_height_m)},
+        'massing_parts': massing_parts,
+        'neighbors': neighbors[:40],
+        'shadow': {'rings': project_coord_groups_to_lonlat(geometry.get('winter_shadow_polygon_coords') or [], src_crs=src_crs)},
+        'placement': geometry.get('placement', {}),
+    }
+
+
+def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any], height_px: int = 640) -> None:
+    payload = build_geodata_scene_payload(site, option, scene_config)
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    html_template = """
+    <div id="viewDiv" style="width:100%;height:__HEIGHT__px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);"></div>
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
+    <script>
+    const payload = __PAYLOAD__;
+    require([
+      'esri/Map',
+      'esri/views/SceneView',
+      'esri/layers/ImageryLayer',
+      'esri/layers/ElevationLayer',
+      'esri/layers/GraphicsLayer',
+      'esri/Graphic',
+      'esri/geometry/Polygon',
+      'esri/geometry/SpatialReference',
+      'esri/geometry/Extent'
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, SpatialReference, Extent) {
+      const sr = new SpatialReference({ wkid: 4326 });
+      const sc = payload.scene_config || {};
+      const services = sc.services || {};
+      const map = new Map({ basemap: 'satellite', ground: 'world-elevation' });
+      if (services.elevation_url) {
+        map.ground.layers.add(new ElevationLayer({ url: services.elevation_url + '?token=' + encodeURIComponent(sc.token || '') }));
+      } else if (services.terrain_cache_url) {
+        map.ground.layers.add(new ElevationLayer({ url: services.terrain_cache_url + '?token=' + encodeURIComponent(sc.token || '') }));
+      }
+      if (services.imagery_latest_url) {
+        map.add(new ImageryLayer({ url: services.imagery_latest_url, opacity: 0.92 }));
+      }
+      const graphicsLayer = new GraphicsLayer();
+      map.add(graphicsLayer);
+
+      function polygonFromRings(rings) {
+        return new Polygon({ rings: rings, spatialReference: sr });
+      }
+      function addExtrusions(items, fallbackColor, opacity, edgeColor) {
+        (items || []).forEach(item => {
+          (item.rings || []).forEach(ring => {
+            const polygon = polygonFromRings([ring]);
+            const useColor = Array.isArray(item.color) ? [item.color[0], item.color[1], item.color[2], opacity] : [fallbackColor[0], fallbackColor[1], fallbackColor[2], opacity];
+            graphicsLayer.add(new Graphic({
+              geometry: polygon,
+              symbol: {
+                type: 'polygon-3d',
+                symbolLayers: [{
+                  type: 'extrude',
+                  size: item.height_m || 3,
+                  material: { color: useColor },
+                  edges: { type: 'solid', color: edgeColor || [255,255,255,0.35], size: 0.6 }
+                }]
+              },
+              popupTemplate: { title: item.name || payload.typology, content: 'Høyde: ' + (item.height_m || 0) + ' m' }
+            }));
+          });
+        });
+      }
+      function addSurface(rings, fillColor, outlineColor) {
+        (rings || []).forEach(ring => {
+          graphicsLayer.add(new Graphic({
+            geometry: polygonFromRings([ring]),
+            symbol: { type: 'simple-fill', color: fillColor, outline: { color: outlineColor, width: 1.2 } }
+          }));
+        });
+      }
+
+      addSurface(payload.site.rings, [255,255,255,0.02], [210,220,235,0.6]);
+      addSurface(payload.buildable.rings, [56,189,248,0.08], [56,189,248,0.8]);
+      addSurface(payload.shadow.rings, [255,213,79,0.10], [255,213,79,0.28]);
+      addExtrusions(payload.neighbors, [140,140,150], 0.32, [200,200,210,0.25]);
+      addExtrusions(payload.massing_parts, [34,197,94], 0.82, [255,255,255,0.45]);
+
+      let extent = null;
+      const allRings = [].concat(payload.site.rings || [], payload.buildable.rings || [], payload.footprint.rings || []);
+      allRings.forEach(ring => {
+        ring.forEach(pt => {
+          const x = pt[0], y = pt[1];
+          if (!extent) {
+            extent = new Extent({ xmin: x, ymin: y, xmax: x, ymax: y, spatialReference: sr });
+          } else {
+            extent.xmin = Math.min(extent.xmin, x);
+            extent.ymin = Math.min(extent.ymin, y);
+            extent.xmax = Math.max(extent.xmax, x);
+            extent.ymax = Math.max(extent.ymax, y);
+          }
+        });
+      });
+
+      const view = new SceneView({
+        container: 'viewDiv',
+        map: map,
+        qualityProfile: 'high',
+        camera: { position: { x: 10.75, y: 59.91, z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
+        environment: { atmosphereEnabled: true, starsEnabled: false }
+      });
+      view.when(() => { if (extent) { view.goTo(extent.expand(1.8)).catch(() => {}); } });
+    });
+    </script>
+    """
+    html = html_template.replace('__PAYLOAD__', payload_json).replace('__HEIGHT__', str(int(height_px)))
+    components.html(html, height=height_px + 20, scrolling=False)
 
 
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
@@ -2423,7 +2837,10 @@ with st.expander("5. Hva modulen faktisk gjor na", expanded=False):
     st.markdown(
         """
 - Leser **ekte tomtepolygon** via Geodata Online (GeomapMatrikkel/FeatureServer), GeoJSON eller koordinatliste.
-- Regner **3 volumalternativer** (lamell, punkthus, tun/U-form) innenfor faktisk byggefelt.
+- Regner **7 volumalternativer** (lamell, karre, punkthus, tarn, podium+tarn, tun/U-form og rekke) innenfor faktisk byggefelt.
+- Lager **sammensatte volumdeler** som kan vises videre i 3D-scene.
+- Bruker **Geodata site intelligence** for plan, utbygging og mobilitet i rangering av typologier.
+- Kan vise volumene i **3D Geodata-scene** med Geodata-terreng som grunnlag.
 - Leser **nabobebyggelse** via Geodata Online ByggFlate, GeoJSON eller OSM og bruker hoyder i sol/skygge.
 - Henter **HD-ortofoto** fra Geodata Online for bedre kartgrunnlag i rapporten.
 - Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
@@ -2523,6 +2940,13 @@ if run_analysis:
                 st.caption(f"Ortofoto-henting feilet: {exc}")
 
     terrain_ctx, terrain_meta = load_terrain_input(terrain_upload, site_polygon_input, site_crs)
+    if terrain_ctx is None and geodata_token_ok and site_polygon_input is not None and gdo is not None:
+        try:
+            terrain_ctx = gdo.fetch_terrain_model(site_polygon_input, sample_spacing_m=10.0, max_points=180)
+            if terrain_ctx is not None:
+                terrain_meta = {'source': terrain_ctx.get('source', 'Geodata Online Terrengmodell'), 'point_count': terrain_ctx.get('point_count', 0)}
+        except Exception as exc:
+            terrain_meta = {'source': 'Geodata Online Terrengmodell', 'error': str(exc)[:120]}
 
     site = SiteInputs(
         site_area_m2=site_area_m2,
@@ -2566,8 +2990,19 @@ if run_analysis:
     site.terrain_slope_pct = float((terrain_ctx or {}).get("slope_pct", 0.0))
     site.terrain_relief_m = float((terrain_ctx or {}).get("relief_m", 0.0))
 
+    site_intelligence_bundle: Dict[str, Any] = {}
+    if HAS_SITE_INTELLIGENCE and geodata_token_ok and site_polygon_input is not None and gdo is not None:
+        try:
+            site_intelligence_bundle = build_site_intelligence_bundle(gdo, geodata_context['site_polygon'], search_buffer_m=350.0)
+            geodata_context['site_intelligence'] = site_intelligence_bundle
+        except Exception as exc:
+            site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
+
     with st.spinner("Regner volumalternativer med faktisk tomtepolygon, naboer og terreng ..."):
         options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+
+    if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
+        options = apply_site_intelligence_to_options(options, site_intelligence_bundle)
 
     if not options:
         st.error("Klarte ikke å generere alternativer. Kontroller tomtepolygon, byggegrenser og BYA.")
@@ -2575,6 +3010,8 @@ if run_analysis:
 
     option_images = [render_plan_diagram(site, option) for option in options]
     deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context))
+    if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
+        deterministic_report = deterministic_report + "\n\n" + build_site_intelligence_markdown(site_intelligence_bundle)
     final_report_text = deterministic_report
 
     if llm_available:
@@ -2591,6 +3028,7 @@ if run_analysis:
                     "polygon_meta": polygon_meta,
                     "neighbor_meta": neighbor_meta,
                     "terrain_meta": terrain_meta,
+                    "site_intelligence": site_intelligence_bundle,
                 }
                 prompt = f"""
 Du er senior arkitekt og utviklingsradgiver. Du far et ferdig, deterministisk analysegrunnlag i JSON.
@@ -2663,6 +3101,7 @@ KRAV:
         "polygon_meta": polygon_meta,
         "neighbor_meta": neighbor_meta,
         "terrain_meta": terrain_meta,
+        "site_intelligence": site_intelligence_bundle,
     }
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
@@ -2703,6 +3142,20 @@ if "analysis_results" in st.session_state:
     polygon_meta = result.get("polygon_meta", {})
     neighbor_meta = result.get("neighbor_meta", {})
     terrain_meta = result.get("terrain_meta", {})
+    site_intelligence_bundle = result.get('site_intelligence', {}) or {}
+
+    if site_intelligence_bundle.get('available'):
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Site score</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('site_score', 0.0))), unsafe_allow_html=True)
+        with s2:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Mulighet</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('opportunity_score', 0.0))), unsafe_allow_html=True)
+        with s3:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Plan-/stedsrisiko</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('risk_score', 0.0))), unsafe_allow_html=True)
+        with s4:
+            favored = sorted((site_intelligence_bundle.get('typology_score_adjustments') or {}).items(), key=lambda item: item[1], reverse=True)
+            favored_text = favored[0][0] if favored else '-'
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Favorisert grep</div><div class='metric-value'>{}</div></div>".format(favored_text), unsafe_allow_html=True)
     meta_lines = []
     if polygon_meta:
         meta_lines.append(f"Tomt: {polygon_meta.get('source', '-')}")
@@ -2737,11 +3190,25 @@ if "analysis_results" in st.session_state:
                 "Terreng fall %": option.terrain_slope_pct,
                 "Naboer": option.neighbor_count,
                 "Score": option.score,
+                "Bygningsdeler": len((option.geometry or {}).get('massing_parts', []) or []),
             }
             for option in options
         ]
     )
     st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+    if site_intelligence_bundle.get('available'):
+        st.markdown('### Geodata-kontekst')
+        gi_plan, gi_projects, gi_transport = st.columns(3)
+        with gi_plan:
+            st.caption('Plan og regulering')
+            st.json(site_intelligence_bundle.get('plan', {}), expanded=False)
+        with gi_projects:
+            st.caption('Utbyggingsaktivitet')
+            st.json(site_intelligence_bundle.get('projects', {}), expanded=False)
+        with gi_transport:
+            st.caption('Mobilitet og adkomst')
+            st.json(site_intelligence_bundle.get('transport', {}), expanded=False)
 
     st.markdown("### Volumskisser")
     cols = st.columns(len(options))
@@ -2779,6 +3246,18 @@ if "analysis_results" in st.session_state:
         }
     ).T
     st.dataframe(solar_df, use_container_width=True)
+
+    if geodata_token_ok and gdo is not None:
+        st.markdown('### 3D Geodata-scene')
+        selected_name = st.selectbox('Velg volum for 3D-scene', [opt.name for opt in options], index=0)
+        selected_option = next((opt for opt in options if opt.name == selected_name), options[0])
+        try:
+            scene_config = gdo.fetch_scene_config()
+            render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
+            scene_payload = build_geodata_scene_payload(SiteInputs(**site_result), selected_option, scene_config)
+            st.download_button('Last ned scene-payload (JSON)', json.dumps(scene_payload, ensure_ascii=False, indent=2), file_name=f'scene_{selected_option.typology.lower().replace(" ", "_")}.json', use_container_width=True)
+        except Exception as exc:
+            st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
 
     st.markdown("### Rapport")
     st.markdown(result["report_text"])
