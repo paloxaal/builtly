@@ -1053,104 +1053,153 @@ def _find_inscribed_rect(poly: Polygon, target_depth_m: float, angle_deg: float,
     return best_rect
 
 
-def _place_multi_buildings(poly: Polygon, building_depth_m: float, angle_deg: float,
-                           spacing_m: float = 16.0, max_buildings: int = 8,
-                           max_footprint_m2: float = 99999.0,
-                           max_width_per_building: float = 55.0) -> List[Polygon]:
-    """
-    Plasser flere realistisk-dimensjonerte bygninger langs polygonet.
+def _make_oriented_rect(cx: float, cy: float, width: float, depth: float, angle_rad: float) -> Polygon:
+    """Lag et rektangel sentrert paa (cx, cy) med gitt orientering."""
+    hw, hd = width / 2.0, depth / 2.0
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    corners = [
+        (cx + hw * cos_a - hd * sin_a, cy + hw * sin_a + hd * cos_a),
+        (cx - hw * cos_a - hd * sin_a, cy - hw * sin_a + hd * cos_a),
+        (cx - hw * cos_a + hd * sin_a, cy - hw * sin_a - hd * cos_a),
+        (cx + hw * cos_a + hd * sin_a, cy + hw * sin_a - hd * cos_a),
+    ]
+    return Polygon(corners)
 
-    Viktig: max_width_per_building begrenser maks lengde per enkeltbygg.
-    Ekte lameller er sjelden over 55m, punkthus 22m, rekkehus-rad 70m.
+
+def _place_grid_buildings(
+    poly: Polygon,
+    building_width_m: float,
+    building_depth_m: float,
+    angle_deg: float,
+    spacing_along: float = 18.0,
+    spacing_across: float = 22.0,
+    max_buildings: int = 12,
+    max_footprint_m2: float = 99999.0,
+) -> List[Polygon]:
+    """
+    2D-grid plassering: fordeler bygninger over HELE tomten i et rutenett
+    langs og paa tvers av hovedaksen, ikke bare langs en linje.
     """
     rad = math.radians(angle_deg)
     perp_rad = rad + math.pi / 2.0
     cx, cy = poly.centroid.x, poly.centroid.y
     major, minor, _ = minimum_rotated_dims(poly)
 
+    # Beregn antall rader og kolonner
+    step_along = building_depth_m + spacing_along    # langs hovedaksen
+    step_across = building_width_m + spacing_across  # paa tvers
+
+    n_along = max(1, int((major - building_depth_m) / max(step_along, 1.0)) + 1)
+    n_across = max(1, int((minor - building_width_m) / max(step_across, 1.0)) + 1)
+
+    # Begrens totalt antall
+    total_slots = n_along * n_across
+    if total_slots > max_buildings:
+        # Reduser symmetrisk
+        ratio = math.sqrt(max_buildings / max(total_slots, 1))
+        n_along = max(1, int(n_along * ratio))
+        n_across = max(1, int(n_across * ratio))
+
+    # Sentrer rutenettet
+    span_along = (n_along - 1) * step_along
+    span_across = (n_across - 1) * step_across
+    start_along = -span_along / 2.0
+    start_across = -span_across / 2.0
+
     buildings: List[Polygon] = []
     total_area = 0.0
 
-    step = building_depth_m + spacing_m
-    n_max = max(1, min(max_buildings, int((major - building_depth_m) / max(step, 1.0)) + 1))
+    for row in range(n_along):
+        for col in range(n_across):
+            if len(buildings) >= max_buildings or total_area >= max_footprint_m2:
+                break
+            offset_along = start_along + row * step_along
+            offset_across = start_across + col * step_across
 
-    # Fordel bygningene jevnt langs aksen
-    total_span = (n_max - 1) * step + building_depth_m
-    start_offset = -total_span / 2.0 + building_depth_m / 2.0
+            bx = cx + offset_along * math.cos(perp_rad) + offset_across * math.cos(rad)
+            by = cy + offset_along * math.sin(perp_rad) + offset_across * math.sin(rad)
 
-    for i in range(n_max):
+            # Proev aa plassere bygning her — tilpass bredde til hva som passer
+            remaining = max_footprint_m2 - total_area
+            max_w = min(building_width_m, remaining / max(building_depth_m, 1.0))
+
+            lo, hi = 6.0, max_w
+            best_w = 0.0
+            for _ in range(16):
+                mid = (lo + hi) / 2.0
+                candidate = _make_oriented_rect(bx, by, mid, building_depth_m, rad)
+                if poly.contains(candidate):
+                    best_w = mid
+                    lo = mid
+                else:
+                    hi = mid
+
+            if best_w >= 6.0:
+                bld = _make_oriented_rect(bx, by, best_w, building_depth_m, rad)
+                buildings.append(bld)
+                total_area += bld.area
+
         if total_area >= max_footprint_m2:
             break
-        offset = start_offset + i * step
-        bx = cx + offset * math.cos(perp_rad)
-        by = cy + offset * math.sin(perp_rad)
-
-        remaining = max_footprint_m2 - total_area
-        max_w = min(max_width_per_building, minor * 0.85, remaining / max(building_depth_m, 1.0))
-
-        lo, hi = 6.0, max_w
-        best_w = 0.0
-        for _ in range(18):
-            mid = (lo + hi) / 2.0
-            hw, hd = mid / 2.0, building_depth_m / 2.0
-            corners = [
-                (bx + hw * math.cos(rad) - hd * math.sin(rad),
-                 by + hw * math.sin(rad) + hd * math.cos(rad)),
-                (bx - hw * math.cos(rad) - hd * math.sin(rad),
-                 by - hw * math.sin(rad) + hd * math.cos(rad)),
-                (bx - hw * math.cos(rad) + hd * math.sin(rad),
-                 by - hw * math.sin(rad) - hd * math.cos(rad)),
-                (bx + hw * math.cos(rad) + hd * math.sin(rad),
-                 by + hw * math.sin(rad) - hd * math.cos(rad)),
-            ]
-            candidate = Polygon(corners)
-            if poly.contains(candidate):
-                best_w = mid
-                lo = mid
-            else:
-                hi = mid
-
-        if best_w >= 6.0:
-            hw, hd = best_w / 2.0, building_depth_m / 2.0
-            corners = [
-                (bx + hw * math.cos(rad) - hd * math.sin(rad),
-                 by + hw * math.sin(rad) + hd * math.cos(rad)),
-                (bx - hw * math.cos(rad) - hd * math.sin(rad),
-                 by - hw * math.sin(rad) + hd * math.cos(rad)),
-                (bx - hw * math.cos(rad) + hd * math.sin(rad),
-                 by - hw * math.sin(rad) - hd * math.cos(rad)),
-                (bx + hw * math.cos(rad) + hd * math.sin(rad),
-                 by + hw * math.sin(rad) - hd * math.cos(rad)),
-            ]
-            bld = Polygon(corners)
-            buildings.append(bld)
-            total_area += bld.area
 
     return buildings
 
 
-# --- REALISTISKE BYGNINGSDIMENSJONER ---
-# Disse begrenser maks stoerrelse per enkeltbygg slik at volumene
-# ser ut som ekte arkitektur, ikke massive blokker.
+def _make_courtyard_block(
+    poly: Polygon,
+    outer_side: float,
+    ring_depth: float,
+    angle_deg: float,
+    cx: float,
+    cy: float,
+) -> Optional[Polygon]:
+    """Lag en karre-blokk med gaardrom paa angitt posisjon."""
+    rad = math.radians(angle_deg)
+    outer = _make_oriented_rect(cx, cy, outer_side, outer_side, rad)
+    if not poly.contains(outer):
+        # Skalere ned til det passer
+        lo_s, hi_s = 0.5, 1.0
+        best_s = 0.0
+        for _ in range(14):
+            mid = (lo_s + hi_s) / 2.0
+            scaled = affinity.scale(outer, xfact=mid, yfact=mid, origin=(cx, cy))
+            if poly.contains(scaled):
+                best_s = mid
+                lo_s = mid
+            else:
+                hi_s = mid
+        if best_s < 0.5:
+            return None
+        outer = affinity.scale(outer, xfact=best_s, yfact=best_s, origin=(cx, cy))
 
+    # Lag gaardrom (indre rektangel)
+    inner_inset = min(ring_depth, math.sqrt(outer.area) * 0.25)
+    inner = outer.buffer(-inner_inset)
+    if inner is not None and not inner.is_empty and inner.area > 30:
+        result = outer.difference(inner).buffer(0)
+        if result.area > 50:
+            return result
+    return outer  # Fallback: solid blokk
+
+
+# --- REALISTISKE BYGNINGSDIMENSJONER ---
 TYPOLOGY_LIMITS = {
-    "Lamell":        {"max_width": 55.0, "depth": (12.0, 14.0), "spacing": 18.0, "max_n": 8},
-    "Punkthus":      {"max_width": 22.0, "depth": (16.0, 22.0), "spacing": 22.0, "max_n": 6},
-    "Rekke":         {"max_width": 65.0, "depth": (10.0, 12.0), "spacing": 0.3,  "max_n": 10},
-    "Tun":           {"max_width": 45.0, "depth": (10.0, 12.0), "spacing": 14.0, "max_n": 3},
-    "Karré":         {"max_width": 50.0, "depth": (10.0, 12.0), "spacing": 20.0, "max_n": 4},
-    "Tårn":          {"max_width": 25.0, "depth": (18.0, 25.0), "spacing": 25.0, "max_n": 3},
-    "Podium + Tårn": {"max_width": 50.0, "depth": (14.0, 20.0), "spacing": 20.0, "max_n": 2},
+    "Lamell":        {"bld_w": 50.0, "bld_d": 14.0, "sp_along": 18.0, "sp_across": 24.0, "max_n": 12},
+    "Punkthus":      {"bld_w": 20.0, "bld_d": 20.0, "sp_along": 24.0, "sp_across": 24.0, "max_n": 9},
+    "Rekke":         {"bld_w": 55.0, "bld_d": 10.0, "sp_along": 14.0, "sp_across": 18.0, "max_n": 12},
+    "Tun":           {"bld_w": 42.0, "bld_d": 11.0, "sp_along": 14.0, "sp_across": 16.0, "max_n": 6},
+    "Karré":         {"bld_w": 45.0, "bld_d": 45.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 4, "ring_d": 11.0},
+    "Tårn":          {"bld_w": 22.0, "bld_d": 22.0, "sp_along": 28.0, "sp_across": 28.0, "max_n": 6},
+    "Podium + Tårn": {"bld_w": 45.0, "bld_d": 22.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 3},
 }
 
 
 def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_footprint_m2: float) -> Tuple[Polygon, Dict[str, Any]]:
     """
-    REALISTISK fotavtrykk-motor.
+    REALISTISK fotavtrykk-motor med 2D-grid-plassering.
 
-    Bygger FLERE realistisk-dimensjonerte bygninger i stedet for
-    en massiv blokk. Bruker TYPOLOGY_LIMITS for aa sikre at
-    ingen enkeltbygg overstiger reelle arkitektoniske dimensjoner.
+    Fordeler bygninger over hele tomten i et rutenett — ikke bare langs en linje.
+    Karré-typologien lager ekte kvartaler med gaardrom.
     """
     shape_info = _analyze_polygon(buildable_polygon)
     major = shape_info['major_m']
@@ -1160,19 +1209,10 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
 
     target_footprint_m2 = min(target_footprint_m2, area * 0.92)
     limits = TYPOLOGY_LIMITS.get(typology, TYPOLOGY_LIMITS["Lamell"])
-    max_w = limits["max_width"]
-    depth_range = limits["depth"]
-    spacing = limits["spacing"]
-    max_n = limits["max_n"]
-
-    # Tilpass dybde til smal side av tomten
-    ideal_depth = clamp(depth_range[1], depth_range[0], minor * 0.55)
 
     placement_info = {
-        'fit_scale': 1.0,
-        'containment_ratio': 1.0,
-        'footprint_width_m': 0.0,
-        'footprint_depth_m': 0.0,
+        'fit_scale': 1.0, 'containment_ratio': 1.0,
+        'footprint_width_m': 0.0, 'footprint_depth_m': 0.0,
         'orientation_deg': round(angle, 1),
         'polygon_shape': 'elongated' if shape_info['is_elongated'] else 'compact',
         'n_buildings': 1,
@@ -1180,170 +1220,113 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
 
     footprint: Any = None
 
-    if typology == 'Lamell':
-        # Beregn hvor mange lameller vi trenger
-        single_area = max_w * ideal_depth
-        n_needed = max(1, min(max_n, math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+    # Tilpass bygningsdybde til smal side
+    bld_w = min(limits["bld_w"], minor * 0.75)
+    bld_d = min(limits["bld_d"], minor * 0.55 if typology != "Karré" else minor * 0.7)
+    bld_w = max(8.0, bld_w)
+    bld_d = max(8.0, bld_d)
 
-        buildings = _place_multi_buildings(
-            buildable_polygon, ideal_depth, angle,
-            spacing_m=spacing, max_buildings=n_needed,
-            max_footprint_m2=target_footprint_m2,
-            max_width_per_building=max_w,
-        )
-        if buildings:
-            footprint = unary_union(buildings).buffer(0)
-            placement_info['n_buildings'] = len(buildings)
+    if typology == 'Karré':
+        # Ekte kvartaler med gaardrom
+        ring_d = limits.get("ring_d", 11.0)
+        karre_side = min(bld_w, bld_d)
+        single_area = karre_side * karre_side - max(0, (karre_side - 2*ring_d))**2
+        n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
 
-    elif typology == 'Punkthus':
-        # Kvadratisk(e) bygning(er) — maks 22x22m per stk
-        side = min(max_w, minor * 0.55, math.sqrt(max(target_footprint_m2, 1.0)))
-        side = max(14.0, side)
-        single_area = side * side
-        n_needed = max(1, min(max_n, math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+        # Plasser kvartaler i grid
+        step = karre_side + limits["sp_along"]
+        n_along = max(1, int(math.sqrt(n_needed) + 0.5))
+        n_across = max(1, math.ceil(n_needed / n_along))
 
-        if n_needed == 1:
-            footprint = _find_inscribed_rect(buildable_polygon, side, angle, max_width_m=side * 1.2)
-        else:
-            buildings = _place_multi_buildings(
-                buildable_polygon, side, angle,
-                spacing_m=spacing, max_buildings=n_needed,
-                max_footprint_m2=target_footprint_m2,
-                max_width_per_building=side * 1.2,
-            )
-            if buildings:
-                footprint = unary_union(buildings).buffer(0)
-                placement_info['n_buildings'] = len(buildings)
+        rad = math.radians(angle)
+        perp_rad = rad + math.pi / 2.0
+        pcx, pcy = buildable_polygon.centroid.x, buildable_polygon.centroid.y
+        span_a = (n_along - 1) * step
+        span_c = (n_across - 1) * step
 
-    elif typology == 'Rekke':
-        # Mange smaa enheter i rader — maks 65m per rad, ~0m spacing (vegg-i-vegg innad)
-        # Men MELLOM radene: 14m avstand
-        single_row_area = max_w * ideal_depth
-        n_rows = max(1, min(max_n, math.ceil(target_footprint_m2 / max(single_row_area, 1.0))))
-        buildings = _place_multi_buildings(
-            buildable_polygon, ideal_depth, angle,
-            spacing_m=max(14.0, ideal_depth * 1.1),
-            max_buildings=n_rows,
-            max_footprint_m2=target_footprint_m2,
-            max_width_per_building=max_w,
-        )
-        if buildings:
-            footprint = unary_union(buildings).buffer(0)
-            placement_info['n_buildings'] = len(buildings)
+        blocks: List[Polygon] = []
+        for row in range(n_along):
+            for col in range(n_across):
+                if len(blocks) >= n_needed:
+                    break
+                oa = -span_a / 2.0 + row * step
+                oc = -span_c / 2.0 + col * step
+                bx = pcx + oa * math.cos(perp_rad) + oc * math.cos(rad)
+                by = pcy + oa * math.sin(perp_rad) + oc * math.sin(rad)
+                block = _make_courtyard_block(buildable_polygon, karre_side, ring_d, angle, bx, by)
+                if block is not None and block.area > 50:
+                    blocks.append(block)
+
+        if blocks:
+            footprint = unary_union(blocks).buffer(0)
+            placement_info['n_buildings'] = len(blocks)
+            placement_info['courtyard_count'] = len(blocks)
 
     elif typology == 'Tun':
-        # L- eller U-form: hoveddel + 1-2 vinkelrette floeyer
-        wing_depth = ideal_depth
-        main_w = min(max_w, target_footprint_m2 * 0.45 / max(wing_depth, 1.0))
-        main_rect = _find_inscribed_rect(buildable_polygon, wing_depth, angle, max_width_m=main_w)
-
-        if main_rect is not None:
-            remaining_poly = buildable_polygon.difference(main_rect.buffer(3.0))
+        # L/U-form: hoveddel + vinkelrette floeyer
+        wing_d = bld_d
+        main_w = min(bld_w, target_footprint_m2 * 0.40 / max(wing_d, 1.0))
+        main = _find_inscribed_rect(buildable_polygon, wing_d, angle, max_width_m=main_w)
+        if main is not None:
+            remaining_poly = buildable_polygon.difference(main.buffer(3.0))
             wings: List[Polygon] = []
             for wing_angle in [angle + 90, angle - 90]:
-                wing_w = min(max_w * 0.7, target_footprint_m2 * 0.25 / max(wing_depth, 1.0))
-                wr = _find_inscribed_rect(remaining_poly, wing_depth, wing_angle, max_width_m=wing_w)
+                w_w = min(bld_w * 0.7, target_footprint_m2 * 0.22 / max(wing_d, 1.0))
+                wr = _find_inscribed_rect(remaining_poly, wing_d, wing_angle, max_width_m=w_w)
                 if wr is not None and wr.area > 40:
                     wings.append(wr)
                     remaining_poly = remaining_poly.difference(wr.buffer(2.0))
-            footprint = unary_union([main_rect] + wings).buffer(0) if wings else main_rect
+            footprint = unary_union([main] + wings).buffer(0) if wings else main
             placement_info['n_buildings'] = 1 + len(wings)
 
-    elif typology == 'Karré':
-        # Kvartalsstruktur med gaardrom — maks 50m side, 10-12m ringdybde
-        ring_depth = ideal_depth
-        outer_side = min(max_w, major * 0.6, minor * 0.65)
-
-        if outer_side >= 28.0 and minor >= 22.0:
-            # Ekte kvartal med gaardrom
-            outer = _find_inscribed_rect(buildable_polygon, outer_side, angle, max_width_m=outer_side)
-            if outer is not None and outer.area > 300:
-                # Gaardrom = outer minus indre rektangel
-                inset = ring_depth
-                inner = outer.buffer(-inset)
-                if inner is not None and not inner.is_empty and inner.area > 50:
-                    footprint = outer.difference(inner).buffer(0)
-                    placement_info['courtyard_area_m2'] = round(float(inner.area), 1)
-                else:
-                    footprint = outer  # Fallback: solid blokk
-                placement_info['n_buildings'] = max(1, len(split_geometry_to_polygons(footprint)))
-
-        if footprint is None or (footprint is not None and footprint.area < target_footprint_m2 * 0.3):
-            # Flere kvartal-blokker
-            n_needed = max(1, min(max_n, math.ceil(target_footprint_m2 / max(outer_side * outer_side * 0.5, 1.0))))
-            buildings = _place_multi_buildings(
-                buildable_polygon, outer_side * 0.7, angle,
-                spacing_m=spacing, max_buildings=n_needed,
-                max_footprint_m2=target_footprint_m2,
-                max_width_per_building=outer_side,
-            )
-            if buildings:
-                # Lag gaardrom i hver blokk
-                karre_parts = []
-                for bld in buildings:
-                    inner = bld.buffer(-ring_depth)
-                    if inner is not None and not inner.is_empty and inner.area > 30:
-                        karre_parts.append(bld.difference(inner).buffer(0))
-                    else:
-                        karre_parts.append(bld)
-                footprint = unary_union(karre_parts).buffer(0)
-                placement_info['n_buildings'] = len(karre_parts)
-
-    elif typology == 'Tårn':
-        # Smaa, hoeye bygninger — maks 25x25m
-        side = min(max_w, minor * 0.5)
-        side = max(16.0, side)
-        single_area = side * side
-        n_needed = max(1, min(max_n, math.ceil(target_footprint_m2 / max(single_area, 1.0))))
-
-        buildings = _place_multi_buildings(
-            buildable_polygon, side, angle,
-            spacing_m=spacing, max_buildings=n_needed,
-            max_footprint_m2=target_footprint_m2,
-            max_width_per_building=side * 1.1,
-        )
-        if buildings:
-            footprint = unary_union(buildings).buffer(0)
-            placement_info['n_buildings'] = len(buildings)
-
     elif typology == 'Podium + Tårn':
-        # Podium (stor, lav) + taarn (smaa, hoeye) plassert oppaa
-        podium_depth = ideal_depth
-        podium_w = min(max_w, target_footprint_m2 * 0.55 / max(podium_depth, 1.0))
-        podium = _find_inscribed_rect(buildable_polygon, podium_depth, angle, max_width_m=podium_w)
-
+        # Podium (stort, lavt) + taarn plassert paa toppen
+        podium_w = min(bld_w, target_footprint_m2 * 0.5 / max(bld_d, 1.0))
+        podium = _find_inscribed_rect(buildable_polygon, bld_d, angle, max_width_m=podium_w)
         if podium is not None:
-            # Taarn paa toppen: ~20x20m
-            tower_side = min(20.0, math.sqrt(podium.area) * 0.4)
-            pcx, pcy = podium.centroid.x, podium.centroid.y
-            half = tower_side / 2.0
-            tower_box = box(pcx - half, pcy - half, pcx + half, pcy + half)
-            tower_clipped = tower_box.intersection(podium).buffer(0)
-
-            if not tower_clipped.is_empty and tower_clipped.area > 80:
+            tower_side = min(18.0, math.sqrt(podium.area) * 0.35)
+            pcx2, pcy2 = podium.centroid.x, podium.centroid.y
+            tower = _make_oriented_rect(pcx2, pcy2, tower_side, tower_side, math.radians(angle))
+            tower_clipped = tower.intersection(podium).buffer(0)
+            if not tower_clipped.is_empty and tower_clipped.area > 60:
                 footprint = unary_union([podium, tower_clipped]).buffer(0)
                 placement_info['n_buildings'] = 2
             else:
                 footprint = podium
-                placement_info['n_buildings'] = 1
 
-    # Generell fallback
+    else:
+        # Lamell, Punkthus, Rekke, Taarn: 2D-grid plassering
+        single_area = bld_w * bld_d
+        n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+
+        buildings = _place_grid_buildings(
+            buildable_polygon, bld_w, bld_d, angle,
+            spacing_along=limits["sp_along"],
+            spacing_across=limits["sp_across"],
+            max_buildings=n_needed,
+            max_footprint_m2=target_footprint_m2,
+        )
+        if buildings:
+            footprint = unary_union(buildings).buffer(0)
+            placement_info['n_buildings'] = len(buildings)
+
+    # Fallback
     if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
-        for depth_try in [14.0, 12.0, 10.0, 8.0]:
-            if depth_try > minor * 0.85:
+        for d_try in [14.0, 12.0, 10.0, 8.0]:
+            if d_try > minor * 0.85:
                 continue
-            footprint = _find_inscribed_rect(buildable_polygon, depth_try, angle, max_width_m=min(max_w, major * 0.6))
+            footprint = _find_inscribed_rect(buildable_polygon, d_try, angle, max_width_m=min(bld_w, major * 0.6))
             if footprint is not None and not footprint.is_empty and float(getattr(footprint, 'area', 0.0)) >= 30:
                 break
 
     if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
-        scale_factor = math.sqrt(min(target_footprint_m2, area * 0.4) / max(area, 1.0))
-        footprint = affinity.scale(buildable_polygon, xfact=scale_factor, yfact=scale_factor, origin=buildable_polygon.centroid).buffer(0)
+        sf = math.sqrt(min(target_footprint_m2, area * 0.4) / max(area, 1.0))
+        footprint = affinity.scale(buildable_polygon, xfact=sf, yfact=sf, origin=buildable_polygon.centroid).buffer(0)
 
     fp_parts = split_geometry_to_polygons(footprint)
     if fp_parts:
-        fp_major = max(minimum_rotated_dims(part)[0] for part in fp_parts)
-        fp_minor = max(minimum_rotated_dims(part)[1] for part in fp_parts)
+        fp_major = max(minimum_rotated_dims(p)[0] for p in fp_parts)
+        fp_minor = max(minimum_rotated_dims(p)[1] for p in fp_parts)
     else:
         fp_major, fp_minor, _ = minimum_rotated_dims(largest_polygon(footprint) or buildable_polygon)
     placement_info['footprint_width_m'] = round(float(fp_major), 1)
