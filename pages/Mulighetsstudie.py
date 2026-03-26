@@ -2312,6 +2312,306 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
     components.html(html, height=height_px + 20, scrolling=False)
 
 
+def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int = 650) -> None:
+    """Interaktiv Three.js 3D-modell med orbit controls — dra, roter, zoom med musen."""
+    geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or []
+    buildable_coords = geometry.get('buildable_polygon_coords') or []
+    footprint_coords = geometry.get('footprint_polygon_coords') or []
+    neighbor_polys = geometry.get('neighbor_polygons', [])
+    massing_parts = geometry.get('massing_parts', []) or []
+
+    # Finn senterpunkt for aa sentrere modellen rundt origo
+    flat_site = flatten_coord_groups(site_coords)
+    if not flat_site:
+        st.warning("Ingen tomtegeometri tilgjengelig for 3D-visning.")
+        return
+    center_x = sum(p[0] for p in flat_site) / len(flat_site)
+    center_y = sum(p[1] for p in flat_site) / len(flat_site)
+    site_span = max(
+        max(p[0] for p in flat_site) - min(p[0] for p in flat_site),
+        max(p[1] for p in flat_site) - min(p[1] for p in flat_site),
+        1.0
+    )
+
+    def to_local(groups):
+        """Konverter coord_groups til lokale koordinater sentrert paa origo."""
+        out = []
+        for ring in groups:
+            local_ring = []
+            for pt in ring:
+                local_ring.append([round(pt[0] - center_x, 2), round(pt[1] - center_y, 2)])
+            out.append(local_ring)
+        return out
+
+    # Bygg JSON-payload for Three.js
+    scene_data = {
+        "site_span": round(site_span, 1),
+        "site_rings": to_local(flatten_coord_groups(site_coords) and [flatten_coord_groups(site_coords)] or []),
+        "buildable_rings": to_local(flatten_coord_groups(buildable_coords) and [flatten_coord_groups(buildable_coords)] or []),
+        "volumes": [],
+        "neighbors": [],
+    }
+
+    # Foreslatte volumer
+    if massing_parts:
+        for part in massing_parts:
+            pc = flatten_coord_groups(part.get('coords', []))
+            if not pc:
+                continue
+            color = part.get('color', [34, 197, 94, 200])
+            scene_data["volumes"].append({
+                "rings": to_local([pc]),
+                "height": float(part.get('height_m', option.building_height_m)),
+                "name": part.get('name', option.typology),
+                "color": [int(c) for c in color[:3]],
+                "floors": int(part.get('floors', option.floors)),
+            })
+    else:
+        fc = flatten_coord_groups(footprint_coords)
+        if fc:
+            scene_data["volumes"].append({
+                "rings": to_local([fc]),
+                "height": float(option.building_height_m),
+                "name": option.typology,
+                "color": [34, 197, 94],
+                "floors": int(option.floors),
+            })
+
+    # Nabobygg — bare de naermeste
+    view_r = site_span * 0.7
+    for nb in neighbor_polys:
+        nc = flatten_coord_groups(nb.get('coords', []))
+        if not nc:
+            continue
+        avg_x = sum(p[0] for p in nc) / len(nc) - center_x
+        avg_y = sum(p[1] for p in nc) / len(nc) - center_y
+        if math.hypot(avg_x, avg_y) > view_r:
+            continue
+        scene_data["neighbors"].append({
+            "rings": to_local([nc]),
+            "height": float(nb.get('height_m', 9.0)),
+        })
+
+    payload_json = json.dumps(scene_data, ensure_ascii=False)
+
+    html = """
+<!DOCTYPE html>
+<html><head><style>
+  body { margin: 0; overflow: hidden; background: #060d14; }
+  canvas { display: block; }
+  #info {
+    position: absolute; bottom: 12px; left: 16px; color: #b0bec5;
+    font: 12px/1.4 -apple-system, sans-serif; pointer-events: none;
+  }
+</style></head><body>
+<div id="info">__INFO__</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const D = __DATA__;
+const W = window.innerWidth, H = __HEIGHT__;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x060d14);
+scene.fog = new THREE.Fog(0x060d14, D.site_span * 1.5, D.site_span * 3.5);
+
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.5, D.site_span * 8);
+const camDist = D.site_span * 0.9;
+camera.position.set(camDist * 0.7, camDist * 0.5, camDist * 0.7);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// Lys
+const amb = new THREE.AmbientLight(0x8899aa, 0.6);
+scene.add(amb);
+const sun = new THREE.DirectionalLight(0xfff5e0, 1.0);
+sun.position.set(camDist * 0.5, camDist * 1.2, camDist * 0.8);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+const sh = D.site_span * 0.8;
+sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh;
+sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x99bbdd, 0.3);
+fill.position.set(-camDist * 0.5, camDist * 0.5, -camDist * 0.3);
+scene.add(fill);
+
+// Bakkeplan
+const groundGeo = new THREE.PlaneGeometry(D.site_span * 4, D.site_span * 4);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a2a3a, roughness: 0.95, metalness: 0.0 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.05;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Grid
+const grid = new THREE.GridHelper(D.site_span * 2.5, 30, 0x2a3a4a, 0x1a2530);
+grid.position.y = -0.02;
+scene.add(grid);
+
+function shapeFromRing(ring) {
+  const shape = new THREE.Shape();
+  ring.forEach((pt, i) => {
+    if (i === 0) shape.moveTo(pt[0], pt[1]);
+    else shape.lineTo(pt[0], pt[1]);
+  });
+  shape.closePath();
+  return shape;
+}
+
+function addFlatPoly(rings, color, opacity, y) {
+  (rings || []).forEach(ring => {
+    if (ring.length < 3) return;
+    const shape = shapeFromRing(ring);
+    const geo = new THREE.ShapeGeometry(shape);
+    const mat = new THREE.MeshStandardMaterial({
+      color: color, transparent: true, opacity: opacity,
+      roughness: 0.8, side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = y;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+  });
+}
+
+function addVolume(rings, height, color, opacity, castShadow) {
+  (rings || []).forEach(ring => {
+    if (ring.length < 3) return;
+    const shape = shapeFromRing(ring);
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: height, bevelEnabled: false
+    });
+    const mat = new THREE.MeshStandardMaterial({
+      color: color, roughness: 0.55, metalness: 0.08,
+      transparent: opacity < 1.0, opacity: opacity
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    // Kantlinjer
+    const edges = new THREE.EdgesGeometry(geo);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.15 });
+    const line = new THREE.LineSegments(edges, lineMat);
+    line.rotation.x = -Math.PI / 2;
+    scene.add(line);
+  });
+}
+
+// Tomtegrense
+addFlatPoly(D.site_rings, 0x38bdf8, 0.12, 0.01);
+
+// Byggefelt
+addFlatPoly(D.buildable_rings, 0x38bdf8, 0.06, 0.02);
+
+// Nabobygg
+D.neighbors.forEach(n => {
+  addVolume(n.rings, n.height, 0x8a8e99, 0.55, false);
+});
+
+// Foreslatte volumer
+D.volumes.forEach(v => {
+  const c = new THREE.Color(`rgb(${v.color[0]},${v.color[1]},${v.color[2]})`);
+  addVolume(v.rings, v.height, c, 0.92, true);
+});
+
+// --- ORBIT CONTROLS (manuell implementasjon) ---
+let isDown = false, isPan = false, prevX = 0, prevY = 0;
+let theta = Math.PI / 4, phi = Math.PI / 5, radius = camDist;
+const target = new THREE.Vector3(0, D.site_span * 0.06, 0);
+
+function updateCamera() {
+  camera.position.x = target.x + radius * Math.sin(phi) * Math.cos(theta);
+  camera.position.y = target.y + radius * Math.cos(phi);
+  camera.position.z = target.z + radius * Math.sin(phi) * Math.sin(theta);
+  camera.lookAt(target);
+}
+updateCamera();
+
+renderer.domElement.addEventListener('mousedown', e => {
+  isDown = true;
+  isPan = e.button === 2 || e.shiftKey;
+  prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('mouseup', () => { isDown = false; });
+window.addEventListener('mousemove', e => {
+  if (!isDown) return;
+  const dx = e.clientX - prevX, dy = e.clientY - prevY;
+  prevX = e.clientX; prevY = e.clientY;
+  if (isPan) {
+    const panSpeed = radius * 0.002;
+    const right = new THREE.Vector3();
+    right.crossVectors(camera.up, new THREE.Vector3().subVectors(target, camera.position)).normalize();
+    const up = camera.up.clone();
+    target.addScaledVector(right, dx * panSpeed);
+    target.addScaledVector(up, -dy * panSpeed);
+    updateCamera();
+  } else {
+    theta -= dx * 0.006;
+    phi = Math.max(0.1, Math.min(Math.PI / 2.1, phi + dy * 0.006));
+    updateCamera();
+  }
+});
+renderer.domElement.addEventListener('wheel', e => {
+  radius = Math.max(D.site_span * 0.15, Math.min(D.site_span * 4, radius * (1 + e.deltaY * 0.001)));
+  updateCamera();
+  e.preventDefault();
+}, { passive: false });
+
+// Touch-stotte
+let touchDist = 0;
+renderer.domElement.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    isDown = true; isPan = false;
+    prevX = e.touches[0].clientX; prevY = e.touches[0].clientY;
+  } else if (e.touches.length === 2) {
+    touchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  }
+  e.preventDefault();
+}, { passive: false });
+renderer.domElement.addEventListener('touchmove', e => {
+  if (e.touches.length === 1 && isDown) {
+    const dx = e.touches[0].clientX - prevX, dy = e.touches[0].clientY - prevY;
+    prevX = e.touches[0].clientX; prevY = e.touches[0].clientY;
+    theta -= dx * 0.006;
+    phi = Math.max(0.1, Math.min(Math.PI / 2.1, phi + dy * 0.006));
+    updateCamera();
+  } else if (e.touches.length === 2) {
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    radius = Math.max(D.site_span * 0.15, Math.min(D.site_span * 4, radius * (touchDist / Math.max(d, 1))));
+    touchDist = d;
+    updateCamera();
+  }
+  e.preventDefault();
+}, { passive: false });
+renderer.domElement.addEventListener('touchend', () => { isDown = false; });
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+</script></body></html>
+""".replace('__DATA__', payload_json).replace('__HEIGHT__', str(int(height_px))).replace(
+        '__INFO__',
+        f"{option.name} | {option.typology} | BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Dra for aa rotere, scroll for zoom, shift+dra for pan"
+    )
+
+    components.html(html, height=height_px + 10, scrolling=False)
+
+
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
     record = asdict(option)
     record["mix_counts"] = json.dumps(option.mix_counts, ensure_ascii=False)
@@ -3509,6 +3809,15 @@ if "analysis_results" in st.session_state:
             st.download_button('Last ned scene-payload (JSON)', json.dumps(scene_payload, ensure_ascii=False, indent=2), file_name=f'scene_{selected_option.typology.lower().replace(" ", "_")}.json', use_container_width=True)
         except Exception as exc:
             st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
+
+    # --- Interaktiv Three.js 3D-modell ---
+    st.markdown('### 3D Volummodell (interaktiv)')
+    sel3d_name = st.selectbox('Velg alternativ for 3D-visning', [opt.name for opt in options], index=0, key='sel3d')
+    sel3d_opt = next((opt for opt in options if opt.name == sel3d_name), options[0])
+    try:
+        render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650)
+    except Exception as exc:
+        st.caption(f'3D-modell kunne ikke rendres: {exc}')
 
     st.markdown("### Rapport")
     st.markdown(result["report_text"])
