@@ -372,7 +372,7 @@ def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
     return []
 
 def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
-    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket."""
+    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket (fallback)."""
     knr = get_kommunenummer(kommune_input)
     if not knr:
         return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Skriv f.eks. 'Oslo' eller '0301'."
@@ -384,58 +384,61 @@ def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, st
         gnr_clean = str(gnr).strip()
         bnr_clean = str(bnr).strip()
         
-        # Kartverkets WFS servere (fallback innebygd)
+        # Kartverkets WFS servere (oppdatert mars 2026)
         services = [
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-eiendomskart-teig", "matrikkelen-eiendomskart-teig:Teig"),
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-eiendomskart-teig", "Teig"),
             ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
-            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig")
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig"),
         ]
         
-        # VIKTIG: Ingen fnutter (') rundt tallene i CQL! GeoServer krasjer hvis Gnr (int) har fnutter.
-        cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
+        cql_variants = [
+            f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}",
+            f"KOMMUNENUMMER='{knr}' AND GARDSNUMMER={gnr_clean} AND BRUKSNUMMER={bnr_clean}",
+        ]
         
         success_for_this_parcel = False
         last_error = ""
 
         for url, layer in services:
-            if success_for_this_parcel: break
-            
-            params = {
-                "service": "WFS",
-                "version": "2.0.0",
-                "request": "GetFeature",
-                "typenames": layer,
-                "srsName": "EPSG:25833",
-                "outputFormat": "application/json",
-                "cql_filter": cql
-            }
-            
-            try:
-                resp = requests.get(url, params=params, timeout=12)
-                # Hvis application/json feiler, prøv bare "json"
-                if resp.status_code != 200:
-                    params["outputFormat"] = "json"
-                    resp = requests.get(url, params=params, timeout=12)
-
-                if resp.status_code == 200:
+            if success_for_this_parcel:
+                break
+            for cql in cql_variants:
+                if success_for_this_parcel:
+                    break
+                for out_fmt in ["application/json", "json"]:
+                    if success_for_this_parcel:
+                        break
+                    params = {
+                        "service": "WFS",
+                        "version": "2.0.0",
+                        "request": "GetFeature",
+                        "typenames": layer,
+                        "srsName": "EPSG:25833",
+                        "outputFormat": out_fmt,
+                        "cql_filter": cql,
+                    }
                     try:
-                        data = resp.json()
-                        features = extract_geojson_features(data)
-                        if features:
-                            for feature in features:
-                                geom = shape(feature["geometry"])
-                                poly = largest_polygon(geom)
-                                if poly:
-                                    polygoner.append(poly)
-                            success_for_this_parcel = True
-                            break
+                        resp = requests.get(url, params=params, timeout=12)
+                        if resp.status_code == 200:
+                            try:
+                                data = resp.json()
+                                features = extract_geojson_features(data)
+                                if features:
+                                    for feature in features:
+                                        geom = shape(feature["geometry"])
+                                        poly = largest_polygon(geom)
+                                        if poly:
+                                            polygoner.append(poly)
+                                    success_for_this_parcel = True
+                                else:
+                                    last_error = "Ingen polygon funnet."
+                            except json.JSONDecodeError:
+                                last_error = "Server returnerte ikke gyldig JSON."
                         else:
-                            last_error = "Ingen polygon funnet på dette Gnr/Bnr i matrikkelen."
-                    except json.JSONDecodeError:
-                        last_error = "Server returnerte ikke gyldig JSON."
-                else:
-                    last_error = f"API-feil (Kode: {resp.status_code})"
-            except Exception as e:
-                last_error = f"Nettverksfeil: {str(e)[:30]}"
+                            last_error = f"API-feil (Kode: {resp.status_code})"
+                    except Exception as e:
+                        last_error = f"Nettverksfeil: {str(e)[:30]}"
                 
         if not success_for_this_parcel:
             feil.append(f"{gnr}/{bnr} ({last_error})")
@@ -2262,7 +2265,7 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     max_height_m = r4.number_input("Maks hoyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
 with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
-    st.markdown("##### 🌍 1. Hent eiendom fra Kartverket automatisk (Anbefalt)")
+    st.markdown("##### 1. Hent eiendom automatisk (Geodata Online / Kartverket)")
     st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4). Motoren slår dem automatisk sammen til ett byggeklart polygon.")
     
     c_k, c_g = st.columns(2)
@@ -2274,27 +2277,50 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
         
     gnr_bnr_input = c_g.text_input("Gnr/Bnr (Bruk komma for flere)", value=default_gnr_bnr)
 
-    if st.button("Søk opp og lagre tomt fra Kartverket", type="secondary"):
+    if st.button("Sok opp og lagre tomt", type="secondary"):
         if not kommune_nr_input or not gnr_bnr_input:
             st.warning("Fyll inn både kommune og Gnr/Bnr.")
         else:
-            with st.spinner("Kobler til GeoNorge WFS og genererer polygon..."):
-                pairs = []
-                for part in gnr_bnr_input.split(","):
-                    if "/" in part:
-                        g, b = part.split("/")
-                        pairs.append((g.strip(), b.strip()))
-                
-                if pairs:
-                    poly, msg = hent_tomt_fra_geonorge(kommune_nr_input, pairs)
-                    if poly:
-                        st.session_state.auto_site_polygon = poly
-                        st.session_state.auto_site_msg = msg
-                        st.rerun()
-                    else:
-                        st.error(f"❌ {msg}")
+            pairs = []
+            for part in gnr_bnr_input.split(","):
+                if "/" in part:
+                    g, b = part.split("/")
+                    pairs.append((g.strip(), b.strip()))
+
+            if not pairs:
+                st.warning("Ugyldig format på Gnr/Bnr. Bruk formatet 15/2.")
+            else:
+                poly = None
+                msg = ""
+
+                # A) Prov Geodata Online forst (best datakvalitet)
+                if geodata_token_ok:
+                    with st.spinner("Soker via Geodata Online Matrikkel..."):
+                        try:
+                            knr = get_kommunenummer(kommune_nr_input) or kommune_nr_input.strip().zfill(4)
+                            poly, msg = gdo.fetch_tomt_polygon(knr, pairs, srid=25833)
+                        except Exception as exc:
+                            msg = f"Geodata Online feilet: {exc}"
+                            poly = None
+
+                # B) Fallback til GeoNorge WFS
+                if poly is None:
+                    with st.spinner("Geodata Online traff ikke — prover Kartverket WFS..."):
+                        try:
+                            poly, msg_gn = hent_tomt_fra_geonorge(kommune_nr_input, pairs)
+                            if poly:
+                                msg = msg_gn
+                            else:
+                                msg = f"Geodata Online: {msg} | Kartverket: {msg_gn}"
+                        except Exception as exc:
+                            msg = f"{msg} | Kartverket WFS feilet: {exc}"
+
+                if poly:
+                    st.session_state.auto_site_polygon = poly
+                    st.session_state.auto_site_msg = msg
+                    st.rerun()
                 else:
-                    st.warning("Ugyldig format på Gnr/Bnr. Bruk formatet 15/2.")
+                    st.error(f"Kunne ikke hente tomt: {msg}")
                     
     if st.session_state.get("auto_site_polygon") is not None:
         st.success(f"✅ **Klar til bruk!** {st.session_state.get('auto_site_msg')} (Nøyaktig areal via UTM33: ca {int(st.session_state.auto_site_polygon.area)} m²)")
