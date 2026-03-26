@@ -21,3 +21,11 @@ streamlit-image-coordinates>=0.4.0
 ifcopenshell
 ezdxf
 reportlab>=4.0.0
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+pydantic==2.10.3
+openpyxl==3.1.5
+xlrd==2.0.1
+reportlab==4.2.5
+pdfplumber>=0.10
