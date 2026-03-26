@@ -1670,6 +1670,125 @@ def rank_score(
     )
 
 
+def build_massing_parts(
+    footprint_polygon: Any,
+    typology: str,
+    floors: int,
+    floor_to_floor_m: float,
+) -> List[Dict[str, Any]]:
+    """
+    Bryt et fotavtrykk-polygon ned i volumdeler med individuelle hoyder.
+
+    Returnerer liste med dicts:
+        name, height_m, floors, color, coords (geometry_to_coord_groups-format)
+    """
+    parts: List[Dict[str, Any]] = []
+    components = split_geometry_to_polygons(footprint_polygon)
+    if not components:
+        return parts
+
+    full_height = max(floor_to_floor_m, 2.8) * max(floors, 1)
+
+    # Fargepalett per typologi
+    COLORS = {
+        "Lamell":        [34, 197, 94, 0.80],    # groenn
+        "Punkthus":      [56, 189, 248, 0.80],   # blaa
+        "Tun":           [168, 130, 240, 0.80],   # lilla
+        "Rekke":         [250, 180, 60, 0.80],    # gul/oransje
+        "Podium + Tårn": [220, 80, 120, 0.80],    # rosa/roed
+        "Karré":         [100, 200, 180, 0.80],   # teal
+        "Tårn":          [56, 140, 248, 0.80],    # moerkere blaa
+    }
+    base_color = COLORS.get(typology, [34, 197, 94, 0.80])
+
+    if typology == "Podium + Tårn" and len(components) >= 1:
+        # Stoerste del = podium (lavere), resten = taarn (full hoyde)
+        sorted_comps = sorted(components, key=lambda p: p.area, reverse=True)
+        podium_floors = max(2, min(floors - 2, int(floors * 0.35)))
+        podium_height = podium_floors * floor_to_floor_m
+        tower_floors = floors
+        tower_height = full_height
+
+        # Podium
+        podium = sorted_comps[0]
+        parts.append({
+            "name": "Podium",
+            "height_m": round(podium_height, 1),
+            "floors": podium_floors,
+            "color": [180, 180, 190, 0.65],
+            "coords": geometry_to_coord_groups(podium),
+        })
+
+        # Taarn(er): plasser i sentrum av podium, eller bruk oevrige deler
+        if len(sorted_comps) > 1:
+            for i, comp in enumerate(sorted_comps[1:], start=1):
+                parts.append({
+                    "name": f"Taarn {i}",
+                    "height_m": round(tower_height, 1),
+                    "floors": tower_floors,
+                    "color": COLORS.get("Tårn", base_color),
+                    "coords": geometry_to_coord_groups(comp),
+                })
+        else:
+            # Lag et taarn-fotavtrykk fra sentrum av podium
+            cx, cy = podium.centroid.x, podium.centroid.y
+            tower_side = min(18.0, math.sqrt(podium.area) * 0.45)
+            half = tower_side / 2.0
+            tower_box = box(cx - half, cy - half, cx + half, cy + half)
+            tower_clipped = tower_box.intersection(podium).buffer(0)
+            if not tower_clipped.is_empty and tower_clipped.area > 20:
+                parts.append({
+                    "name": "Taarn",
+                    "height_m": round(tower_height, 1),
+                    "floors": tower_floors,
+                    "color": COLORS.get("Tårn", base_color),
+                    "coords": geometry_to_coord_groups(tower_clipped),
+                })
+
+    elif typology == "Tun" and len(components) >= 2:
+        # Stoerste = hovedfloey (full hoyde), resten = sidefloyer (1 etasje lavere)
+        sorted_comps = sorted(components, key=lambda p: p.area, reverse=True)
+        for i, comp in enumerate(sorted_comps):
+            if i == 0:
+                part_floors = floors
+                part_name = "Hovedfloey"
+            else:
+                part_floors = max(2, floors - 1)
+                part_name = f"Sidefloey {i}"
+            parts.append({
+                "name": part_name,
+                "height_m": round(part_floors * floor_to_floor_m, 1),
+                "floors": part_floors,
+                "color": base_color if i == 0 else [base_color[0], base_color[1], base_color[2], 0.65],
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    elif typology == "Rekke":
+        # Alle enheter paa samme hoyde (typisk 2-3 etasjer)
+        for i, comp in enumerate(components):
+            parts.append({
+                "name": f"Enhet {i + 1}",
+                "height_m": round(full_height, 1),
+                "floors": floors,
+                "color": base_color,
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    else:
+        # Lamell, Punkthus, Karre, Taarn, og alt annet: hver komponent paa full hoyde
+        for i, comp in enumerate(components):
+            label = typology if len(components) == 1 else f"{typology} {i + 1}"
+            parts.append({
+                "name": label,
+                "height_m": round(full_height, 1),
+                "floors": floors,
+                "color": base_color,
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    return parts
+
+
 def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context: Optional[Dict[str, Any]] = None) -> List[OptionResult]:
     geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
     limits = derive_limits(site, geodata_context)
@@ -1957,10 +2076,19 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
             'rings': project_coord_groups_to_lonlat(neighbor.get('coords') or [], src_crs=src_crs),
         })
 
+    # Beregn senterpunkt i lon/lat for kameraposisjon
+    site_centroid_lonlat = [10.75, 59.91]  # fallback Oslo
+    all_site_pts = [pt for ring in site_rings for pt in ring]
+    if all_site_pts:
+        avg_lon = sum(pt[0] for pt in all_site_pts) / len(all_site_pts)
+        avg_lat = sum(pt[1] for pt in all_site_pts) / len(all_site_pts)
+        site_centroid_lonlat = [avg_lon, avg_lat]
+
     return {
         'site_name': option.name,
         'typology': option.typology,
         'scene_config': scene_config,
+        'site_centroid': site_centroid_lonlat,
         'site': {'rings': site_rings},
         'buildable': {'rings': buildable_rings},
         'footprint': {'rings': footprint_rings, 'height_m': float(option.building_height_m)},
@@ -2061,11 +2189,12 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
         });
       });
 
+      const centroid = payload.site_centroid || [10.75, 59.91];
       const view = new SceneView({
         container: 'viewDiv',
         map: map,
         qualityProfile: 'high',
-        camera: { position: { x: 10.75, y: 59.91, z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
+        camera: { position: { x: centroid[0], y: centroid[1], z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
         environment: { atmosphereEnabled: true, starsEnabled: false }
       });
       view.when(() => { if (extent) { view.goTo(extent.expand(1.8)).catch(() => {}); } });
