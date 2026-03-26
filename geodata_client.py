@@ -745,7 +745,7 @@ class GeodataOnlineClient:
             "point_count": int(len(samples)),
             "source": sample_payload.get("source", "Geodata Online Terrengmodell"),
             "service": service,
-            "sample_points": samples[:40],
+            "sample_points": samples,
         }
 
     def fetch_scene_config(self) -> Dict[str, Any]:
