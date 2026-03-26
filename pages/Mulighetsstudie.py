@@ -74,6 +74,13 @@ try:
 except ImportError:
     HAS_SITE_INTELLIGENCE = False
 
+try:
+    import ai_site_planner
+    HAS_AI_PLANNER = bool(ai_site_planner.is_available())
+except ImportError:
+    HAS_AI_PLANNER = False
+    ai_site_planner = None  # type: ignore[assignment]
+
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(
@@ -1878,7 +1885,76 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     for template in templates:
         typology = template["typology"]
         target_footprint = max_footprint * template["coverage"]
-        footprint_polygon, placement = create_typology_footprint(buildable_polygon, typology, target_footprint)
+
+        ai_result = None
+        ai_massing = None
+
+        # --- AI-DREVET PLASSERING (foerstevalg) ---
+        if HAS_AI_PLANNER and ai_site_planner is not None and ai_site_planner.is_available():
+            try:
+                ai_result = ai_site_planner.plan_site(
+                    site_polygon=site_polygon,
+                    buildable_polygon=buildable_polygon,
+                    typology=typology,
+                    neighbors=neighbors,
+                    terrain=terrain,
+                    site_intelligence=geodata_context.get('site_intelligence'),
+                    site_inputs={"latitude_deg": site.latitude_deg, "site_area_m2": site.site_area_m2},
+                    target_bta_m2=target_bta,
+                    max_floors=int(allowed_floors),
+                    max_height_m=site.max_height_m,
+                    max_bya_pct=site.max_bya_pct,
+                    floor_to_floor_m=site.floor_to_floor_m,
+                )
+                if ai_result and ai_result.get("buildings") and ai_result.get("footprint"):
+                    footprint_polygon = ai_result["footprint"]
+                    ai_buildings = ai_result["buildings"]
+                    footprint_area = float(footprint_polygon.area)
+                    placement = {
+                        "fit_scale": round(footprint_area / max(target_footprint, 1.0), 3),
+                        "containment_ratio": 1.0,
+                        "footprint_width_m": round(max(b.get("width_m", 0) for b in ai_buildings), 1),
+                        "footprint_depth_m": round(max(b.get("depth_m", 0) for b in ai_buildings), 1),
+                        "orientation_deg": round(ai_buildings[0].get("angle_deg", 0), 1) if ai_buildings else 0.0,
+                        "n_buildings": len(ai_buildings),
+                        "component_count": len(ai_buildings),
+                        "source": ai_result.get("source", "AI"),
+                    }
+                    # Bygg massing_parts fra AI-bygninger
+                    PART_COLORS = {
+                        "Lamell": [34, 197, 94, 200], "Punkthus": [56, 189, 248, 200],
+                        "Tun": [168, 130, 240, 200], "Rekke": [250, 180, 60, 200],
+                        "Karré": [100, 200, 180, 200], "Tårn": [56, 140, 248, 200],
+                        "Podium + Tårn": [220, 80, 120, 200],
+                    }
+                    base_color = PART_COLORS.get(typology, [34, 197, 94, 200])
+                    ai_massing = []
+                    for bld in ai_buildings:
+                        bld_poly = bld.get("polygon")
+                        if bld_poly is None:
+                            continue
+                        role = bld.get("role", "main")
+                        color = list(base_color)
+                        if role == "wing":
+                            color = [int(c * 0.8) for c in base_color[:3]] + [180]
+                        elif role == "tower":
+                            color = [56, 140, 248, 230]
+                        ai_massing.append({
+                            "name": bld.get("name", typology),
+                            "height_m": float(bld.get("height_m", site.floor_to_floor_m * 4)),
+                            "floors": int(bld.get("floors", 4)),
+                            "color": color,
+                            "coords": geometry_to_coord_groups(bld_poly),
+                        })
+                else:
+                    ai_result = None  # Fell through to geometric
+            except Exception:
+                ai_result = None
+
+        # --- GEOMETRISK FALLBACK ---
+        if ai_result is None or not ai_result.get("buildings"):
+            footprint_polygon, placement = create_typology_footprint(buildable_polygon, typology, target_footprint)
+
         footprint_area = float(footprint_polygon.area)
 
         floors_needed = math.ceil(target_bta / max(footprint_area, 1.0))
@@ -1972,7 +2048,8 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         winter_az = (solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) % 360.0
         winter_shadow_poly = build_shadow_polygon(footprint_polygon, height_m, winter_az, winter_alt, terrain)
 
-        massing_parts = build_massing_parts(footprint_polygon, typology, floors, site.floor_to_floor_m)
+        massing_parts = ai_massing if ai_massing else build_massing_parts(footprint_polygon, typology, floors, site.floor_to_floor_m)
+        ai_source = placement.get("source", "") if ai_result else ""
         geometry = {
             "site_polygon_coords": geometry_to_coord_groups(site_polygon),
             "buildable_polygon_coords": geometry_to_coord_groups(buildable_polygon),
@@ -1981,7 +2058,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             "neighbor_polygons": serialized_neighbors,
             "terrain_summary": terrain_summary,
             "placement": placement,
-            "site_source": geodata_context.get("source", "Tomt"),
+            "site_source": (ai_source + " + " if ai_source else "") + geodata_context.get("source", "Tomt"),
             "massing_parts": massing_parts,
             "component_count": len(split_geometry_to_polygons(footprint_polygon)),
         }
@@ -3722,7 +3799,8 @@ if run_analysis:
         except Exception as exc:
             site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
 
-    with st.spinner("Regner volumalternativer med faktisk tomtepolygon, naboer og terreng ..."):
+    ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
+    with st.spinner(f"Regner volumalternativer med faktisk tomtepolygon, naboer og terreng{ai_label} ..."):
         options = generate_options(site, mix_inputs, geodata_context=geodata_context)
 
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
