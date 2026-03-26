@@ -1975,8 +1975,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    canvas_w, canvas_h = 1000, 720
-    margin = 65
+    """
+    Isometrisk 3D-volumskisse.
+    Viser foreslatte volumer, nabobygg og tomtegrense fra skraa vinkel
+    slik at siktlinjer, hoyder og romlige forhold er tydelige.
+    """
+    canvas_w, canvas_h = 1100, 780
     img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
     font = ImageFont.load_default()
@@ -1987,158 +1991,159 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     shadow_coords = option.geometry.get('winter_shadow_polygon_coords') or []
     neighbor_polys = option.geometry.get('neighbor_polygons', [])
     massing_parts = option.geometry.get('massing_parts', []) or []
-    terrain_summary = option.geometry.get('terrain_summary', {})
 
-    # Samle koordinater for viewport — fokuser paa TOMTEN, ikke alle naboer
-    site_pts: List[List[float]] = flatten_coord_groups(site_coords)
+    # --- Isometrisk projeksjon ---
+    ISO_ANGLE = math.radians(30)
+    COS_A = math.cos(ISO_ANGLE)
+    SIN_A = math.sin(ISO_ANGLE)
+    Z_SCALE = 1.5
+
+    site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
         site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    sxs = [pt[0] for pt in site_pts]
-    sys_ = [pt[1] for pt in site_pts]
-    site_minx, site_maxx = min(sxs), max(sxs)
-    site_miny, site_maxy = min(sys_), max(sys_)
-    site_w = max(1.0, site_maxx - site_minx)
-    site_h = max(1.0, site_maxy - site_miny)
+    target_screen_span = min(canvas_w, canvas_h) * 0.48
+    pixel_scale = target_screen_span / site_span
 
-    # Buffer rundt tomten: 30% av stoerste dimensjon, nok til aa vise naernaboer
-    view_buf = max(site_w, site_h) * 0.30
-    minx = site_minx - view_buf
-    maxx = site_maxx + view_buf
-    miny = site_miny - view_buf
-    maxy = site_maxy + view_buf
-    data_w = max(1.0, maxx - minx)
-    data_h = max(1.0, maxy - miny)
-    draw_area_w = canvas_w - (2 * margin)
-    draw_area_h = canvas_h - margin - 90
-    scale = min(draw_area_w / data_w, draw_area_h / data_h) * 0.92
+    screen_cx = canvas_w * 0.50
+    screen_cy = canvas_h * 0.50
 
-    cx_data = (minx + maxx) / 2.0
-    cy_data = (miny + maxy) / 2.0
-    cx_canvas = margin + draw_area_w / 2.0
-    cy_canvas = 45 + draw_area_h / 2.0
+    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE * 0.01
+        return sx, sy
 
-    def map_pt(pt: List[float]) -> Tuple[float, float]:
-        px = cx_canvas + (pt[0] - cx_data) * scale
-        py = cy_canvas - (pt[1] - cy_data) * scale
-        return px, py
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
 
-    def draw_groups(groups: Any, fill: Tuple, outline: Tuple, width_px: int = 2) -> None:
-        if not groups:
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), c[3] if len(c)>3 else 255)
+
+    def lighten(c, a):
+        return (min(255,c[0]+a), min(255,c[1]+a), min(255,c[2]+a), c[3] if len(c)>3 else 255)
+
+    def draw_iso_flat(coords, z, fill, outline, w=1):
+        pts = iso_pts(coords, z)
+        if len(pts) < 3:
             return
-        if isinstance(groups, list) and groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
-            groups = [groups]
-        for coords in groups:
-            if not coords:
-                continue
-            pts = [map_pt(pt) for pt in coords]
-            if len(pts) < 3:
-                continue
-            draw.polygon(pts, fill=fill, outline=outline)
-            if width_px > 1:
-                draw.line(pts + [pts[0]], fill=outline, width=width_px)
+        draw.polygon(pts, fill=fill, outline=outline)
+        if w > 1:
+            draw.line(pts + [pts[0]], fill=outline, width=w)
 
-    def centroid_of_group(coords: List[List[float]]) -> Tuple[float, float]:
-        if not coords:
-            return (0, 0)
-        flat = flatten_coord_groups(coords) if isinstance(coords[0][0], list) else coords
-        if not flat:
-            return (0, 0)
-        ax = sum(p[0] for p in flat) / len(flat)
-        ay = sum(p[1] for p in flat) / len(flat)
-        return map_pt([ax, ay])
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return 0.0
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return 0.0
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
+        return sum(p[0] for p in coords)/len(coords) - cx + sum(p[1] for p in coords)/len(coords) - cy
 
-    # 1. TOMTEGRENSE (svak outline)
-    draw_groups(site_coords, fill=(13, 24, 36, 255), outline=(90, 110, 135, 200), width_px=2)
-
-    # 2. BYGGEFELT (lys blaa flate)
-    draw_groups(buildable_coords, fill=(56, 189, 248, 22), outline=(56, 189, 248, 180), width_px=2)
-
-    # 3. NABOBYGG — kun de som er innenfor viewporten, hoydeavhengig farge
-    visible_neighbors = []
-    for neighbor in neighbor_polys[:80]:
+    # --- Samle volumer for depth-sorting ---
+    volumes = []
+    view_radius = site_span * 0.65
+    for neighbor in neighbor_polys:
         ncoords = flatten_coord_groups(neighbor.get('coords', []))
         if not ncoords:
             continue
-        # Sjekk om noen punkter er innenfor viewport
-        in_view = any(minx <= pt[0] <= maxx and miny <= pt[1] <= maxy for pt in ncoords)
-        if in_view:
-            visible_neighbors.append(neighbor)
-
-    max_neighbor_h = max((float(n.get('height_m', 3)) for n in visible_neighbors), default=9.0)
-    for neighbor in visible_neighbors:
-        h = float(neighbor.get('height_m', 9.0))
-        intensity = int(80 + 80 * min(h / max(max_neighbor_h, 1.0), 1.0))
-        fill_c = (intensity, intensity + 5, intensity + 10, 100)
-        outline_c = (intensity + 40, intensity + 45, intensity + 50, 180)
-        draw_groups(neighbor.get('coords', []), fill=fill_c, outline=outline_c, width_px=1)
-
-    # 4. VINTERSKYGGE
-    draw_groups(shadow_coords, fill=(255, 213, 79, 35), outline=(255, 213, 79, 120), width_px=1)
-
-    # 5. MASSING PARTS — individuelle deler med typologifarger og hoyde-label
-    PART_COLORS = {
-        'Lamell':        (34, 197, 94),
-        'Punkthus':      (56, 189, 248),
-        'Tun':           (168, 130, 240),
-        'Rekke':         (250, 180, 60),
-        'Podium + Tårn': (220, 80, 120),
-        'Karré':         (100, 200, 180),
-        'Tårn':          (56, 140, 248),
-        'Podium':        (160, 160, 175),
-        'Hovedfloey':    (168, 130, 240),
-    }
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        volumes.append({'coords': ncoords, 'height_m': float(neighbor.get('height_m', 9.0)),
+                        'type': 'neighbor', 'depth': (avg_x - cx) + (avg_y - cy)})
 
     if massing_parts:
         for part in massing_parts:
-            part_name = part.get('name', '')
-            color_key = part_name.split(' ')[0] if part_name else option.typology
-            base = PART_COLORS.get(color_key, PART_COLORS.get(option.typology, (34, 197, 94)))
-            fill_c = (base[0], base[1], base[2], 200)
-            outline_c = (min(255, base[0] + 60), min(255, base[1] + 60), min(255, base[2] + 60), 255)
-            draw_groups(part.get('coords', []), fill=fill_c, outline=outline_c, width_px=2)
-
-            # Hoyde-label paa hver del
-            h = part.get('height_m', 0)
-            floors = part.get('floors', 0)
-            cx_part, cy_part = centroid_of_group(part.get('coords', []))
-            if cx_part > 0 and h > 0:
-                label = f"{floors}et/{h:.0f}m"
-                draw.text((cx_part - 18, cy_part - 6), label, fill=(255, 255, 255, 230), font=font)
+            pcoords = flatten_coord_groups(part.get('coords', []))
+            if not pcoords:
+                continue
+            avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+            avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+            volumes.append({'coords': pcoords, 'height_m': float(part.get('height_m', option.building_height_m)),
+                            'name': part.get('name', option.typology),
+                            'color': tuple(part.get('color', [34,197,94,200])),
+                            'floors': int(part.get('floors', option.floors)),
+                            'type': 'proposed', 'depth': (avg_x - cx) + (avg_y - cy)})
     else:
-        # Fallback: tegn fotavtrykket som en enkel blokk
-        draw_groups(footprint_coords, fill=(34, 197, 94, 200), outline=(220, 252, 231, 255), width_px=2)
+        fcoords = flatten_coord_groups(footprint_coords)
+        if fcoords:
+            avg_x = sum(p[0] for p in fcoords) / len(fcoords)
+            avg_y = sum(p[1] for p in fcoords) / len(fcoords)
+            volumes.append({'coords': fcoords, 'height_m': option.building_height_m,
+                            'name': option.typology, 'color': (34,197,94,200),
+                            'floors': option.floors, 'type': 'proposed',
+                            'depth': (avg_x - cx) + (avg_y - cy)})
 
-    # 6. NORDPIL
-    arrow_x = canvas_w - 60
-    arrow_y = 55
-    draw.line((arrow_x, arrow_y + 25, arrow_x, arrow_y - 18), fill=(245, 247, 251, 220), width=3)
-    draw.polygon([(arrow_x, arrow_y - 28), (arrow_x - 8, arrow_y - 8), (arrow_x + 8, arrow_y - 8)], fill=(245, 247, 251, 220))
-    draw.text((arrow_x - 5, arrow_y + 30), 'N', fill=(245, 247, 251, 200), font=font)
+    volumes.sort(key=lambda v: v['depth'])
 
-    # 7. TEKST-PANEL
-    placement = option.geometry.get('placement', {})
+    # --- TEGNING ---
+    # Himmelgradient
+    for row in range(canvas_h // 2):
+        t = row / (canvas_h / 2.0)
+        draw.line([(0, row), (canvas_w, row)], fill=(int(6+t*10), int(17+t*18), int(26+t*28), 255))
+
+    # Bakkeplan: tomt
+    draw_iso_flat(flatten_coord_groups(site_coords), 0.0, (15,28,42,200), (80,100,130,180), 2)
+    draw_iso_flat(flatten_coord_groups(buildable_coords), 0.0, (56,189,248,15), (56,189,248,80), 1)
+    draw_iso_flat(flatten_coord_groups(shadow_coords), 0.0, (255,213,79,20), (255,213,79,50), 1)
+
+    # Volumer
+    for vol in volumes:
+        coords, h = vol['coords'], vol['height_m']
+        if vol['type'] == 'neighbor':
+            alpha = min(180, int(80 + h * 6))
+            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(220,alpha+30)), 1)
+        else:
+            base = vol.get('color', (34,197,94,200))
+            if len(base) < 4:
+                base = (base[0], base[1], base[2], 220)
+            draw_extruded(coords, h, (base[0],base[1],base[2],230), darken(base, 0.72), lighten(base, 50), 2)
+            # Hoyde-label
+            avg_x = sum(p[0] for p in coords) / len(coords)
+            avg_y = sum(p[1] for p in coords) / len(coords)
+            lx, ly = iso_project(avg_x, avg_y, h * 1.08)
+            floors = vol.get('floors', 0)
+            draw.text((lx - 22, ly - 10), f"{floors}et / {h:.0f}m", fill=(255,255,255,240), font=font)
+
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay+22, ax, ay-16), fill=(245,247,251,200), width=3)
+    draw.polygon([(ax, ay-25), (ax-7, ay-7), (ax+7, ay-7)], fill=(245,247,251,200))
+    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font)
+
+    # Infopanel
+    yt = canvas_h - 75
+    draw.rectangle([(0, yt-4), (canvas_w, canvas_h)], fill=(6,17,26,230))
     n_parts = len(massing_parts)
-    y_text = canvas_h - 82
-
-    draw.rectangle([(0, y_text - 6), (canvas_w, canvas_h)], fill=(6, 17, 26, 220))
-
-    title_text = f"{option.name} | {option.typology}"
+    title = f"{option.name} | {option.typology}"
     if n_parts > 1:
-        title_text += f" | {n_parts} deler"
-    draw.text((margin, y_text), title_text, fill=(245, 247, 251, 255), font=font)
-
-    draw.text((margin, y_text + 16),
-              f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} etasjer | Hoyde {option.building_height_m:.1f} m",
-              fill=(200, 211, 223, 255), font=font)
-
-    draw.text((margin, y_text + 32),
-              f"Tomt {option.geometry.get('site_source', '-')} | Byggefelt {option.buildable_area_m2:.0f} m2 | Naboer {option.neighbor_count} | Sol {option.solar_score:.0f}/100",
-              fill=(159, 176, 195, 255), font=font)
-
-    draw.text((margin, y_text + 48),
-              f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Solbelyst uteareal {option.sunlit_open_space_pct:.0f}% | Vinterskygge {option.winter_noon_shadow_m:.0f} m",
-              fill=(130, 145, 165, 255), font=font)
+        title += f" | {n_parts} deler"
+    draw.text((30, yt), title, fill=(245,247,251,255), font=font)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Hoyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font)
+    draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font)
+    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font)
 
     return img.convert('RGB')
 
