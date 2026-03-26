@@ -57,13 +57,13 @@ GEOCACHE_TERRENGSKYGGE_MS = "Geocache_UTM33_EUREF89/GeocacheTerrengskygge/MapSer
 GEOCACHE_TERRENG_IS = "Geocache_UTM33_EUREF89/GeocacheTerreng/ImageServer"
 GEOMAP_BILDER_NYESTE_IS = "Geomap_UTM33_EUREF89/GeomapBilderNyeste/ImageServer"
 
-# Thematic / analysis services
+# Thematic / analysis services (VERIFIED against bolignorge2 account 2026-01-24)
 GEOMAP_DOKPLAN_MS = "Geomap_UTM33_EUREF89/GeomapDOKPlan/MapServer"
-GEOMAP_REGULERINGSPLAN_MS = "Geomap_UTM33_EUREF89/GeomapReguleringsplan/MapServer"
-GEOMAP_UTBYGGER_MS = "Geomap_UTM33_EUREF89/GeomapUtbygger/MapServer"
-GEOMAP_SAMFERDSEL_MS = "Geomap_UTM33_EUREF89/GeomapSamferdsel/MapServer"
+GEOMAP_REGULERINGSPLAN_MS = "Geomap_UTM33_EUREF89/GeomapDOKPlan/MapServer"  # NB: GeomapReguleringsplan finnes IKKE - bruk DOKPlan
+GEOMAP_UTBYGGER_MS = "Geomap_UTM33_EUREF89/GeomapDOKAnnen/MapServer"  # NB: GeomapUtbygger finnes IKKE - bruk DOKAnnen som fallback
+GEOMAP_SAMFERDSEL_MS = "Geomap_UTM33_EUREF89/GeomapDOKSamferdsel/MapServer"  # NB: het GeomapDOKSamferdsel, ikke GeomapSamferdsel
 GEOMAP_DOKGEOLOGI_MS = "Geomap_UTM33_EUREF89/GeomapDOKGeologi/MapServer"
-GEOMAP_DTM_IS = "Geomap_UTM33_EUREF89/GeomapDTM/ImageServer"
+GEOMAP_DTM_IS = "Geocache_UTM33_EUREF89/GeocacheTerreng/ImageServer"  # NB: GeomapDTM finnes IKKE - bruk GeocacheTerreng
 
 ADDRESS_GEOCODER = f"{PROXY_BASE}/Adresse/GeocodeServer"
 DEFAULT_FLOOR_HEIGHT = 3.0
