@@ -110,66 +110,195 @@ def _build_prompt(positions, typology, target_bta_m2, max_floors, max_height_m, 
                   floor_to_floor_m, site_area_m2, buildable_area_m2, latitude_deg,
                   terrain, site_intelligence, neighbor_summary):
     max_footprint = buildable_area_m2 * (max_bya_pct / 100.0)
-    typo_rules = {
-        "Lamell": {"desc": "Langstrakte boligblokker", "w": "35-55", "d": "12-14", "sp": 18,
-                   "pattern": "parallelle rader, langfasade mot sor/sorvest",
-                   "tip": "Varier lengde 35-55m, forskyv annenhver rad 8-15m"},
-        "Punkthus": {"desc": "Kompakte frittstaende blokker", "w": "16-22", "d": "16-22", "sp": 22,
-                     "pattern": "spredt grid med siktlinjer",
-                     "tip": "Roter annethvert 15-30 grader, varier hoyde"},
-        "Karré": {"desc": "Kvartalsstruktur med gaardrom", "w": "38-50", "d": "38-50", "sp": 20,
-                  "pattern": "kvartaler med aapent gaardrom mot sorvest",
-                  "tip": "courtyard=true, ring_depth=11. Varier stoerrelse"},
-        "Tårn": {"desc": "Hoeye slanke taarn", "w": "18-25", "d": "18-25", "sp": 28,
-                 "pattern": "spredt, varier hoyde", "tip": "Hoyest sorvest, lavest nordost"},
-        "Rekke": {"desc": "Rekkehusrader", "w": "40-60", "d": "9-11", "sp": 14,
-                  "pattern": "parallelle rader ost-vest", "tip": "14-18m mellomrom, sorfasade"},
-        "Tun": {"desc": "L/U-form med skjermet uterom", "w": "30-45", "d": "10-12", "sp": 14,
-                "pattern": "hovedbygg + floeyer, aapent mot sor",
-                "tip": "2-3 tungrupper, set role=main og role=wing"},
-        "Podium + Tårn": {"desc": "Lavt podium med hoyt taarn", "w": "40-55", "d": "18-25", "sp": 22,
-                          "pattern": "podium 2-3et + taarn full hoyde",
-                          "tip": "role=main paa podium, role=tower paa taarn"},
-    }
-    r = typo_rules.get(typology, typo_rules["Lamell"])
     fl_est = min(max_floors, max(2, int(target_bta_m2 / max(max_footprint, 1.0)) + 1))
 
+    # Sorter posisjoner etter plassering for aa gi Claude romlig oversikt
+    # Grupper i NORD/SOR/OST/VEST soner
+    if positions:
+        xs = [p['x'] for p in positions]
+        ys = [p['y'] for p in positions]
+        mid_x = (min(xs) + max(xs)) / 2
+        mid_y = (min(ys) + max(ys)) / 2
+        site_w = max(xs) - min(xs)
+        site_h = max(ys) - min(ys)
+
+        zones = {"nordvest": [], "nordost": [], "sorvest": [], "sorost": [], "sentrum": []}
+        for p in positions:
+            dx = p['x'] - mid_x
+            dy = p['y'] - mid_y
+            if abs(dx) < site_w * 0.15 and abs(dy) < site_h * 0.15:
+                zones["sentrum"].append(p)
+            elif dy > 0 and dx < 0:
+                zones["nordvest"].append(p)
+            elif dy > 0 and dx >= 0:
+                zones["nordost"].append(p)
+            elif dy <= 0 and dx < 0:
+                zones["sorvest"].append(p)
+            else:
+                zones["sorost"].append(p)
+    else:
+        zones = {}
+
+    zone_summary = []
+    for name, pts in zones.items():
+        if pts:
+            best = max(pts, key=lambda p: p.get('rank_score', 0))
+            zone_summary.append(f"  {name.upper()}: {len(pts)} pos, beste={best['id']} sol={best['sol_score']:.0f} ({best['x']:.0f},{best['y']:.0f})")
+
     pos_lines = []
-    for p in positions[:50]:
+    for p in positions[:60]:
         pos_lines.append(f"  {p['id']}: ({p['x']:.0f},{p['y']:.0f}) sol={p['sol_score']:.0f} nabo={p['nearest_neighbor_m']:.0f}m kant={p['edge_distance_m']:.0f}m h={p['elevation_m']:.1f}m")
 
     terrain_text = "Flatt"
     if terrain and terrain.get('point_count', 0) > 0:
         terrain_text = f"Fall {terrain.get('slope_pct', 0):.1f}%, relieff {terrain.get('relief_m', 0):.1f}m"
 
-    courtyard_example = ',"courtyard":true,"ring_depth":11' if typology == "Karré" else ''
+    courtyard_json = ',"courtyard":true,"ring_depth":11' if typology == "Karré" else ''
 
-    return f"""Du er en prisbelonnet norsk arkitekt som planlegger {typology.lower()}-bebyggelse.
+    # DETALJERTE BEBYGGELSESMONSTER per typologi
+    typo_master = {
+        "Punkthus": f"""
+BEBYGGELSESKONSEPT: PUNKTHUS-PARK
+Tenk Fornebu/Loeren: frittstaende punkthus i et parkmessig landskap.
 
-TOMT: {site_area_m2:.0f}m2, byggbart {buildable_area_m2:.0f}m2
-REGULERING: BYA {max_bya_pct:.0f}% (maks {max_footprint:.0f}m2 fotavtrykk), {max_floors} etasjer, {max_height_m:.0f}m
-MAL: {target_bta_m2:.0f}m2 BTA (~{fl_est} etasjer)
-TERRENG: {terrain_text} | BREDDEGRAD: {latitude_deg:.1f} (lav sol, sorfasade kritisk)
+ORGANISERING:
+1. Plasser punkthusene langs tomtens YTTERKANT, 10-15m fra tomtegrensen
+   — dette gjor naboer minst mulig usjenert og frigjor tomtens INDRE til park
+2. Hvert punkthus: 22-25m x 22-25m, 8-12m avstand mellom paa sidene
+3. SENTRUM av tomten holdes HELT AAPENT som stort felles parkdrag/lekeomraade
+4. Hovedtorg/motepass der flest siktlinjer moetes — gjerne litt forskjevet fra sentrum mot sor
+5. Varier hoyde: lavest mot eksisterende smaabebyggelse (3-4 et), hoyest der det er mest aapent ({fl_est} et)
+6. Roter annethvert punkthus 10-20 grader for aa bryte opp og skape diagonale siktlinjer
+7. La det vaere 25-35m AAPENT mellom husgrupper paa motsatte sider — dette er parkdraget
+8. Plasser {max(4, min(9, int(target_bta_m2 / (22*22*fl_est))))} punkthus
+
+KVALITETSSJEKK: Hvis du tegner en rett linje fra hvert hus, skal den treffe park/uterom — IKKE en annen bygning.""",
+
+        "Karré": f"""
+BEBYGGELSESKONSEPT: KVARTALSBY
+Tenk Grunerloekka/Nydalen: tydelige kvartaler med gaardrom som private uterom.
+
+ORGANISERING:
+1. Del tomten i 2-4 KVARTALER, hvert 40-50m x 40-50m ytre maal
+2. Hvert kvartal har et GAARDROM paa 20-28m x 20-28m i midten (courtyard=true, ring_depth=11)
+3. Gaardrommet aapnes mot SORVEST (klipp bort sorvest-floyen eller gjor den lavere)
+4. Mellom kvartalene: 18-22m gate/allmenning
+5. Kvartals-aksene boer foelge tomtens hovedretning
+6. Varier kvartalene: noen 42x42m, noen 48x46m — IKKE identiske kopier
+7. Hoyeste punkt (gesims) paa nordost-floyen i hvert kvartal, lavest paa sorvest
+8. Sett courtyard=true og ring_depth=11 paa ALLE kvartalene
+9. Plasser {max(2, min(4, int(target_bta_m2 / (1500*fl_est)) + 1))} kvartaler
+
+KVALITETSSJEKK: Hvert kvartal skal ha et tydelig gaardrom. Mellomrommene mellom kvartaler skal fungere som gater/allmenninger.""",
+
+        "Lamell": f"""
+BEBYGGELSESKONSEPT: LAMELLBY
+Tenk Romsaas/klassisk skandinavisk: parallelle lameller med sol og luft.
+
+ORGANISERING:
+1. Plasser lamellene i PARALLELLE RADER orientert sor-sorvest (langfasade ~195 grader)
+2. 20-25m mellom parallelle rader (TEK17 dagslys + privatliv)
+3. Hver lamell: 35-50m lang, 12-14m dyp — VARIER lengden
+4. FORSKYV annenhver rad 10-15m sidelengs for aa bryte monotoni og skape L-formede uterom
+5. Radene skal dekke HELE tomtens utstrekning fra nord til sor
+6. Mellom to lameller i samme rad: 8-12m aapning (portrom/gjennomgang)
+7. Skap et hierarki: to-tre lameller rammer inn et "naabolagstorg" (30x40m aapent felt)
+8. Lavest mot eksisterende smaabebyggelse, hoyest der tomten er mest aapen
+9. Plasser {max(4, min(10, int(target_bta_m2 / (45*13*fl_est)) + 1))} lameller
+
+KVALITETSSJEKK: Alle leiligheter skal ha solfasade. Mellomrommene skal vaere brede nok til at solen naar bakken kl 12 vaarjevndoegn.""",
+
+        "Rekke": f"""
+BEBYGGELSESKONSEPT: REKKEHUS-LANDSBY
+Tenk Svartlamoen/Lillestroem: tette rader med private hager og felles groentdrag.
+
+ORGANISERING:
+1. Parallelle rader orientert OST-VEST slik at alle faar sorfasade
+2. Hver rad: 40-55m lang, 9-11m dyp
+3. 16-20m mellom rader (plass til privat hage + gangsti)
+4. Spre radene over HELE tomtens nord-sor-utstrekning
+5. Felles groentdrag/lekeomraade sentralt — bryt opp en rad i midten for aa lage en "landsbyplass"
+6. Laveste rader (2 et) naermest naboer, hoyere (3-4 et) mot midten
+7. Plasser {max(5, min(12, int(target_bta_m2 / (50*10*3)) + 1))} rader
+
+KVALITETSSJEKK: Enhver rad skal ha direkte soltilgang uten aa bli skyggelagt av raden foran.""",
+
+        "Tun": f"""
+BEBYGGELSESKONSEPT: TUNBEBYGGELSE
+Tenk tradisjonelt norsk tun: bygninger rundt et skjermet uterom.
+
+ORGANISERING:
+1. Del tomten i 2-3 TUN-GRUPPER, hver bestaaende av:
+   - 1 HOVEDBYGG (35-45m langt, 10-12m dypt, role="main") som "rygg" mot nord/ost
+   - 1-2 SIDEFLOYER (20-30m lange, role="wing") vinkelrett, danner U-form
+2. Tunet (det innrammede uterommet) skal AAPNE MOT SOR/SORVEST for maks sol
+3. Hvert tun-rom: ca 25-35m x 25-35m — stort nok for lek og opphold
+4. Mellom tun-gruppene: 20-30m med felles groentstruktur
+5. Hovedbygget typisk {fl_est} etasjer, sidefloyer {max(2, fl_est-1)}-{fl_est-1} etasjer (trapper ned mot solen)
+6. Plasser {max(2, min(4, int(target_bta_m2 / (3000*fl_est/4)) + 1))} tungrupper
+
+KVALITETSSJEKK: Hvert tun skal ha en tydelig "innside" (skjermet, solrikt) og "utside" (mot gate/nabo).""",
+
+        "Tårn": f"""
+BEBYGGELSESKONSEPT: TAARNLANDSKAP
+Tenk Barcode/Bjoervika: vertikale volumer med maksimal avstand og sikt.
+
+ORGANISERING:
+1. Plasser taarnene i et AAPENT GRID med minimum 30-40m mellom hvert taarn
+2. Hvert taarn: 20-25m x 20-25m fotavtrykk
+3. Spread taarnene langs tomtens ytterkant for aa frigjore sentrum til torg/park
+4. VARIER HOYDE DRAMATISK: fra {max(4, fl_est-4)} til {fl_est} etasjer
+5. Hoyeste taarn i sorvest (minst skygge), laveste i nordost
+6. Mellom taarnene: aapent terreng med siktlinjer mot omgivelsene
+7. Sentralt felles torg/park der flest taarn har "adresse" mot
+8. Plasser {max(3, min(6, int(target_bta_m2 / (22*22*fl_est)) + 1))} taarn
+
+KVALITETSSJEKK: Fra hvert taarn skal du kunne se minst 2 andre taarn OG parken/torget.""",
+
+        "Podium + Tårn": f"""
+BEBYGGELSESKONSEPT: URBANT PODIUM MED TAARN
+Tenk Bjoervika/Vulkan: lavt, aktivt sokkelplan med vertikale aksentbygg.
+
+ORGANISERING:
+1. 1-2 PODIER (40-55m x 18-25m, 2-3 etasjer, role="main") danner et sammenhengende gategrep
+2. 1-2 TAARN (16-20m x 16-20m, {fl_est} etasjer, role="tower") plassert OPPAA podiet
+3. Podiet skaper urban fasade mot gate/adkomst
+4. Taarnet plasseres i podiumets mest eksponerte hjorne (sorvest for sikt, nordost for aa unngaa skygge)
+5. Mellom podier: offentlig passasje/smug (8-12m) med gjennomgang
+6. Takhage paa podiet rundt taarnet
+7. Plasser {max(1, min(3, int(target_bta_m2 / (4000*fl_est/5)) + 1))} podium+taarn-kombinasjoner
+
+KVALITETSSJEKK: Podiet skal skape et "gaterom", taarnet skal vaere et landemerke synlig fra avstand.""",
+    }
+
+    concept = typo_master.get(typology, typo_master["Lamell"])
+
+    return f"""Du er Norges fremste arkitekt for boligutvikling og volumstudier. Du har vunnet Statens byggeskikkpris
+og er kjent for aa skape bebyggelse der bygninger og uterom er LIKE VIKTIGE.
+
+TOMT: {site_area_m2:.0f}m2 totalt, {buildable_area_m2:.0f}m2 byggbart
+REGULERING: BYA {max_bya_pct:.0f}% (maks {max_footprint:.0f}m2 samlet fotavtrykk), {max_floors} et, {max_height_m:.0f}m
+MAL: {target_bta_m2:.0f}m2 BTA | Etasjehoyde: {floor_to_floor_m}m | Estimert ~{fl_est} etasjer
+TERRENG: {terrain_text} | BREDDEGRAD: {latitude_deg:.1f} (lav sol, sorfasade er livsnoedvendig)
 {neighbor_summary}
-Bygg PÅ tomten rives — nabobygg UTENFOR tomten er uroerlige.
+Bygg PÅ tomten rives. Nabobygg utenfor tomtegrensen er UROERLIGE.
 
-TYPOLOGI: {typology.upper()} — {r['desc']}
-  Dimensjoner: {r['w']}m x {r['d']}m, min avstand {r['sp']}m
-  Monster: {r['pattern']}
-  Tips: {r['tip']}
+SONEOVERSIKT (for aa forstaa tomtens romlige struktur):
+{chr(10).join(zone_summary) if zone_summary else "  Ingen soner beregnet"}
+{concept}
 
-FORHANDS-EVALUERTE POSISJONER (bruk disse koordinatene +/- 15m):
+TILGJENGELIGE POSISJONER (velg fra disse, juster +/- 15m):
 {chr(10).join(pos_lines)}
 
-OPPGAVE: Velg posisjoner og plasser bygninger. Tenk som en arkitekt:
-- SKAP UTEROM: bygninger skal ramme inn torg, gaardrom, lekeplasser — ikke staa tilfeldig
-- SPREDNING: bruk HELE tomten, ikke klump i midten
-- HOYDE-VARIASJON: {max(2, fl_est-2)}-{fl_est} etasjer, hoyest sorvest, lavest nordost
-- ORIENTERING: langfasade mot sor/sorvest (ca 195-210 grader) for dagslys
-- SKALA: respekter nabobebyggelsens hoyde og avstand
+ABSOLUTTE REGLER:
+1. cx/cy SKAL vaere innenfor det byggbare omraadet (bruk posisjonslisten)
+2. Maks samlet fotavtrykk: {max_footprint:.0f}m2
+3. Maks {max_floors} etasjer / {max_height_m:.0f}m per bygg
+4. Nabobygg utenfor tomten SKAL respekteres — plasser nye bygg min 8m fra tomtegrense
+5. UTEROMMET ER LIKE VIKTIG SOM BYGNINGENE — vis at du har tenkt paa det i "notes"
 
-Returner BARE JSON-array, ingen annen tekst:
-[{{"pos_id":"P005","name":"A","cx":0.0,"cy":0.0,"width":48,"depth":14,"angle_deg":195,"floors":{fl_est},"role":"main"{courtyard_example},"notes":"..."}}]
+Returner BARE JSON-array. Ingen annen tekst.
+[{{"pos_id":"P005","name":"Lamell A","cx":0.0,"cy":0.0,"width":48,"depth":14,"angle_deg":195,"floors":{fl_est},"role":"main"{courtyard_json},"notes":"Rammer inn nordkant av naabolagstorget"}}]
 """
 
 
