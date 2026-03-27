@@ -1,1008 +1,742 @@
 """
-ai_site_planner_v2.py — Multi-Pass AI Site Planner for Builtly Mulighetsstudie
+AI-drevet tomteplanlegger for Builtly — v3 (multi-pass).
 
-Architecture:
-  Pass 1: Claude generates a high-level bebyggelseskonsept (concept)
-  Pass 2: Python places buildings deterministically based on the concept
-  Pass 3: Claude refines — adjusts rotation, height variation, courtyard openings, solar
-  Pass 4: Python validates everything and auto-fixes violations
+ARKITEKTUR (4-pass):
+  Pass 1: Claude velger bebyggelseskonsept basert på typologi, tomt og kontekst
+  Pass 2: Python plasserer bygninger deterministisk med Shapely-geometri
+  Pass 3: Claude finjusterer — rotasjon, høydevariasjon, gårdsrom-åpninger
+  Pass 4: Python validerer og auto-fikser alt (containment, spacing, BYA, overlap)
 
-Author: Builtly AS
+Eksporterer plan_site() med identisk signatur og retur-format som v2.
 """
 
-import json
-import math
-import logging
-from typing import Optional
-from dataclasses import dataclass, field, asdict
-
-import anthropic
-from shapely.geometry import Polygon, MultiPolygon, box, Point
-from shapely.ops import unary_union
-from shapely.affinity import rotate, translate
+from __future__ import annotations
+import json, math, os, logging
+from typing import Any, Dict, List, Optional, Tuple
+import requests
 
 logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────
-# Data models
-# ──────────────────────────────────────────────
+try:
+    from shapely.geometry import Polygon, box as shapely_box, Point, MultiPolygon
+    from shapely import affinity
+    from shapely.ops import unary_union
+    HAS_SHAPELY = True
+except Exception:
+    HAS_SHAPELY = False
 
-@dataclass
-class BuildingFootprint:
-    """A single building placement."""
-    id: str
-    typology: str          # "blokk", "rekkehus", "punkthus", "lamell", "naering"
-    x: float               # center x in meters (local coord)
-    y: float               # center y in meters (local coord)
-    width: float           # meters (along x-axis before rotation)
-    depth: float           # meters (along y-axis before rotation)
-    height: float          # meters
-    floors: int
-    rotation_deg: float    # degrees CCW from east
-    units: int = 0         # estimated dwelling units
-    bra_m2: float = 0.0
-    label: str = ""
-
-    @property
-    def footprint_m2(self) -> float:
-        return self.width * self.depth
-
-    @property
-    def polygon(self) -> Polygon:
-        """Return the rotated rectangle as a Shapely polygon."""
-        b = box(-self.width / 2, -self.depth / 2, self.width / 2, self.depth / 2)
-        b = rotate(b, self.rotation_deg, origin=(0, 0))
-        b = translate(b, self.x, self.y)
-        return b
-
-
-@dataclass
-class SiteConcept:
-    """Output of Pass 1 — the AI-generated concept."""
-    strategy: str                    # e.g. "perimeter block with central courtyard"
-    zones: list                      # list of zone dicts
-    buildings: list                  # list of building type specs
-    total_target_bya_pct: float
-    max_floors: int
-    notes: str = ""
-
-
-@dataclass
-class PlacementResult:
-    """Output of Pass 2/3/4 — validated building placements."""
-    buildings: list                  # list of BuildingFootprint
-    bya_m2: float
-    bya_pct: float
-    bra_total: float
-    units_total: int
-    coverage_score: float            # 0-1, how well the plot is utilized
-    validation_errors: list = field(default_factory=list)
-    validation_warnings: list = field(default_factory=list)
-
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+DEFAULT_MODEL = "claude-opus-4-6"
 
 # ──────────────────────────────────────────────
-# Configuration
+# Typology constraints
 # ──────────────────────────────────────────────
 
-# Typology dimension constraints (TEK17 + practical)
-TYPOLOGY_LIMITS = {
-    "blokk":     {"w_min": 14, "w_max": 60, "d_min": 14, "d_max": 20, "h_floor": 3.0, "floors_min": 3, "floors_max": 8,  "units_per_floor": 4},
-    "lamell":    {"w_min": 30, "w_max": 80, "d_min": 12, "d_max": 16, "h_floor": 3.0, "floors_min": 3, "floors_max": 6,  "units_per_floor": 3},
-    "punkthus":  {"w_min": 16, "w_max": 24, "d_min": 16, "d_max": 24, "h_floor": 3.0, "floors_min": 4, "floors_max": 12, "units_per_floor": 3},
-    "rekkehus":  {"w_min": 30, "w_max": 80, "d_min": 8,  "d_max": 12, "h_floor": 2.8, "floors_min": 2, "floors_max": 3,  "units_per_floor": 1},
-    "naering":   {"w_min": 20, "w_max": 80, "d_min": 15, "d_max": 40, "h_floor": 3.5, "floors_min": 1, "floors_max": 5,  "units_per_floor": 0},
+TYPOLOGY_DIMS = {
+    "Lamell":         {"w_min": 30, "w_max": 60, "d_min": 12, "d_max": 16, "f_min": 3, "f_max": 7,  "ftf": 3.2, "units_per_floor": 3},
+    "Punkthus":       {"w_min": 18, "w_max": 26, "d_min": 18, "d_max": 26, "f_min": 4, "f_max": 12, "ftf": 3.0, "units_per_floor": 3},
+    "Karré":          {"w_min": 38, "w_max": 55, "d_min": 38, "d_max": 55, "f_min": 3, "f_max": 7,  "ftf": 3.2, "units_per_floor": 6},
+    "Rekke":          {"w_min": 35, "w_max": 60, "d_min": 8,  "d_max": 12, "f_min": 2, "f_max": 3,  "ftf": 2.8, "units_per_floor": 1},
+    "Tun":            {"w_min": 25, "w_max": 50, "d_min": 10, "d_max": 14, "f_min": 3, "f_max": 6,  "ftf": 3.0, "units_per_floor": 3},
+    "Tårn":           {"w_min": 18, "w_max": 26, "d_min": 18, "d_max": 26, "f_min": 6, "f_max": 16, "ftf": 3.0, "units_per_floor": 4},
+    "Podium + Tårn":  {"w_min": 35, "w_max": 55, "d_min": 18, "d_max": 28, "f_min": 2, "f_max": 4,  "ftf": 3.5, "units_per_floor": 0},
 }
 
-# Minimum distances (meters)
-MIN_BUILDING_SPACING = 8.0      # Between buildings (TEK17 brannkrav ~8m)
-MIN_BOUNDARY_SETBACK = 4.0      # From plot boundary
-MIN_ROAD_SETBACK = 6.0          # From road/vei
-MIN_COURTYARD_WIDTH = 15.0      # Minimum gårdsrom width to count as "real"
+MIN_BUILDING_SPACING = 8.0
+MIN_BOUNDARY_SETBACK = 4.0
 
-# Solar direction (south = 180° from north, in math coords south ≈ 270°)
-SOUTH_DIRECTION_DEG = 180.0     # Compass bearing for south
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+
+def _get_api_key():
+    return os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
+
+def is_available():
+    return bool(_get_api_key())
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def _call_claude(prompt, api_key, model=DEFAULT_MODEL, temperature=0.3, max_tokens=4000):
+    try:
+        resp = requests.post(ANTHROPIC_API_URL,
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}], "temperature": temperature},
+            timeout=120)
+        resp.raise_for_status()
+        for block in resp.json().get("content", []):
+            if block.get("type") == "text":
+                return block["text"]
+    except Exception as exc:
+        logger.error(f"Claude API error: {exc}")
+    return None
+
+def _parse_json(text):
+    if not text:
+        return None
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = "\n".join(l for l in cleaned.split("\n") if not l.strip().startswith("```"))
+    for start_char, end_char in [('{', '}'), ('[', ']')]:
+        s = cleaned.find(start_char)
+        e = cleaned.rfind(end_char)
+        if s >= 0 and e > s:
+            try:
+                return json.loads(cleaned[s:e+1])
+            except json.JSONDecodeError:
+                continue
+    return None
+
+def _make_polygon(cx, cy, width, depth, angle_deg):
+    """Create a rotated rectangle polygon."""
+    if not HAS_SHAPELY:
+        return None
+    b = shapely_box(-width/2, -depth/2, width/2, depth/2)
+    b = affinity.rotate(b, angle_deg, origin=(0, 0))
+    b = affinity.translate(b, cx, cy)
+    return b if b.is_valid and not b.is_empty else None
+
+def _compute_neighbor_context(neighbors, site_polygon):
+    """Build neighbor summary for prompts."""
+    if not neighbors or not site_polygon:
+        return "NABOER: Ingen nære", []
+
+    nb_polys = []
+    nb_lines = []
+    for nb in (neighbors or [])[:20]:
+        p = nb.get('polygon')
+        if not p or p.is_empty:
+            continue
+        if site_polygon and p.intersection(site_polygon).area / max(float(p.area), 1.0) >= 0.3:
+            continue
+        nc = p.centroid
+        sc = site_polygon.centroid
+        dist = nc.distance(sc)
+        ang = math.degrees(math.atan2(nc.y - sc.y, nc.x - sc.x)) % 360
+        compass = ["Ø","NØ","N","NV","V","SV","S","SØ"][int((ang + 22.5) / 45) % 8]
+        h = nb.get('height_m', 9.0)
+        nb_lines.append(f"  {compass}: {h:.0f}m høy, {dist:.0f}m unna")
+        nb_polys.append({'polygon': p, 'height_m': float(h)})
+
+    text = "NABOER (urørlige):\n" + "\n".join(nb_lines[:10]) if nb_lines else "NABOER: Ingen nære"
+    return text, nb_polys
 
 
 # ──────────────────────────────────────────────
-# Pass 1: Claude Concept Generation
+# PASS 1: Claude Concept
 # ──────────────────────────────────────────────
 
-def pass1_generate_concept(
-    plot_polygon: Polygon,
-    regulations: dict,
-    client: anthropic.Anthropic,
-    model: str = "claude-opus-4-6",
-) -> SiteConcept:
-    """
-    Pass 1: Ask Claude to generate a high-level bebyggelseskonsept.
+def _pass1_concept(typology, site_area, buildable_area, buildable_polygon,
+                   max_bya_pct, max_floors, max_height_m, target_bta,
+                   floor_to_floor_m, latitude_deg, terrain, neighbor_text):
+    """Ask Claude for a high-level placement concept."""
 
-    Args:
-        plot_polygon: Shapely Polygon of the site (in meters, local coords)
-        regulations: dict with keys like 'max_bya_pct', 'max_floors', 'allowed_typologies',
-                     'min_uteoppholdsareal_pct', 'parking_per_unit', 'road_edges' (list of edge indices)
-        client: Anthropic API client
-        model: Claude model to use
+    api_key = _get_api_key()
+    max_footprint = buildable_area * (max_bya_pct / 100.0)
+    fl_est = min(max_floors, max(2, int(target_bta / max(max_footprint, 1.0)) + 1))
 
-    Returns:
-        SiteConcept with strategy, zones, and building specs
-    """
-    bounds = plot_polygon.bounds  # (minx, miny, maxx, maxy)
-    plot_w = bounds[2] - bounds[0]
-    plot_d = bounds[3] - bounds[1]
-    plot_area = plot_polygon.area
+    bounds = buildable_polygon.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    coords = [[round(c[0], 1), round(c[1], 1)] for c in buildable_polygon.exterior.coords]
 
-    # Build the inset polygon for reference
-    inset = plot_polygon.buffer(-MIN_BOUNDARY_SETBACK)
-    inset_area = inset.area if not inset.is_empty else 0
+    terrain_text = "Flatt"
+    if terrain and terrain.get('point_count', 0) > 0:
+        terrain_text = f"Fall {terrain.get('slope_pct', 0):.1f}%, relieff {terrain.get('relief_m', 0):.1f}m"
 
-    # Determine plot shape characteristics
-    coords = list(plot_polygon.exterior.coords)
-    aspect_ratio = plot_w / plot_d if plot_d > 0 else 1.0
+    dims = TYPOLOGY_DIMS.get(typology, TYPOLOGY_DIMS["Lamell"])
 
-    prompt = f"""Du er en norsk arkitekt/byplanlegger som skal lage et bebyggelseskonsept for en tomt.
+    prompt = f"""Du er Norges fremste arkitekt for boligutvikling og volumstudier.
 
 TOMT:
-- Areal: {plot_area:.0f} m² ({plot_area/1000:.1f} dekar)
-- Bounding box: {plot_w:.0f} x {plot_d:.0f} m
-- Aspect ratio: {aspect_ratio:.2f}
-- Byggbart areal (etter 4m tilbaketrekking): {inset_area:.0f} m²
-- Polygon-koordinater (meter, lokalt): {json.dumps([[round(c[0],1), round(c[1],1)] for c in coords])}
+- Totalareal: {site_area:.0f} m²
+- Byggbart areal: {buildable_area:.0f} m² (etter setback)
+- Byggbart polygon (meter): {json.dumps(coords)}
+- Bounding box: {bw:.0f} x {bh:.0f} m
+- Terreng: {terrain_text}
+- Breddegrad: {latitude_deg:.1f}° (lav sol, sørfasade er livsnødvendig)
 
-REGULERINGSBESTEMMELSER:
-- Maks BYA: {regulations.get('max_bya_pct', 40)}%
-- Maks etasjer: {regulations.get('max_floors', 5)}
-- Tillatte typologier: {json.dumps(regulations.get('allowed_typologies', ['blokk', 'lamell', 'punkthus', 'rekkehus']))}
-- Min uteoppholdsareal: {regulations.get('min_uteoppholdsareal_pct', 25)}% av tomten
-- Parkering: {regulations.get('parking_per_unit', 1.0)} plass per boenhet
-- Veikanter (indeks i polygon): {json.dumps(regulations.get('road_edges', [0]))}
+REGULERING:
+- Maks BYA: {max_bya_pct:.0f}% = {max_footprint:.0f} m² fotavtrykk
+- Maks etasjer: {max_floors}, maks høyde: {max_height_m:.0f}m
+- Etasjehøyde: {floor_to_floor_m}m
+- Mål: {target_bta:.0f} m² BTA → estimert ~{fl_est} etasjer
+
+{neighbor_text}
+
+TYPOLOGI: {typology}
+
+TYPOLOGIDIMENSJONER:
+- Bredde: {dims['w_min']}-{dims['w_max']}m
+- Dybde: {dims['d_min']}-{dims['d_max']}m
+- Etasjer: {dims['f_min']}-{dims['f_max']}
 
 OPPGAVE:
-Velg et bebyggelseskonsept som:
-1. Utnytter hele tomten jevnt (ikke klumper alt på én side)
-2. Skaper gode uterom og gårdsrom
-3. Åpner mot sør der mulig
-4. Holder BYA innenfor reguleringsgrensen
-5. Gir realistisk antall boenheter
+Bestem et bebyggelseskonsept. Du skal IKKE plassere bygninger med koordinater.
+Du skal velge:
+1. Antall bygninger
+2. Dimensjoner for hver (bredde, dybde, etasjer)
+3. Overordnet organiseringsprinsipp (grid-retning, forskyvning, åpninger)
+4. Rollefordeling (main/wing/tower)
+5. Rotasjonsvinkel (angle_deg) — langfasade bør ha søreksponering
 
-Svar BARE med JSON i dette formatet (ingen markdown, ingen forklaring):
+Svar BARE med JSON (ingen markdown):
 {{
   "strategy": "kort beskrivelse av konseptet",
-  "zones": [
-    {{
-      "id": "zone_1",
-      "purpose": "bolig" | "naering" | "parkering" | "uteopphold",
-      "approximate_bounds": [x_min, y_min, x_max, y_max],
-      "notes": "..."
-    }}
-  ],
+  "orientation_deg": 195,
+  "grid_direction": "north-south",
+  "stagger_m": 10,
   "buildings": [
     {{
-      "typology": "blokk" | "lamell" | "punkthus" | "rekkehus" | "naering",
-      "count": 2,
-      "target_width": 40,
-      "target_depth": 16,
-      "target_floors": 4,
-      "preferred_rotation_deg": 0,
-      "zone_id": "zone_1"
+      "name": "Lamell A",
+      "role": "main",
+      "width": 45,
+      "depth": 14,
+      "floors": {fl_est},
+      "angle_deg": 195,
+      "courtyard": false,
+      "ring_depth": 0,
+      "notes": "Nordligste lamell, rammer inn parkdraget"
     }}
   ],
-  "total_target_bya_pct": 35,
-  "max_floors": 5,
+  "open_south": true,
   "notes": "..."
 }}"""
 
-    logger.info("Pass 1: Generating site concept via Claude...")
-    response = client.messages.create(
-        model=model,
-        max_tokens=2000,
-        temperature=0.3,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    raw = _call_claude(prompt, api_key, temperature=0.3, max_tokens=3000)
+    concept = _parse_json(raw)
 
-    raw = response.content[0].text.strip()
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0]
-        raw = raw.strip()
+    if not concept or not concept.get("buildings"):
+        logger.warning("Pass 1: Claude concept failed, using defaults")
+        concept = _default_concept(typology, buildable_area, max_footprint, fl_est, dims)
 
-    concept_data = json.loads(raw)
-    logger.info(f"Pass 1 concept: {concept_data.get('strategy', 'N/A')}")
+    # Clamp all building dimensions
+    for b in concept.get("buildings", []):
+        b["width"] = _clamp(b.get("width", dims["w_min"]), dims["w_min"], dims["w_max"])
+        b["depth"] = _clamp(b.get("depth", dims["d_min"]), dims["d_min"], dims["d_max"])
+        b["floors"] = _clamp(b.get("floors", fl_est), dims["f_min"], min(max_floors, dims["f_max"]))
+        b["angle_deg"] = b.get("angle_deg", 0)
+        b["role"] = b.get("role", "main")
+        b["name"] = b.get("name", f"{typology} {concept['buildings'].index(b)+1}")
 
-    return SiteConcept(
-        strategy=concept_data["strategy"],
-        zones=concept_data.get("zones", []),
-        buildings=concept_data.get("buildings", []),
-        total_target_bya_pct=concept_data.get("total_target_bya_pct", 35),
-        max_floors=concept_data.get("max_floors", 5),
-        notes=concept_data.get("notes", ""),
-    )
+    logger.info(f"Pass 1: {concept.get('strategy', 'N/A')} — {len(concept.get('buildings', []))} bygninger")
+    return concept
+
+
+def _default_concept(typology, buildable_area, max_footprint, fl_est, dims):
+    """Fallback concept if Claude fails."""
+    w = (dims["w_min"] + dims["w_max"]) / 2
+    d = (dims["d_min"] + dims["d_max"]) / 2
+    fp_per_bld = w * d
+    count = max(2, min(10, int(max_footprint / fp_per_bld)))
+
+    buildings = []
+    for i in range(count):
+        buildings.append({
+            "name": f"{typology} {i+1}",
+            "role": "main",
+            "width": w, "depth": d,
+            "floors": fl_est,
+            "angle_deg": 0,
+            "courtyard": typology == "Karré",
+            "ring_depth": 11 if typology == "Karré" else 0,
+            "notes": "",
+        })
+
+    return {
+        "strategy": f"Standard {typology.lower()}-plassering",
+        "orientation_deg": 0,
+        "grid_direction": "north-south",
+        "stagger_m": 0,
+        "buildings": buildings,
+        "notes": "Fallback",
+    }
 
 
 # ──────────────────────────────────────────────
-# Pass 2: Deterministic Python Placement
+# PASS 2: Deterministic Python Placement
 # ──────────────────────────────────────────────
 
-def pass2_deterministic_placement(
-    plot_polygon: Polygon,
-    concept: SiteConcept,
-    regulations: dict,
-) -> list[BuildingFootprint]:
-    """
-    Pass 2: Place buildings deterministically based on the AI concept.
+def _pass2_place(concept, buildable_polygon, max_bya_m2, typology, floor_to_floor_m):
+    """Place buildings deterministically within the buildable polygon."""
 
-    Strategy:
-    1. Create inset polygon (boundary setback)
-    2. For each zone, compute the usable sub-polygon
-    3. Within each zone, place buildings in a grid with required spacing
-    4. Clip any buildings that extend outside the inset polygon
-    5. Enforce BYA limits
-
-    Returns list of BuildingFootprint objects.
-    """
-    logger.info("Pass 2: Deterministic placement...")
-
-    setback = MIN_BOUNDARY_SETBACK
-    road_setback = MIN_ROAD_SETBACK
-
-    # Create inset polygon with boundary setback
-    inset = plot_polygon.buffer(-setback)
-    if inset.is_empty or not inset.is_valid:
-        logger.error("Plot too small for setback")
-        return []
-
-    # Handle road edges with extra setback
-    road_edges = regulations.get("road_edges", [])
-    if road_edges:
-        inset = _apply_road_setback(plot_polygon, inset, road_edges, road_setback - setback)
-
+    inset = buildable_polygon
     if inset.is_empty:
-        logger.error("No buildable area after setbacks")
         return []
 
-    # Ensure we work with a single polygon
     if isinstance(inset, MultiPolygon):
         inset = max(inset.geoms, key=lambda g: g.area)
 
-    max_bya_pct = regulations.get("max_bya_pct", 40)
-    max_bya_m2 = plot_polygon.area * max_bya_pct / 100.0
+    bounds = inset.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
 
-    buildings = []
-    total_bya = 0.0
-    building_id = 0
+    spec_buildings = concept.get("buildings", [])
+    orientation = concept.get("orientation_deg", 0)
+    grid_dir = concept.get("grid_direction", "north-south")
+    stagger = concept.get("stagger_m", 0)
 
-    # Sort building specs by size (largest first for better packing)
-    building_specs = sorted(
-        concept.buildings,
-        key=lambda b: b.get("target_width", 30) * b.get("target_depth", 15),
-        reverse=True,
-    )
+    placed = []
+    placed_polys = []
+    total_fp = 0.0
 
-    # Collect all placed polygons for overlap checking
-    placed_polygons = []
+    for idx, spec in enumerate(spec_buildings):
+        w = spec["width"]
+        d = spec["depth"]
+        angle = spec.get("angle_deg", orientation)
+        is_karre = spec.get("courtyard", False) or typology == "Karré"
+        ring_depth = spec.get("ring_depth", 11 if is_karre else 0)
 
-    for spec in building_specs:
-        typology = spec["typology"]
-        count = spec.get("count", 1)
-        limits = TYPOLOGY_LIMITS.get(typology, TYPOLOGY_LIMITS["blokk"])
+        if total_fp + w * d > max_bya_m2 * 1.02:
+            logger.info(f"Pass 2: BYA limit reached at building {idx+1}")
+            break
 
-        # Clamp dimensions to typology limits
-        w = _clamp(spec.get("target_width", limits["w_min"]), limits["w_min"], limits["w_max"])
-        d = _clamp(spec.get("target_depth", limits["d_min"]), limits["d_min"], limits["d_max"])
-        floors = _clamp(spec.get("target_floors", limits["floors_min"]), limits["floors_min"], limits["floors_max"])
-        rotation = spec.get("preferred_rotation_deg", 0)
+        pos = _find_best_position(inset, w, d, angle, placed_polys, idx, len(spec_buildings),
+                                  grid_dir, stagger, bw, bh, bounds)
+        if pos is None:
+            pos = _find_best_position(inset, w, d, angle + 90, placed_polys, idx, len(spec_buildings),
+                                      grid_dir, stagger, bw, bh, bounds)
+        if pos is None:
+            dims = TYPOLOGY_DIMS.get(typology, {})
+            w2 = max(dims.get("w_min", 12), w * 0.75)
+            d2 = max(dims.get("d_min", 8), d * 0.75)
+            pos = _find_best_position(inset, w2, d2, angle, placed_polys, idx, len(spec_buildings),
+                                      grid_dir, stagger, bw, bh, bounds)
+            if pos:
+                w, d = w2, d2
 
-        # Determine zone sub-polygon
-        zone_id = spec.get("zone_id")
-        zone_poly = _get_zone_polygon(inset, concept.zones, zone_id)
-
-        # Place buildings in a grid within the zone
-        for i in range(count):
-            if total_bya + w * d > max_bya_m2:
-                logger.warning(f"BYA limit reached ({total_bya:.0f}/{max_bya_m2:.0f} m²), skipping remaining")
-                break
-
-            placement = _find_placement(
-                zone_poly, w, d, rotation, placed_polygons, MIN_BUILDING_SPACING
-            )
-            if placement is None:
-                # Try alternate rotation (90°)
-                placement = _find_placement(
-                    zone_poly, w, d, rotation + 90, placed_polygons, MIN_BUILDING_SPACING
-                )
-            if placement is None:
-                # Try smaller building
-                w_reduced = max(limits["w_min"], w * 0.8)
-                d_reduced = max(limits["d_min"], d * 0.8)
-                placement = _find_placement(
-                    zone_poly, w_reduced, d_reduced, rotation, placed_polygons, MIN_BUILDING_SPACING
-                )
-                if placement:
-                    w, d = w_reduced, d_reduced
-
-            if placement is None:
-                logger.warning(f"Could not place {typology} #{i+1} in zone {zone_id}")
-                continue
-
-            cx, cy, final_rot = placement
-            building_id += 1
-            h = floors * limits["h_floor"]
-
-            bldg = BuildingFootprint(
-                id=f"B{building_id:03d}",
-                typology=typology,
-                x=cx, y=cy,
-                width=w, depth=d,
-                height=h,
-                floors=floors,
-                rotation_deg=final_rot,
-                units=floors * limits["units_per_floor"] if typology != "naering" else 0,
-                bra_m2=w * d * floors * 0.85,  # ~85% BTA→BRA
-                label=f"{typology.capitalize()} {building_id}",
-            )
-
-            placed_polygons.append(bldg.polygon)
-            total_bya += bldg.footprint_m2
-            buildings.append(bldg)
-
-    logger.info(f"Pass 2: Placed {len(buildings)} buildings, BYA={total_bya:.0f} m² ({total_bya/plot_polygon.area*100:.1f}%)")
-    return buildings
-
-
-def _apply_road_setback(
-    plot_polygon: Polygon, inset: Polygon, road_edges: list[int], extra_setback: float
-) -> Polygon:
-    """Apply extra setback along road-facing edges."""
-    coords = list(plot_polygon.exterior.coords)
-    for edge_idx in road_edges:
-        if edge_idx >= len(coords) - 1:
+        if pos is None:
+            logger.warning(f"Pass 2: Could not place {spec.get('name', idx)}")
             continue
-        p1 = coords[edge_idx]
-        p2 = coords[edge_idx + 1]
-        # Create a buffer strip along this edge
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        length = math.sqrt(dx**2 + dy**2)
-        if length < 1:
+
+        cx, cy, final_angle = pos
+        poly = _make_polygon(cx, cy, w, d, final_angle)
+        if poly is None:
             continue
-        # Normal vector pointing inward
-        nx = -dy / length
-        ny = dx / length
-        # Build a polygon strip to subtract
-        strip = Polygon([
-            p1,
-            p2,
-            (p2[0] + nx * extra_setback, p2[1] + ny * extra_setback),
-            (p1[0] + nx * extra_setback, p1[1] + ny * extra_setback),
-        ])
-        inset = inset.difference(strip)
-    return inset
+
+        clipped = poly.intersection(inset).buffer(0)
+        if clipped.is_empty or clipped.area < 20:
+            continue
+
+        # Handle karré courtyard
+        actual_fp = clipped.area
+        if is_karre and clipped.area > 300:
+            rd = max(8, min(float(ring_depth), math.sqrt(clipped.area) * 0.22))
+            inner = clipped.buffer(-rd)
+            if inner and not inner.is_empty and inner.area > 40:
+                clipped = clipped.difference(inner).buffer(0)
+                actual_fp = clipped.area  # karré footprint is the ring, not the full box
+
+        floors = spec.get("floors", 4)
+        ftf = TYPOLOGY_DIMS.get(typology, {}).get("ftf", floor_to_floor_m)
+        height_m = floors * ftf
+
+        placed.append({
+            "polygon": clipped,
+            "name": spec.get("name", f"{typology} {idx+1}"),
+            "role": spec.get("role", "main"),
+            "floors": floors,
+            "height_m": round(height_m, 1),
+            "width_m": round(w, 1),
+            "depth_m": round(d, 1),
+            "angle_deg": round(final_angle, 1),
+            "area_m2": round(float(actual_fp), 1),
+            "notes": spec.get("notes", ""),
+            "cx": round(cx, 1),
+            "cy": round(cy, 1),
+            "courtyard": is_karre,
+            "ring_depth": ring_depth,
+        })
+        placed_polys.append(poly)  # Use un-hollowed poly for spacing checks
+        total_fp += actual_fp
+
+    logger.info(f"Pass 2: Placed {len(placed)}/{len(spec_buildings)} buildings, BYA={total_fp:.0f} m²")
+    return placed
 
 
-def _get_zone_polygon(inset: Polygon, zones: list[dict], zone_id: Optional[str]) -> Polygon:
-    """Get the sub-polygon for a specific zone, or the full inset if no zone specified."""
-    if not zone_id or not zones:
-        return inset
-
-    for z in zones:
-        if z.get("id") == zone_id and "approximate_bounds" in z:
-            b = z["approximate_bounds"]
-            zone_box = box(b[0], b[1], b[2], b[3])
-            clipped = inset.intersection(zone_box)
-            if not clipped.is_empty and clipped.area > 100:
-                if isinstance(clipped, MultiPolygon):
-                    return max(clipped.geoms, key=lambda g: g.area)
-                return clipped
-    return inset
-
-
-def _find_placement(
-    zone_poly: Polygon,
-    width: float,
-    depth: float,
-    rotation_deg: float,
-    placed: list[Polygon],
-    min_spacing: float,
-) -> Optional[tuple[float, float, float]]:
-    """
-    Find a valid placement for a building within the zone polygon.
-
-    Uses a grid scan approach:
-    1. Compute the zone bounding box
-    2. Scan grid points at (width + spacing) intervals
-    3. For each point, check if the rotated building fits within zone AND
-       maintains spacing from all placed buildings
-    4. Return the first valid placement, preferring positions that
-       maximize distance from edges (better urban design)
-
-    Returns (cx, cy, rotation_deg) or None.
-    """
-    if zone_poly.is_empty:
-        return None
-
-    bounds = zone_poly.bounds
-    # Effective footprint size considering rotation
-    rad = math.radians(rotation_deg)
+def _find_best_position(inset, width, depth, angle_deg, placed_polys,
+                        bld_idx, bld_count, grid_dir, stagger,
+                        bw, bh, bounds):
+    """Find best position using structured grid-cell assignment."""
+    rad = math.radians(angle_deg)
     eff_w = abs(width * math.cos(rad)) + abs(depth * math.sin(rad))
     eff_d = abs(width * math.sin(rad)) + abs(depth * math.cos(rad))
 
-    step_x = eff_w + min_spacing
-    step_y = eff_d + min_spacing
+    spacing = MIN_BUILDING_SPACING
 
-    # Generate candidate positions
-    candidates = []
-    x = bounds[0] + eff_w / 2 + min_spacing / 2
-    while x < bounds[2] - eff_w / 2:
-        y = bounds[1] + eff_d / 2 + min_spacing / 2
-        while y < bounds[3] - eff_d / 2:
-            candidates.append((x, y))
-            y += step_y
-        x += step_x
+    # Grid layout based on building count and site shape
+    if bld_count <= 1:
+        cols, rows = 1, 1
+    elif bld_count <= 3:
+        if grid_dir == "north-south":
+            cols, rows = 1, bld_count
+        else:
+            cols, rows = bld_count, 1
+    elif bld_count <= 6:
+        if bw > bh * 1.3:
+            cols = min(bld_count, 3)
+            rows = math.ceil(bld_count / cols)
+        elif bh > bw * 1.3:
+            rows = min(bld_count, 3)
+            cols = math.ceil(bld_count / rows)
+        else:
+            cols = math.ceil(math.sqrt(bld_count))
+            rows = math.ceil(bld_count / cols)
+    else:
+        if bw > bh:
+            cols = max(2, min(5, math.ceil(math.sqrt(bld_count * bw / max(bh, 1)))))
+        else:
+            cols = max(2, min(4, math.ceil(math.sqrt(bld_count))))
+        rows = math.ceil(bld_count / cols)
 
-    # Score candidates by distance from zone centroid (prefer spread-out placement)
-    centroid = zone_poly.centroid
-    # Sort: prefer positions farther from already-placed buildings (better distribution)
-    def score(pos):
-        px, py = pos
-        if not placed:
-            # Prefer positions near centroid initially
-            return -math.sqrt((px - centroid.x)**2 + (py - centroid.y)**2)
-        # Prefer positions that maximize minimum distance to placed buildings
-        min_dist = min(
-            Point(px, py).distance(p) for p in placed
-        )
-        return min_dist  # higher = better (more spread out)
+    col = bld_idx % cols
+    row = bld_idx // cols
 
-    candidates.sort(key=score, reverse=True)
+    cell_w = bw / cols
+    cell_h = bh / rows
+    cell_cx = bounds[0] + (col + 0.5) * cell_w
+    cell_cy = bounds[1] + (row + 0.5) * cell_h
 
-    for cx, cy in candidates:
-        bldg_box = box(-width / 2, -depth / 2, width / 2, depth / 2)
-        bldg_poly = rotate(bldg_box, rotation_deg, origin=(0, 0))
-        bldg_poly = translate(bldg_poly, cx, cy)
+    if row % 2 == 1 and stagger:
+        cell_cx += stagger
 
-        # Check 1: Must be fully within zone
-        if not zone_poly.contains(bldg_poly):
-            continue
+    # Search with expanding radius
+    search_radii = [0, cell_w * 0.3, cell_w * 0.5, max(cell_w, cell_h) * 0.8, max(bw, bh) * 0.4]
 
-        # Check 2: Must maintain spacing from all placed buildings
-        too_close = False
-        for p in placed:
-            if bldg_poly.distance(p) < min_spacing:
-                too_close = True
-                break
-        if too_close:
-            continue
+    for radius in search_radii:
+        candidates = _generate_candidates(cell_cx, cell_cy, radius, eff_w, eff_d, spacing)
 
-        return (cx, cy, rotation_deg)
+        for cx, cy in candidates:
+            poly = _make_polygon(cx, cy, width, depth, angle_deg)
+            if poly is None:
+                continue
+            if not inset.contains(poly):
+                continue
+            too_close = False
+            for pp in placed_polys:
+                if poly.distance(pp) < spacing:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+            return (cx, cy, angle_deg)
 
     return None
 
 
-def _clamp(val, lo, hi):
-    return max(lo, min(hi, val))
+def _generate_candidates(cx, cy, radius, eff_w, eff_d, spacing):
+    """Generate candidate positions around a center point."""
+    if radius < 1:
+        return [(cx, cy)]
+
+    step = max(eff_w, eff_d) * 0.4 + spacing * 0.3
+    candidates = [(cx, cy)]
+
+    steps = max(1, int(radius / step))
+    for i in range(-steps, steps + 1):
+        for j in range(-steps, steps + 1):
+            if i == 0 and j == 0:
+                continue
+            px = cx + i * step
+            py = cy + j * step
+            if math.sqrt((px - cx)**2 + (py - cy)**2) <= radius * 1.2:
+                candidates.append((px, py))
+
+    candidates.sort(key=lambda p: (p[0] - cx)**2 + (p[1] - cy)**2)
+    return candidates
 
 
 # ──────────────────────────────────────────────
-# Pass 3: Claude Refinement
+# PASS 3: Claude Refinement
 # ──────────────────────────────────────────────
 
-def pass3_refine_with_claude(
-    plot_polygon: Polygon,
-    buildings: list[BuildingFootprint],
-    regulations: dict,
-    client: anthropic.Anthropic,
-    model: str = "claude-opus-4-6",
-    north_bearing_deg: float = 0.0,
-) -> list[BuildingFootprint]:
-    """
-    Pass 3: Ask Claude to refine the deterministic placements.
+def _pass3_refine(buildings, buildable_polygon, max_floors, max_height_m,
+                  latitude_deg, neighbor_text, typology, floor_to_floor_m):
+    """Ask Claude to refine the deterministic placements."""
 
-    Claude can:
-    - Rotate buildings for better solar orientation
-    - Vary heights for skyline interest
-    - Open courtyards toward south
-    - Adjust spacing for better uterom
-    - Suggest removing a building to improve quality
+    if not buildings:
+        return buildings
 
-    Returns updated list of BuildingFootprint.
-    """
-    logger.info("Pass 3: Claude refinement...")
+    api_key = _get_api_key()
+    bounds = buildable_polygon.bounds
 
-    buildings_json = []
+    bld_json = []
     for b in buildings:
-        buildings_json.append({
-            "id": b.id,
-            "typology": b.typology,
-            "x": round(b.x, 1),
-            "y": round(b.y, 1),
-            "width": round(b.width, 1),
-            "depth": round(b.depth, 1),
-            "floors": b.floors,
-            "rotation_deg": round(b.rotation_deg, 1),
-            "footprint_m2": round(b.footprint_m2, 1),
+        bld_json.append({
+            "name": b["name"],
+            "role": b["role"],
+            "cx": b["cx"], "cy": b["cy"],
+            "width": b["width_m"], "depth": b["depth_m"],
+            "angle_deg": b["angle_deg"],
+            "floors": b["floors"],
+            "area_m2": b["area_m2"],
         })
 
-    coords = list(plot_polygon.exterior.coords)
-    plot_area = plot_polygon.area
+    prompt = f"""Du er en norsk arkitekt som kvalitetssikrer en maskinell bygningsplassering for {typology}.
 
-    prompt = f"""Du er en norsk arkitekt som skal kvalitetssikre og forbedre en maskinell bygningsplassering.
+TOMT (byggbart): {buildable_polygon.area:.0f} m²
+Bounds: ({bounds[0]:.0f},{bounds[1]:.0f}) til ({bounds[2]:.0f},{bounds[3]:.0f})
+BREDDEGRAD: {latitude_deg:.1f}° | MAKS: {max_floors} etasjer / {max_height_m:.0f}m
+{neighbor_text}
 
-TOMT:
-- Areal: {plot_area:.0f} m²
-- Polygon: {json.dumps([[round(c[0],1), round(c[1],1)] for c in coords])}
-- Nord-retning: {north_bearing_deg}° (0=opp på kartet)
+PLASSERTE BYGNINGER:
+{json.dumps(bld_json, indent=2)}
 
-PLASSERINGER FRA MASKINELL PLASSERING:
-{json.dumps(buildings_json, indent=2)}
+JUSTER for bedre arkitektonisk kvalitet:
+1. angle_deg — roter for søreksponering (langfasade ~180-200°)
+2. floors — varier for skyline (lavere mot sør for å slippe sol inn, høyere mot nord)
+3. cx/cy — flytt inntil ±8m for å åpne siktlinjer/gårdsrom mot sør
+4. remove: true — BARE hvis det tydelig forbedrer helheten
 
-REGULERING:
-- Maks BYA: {regulations.get('max_bya_pct', 40)}%
-- Maks etasjer: {regulations.get('max_floors', 5)}
+REGLER: Ikke endre width/depth. Hold min 8m mellom bygninger.
 
-DU KAN JUSTERE:
-1. **rotation_deg** — Roter bygninger for bedre solforhold (sør-orientering). 
-   Sør er ca. {(180 + north_bearing_deg) % 360:.0f}° i kartkoordinater.
-2. **floors** — Varier høyder for interessant skyline. Trapp ned mot sør, opp mot nord.
-3. **x, y** — Flytt maks ±5m for å åpne gårdsrom mot sør eller forbedre siktlinjer.
-4. **remove** — Sett "remove": true for å fjerne en bygning som ødelegger kvaliteten.
+Svar BARE med JSON-array:
+[{{"name":"...","angle_deg":195,"floors":4,"cx":50.5,"cy":30.2,"remove":false}}]"""
 
-REGLER:
-- Ikke endre width/depth (det gjøres deterministisk)
-- Hold alle bygninger innenfor tomten (4m fra kant)
-- Hold min 8m mellom bygninger
-- Behold total BYA innenfor grensen
+    raw = _call_claude(prompt, api_key, temperature=0.2, max_tokens=3000)
+    adjustments = _parse_json(raw)
 
-Svar BARE med JSON-array av justerte bygninger (ingen markdown):
-[
-  {{
-    "id": "B001",
-    "rotation_deg": 15,
-    "floors": 4,
-    "x": 50.5,
-    "y": 30.2,
-    "remove": false
-  }},
-  ...
-]"""
+    if not adjustments or not isinstance(adjustments, list):
+        logger.warning("Pass 3: Refinement failed, keeping original")
+        return buildings
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=3000,
-        temperature=0.2,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-        if raw.endswith("```"):
-            raw = raw.rsplit("```", 1)[0]
-        raw = raw.strip()
-
-    adjustments = json.loads(raw)
-    adj_map = {a["id"]: a for a in adjustments}
+    adj_map = {a.get("name"): a for a in adjustments}
 
     refined = []
     for b in buildings:
-        adj = adj_map.get(b.id, {})
+        adj = adj_map.get(b["name"], {})
+
         if adj.get("remove", False):
-            logger.info(f"Pass 3: Removing {b.id} ({b.typology}) per Claude refinement")
+            logger.info(f"Pass 3: Removing {b['name']}")
             continue
 
-        # Apply adjustments
-        if "rotation_deg" in adj:
-            b.rotation_deg = adj["rotation_deg"]
+        if "angle_deg" in adj:
+            b["angle_deg"] = round(float(adj["angle_deg"]), 1)
+
         if "floors" in adj:
-            limits = TYPOLOGY_LIMITS.get(b.typology, TYPOLOGY_LIMITS["blokk"])
-            b.floors = _clamp(adj["floors"], limits["floors_min"], limits["floors_max"])
-            b.height = b.floors * limits["h_floor"]
-            b.bra_m2 = b.width * b.depth * b.floors * 0.85
-            b.units = b.floors * limits["units_per_floor"] if b.typology != "naering" else 0
-        if "x" in adj:
-            # Limit movement to ±5m
-            dx = _clamp(adj["x"] - b.x, -5.0, 5.0)
-            b.x += dx
-        if "y" in adj:
-            dy = _clamp(adj["y"] - b.y, -5.0, 5.0)
-            b.y += dy
+            dims = TYPOLOGY_DIMS.get(typology, {})
+            new_floors = _clamp(int(adj["floors"]), dims.get("f_min", 2), min(max_floors, dims.get("f_max", 8)))
+            b["floors"] = new_floors
+            b["height_m"] = round(new_floors * dims.get("ftf", floor_to_floor_m), 1)
+
+        if "cx" in adj:
+            dx = _clamp(float(adj["cx"]) - b["cx"], -8.0, 8.0)
+            b["cx"] = round(b["cx"] + dx, 1)
+        if "cy" in adj:
+            dy = _clamp(float(adj["cy"]) - b["cy"], -8.0, 8.0)
+            b["cy"] = round(b["cy"] + dy, 1)
+
+        # Rebuild polygon
+        new_poly = _make_polygon(b["cx"], b["cy"], b["width_m"], b["depth_m"], b["angle_deg"])
+        if new_poly and not new_poly.is_empty:
+            clipped = new_poly.intersection(buildable_polygon).buffer(0)
+            if not clipped.is_empty and clipped.area > 20:
+                is_karre = b.get("courtyard", False)
+                if is_karre and clipped.area > 300:
+                    rd = max(8, min(float(b.get("ring_depth", 11)), math.sqrt(clipped.area) * 0.22))
+                    inner = clipped.buffer(-rd)
+                    if inner and not inner.is_empty and inner.area > 40:
+                        clipped = clipped.difference(inner).buffer(0)
+                b["polygon"] = clipped
+                b["area_m2"] = round(float(clipped.area), 1)
 
         refined.append(b)
 
-    logger.info(f"Pass 3: {len(refined)} buildings after refinement (was {len(buildings)})")
+    logger.info(f"Pass 3: {len(refined)} buildings after refinement")
     return refined
 
 
 # ──────────────────────────────────────────────
-# Pass 4: Python Validation & Auto-Fix
+# PASS 4: Validation & Auto-Fix
 # ──────────────────────────────────────────────
 
-def pass4_validate_and_fix(
-    plot_polygon: Polygon,
-    buildings: list[BuildingFootprint],
-    regulations: dict,
-) -> PlacementResult:
-    """
-    Pass 4: Hard validation and auto-fix.
+def _pass4_validate(buildings, buildable_polygon, max_bya_m2, max_floors, max_height_m, floor_to_floor_m):
+    """Hard validation and auto-fix."""
 
-    Checks:
-    1. All buildings within plot (with setback)
-    2. No overlapping buildings
-    3. Minimum spacing between buildings
-    4. BYA within limits
-    5. Floor count within limits
-    6. Coverage distribution (anti-clumping)
-    7. Courtyard validity (if enclosed spaces exist)
+    if not buildings:
+        return []
 
-    Auto-fixes:
-    - Shrinks buildings that overlap
-    - Pushes buildings inward if outside boundary
-    - Removes buildings if BYA exceeded (smallest first)
-
-    Returns PlacementResult with final buildings and diagnostics.
-    """
-    logger.info("Pass 4: Validation and auto-fix...")
-
-    errors = []
-    warnings = []
-    max_bya_pct = regulations.get("max_bya_pct", 40)
-    max_bya_m2 = plot_polygon.area * max_bya_pct / 100.0
-    max_floors = regulations.get("max_floors", 5)
-
-    inset = plot_polygon.buffer(-MIN_BOUNDARY_SETBACK)
-    if isinstance(inset, MultiPolygon):
-        inset = max(inset.geoms, key=lambda g: g.area)
-
-    # ── Check 1: Containment ──
-    fixed_buildings = []
+    # 1. Containment
+    valid = []
     for b in buildings:
-        poly = b.polygon
-        if inset.contains(poly):
-            fixed_buildings.append(b)
-        else:
-            # Try to push inward
-            fixed_b = _push_building_inward(b, inset)
-            if fixed_b:
-                warnings.append(f"{b.id}: Pushed inward to fit within setback")
-                fixed_buildings.append(fixed_b)
+        poly = b.get("polygon")
+        if poly is None or poly.is_empty:
+            continue
+
+        if not buildable_polygon.contains(poly):
+            clipped = poly.intersection(buildable_polygon).buffer(0)
+            if clipped.is_empty or clipped.area < 20:
+                pushed = _push_toward_centroid(b, buildable_polygon)
+                if pushed:
+                    b = pushed
+                else:
+                    logger.warning(f"Pass 4: {b['name']} removed — outside")
+                    continue
             else:
-                errors.append(f"{b.id}: Could not fit within plot, REMOVED")
+                b["polygon"] = clipped
+                b["area_m2"] = round(float(clipped.area), 1)
+        valid.append(b)
+    buildings = valid
 
-    buildings = fixed_buildings
-
-    # ── Check 2: Floor limits ──
+    # 2. Floor/height limits
     for b in buildings:
-        if b.floors > max_floors:
-            warnings.append(f"{b.id}: Reduced from {b.floors} to {max_floors} floors")
-            limits = TYPOLOGY_LIMITS.get(b.typology, TYPOLOGY_LIMITS["blokk"])
-            b.floors = max_floors
-            b.height = b.floors * limits["h_floor"]
-            b.bra_m2 = b.width * b.depth * b.floors * 0.85
-            b.units = b.floors * limits["units_per_floor"] if b.typology != "naering" else 0
+        if b["floors"] > max_floors:
+            b["floors"] = max_floors
+            b["height_m"] = round(max_floors * floor_to_floor_m, 1)
+        if b["height_m"] > max_height_m:
+            b["height_m"] = max_height_m
+            b["floors"] = max(1, int(max_height_m / floor_to_floor_m))
 
-    # ── Check 3: Overlap resolution ──
-    buildings = _resolve_overlaps(buildings, warnings)
+    # 3. Overlap removal (keep larger)
+    buildings.sort(key=lambda b: b["area_m2"], reverse=True)
+    no_overlap = []
+    no_overlap_polys = []
+    for b in buildings:
+        poly = b["polygon"]
+        overlaps = False
+        for op in no_overlap_polys:
+            if poly.intersects(op) and poly.intersection(op).area > 2.0:
+                overlaps = True
+                break
+        if not overlaps:
+            no_overlap.append(b)
+            no_overlap_polys.append(poly)
+    buildings = no_overlap
 
-    # ── Check 4: Minimum spacing ──
-    buildings = _enforce_spacing(buildings, MIN_BUILDING_SPACING, warnings)
+    # 4. Spacing enforcement
+    spaced = []
+    spaced_polys = []
+    for b in buildings:
+        too_close = False
+        for sp in spaced_polys:
+            if b["polygon"].distance(sp) < MIN_BUILDING_SPACING * 0.9:
+                too_close = True
+                break
+        if not too_close:
+            spaced.append(b)
+            spaced_polys.append(b["polygon"])
+    buildings = spaced
 
-    # ── Check 5: BYA limit ──
-    total_bya = sum(b.footprint_m2 for b in buildings)
-    while total_bya > max_bya_m2 and buildings:
-        # Remove smallest building
-        smallest = min(buildings, key=lambda b: b.footprint_m2)
-        warnings.append(f"{smallest.id}: Removed to meet BYA limit ({total_bya:.0f} > {max_bya_m2:.0f})")
-        buildings.remove(smallest)
-        total_bya = sum(b.footprint_m2 for b in buildings)
+    # 5. BYA cap
+    total_fp = sum(b["area_m2"] for b in buildings)
+    buildings.sort(key=lambda b: b["area_m2"])
+    while total_fp > max_bya_m2 * 1.05 and buildings:
+        removed = buildings.pop(0)
+        total_fp -= removed["area_m2"]
+    buildings.sort(key=lambda b: b["name"])
 
-    # ── Check 6: Coverage distribution ──
-    coverage_score = _compute_coverage_score(buildings, plot_polygon)
-    if coverage_score < 0.4:
-        warnings.append(f"Coverage score {coverage_score:.2f} — buildings may be clustered")
-
-    # ── Check 7: Courtyard validation ──
-    _validate_courtyards(buildings, warnings)
-
-    # ── Final metrics ──
-    total_bya = sum(b.footprint_m2 for b in buildings)
-    total_bra = sum(b.bra_m2 for b in buildings)
-    total_units = sum(b.units for b in buildings)
-    bya_pct = total_bya / plot_polygon.area * 100 if plot_polygon.area > 0 else 0
-
-    result = PlacementResult(
-        buildings=buildings,
-        bya_m2=round(total_bya, 1),
-        bya_pct=round(bya_pct, 1),
-        bra_total=round(total_bra, 1),
-        units_total=total_units,
-        coverage_score=round(coverage_score, 2),
-        validation_errors=errors,
-        validation_warnings=warnings,
-    )
-
-    logger.info(
-        f"Pass 4 complete: {len(buildings)} buildings, "
-        f"BYA={bya_pct:.1f}%, BRA={total_bra:.0f} m², "
-        f"{total_units} units, coverage={coverage_score:.2f}"
-    )
-    return result
+    logger.info(f"Pass 4: {len(buildings)} buildings, FP={sum(b['area_m2'] for b in buildings):.0f} m²")
+    return buildings
 
 
-def _push_building_inward(b: BuildingFootprint, inset: Polygon) -> Optional[BuildingFootprint]:
-    """Try to push a building inward so it fits within the inset polygon."""
-    poly = b.polygon
-    if inset.contains(poly):
-        return b
-
-    # Compute direction from building centroid to inset centroid
-    bc = poly.centroid
-    ic = inset.centroid
-    dx = ic.x - bc.x
-    dy = ic.y - bc.y
+def _push_toward_centroid(b, buildable_polygon):
+    """Push building toward polygon centroid until it fits."""
+    cx, cy = b["cx"], b["cy"]
+    tc = buildable_polygon.centroid
+    dx = tc.x - cx
+    dy = tc.y - cy
     dist = math.sqrt(dx**2 + dy**2)
     if dist < 0.1:
         return None
 
-    # Try incremental pushes
-    for step in [1, 2, 3, 5, 8, 12, 16, 20]:
-        new_x = b.x + dx / dist * step
-        new_y = b.y + dy / dist * step
-        test_b = BuildingFootprint(
-            id=b.id, typology=b.typology,
-            x=new_x, y=new_y,
-            width=b.width, depth=b.depth,
-            height=b.height, floors=b.floors,
-            rotation_deg=b.rotation_deg,
-            units=b.units, bra_m2=b.bra_m2, label=b.label,
-        )
-        if inset.contains(test_b.polygon):
-            return test_b
-
+    for step in [2, 5, 10, 15, 20, 30]:
+        nx = cx + dx / dist * step
+        ny = cy + dy / dist * step
+        poly = _make_polygon(nx, ny, b["width_m"], b["depth_m"], b["angle_deg"])
+        if poly and buildable_polygon.contains(poly):
+            b_copy = dict(b)
+            b_copy["cx"] = round(nx, 1)
+            b_copy["cy"] = round(ny, 1)
+            clipped = poly.intersection(buildable_polygon).buffer(0)
+            is_karre = b.get("courtyard", False)
+            if is_karre and clipped.area > 300:
+                rd = max(8, min(float(b.get("ring_depth", 11)), math.sqrt(clipped.area) * 0.22))
+                inner = clipped.buffer(-rd)
+                if inner and not inner.is_empty and inner.area > 40:
+                    clipped = clipped.difference(inner).buffer(0)
+            b_copy["polygon"] = clipped
+            b_copy["area_m2"] = round(float(clipped.area), 1)
+            return b_copy
     return None
 
 
-def _resolve_overlaps(buildings: list[BuildingFootprint], warnings: list) -> list[BuildingFootprint]:
-    """Remove buildings that overlap with larger buildings."""
-    kept = []
-    polys = [(b, b.polygon) for b in buildings]
-    # Sort by footprint size descending (keep larger buildings)
-    polys.sort(key=lambda bp: bp[0].footprint_m2, reverse=True)
-
-    kept_polys = []
-    for b, poly in polys:
-        overlaps = False
-        for kp in kept_polys:
-            if poly.intersects(kp) and poly.intersection(kp).area > 1.0:
-                overlaps = True
-                break
-        if overlaps:
-            warnings.append(f"{b.id}: Removed due to overlap")
-        else:
-            kept.append(b)
-            kept_polys.append(poly)
-
-    return kept
-
-
-def _enforce_spacing(
-    buildings: list[BuildingFootprint], min_spacing: float, warnings: list
-) -> list[BuildingFootprint]:
-    """Remove buildings that violate minimum spacing (smallest first)."""
-    # Check all pairs
-    violations = set()
-    for i, b1 in enumerate(buildings):
-        for j, b2 in enumerate(buildings):
-            if j <= i:
-                continue
-            dist = b1.polygon.distance(b2.polygon)
-            if dist < min_spacing:
-                # Mark the smaller one for removal
-                if b1.footprint_m2 < b2.footprint_m2:
-                    violations.add(b1.id)
-                else:
-                    violations.add(b2.id)
-
-    result = []
-    for b in buildings:
-        if b.id in violations:
-            warnings.append(f"{b.id}: Removed — too close to neighbor ({min_spacing}m min)")
-        else:
-            result.append(b)
-    return result
-
-
-def _compute_coverage_score(buildings: list[BuildingFootprint], plot_polygon: Polygon) -> float:
-    """
-    Compute how evenly buildings are distributed across the plot.
-
-    Divides the plot bounding box into a 4x4 grid.
-    Score = fraction of cells that contain at least part of a building.
-    """
-    if not buildings:
-        return 0.0
-
-    bounds = plot_polygon.bounds
-    bw = bounds[2] - bounds[0]
-    bh = bounds[3] - bounds[1]
-    if bw < 1 or bh < 1:
-        return 0.0
-
-    grid_n = 4
-    cell_w = bw / grid_n
-    cell_h = bh / grid_n
-
-    occupied = 0
-    valid_cells = 0
-
-    for gx in range(grid_n):
-        for gy in range(grid_n):
-            cell = box(
-                bounds[0] + gx * cell_w,
-                bounds[1] + gy * cell_h,
-                bounds[0] + (gx + 1) * cell_w,
-                bounds[1] + (gy + 1) * cell_h,
-            )
-            # Only count cells that overlap with the plot
-            if not plot_polygon.intersects(cell):
-                continue
-            cell_in_plot = plot_polygon.intersection(cell)
-            if cell_in_plot.area < cell_w * cell_h * 0.25:
-                continue
-            valid_cells += 1
-
-            for b in buildings:
-                if b.polygon.intersects(cell):
-                    occupied += 1
-                    break
-
-    return occupied / valid_cells if valid_cells > 0 else 0.0
-
-
-def _validate_courtyards(buildings: list[BuildingFootprint], warnings: list):
-    """Check if any enclosed spaces between buildings are too narrow to be real courtyards."""
-    if len(buildings) < 3:
-        return
-
-    # Union of all building polygons
-    all_polys = unary_union([b.polygon for b in buildings])
-    # The convex hull minus the buildings gives potential courtyard spaces
-    hull = all_polys.convex_hull
-    open_space = hull.difference(all_polys)
-
-    if open_space.is_empty:
-        return
-
-    # Check if any enclosed space is too narrow
-    if hasattr(open_space, 'geoms'):
-        spaces = list(open_space.geoms)
-    else:
-        spaces = [open_space]
-
-    for i, space in enumerate(spaces):
-        if space.area < 50:  # Less than 50m² is not a usable courtyard
-            continue
-        # Check minimum width using negative buffer
-        narrowed = space.buffer(-MIN_COURTYARD_WIDTH / 2)
-        if narrowed.is_empty:
-            warnings.append(
-                f"Courtyard space {i+1} ({space.area:.0f} m²) is narrower than "
-                f"{MIN_COURTYARD_WIDTH}m — may not function as real gårdsrom"
-            )
-
-
 # ──────────────────────────────────────────────
-# Main orchestrator
+# Main: plan_site()
 # ──────────────────────────────────────────────
 
-def run_multi_pass_planner(
-    plot_polygon: Polygon,
-    regulations: dict,
-    api_key: Optional[str] = None,
-    model: str = "claude-opus-4-6",
-    north_bearing_deg: float = 0.0,
-) -> PlacementResult:
+def plan_site(site_polygon, buildable_polygon, typology, *, neighbors=None, terrain=None,
+              site_intelligence=None, site_inputs=None, target_bta_m2=5000.0, max_floors=5,
+              max_height_m=16.0, max_bya_pct=35.0, floor_to_floor_m=3.2, model=DEFAULT_MODEL):
     """
-    Run the full 4-pass site planning pipeline.
+    Run the 4-pass site planner.
 
-    Args:
-        plot_polygon: Shapely Polygon in local meter coordinates
-        regulations: dict with regulation parameters
-        api_key: Anthropic API key (or uses ANTHROPIC_API_KEY env var)
-        model: Claude model ID
-        north_bearing_deg: compass bearing of "up" on the coordinate system
-
-    Returns:
-        PlacementResult with final validated placements
+    Returns dict compatible with Mulighetsstudie.py:
+      buildings: list of dicts with polygon, name, role, floors, height_m, width_m, depth_m, angle_deg, area_m2, notes, pos_id
+      footprint: unary_union Shapely polygon
+      building_count, total_footprint_m2, total_bta_m2, source
     """
-    import os
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    client = anthropic.Anthropic(api_key=key)
+    api_key = _get_api_key()
+    if not api_key:
+        return {"buildings": [], "footprint": None, "error": "ANTHROPIC_API_KEY ikke satt"}
+    if not HAS_SHAPELY or buildable_polygon is None:
+        return {"buildings": [], "footprint": None, "error": "Shapely/polygon mangler"}
 
-    # Pass 1: Claude concept
-    concept = pass1_generate_concept(plot_polygon, regulations, client, model)
-    logger.info(f"Concept: {concept.strategy}")
+    latitude = float((site_inputs or {}).get('latitude_deg', 63.4))
+    site_area = float(site_polygon.area) if site_polygon else 1000
+    bp_area = float(buildable_polygon.area)
+    max_fp = bp_area * (max_bya_pct / 100.0)
 
-    # Pass 2: Deterministic placement
-    buildings = pass2_deterministic_placement(plot_polygon, concept, regulations)
-    if not buildings:
-        logger.error("Pass 2 produced no buildings!")
-        return PlacementResult(
-            buildings=[], bya_m2=0, bya_pct=0, bra_total=0,
-            units_total=0, coverage_score=0,
-            validation_errors=["No buildings could be placed"],
-        )
+    neighbor_text, nb_polys = _compute_neighbor_context(neighbors, site_polygon)
 
-    # Pass 3: Claude refinement
-    buildings = pass3_refine_with_claude(
-        plot_polygon, buildings, regulations, client, model, north_bearing_deg
+    # Pass 1
+    concept = _pass1_concept(
+        typology, site_area, bp_area, buildable_polygon,
+        max_bya_pct, max_floors, max_height_m, target_bta_m2,
+        floor_to_floor_m, latitude, terrain, neighbor_text,
     )
 
-    # Pass 4: Validation and fix
-    result = pass4_validate_and_fix(plot_polygon, buildings, regulations)
+    # Pass 2
+    buildings = _pass2_place(concept, buildable_polygon, max_fp, typology, floor_to_floor_m)
 
-    return result
+    if not buildings:
+        return {"buildings": [], "footprint": None, "error": "Pass 2: ingen bygninger plassert",
+                "concept": concept.get("strategy", "")}
 
+    # Pass 3
+    buildings = _pass3_refine(
+        buildings, buildable_polygon, max_floors, max_height_m,
+        latitude, neighbor_text, typology, floor_to_floor_m,
+    )
 
-# ──────────────────────────────────────────────
-# Conversion helpers for Builtly integration
-# ──────────────────────────────────────────────
+    # Pass 4
+    buildings = _pass4_validate(
+        buildings, buildable_polygon, max_fp, max_floors, max_height_m, floor_to_floor_m,
+    )
 
-def result_to_threejs_json(result: PlacementResult, plot_polygon: Polygon) -> dict:
-    """Convert PlacementResult to JSON for Three.js viewer."""
+    footprint = None
+    if buildings:
+        polys = [b["polygon"] for b in buildings if b.get("polygon")]
+        if polys:
+            footprint = unary_union(polys).buffer(0)
+
+    for b in buildings:
+        b.setdefault("pos_id", "")
+
+    total_fp_m2 = sum(b.get("area_m2", 0) for b in buildings)
+    total_bta = sum(b.get("area_m2", 0) * b.get("floors", 1) for b in buildings)
+
     return {
-        "plot": {
-            "coordinates": [list(c) for c in plot_polygon.exterior.coords],
-            "area_m2": round(plot_polygon.area, 1),
-        },
-        "buildings": [
-            {
-                "id": b.id,
-                "typology": b.typology,
-                "position": [round(b.x, 1), round(b.y, 1)],
-                "dimensions": [round(b.width, 1), round(b.depth, 1), round(b.height, 1)],
-                "rotation_deg": round(b.rotation_deg, 1),
-                "floors": b.floors,
-                "units": b.units,
-                "bra_m2": round(b.bra_m2, 1),
-                "label": b.label,
-            }
-            for b in result.buildings
-        ],
-        "metrics": {
-            "bya_m2": result.bya_m2,
-            "bya_pct": result.bya_pct,
-            "bra_total": result.bra_total,
-            "units_total": result.units_total,
-            "coverage_score": result.coverage_score,
-        },
-        "diagnostics": {
-            "errors": result.validation_errors,
-            "warnings": result.validation_warnings,
-        },
+        "buildings": buildings,
+        "footprint": footprint,
+        "building_count": len(buildings),
+        "total_footprint_m2": round(total_fp_m2, 1),
+        "total_bta_m2": round(total_bta, 1),
+        "source": f"AI multi-pass (Claude {model})",
+        "concept": concept.get("strategy", ""),
+        "positions_evaluated": 0,
+        "positions_usable": 0,
+        "prompt": "",
+        "raw_response": "",
+        "raw_parsed": [],
     }
-
-
-def result_to_isometric_data(result: PlacementResult) -> list[dict]:
-    """Convert PlacementResult to the format expected by the isometric PIL renderer."""
-    return [
-        {
-            "x": b.x,
-            "y": b.y,
-            "width": b.width,
-            "depth": b.depth,
-            "height": b.height,
-            "floors": b.floors,
-            "typology": b.typology,
-            "rotation": b.rotation_deg,
-            "label": b.label,
-        }
-        for b in result.buildings
-    ]
-def is_available() -> bool:
-    """Check if AI site planner dependencies are available."""
-    try:
-        import anthropic
-        import shapely
-        return True
-    except ImportError:
-        return False
