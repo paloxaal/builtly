@@ -998,3 +998,11 @@ def result_to_isometric_data(result: PlacementResult) -> list[dict]:
         }
         for b in result.buildings
     ]
+def is_available() -> bool:
+    """Check if AI site planner dependencies are available."""
+    try:
+        import anthropic
+        import shapely
+        return True
+    except ImportError:
+        return False
