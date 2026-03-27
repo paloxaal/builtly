@@ -1,26 +1,23 @@
 """
-AI-drevet tomteplanlegger for Builtly.
+AI-drevet tomteplanlegger for Builtly — v2 (hybrid).
 
-Bruker Claude (Anthropic API) til aa analysere tomtegeometri, nabobebyggelse,
-terreng, solforhold og regulering — og generere realistiske bygningsplasseringer
-som en arkitekt ville gjort, ikke bare et mekanisk rutenett.
-
-Returnerer en liste med bygningsplasseringer som geometrimotoren
-kan konvertere til Shapely-polygoner og bruke i volumstudie/3D.
+ARKITEKTUR:
+  1. Python analyserer tomten og beregner et grid av GYLDIGE plasseringsposisjoner
+  2. For hver posisjon beregnes sol-score, naboavstand, terrengkote
+  3. Claude faar dette som et "menykort" og velger HVILKE posisjoner som brukes,
+     med hvilken orientering, bredde/dybde og etasjetall
+  4. Python validerer, bygger Shapely-polygoner og sjekker overlapp/BYA
 """
 
 from __future__ import annotations
-
-import json
-import math
-import os
+import json, math, os
 from typing import Any, Dict, List, Optional, Tuple
-
 import requests
 
 try:
-    from shapely.geometry import Polygon
+    from shapely.geometry import Polygon, box as shapely_box, Point
     from shapely import affinity
+    from shapely.ops import unary_union
     HAS_SHAPELY = True
 except Exception:
     HAS_SHAPELY = False
@@ -28,452 +25,295 @@ except Exception:
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = "claude-opus-4-6"
 
-
-def _get_api_key() -> Optional[str]:
+def _get_api_key():
     return os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
 
-
-def is_available() -> bool:
+def is_available():
     return bool(_get_api_key())
 
 
-def _safe_round(val: Any, decimals: int = 1) -> float:
-    try:
-        return round(float(val), decimals)
-    except Exception:
-        return 0.0
+def _compute_placement_grid(buildable_polygon, site_polygon, neighbors, terrain, latitude_deg, grid_spacing_m=20.0):
+    if not HAS_SHAPELY or buildable_polygon is None:
+        return []
+    bp = buildable_polygon
+    minx, miny, maxx, maxy = bp.bounds
+
+    neighbor_polys = []
+    for nb in (neighbors or []):
+        p = nb.get('polygon')
+        if p is not None and not p.is_empty:
+            if site_polygon and p.intersection(site_polygon).area / max(float(p.area), 1.0) < 0.3:
+                neighbor_polys.append({'polygon': p, 'height_m': float(nb.get('height_m', 9.0)),
+                                       'centroid': (p.centroid.x, p.centroid.y)})
+
+    positions = []
+    pos_id = 0
+    x = minx + grid_spacing_m / 2
+    while x < maxx:
+        y = miny + grid_spacing_m / 2
+        while y < maxy:
+            pt = Point(x, y)
+            if bp.contains(pt):
+                test_rect = shapely_box(x - 10, y - 7, x + 10, y + 7)
+                containment = bp.intersection(test_rect).area / max(test_rect.area, 1.0)
+
+                min_nb_dist, closest_nb_h = 999.0, 0.0
+                sol_score = 70.0
+                for nb in neighbor_polys:
+                    d = pt.distance(nb['polygon'])
+                    if d < min_nb_dist:
+                        min_nb_dist = d
+                        closest_nb_h = nb['height_m']
+                    ncx, ncy = nb['centroid']
+                    dx, dy = ncx - x, ncy - y
+                    nb_angle = math.degrees(math.atan2(dy, dx)) % 360
+                    if 150 < nb_angle < 210:
+                        dist = math.hypot(dx, dy)
+                        sol_score -= min(30.0, (nb['height_m'] / max(dist, 1.0)) * 80.0)
+                sol_score = max(10.0, min(100.0, sol_score))
+
+                elev = 0.0
+                if terrain and terrain.get('a') is not None:
+                    elev = float(terrain['a']) * x + float(terrain['b']) * y + float(terrain['c'])
+                    elev -= float(terrain.get('min_elev_m', elev))
+
+                edge_dist = bp.exterior.distance(pt)
+                rel_x = (x - minx) / max(maxx - minx, 1.0)
+                rel_y = (y - miny) / max(maxy - miny, 1.0)
+
+                positions.append({
+                    'id': f'P{pos_id:03d}', 'x': round(x, 1), 'y': round(y, 1),
+                    'rel_x': round(rel_x, 2), 'rel_y': round(rel_y, 2),
+                    'containment': round(containment, 2),
+                    'sol_score': round(sol_score, 0),
+                    'nearest_neighbor_m': round(min_nb_dist, 0),
+                    'nearest_neighbor_height_m': round(closest_nb_h, 0),
+                    'edge_distance_m': round(edge_dist, 0),
+                    'elevation_m': round(elev, 1),
+                    'usable': containment > 0.5 and edge_dist > 4.0,
+                })
+                pos_id += 1
+            y += grid_spacing_m
+        x += grid_spacing_m
+    return positions
 
 
-def _build_site_description(
-    site_polygon: Any,
-    buildable_polygon: Any,
-    neighbors: List[Dict[str, Any]],
-    terrain: Optional[Dict[str, Any]],
-    site_intelligence: Optional[Dict[str, Any]],
-    site_inputs: Optional[Dict[str, Any]],
-    typology: str,
-    target_bta_m2: float,
-    max_floors: int,
-    max_height_m: float,
-    max_bya_pct: float,
-    floor_to_floor_m: float,
-) -> str:
-    """Bygg en detaljert romlig beskrivelse for AI-arkitekten."""
+def _rank_positions(positions):
+    usable = [p for p in positions if p.get('usable')]
+    for p in usable:
+        p['rank_score'] = p['sol_score'] * 0.35 + min(p['nearest_neighbor_m'], 50) * 0.8 + min(p['edge_distance_m'], 30) * 0.6 + p['containment'] * 20
+    usable.sort(key=lambda p: p['rank_score'], reverse=True)
+    return usable
 
-    if HAS_SHAPELY and site_polygon is not None:
-        site_area = float(site_polygon.area)
-        bp_area = float(buildable_polygon.area) if buildable_polygon else site_area
-        bounds = site_polygon.bounds
-        site_width = bounds[2] - bounds[0]
-        site_depth = bounds[3] - bounds[1]
-        centroid = site_polygon.centroid
-        cx, cy = centroid.x, centroid.y
 
-        # BYGGBART POLYGONS FAKTISKE KOORDINATER — dette er noekkelen
-        bp = buildable_polygon if buildable_polygon else site_polygon
-        bp_coords = list(bp.exterior.coords)[:30]
-        bp_coord_str = "\n".join([f"    ({c[0]:.1f}, {c[1]:.1f})" for c in bp_coords])
-        bp_bounds = bp.bounds
-        bp_minx, bp_miny, bp_maxx, bp_maxy = bp_bounds
+def _build_prompt(positions, typology, target_bta_m2, max_floors, max_height_m, max_bya_pct,
+                  floor_to_floor_m, site_area_m2, buildable_area_m2, latitude_deg,
+                  terrain, site_intelligence, neighbor_summary):
+    max_footprint = buildable_area_m2 * (max_bya_pct / 100.0)
+    typo_rules = {
+        "Lamell": {"desc": "Langstrakte boligblokker", "w": "35-55", "d": "12-14", "sp": 18,
+                   "pattern": "parallelle rader, langfasade mot sor/sorvest",
+                   "tip": "Varier lengde 35-55m, forskyv annenhver rad 8-15m"},
+        "Punkthus": {"desc": "Kompakte frittstaende blokker", "w": "16-22", "d": "16-22", "sp": 22,
+                     "pattern": "spredt grid med siktlinjer",
+                     "tip": "Roter annethvert 15-30 grader, varier hoyde"},
+        "Karré": {"desc": "Kvartalsstruktur med gaardrom", "w": "38-50", "d": "38-50", "sp": 20,
+                  "pattern": "kvartaler med aapent gaardrom mot sorvest",
+                  "tip": "courtyard=true, ring_depth=11. Varier stoerrelse"},
+        "Tårn": {"desc": "Hoeye slanke taarn", "w": "18-25", "d": "18-25", "sp": 28,
+                 "pattern": "spredt, varier hoyde", "tip": "Hoyest sorvest, lavest nordost"},
+        "Rekke": {"desc": "Rekkehusrader", "w": "40-60", "d": "9-11", "sp": 14,
+                  "pattern": "parallelle rader ost-vest", "tip": "14-18m mellomrom, sorfasade"},
+        "Tun": {"desc": "L/U-form med skjermet uterom", "w": "30-45", "d": "10-12", "sp": 14,
+                "pattern": "hovedbygg + floeyer, aapent mot sor",
+                "tip": "2-3 tungrupper, set role=main og role=wing"},
+        "Podium + Tårn": {"desc": "Lavt podium med hoyt taarn", "w": "40-55", "d": "18-25", "sp": 22,
+                          "pattern": "podium 2-3et + taarn full hoyde",
+                          "tip": "role=main paa podium, role=tower paa taarn"},
+    }
+    r = typo_rules.get(typology, typo_rules["Lamell"])
+    fl_est = min(max_floors, max(2, int(target_bta_m2 / max(max_footprint, 1.0)) + 1))
 
-        # Beregn plasseringssoner (del tomten i et grid)
-        n_zones_x = max(2, int(site_width / 60))
-        n_zones_y = max(2, int(site_depth / 60))
-        zones = []
-        zone_w = (bp_maxx - bp_minx) / n_zones_x
-        zone_h = (bp_maxy - bp_miny) / n_zones_y
-        from shapely.geometry import box as shapely_box
-        for ix in range(n_zones_x):
-            for iy in range(n_zones_y):
-                zx = bp_minx + ix * zone_w + zone_w / 2
-                zy = bp_miny + iy * zone_h + zone_h / 2
-                zone_box = shapely_box(bp_minx + ix * zone_w, bp_miny + iy * zone_h,
-                                       bp_minx + (ix+1) * zone_w, bp_miny + (iy+1) * zone_h)
-                overlap = zone_box.intersection(bp)
-                if overlap.area > zone_w * zone_h * 0.3:
-                    zones.append({"cx": round(zx, 1), "cy": round(zy, 1),
-                                  "w": round(zone_w, 1), "h": round(zone_h, 1),
-                                  "area": round(float(overlap.area), 0)})
-        zone_str = "\n".join([f"    Sone ({z['cx']:.0f}, {z['cy']:.0f}): {z['w']:.0f}x{z['h']:.0f}m, {z['area']:.0f}m2 tilgjengelig" for z in zones])
-    else:
-        site_area = float((site_inputs or {}).get('site_area_m2', 1000))
-        bp_area = site_area * 0.85
-        site_width = site_depth = math.sqrt(site_area)
-        cx = cy = 0.0
-        bp_coord_str = "    ikke tilgjengelig"
-        bp_minx = bp_miny = 0.0
-        bp_maxx = site_width
-        bp_maxy = site_depth
-        zone_str = "    Hele tomten"
-        zones = []
+    pos_lines = []
+    for p in positions[:50]:
+        pos_lines.append(f"  {p['id']}: ({p['x']:.0f},{p['y']:.0f}) sol={p['sol_score']:.0f} nabo={p['nearest_neighbor_m']:.0f}m kant={p['edge_distance_m']:.0f}m h={p['elevation_m']:.1f}m")
 
-    # Nabobygg med retning og posisjon
-    neighbor_lines = []
-    for nb in neighbors[:20]:
-        h = float(nb.get('height_m', 9.0))
-        d = float(nb.get('distance_m', 0.0))
-        if HAS_SHAPELY and nb.get('polygon') and site_polygon:
-            nc = nb['polygon'].centroid
-            sc = site_polygon.centroid
-            dx, dy = nc.x - sc.x, nc.y - sc.y
-            angle = math.degrees(math.atan2(dy, dx))
-            if angle < 0: angle += 360
-            compass = ["ost", "nord-ost", "nord", "nord-vest", "vest", "sor-vest", "sor", "sor-ost"][int((angle + 22.5) / 45) % 8]
-            neighbor_lines.append(f"    {compass}: {h:.0f}m hoyde, {d:.0f}m fra tomtegrense, pos ({nc.x:.0f}, {nc.y:.0f})")
-        else:
-            neighbor_lines.append(f"    {h:.0f}m hoyde, {d:.0f}m unna")
-    neighbor_text = "\n".join(neighbor_lines[:15]) if neighbor_lines else "    Ingen naboer registrert"
-
-    # Terreng
     terrain_text = "Flatt"
     if terrain and terrain.get('point_count', 0) > 0:
-        terrain_text = f"Fall {terrain.get('slope_pct', 0):.1f}%, relieff {terrain.get('relief_m', 0):.1f}m, helning N-S {terrain.get('grade_ns_pct', 0):.2f}%, O-V {terrain.get('grade_ew_pct', 0):.2f}%"
+        terrain_text = f"Fall {terrain.get('slope_pct', 0):.1f}%, relieff {terrain.get('relief_m', 0):.1f}m"
 
-    # Site intelligence
-    si_text = ""
-    if site_intelligence and site_intelligence.get('available'):
-        transport = site_intelligence.get('transport', {})
-        si_text = f"Mobilitet {transport.get('mobility_score', 50):.0f}/100, kollektiv innen 600m: {transport.get('transit_within_600_m', 0)}"
+    courtyard_example = ',"courtyard":true,"ring_depth":11' if typology == "Karré" else ''
 
-    # Typologispesifikke instruksjoner
-    typo_instructions = {
-        "Lamell": """LAMELL-REGLER:
-    - Hver lamell: 35-55m lang, 12-14m dyp
-    - Orienter ALLE lameller med langfasaden mot sor/sorvest for maks dagslys
-    - Minimum 18m mellom parallelle lameller (TEK17 dagslys + utsyn)
-    - Plasser i parallelle rader — IKKE i klynge
-    - Spre radene over HELE tomtens bredde og dybde
-    - Varier lengden paa lamellene for aa skape variasjon""",
+    return f"""Du er en prisbelonnet norsk arkitekt som planlegger {typology.lower()}-bebyggelse.
 
-        "Punkthus": """PUNKTHUS-REGLER:
-    - Hvert punkthus: 16-22m x 16-22m (tilnaermet kvadratisk)
-    - Minimum 22m mellom punkthus
-    - Plasser i et aapent grid-monster over HELE tomten
-    - Roter annen-hvert punkthus 15-30 grader for variasjon
-    - La det vaere tydelige siktlinjer mellom bygningene
-    - Posisjoner saa hvert hus faar sol fra minst to sider""",
+TOMT: {site_area_m2:.0f}m2, byggbart {buildable_area_m2:.0f}m2
+REGULERING: BYA {max_bya_pct:.0f}% (maks {max_footprint:.0f}m2 fotavtrykk), {max_floors} etasjer, {max_height_m:.0f}m
+MAL: {target_bta_m2:.0f}m2 BTA (~{fl_est} etasjer)
+TERRENG: {terrain_text} | BREDDEGRAD: {latitude_deg:.1f} (lav sol, sorfasade kritisk)
+{neighbor_summary}
+Bygg PÅ tomten rives — nabobygg UTENFOR tomten er uroerlige.
 
-        "Karré": """KARRE-REGLER:
-    - Hvert kvartal: 40-50m ytre side, 10-12m ringdybde
-    - Gaardrom i midten (ca 18-28m x 18-28m)
-    - Aapning i sorvest-hjornet for sol inn i gaardsrommet
-    - Sett "courtyard": true og "ring_depth": 11 i JSON
-    - Minimum 20m mellom kvartaler
-    - Plasser 2-4 kvartaler spredt over tomten""",
+TYPOLOGI: {typology.upper()} — {r['desc']}
+  Dimensjoner: {r['w']}m x {r['d']}m, min avstand {r['sp']}m
+  Monster: {r['pattern']}
+  Tips: {r['tip']}
 
-        "Tårn": """TAARN-REGLER:
-    - Hvert taarn: 18-25m x 18-25m
-    - Minimum 28m mellom taarn
-    - Plasser spredt over hele tomten
-    - Varier hoyde mellom taarnene (noen lavere, noen hoyere)
-    - Orienter for aa unngaa skygge paa nabotaarn""",
+FORHANDS-EVALUERTE POSISJONER (bruk disse koordinatene +/- 15m):
+{chr(10).join(pos_lines)}
 
-        "Rekke": """REKKE-REGLER:
-    - Hver rad: 40-60m lang, 9-11m dyp
-    - Radene skal vaere parallelle
-    - 14-18m mellom rader
-    - Orienter radene ost-vest slik at alle faar sorfasade
-    - Spre radene over HELE tomtens utstrekning""",
+OPPGAVE: Velg posisjoner og plasser bygninger. Tenk som en arkitekt:
+- SKAP UTEROM: bygninger skal ramme inn torg, gaardrom, lekeplasser — ikke staa tilfeldig
+- SPREDNING: bruk HELE tomten, ikke klump i midten
+- HOYDE-VARIASJON: {max(2, fl_est-2)}-{fl_est} etasjer, hoyest sorvest, lavest nordost
+- ORIENTERING: langfasade mot sor/sorvest (ca 195-210 grader) for dagslys
+- SKALA: respekter nabobebyggelsens hoyde og avstand
 
-        "Tun": """TUN-REGLER:
-    - Hovedbygg: 35-45m langt, 10-12m dypt
-    - 1-2 sidefloyer vinkelrett paa hovedbygget, 20-30m lange
-    - Floyene danner et beskyttet uterom (tun) aapent mot sor
-    - Lag 2-3 separate tun-grupper spredt over tomten""",
-
-        "Podium + Tårn": """PODIUM+TAARN-REGLER:
-    - Podium: 40-55m x 18-25m, 2-3 etasjer
-    - Taarn: 16-20m x 16-20m, plassert paa podiumet, full hoyde
-    - Sett role="main" paa podium og role="tower" paa taarn
-    - Lag 1-3 slike kombinasjoner spredt over tomten""",
-    }
-
-    typo_rules = typo_instructions.get(typology, "Plasser realistiske bygningskropper spredt over hele tomten.")
-
-    # Beregn maks fotavtrykk og antall bygninger
-    max_footprint = bp_area * (max_bya_pct / 100.0)
-    floors_estimate = min(max_floors, max(2, int(target_bta_m2 / max(max_footprint, 1.0)) + 1))
-
-    prompt = f"""Du er Norges beste arkitekt for volumstudier. Du planlegger bebyggelse som maksimerer
-bokvalitet, dagslys, uterom og arealutnyttelse paa en reell tomt i Trondheim.
-
-═══════════════════════════════════════════════════════
-TOMTENS BYGGBARE OMRAADE (UTM33 EUREF89 koordinater)
-═══════════════════════════════════════════════════════
-Senterpunkt: ({cx:.1f}, {cy:.1f})
-Byggbart areal: {bp_area:.0f} m2
-Tomteareal totalt: {site_area:.0f} m2
-Bounding box: x=[{bp_minx:.0f} til {bp_maxx:.0f}], y=[{bp_miny:.0f} til {bp_maxy:.0f}]
-Bredde: {site_width:.0f}m, Dybde: {site_depth:.0f}m
-
-Byggbart polygon (ALLE bygninger SKAL ligge INNENFOR disse koordinatene):
-{bp_coord_str}
-
-TILGJENGELIGE PLASSERINGSSONER (bruk disse som guide for aa spre bygninger):
-{zone_str}
-
-═══════════════════════════════════════════════════════
-REGULERING
-═══════════════════════════════════════════════════════
-Maks BYA: {max_bya_pct:.0f}% (maks samlet fotavtrykk: {max_footprint:.0f} m2)
-Maks etasjer: {max_floors}
-Maks hoyde: {max_height_m:.0f}m
-Onsket total BTA: {target_bta_m2:.0f} m2
-Etasjehoyde: {floor_to_floor_m:.1f}m
-Estimert etasjer for aa naa BTA: {floors_estimate}
-
-═══════════════════════════════════════════════════════
-NABOBEBYGGELSE
-═══════════════════════════════════════════════════════
-{neighbor_text}
-
-═══════════════════════════════════════════════════════
-TERRENG OG KONTEKST
-═══════════════════════════════════════════════════════
-Terreng: {terrain_text}
-Breddegrad: {(site_inputs or {}).get('latitude_deg', 63.4):.1f} (sol staar lavt — sorfasade er kritisk)
-{si_text}
-
-═══════════════════════════════════════════════════════
-TYPOLOGI: {typology.upper()}
-═══════════════════════════════════════════════════════
-{typo_rules}
-
-═══════════════════════════════════════════════════════
-KRITISKE REGLER (BRUDD = FORKASTET)
-═══════════════════════════════════════════════════════
-1. ALLE bygninger SKAL ha cx/cy-koordinater INNENFOR det byggbare polygonet ovenfor
-2. Bygningene SKAL spre seg over HELE tomtens utstrekning — IKKE klumpe seg i ett hjorne
-3. Bruk sonene ovenfor: plasser minst en bygning i HVER tilgjengelige sone der det er plass
-4. Maks samlet fotavtrykk: {max_footprint:.0f} m2 (BYA {max_bya_pct:.0f}%)
-5. Maks {max_floors} etasjer, maks {max_height_m:.0f}m hoyde per bygning
-6. Minimum avstand mellom bygninger: se typologiregler ovenfor
-7. Orienter for maks sol paa breddegrad {(site_inputs or {}).get('latitude_deg', 63.4):.1f}
-
-═══════════════════════════════════════════════════════
-SVAR-FORMAT
-═══════════════════════════════════════════════════════
-Returner BARE en JSON-array. Ingen annen tekst, ingen forklaring.
-
-[
-  {{
-    "name": "Bygning A",
-    "cx": {cx:.0f},
-    "cy": {cy:.0f},
-    "width": 45.0,
-    "depth": 14.0,
-    "angle_deg": 15.0,
-    "floors": {floors_estimate},
-    "role": "main",
-    "notes": "Sorvest-orientert for optimal sol"
-  }}
-]
-
-Felter: name (string), cx/cy (UTM33 floats), width/depth (meter), angle_deg (grader fra ost-aksen),
-floors (int), role ("main"|"wing"|"tower"|"row"), notes (kort begrunnelse).
-{"Legg til courtyard: true og ring_depth: 11 for karre-blokker." if typology == "Karré" else ""}
+Returner BARE JSON-array, ingen annen tekst:
+[{{"pos_id":"P005","name":"A","cx":0.0,"cy":0.0,"width":48,"depth":14,"angle_deg":195,"floors":{fl_est},"role":"main"{courtyard_example},"notes":"..."}}]
 """
-    return prompt
 
-def _call_claude(prompt: str, api_key: str, model: str = DEFAULT_MODEL) -> Optional[str]:
-    """Kall Anthropic API og returner svarteksten."""
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    body = {
-        "model": model,
-        "max_tokens": 4000,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-    }
+
+def _call_claude(prompt, api_key, model=DEFAULT_MODEL):
     try:
-        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=body, timeout=60)
+        resp = requests.post(ANTHROPIC_API_URL,
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": model, "max_tokens": 4000, "messages": [{"role": "user", "content": prompt}], "temperature": 0.4},
+            timeout=90)
         resp.raise_for_status()
-        data = resp.json()
-        for block in data.get("content", []):
+        for block in resp.json().get("content", []):
             if block.get("type") == "text":
                 return block["text"]
     except Exception as exc:
-        print(f"[ai_site_planner] API-kall feilet: {exc}")
+        print(f"[ai_site_planner] API feilet: {exc}")
     return None
 
 
-def _parse_buildings_json(text: str) -> List[Dict[str, Any]]:
-    """Parse AI-svaret som JSON-array."""
-    if not text:
-        return []
-    # Strip markdown fences
+def _parse_buildings_json(text):
+    if not text: return []
     cleaned = text.strip()
     if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines)
-    # Find JSON array
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start < 0 or end < 0:
-        return []
-    try:
-        return json.loads(cleaned[start:end + 1])
-    except json.JSONDecodeError:
-        return []
+        cleaned = "\n".join(l for l in cleaned.split("\n") if not l.strip().startswith("```"))
+    s, e = cleaned.find("["), cleaned.rfind("]")
+    if s < 0 or e < 0: return []
+    try: return json.loads(cleaned[s:e+1])
+    except: return []
 
 
-def _buildings_to_polygons(
-    buildings: List[Dict[str, Any]],
-    buildable_polygon: Any,
-    floor_to_floor_m: float = 3.2,
-    max_height_m: float = 25.0,
-) -> List[Dict[str, Any]]:
-    """Konverter AI-genererte bygningsplasseringer til Shapely-polygoner."""
-    if not HAS_SHAPELY:
-        return []
+def _make_building_polygon(cx, cy, width, depth, angle_deg):
+    if not HAS_SHAPELY: return None
+    rad = math.radians(angle_deg)
+    hw, hd = width/2, depth/2
+    ca, sa = math.cos(rad), math.sin(rad)
+    corners = [(cx+hw*ca-hd*sa, cy+hw*sa+hd*ca), (cx-hw*ca-hd*sa, cy-hw*sa+hd*ca),
+               (cx-hw*ca+hd*sa, cy-hw*sa-hd*ca), (cx+hw*ca+hd*sa, cy+hw*sa-hd*ca)]
+    p = Polygon(corners)
+    return p if p.is_valid and not p.is_empty else None
 
-    results: List[Dict[str, Any]] = []
-    for bld in buildings:
+
+def _validate_and_build(raw_buildings, buildable_polygon, max_bya_m2, floor_to_floor_m, max_height_m, max_floors):
+    if not HAS_SHAPELY or not raw_buildings: return []
+    results, placed_union, total_fp = [], None, 0.0
+
+    for bld in raw_buildings:
         try:
-            cx = float(bld["cx"])
-            cy = float(bld["cy"])
-            width = float(bld.get("width", 14.0))
-            depth = float(bld.get("depth", 14.0))
-            angle = float(bld.get("angle_deg", 0.0))
-            floors = int(bld.get("floors", 4))
-            name = str(bld.get("name", f"Bygning {len(results)+1}"))
+            cx, cy = float(bld["cx"]), float(bld["cy"])
+            width = max(6, min(65, float(bld.get("width", 14))))
+            depth = max(6, min(55, float(bld.get("depth", 14))))
+            angle = float(bld.get("angle_deg", 0))
+            floors = max(1, min(max_floors, int(bld.get("floors", 4))))
+            name = str(bld.get("name", f"Bygg {len(results)+1}"))
             role = str(bld.get("role", "main"))
             notes = str(bld.get("notes", ""))
+            height_m = min(max_height_m, floors * floor_to_floor_m)
 
-            # Valider dimensjoner
-            width = max(6.0, min(65.0, width))
-            depth = max(6.0, min(50.0, depth))
-            floors = max(1, min(int(max_height_m / floor_to_floor_m), floors))
-            height_m = floors * floor_to_floor_m
+            poly = _make_building_polygon(cx, cy, width, depth, angle)
+            if not poly or poly.area < 20: continue
 
-            # Lag polygon
-            angle_rad = math.radians(angle)
-            hw, hd = width / 2.0, depth / 2.0
-            cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
-            corners = [
-                (cx + hw * cos_a - hd * sin_a, cy + hw * sin_a + hd * cos_a),
-                (cx - hw * cos_a - hd * sin_a, cy - hw * sin_a + hd * cos_a),
-                (cx - hw * cos_a + hd * sin_a, cy - hw * sin_a - hd * cos_a),
-                (cx + hw * cos_a + hd * sin_a, cy + hw * sin_a - hd * cos_a),
-            ]
-            poly = Polygon(corners)
-            if poly.is_empty or poly.area < 20:
-                continue
+            clipped = poly.intersection(buildable_polygon).buffer(0)
+            if clipped.is_empty or clipped.area < 20:
+                bp_cx, bp_cy = buildable_polygon.centroid.x, buildable_polygon.centroid.y
+                for t in [0.2, 0.4, 0.6]:
+                    p2 = _make_building_polygon(cx+(bp_cx-cx)*t, cy+(bp_cy-cy)*t, width, depth, angle)
+                    if p2:
+                        c2 = p2.intersection(buildable_polygon).buffer(0)
+                        if not c2.is_empty and c2.area > poly.area * 0.5:
+                            clipped = c2; break
+                if clipped.is_empty or clipped.area < 20: continue
 
-            # Klipp til byggbart areal
-            if buildable_polygon is not None:
-                clipped = poly.intersection(buildable_polygon).buffer(0)
-                if clipped.is_empty or clipped.area < 20:
-                    continue
-                poly = clipped
+            if placed_union and clipped.intersection(placed_union).area > clipped.area * 0.1: continue
+            if total_fp + clipped.area > max_bya_m2 * 1.05: continue
 
-            # Haandter karre med gaardrom
-            if bld.get("courtyard") or (role == "main" and "gardsrom" in notes.lower()):
-                ring_depth = float(bld.get("ring_depth", 11.0))
-                inner = poly.buffer(-ring_depth)
-                if inner is not None and not inner.is_empty and inner.area > 30:
-                    poly = poly.difference(inner).buffer(0)
+            is_karre = bld.get("courtyard") or "karre" in name.lower() or "kvartal" in name.lower()
+            if is_karre and clipped.area > 250:
+                rd = max(8, min(float(bld.get("ring_depth", 11)), math.sqrt(clipped.area)*0.22))
+                inner = clipped.buffer(-rd)
+                if inner and not inner.is_empty and inner.area > 30:
+                    clipped = clipped.difference(inner).buffer(0)
 
-            results.append({
-                "polygon": poly,
-                "name": name,
-                "role": role,
-                "floors": floors,
-                "height_m": round(height_m, 1),
-                "width_m": round(width, 1),
-                "depth_m": round(depth, 1),
-                "angle_deg": round(angle, 1),
-                "area_m2": round(float(poly.area), 1),
-                "notes": notes,
-            })
-        except (KeyError, ValueError, TypeError) as exc:
-            continue
+            placed_union = clipped if placed_union is None else placed_union.union(clipped).buffer(0)
+            total_fp += clipped.area
 
+            results.append({"polygon": clipped, "name": name, "role": role, "floors": floors,
+                          "height_m": round(height_m, 1), "width_m": round(width, 1),
+                          "depth_m": round(depth, 1), "angle_deg": round(angle, 1),
+                          "area_m2": round(float(clipped.area), 1), "notes": notes,
+                          "pos_id": bld.get("pos_id", "")})
+        except (KeyError, ValueError, TypeError): continue
     return results
 
 
-def plan_site(
-    site_polygon: Any,
-    buildable_polygon: Any,
-    typology: str,
-    *,
-    neighbors: Optional[List[Dict[str, Any]]] = None,
-    terrain: Optional[Dict[str, Any]] = None,
-    site_intelligence: Optional[Dict[str, Any]] = None,
-    site_inputs: Optional[Dict[str, Any]] = None,
-    target_bta_m2: float = 5000.0,
-    max_floors: int = 5,
-    max_height_m: float = 16.0,
-    max_bya_pct: float = 35.0,
-    floor_to_floor_m: float = 3.2,
-    model: str = DEFAULT_MODEL,
-) -> Dict[str, Any]:
-    """
-    Hovedfunksjon: AI-drevet tomteplanlegging.
-
-    Returnerer dict med:
-        buildings: List[Dict] — bygningsplasseringer med Shapely-polygoner
-        footprint: Polygon — samlet fotavtrykk (union av alle bygninger)
-        raw_response: str — raa AI-svar for debugging
-        prompt: str — prompten som ble sendt
-        source: str — "AI (Claude)" eller "Fallback (geometrimotor)"
-    """
+def plan_site(site_polygon, buildable_polygon, typology, *, neighbors=None, terrain=None,
+              site_intelligence=None, site_inputs=None, target_bta_m2=5000.0, max_floors=5,
+              max_height_m=16.0, max_bya_pct=35.0, floor_to_floor_m=3.2, model=DEFAULT_MODEL):
     api_key = _get_api_key()
     if not api_key:
-        return {"buildings": [], "footprint": None, "source": "Ingen API-noekkel",
-                "error": "ANTHROPIC_API_KEY ikke satt"}
+        return {"buildings": [], "footprint": None, "error": "ANTHROPIC_API_KEY ikke satt"}
+    if not HAS_SHAPELY or buildable_polygon is None:
+        return {"buildings": [], "footprint": None, "error": "Shapely/polygon mangler"}
 
-    prompt = _build_site_description(
-        site_polygon=site_polygon,
-        buildable_polygon=buildable_polygon,
-        neighbors=neighbors or [],
-        terrain=terrain,
-        site_intelligence=site_intelligence,
-        site_inputs=site_inputs,
-        typology=typology,
-        target_bta_m2=target_bta_m2,
-        max_floors=max_floors,
-        max_height_m=max_height_m,
-        max_bya_pct=max_bya_pct,
-        floor_to_floor_m=floor_to_floor_m,
-    )
+    latitude = float((site_inputs or {}).get('latitude_deg', 63.4))
+    site_area = float(site_polygon.area) if site_polygon else 1000
+    bp_area = float(buildable_polygon.area)
+    max_fp = bp_area * (max_bya_pct / 100.0)
 
-    raw = _call_claude(prompt, api_key, model=model)
+    grid_sp = max(15, min(30, math.sqrt(bp_area) / 8))
+    all_pos = _compute_placement_grid(buildable_polygon, site_polygon, neighbors or [], terrain, latitude, grid_sp)
+    ranked = _rank_positions(all_pos)
+    if not ranked:
+        return {"buildings": [], "footprint": None, "error": "Ingen gyldige posisjoner"}
+
+    nb_lines = []
+    for nb in (neighbors or [])[:12]:
+        p = nb.get('polygon')
+        if p and site_polygon:
+            if p.intersection(site_polygon).area / max(float(p.area), 1) >= 0.3: continue
+            nc, sc = p.centroid, site_polygon.centroid
+            ang = math.degrees(math.atan2(nc.y-sc.y, nc.x-sc.x)) % 360
+            compass = ["O","NO","N","NV","V","SV","S","SO"][int((ang+22.5)/45)%8]
+            nb_lines.append(f"  {compass}: {nb.get('height_m',9):.0f}m, {nb.get('distance_m',0):.0f}m unna")
+    nb_text = "NABOER (uroerlige):\n" + "\n".join(nb_lines[:10]) if nb_lines else "NABOER: Ingen naere"
+
+    prompt = _build_prompt(ranked[:50], typology, target_bta_m2, max_floors, max_height_m,
+                           max_bya_pct, floor_to_floor_m, site_area, bp_area, latitude,
+                           terrain, site_intelligence, nb_text)
+
+    raw = _call_claude(prompt, api_key, model)
     if not raw:
-        return {"buildings": [], "footprint": None, "source": "API-kall feilet",
-                "prompt": prompt, "error": "Ingen svar fra Claude"}
+        return {"buildings": [], "footprint": None, "prompt": prompt, "error": "Ingen svar fra Claude"}
 
     parsed = _parse_buildings_json(raw)
     if not parsed:
-        return {"buildings": [], "footprint": None, "source": "Parsing feilet",
-                "prompt": prompt, "raw_response": raw,
-                "error": "Kunne ikke parse JSON fra AI-svar"}
+        return {"buildings": [], "footprint": None, "prompt": prompt, "raw_response": raw, "error": "Parse feilet"}
 
-    buildings = _buildings_to_polygons(
-        parsed, buildable_polygon,
-        floor_to_floor_m=floor_to_floor_m,
-        max_height_m=max_height_m,
-    )
+    buildings = _validate_and_build(parsed, buildable_polygon, max_fp, floor_to_floor_m, max_height_m, max_floors)
 
     footprint = None
-    if buildings and HAS_SHAPELY:
-        from shapely.ops import unary_union
+    if buildings:
         polys = [b["polygon"] for b in buildings if b.get("polygon")]
-        if polys:
-            footprint = unary_union(polys).buffer(0)
+        if polys: footprint = unary_union(polys).buffer(0)
 
-    return {
-        "buildings": buildings,
-        "footprint": footprint,
-        "building_count": len(buildings),
-        "total_footprint_m2": round(sum(b.get("area_m2", 0) for b in buildings), 1),
-        "total_bta_m2": round(sum(b.get("area_m2", 0) * b.get("floors", 1) for b in buildings), 1),
-        "source": f"AI (Claude {model})",
-        "prompt": prompt,
-        "raw_response": raw,
-        "raw_parsed": parsed,
-    }
+    return {"buildings": buildings, "footprint": footprint, "building_count": len(buildings),
+            "total_footprint_m2": round(sum(b.get("area_m2",0) for b in buildings), 1),
+            "total_bta_m2": round(sum(b.get("area_m2",0)*b.get("floors",1) for b in buildings), 1),
+            "source": f"AI (Claude {model})", "positions_evaluated": len(all_pos),
+            "positions_usable": len(ranked), "prompt": prompt, "raw_response": raw, "raw_parsed": parsed}
