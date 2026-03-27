@@ -58,135 +58,222 @@ def _build_site_description(
     max_bya_pct: float,
     floor_to_floor_m: float,
 ) -> str:
-    """Bygg en strukturert beskrivelse av tomten for AI-modellen."""
+    """Bygg en detaljert romlig beskrivelse for AI-arkitekten."""
 
-    # Tomt-dimensjoner
     if HAS_SHAPELY and site_polygon is not None:
-        from shapely.geometry import Polygon as ShapelyPolygon
         site_area = float(site_polygon.area)
         bp_area = float(buildable_polygon.area) if buildable_polygon else site_area
         bounds = site_polygon.bounds
         site_width = bounds[2] - bounds[0]
         site_depth = bounds[3] - bounds[1]
+        centroid = site_polygon.centroid
+        cx, cy = centroid.x, centroid.y
 
-        # Tomtens hjornepunkter (forenklet)
-        coords = list(site_polygon.exterior.coords)[:20]
-        coord_str = ", ".join([f"({c[0]:.1f}, {c[1]:.1f})" for c in coords[:8]])
+        # BYGGBART POLYGONS FAKTISKE KOORDINATER — dette er noekkelen
+        bp = buildable_polygon if buildable_polygon else site_polygon
+        bp_coords = list(bp.exterior.coords)[:30]
+        bp_coord_str = "\n".join([f"    ({c[0]:.1f}, {c[1]:.1f})" for c in bp_coords])
+        bp_bounds = bp.bounds
+        bp_minx, bp_miny, bp_maxx, bp_maxy = bp_bounds
+
+        # Beregn plasseringssoner (del tomten i et grid)
+        n_zones_x = max(2, int(site_width / 60))
+        n_zones_y = max(2, int(site_depth / 60))
+        zones = []
+        zone_w = (bp_maxx - bp_minx) / n_zones_x
+        zone_h = (bp_maxy - bp_miny) / n_zones_y
+        from shapely.geometry import box as shapely_box
+        for ix in range(n_zones_x):
+            for iy in range(n_zones_y):
+                zx = bp_minx + ix * zone_w + zone_w / 2
+                zy = bp_miny + iy * zone_h + zone_h / 2
+                zone_box = shapely_box(bp_minx + ix * zone_w, bp_miny + iy * zone_h,
+                                       bp_minx + (ix+1) * zone_w, bp_miny + (iy+1) * zone_h)
+                overlap = zone_box.intersection(bp)
+                if overlap.area > zone_w * zone_h * 0.3:
+                    zones.append({"cx": round(zx, 1), "cy": round(zy, 1),
+                                  "w": round(zone_w, 1), "h": round(zone_h, 1),
+                                  "area": round(float(overlap.area), 0)})
+        zone_str = "\n".join([f"    Sone ({z['cx']:.0f}, {z['cy']:.0f}): {z['w']:.0f}x{z['h']:.0f}m, {z['area']:.0f}m2 tilgjengelig" for z in zones])
     else:
         site_area = float((site_inputs or {}).get('site_area_m2', 1000))
         bp_area = site_area * 0.85
         site_width = site_depth = math.sqrt(site_area)
-        coord_str = "ikke tilgjengelig"
+        cx = cy = 0.0
+        bp_coord_str = "    ikke tilgjengelig"
+        bp_minx = bp_miny = 0.0
+        bp_maxx = site_width
+        bp_maxy = site_depth
+        zone_str = "    Hele tomten"
+        zones = []
 
-    # Nabobygg-sammendrag
-    neighbor_summary = []
-    for nb in neighbors[:25]:
+    # Nabobygg med retning og posisjon
+    neighbor_lines = []
+    for nb in neighbors[:20]:
         h = float(nb.get('height_m', 9.0))
         d = float(nb.get('distance_m', 0.0))
-        a = float(getattr(nb.get('polygon'), 'area', 0.0)) if nb.get('polygon') else 0.0
-        direction = ""
         if HAS_SHAPELY and nb.get('polygon') and site_polygon:
             nc = nb['polygon'].centroid
             sc = site_polygon.centroid
             dx, dy = nc.x - sc.x, nc.y - sc.y
-            if abs(dx) > abs(dy):
-                direction = "ost" if dx > 0 else "vest"
-            else:
-                direction = "nord" if dy > 0 else "sor"
-        neighbor_summary.append(f"  - {direction}: {h:.0f}m hoey, {d:.0f}m unna, {a:.0f}m2 fotavtrykk")
-
-    neighbor_text = "\n".join(neighbor_summary[:15]) if neighbor_summary else "  Ingen nabobygg registrert."
+            angle = math.degrees(math.atan2(dy, dx))
+            if angle < 0: angle += 360
+            compass = ["ost", "nord-ost", "nord", "nord-vest", "vest", "sor-vest", "sor", "sor-ost"][int((angle + 22.5) / 45) % 8]
+            neighbor_lines.append(f"    {compass}: {h:.0f}m hoyde, {d:.0f}m fra tomtegrense, pos ({nc.x:.0f}, {nc.y:.0f})")
+        else:
+            neighbor_lines.append(f"    {h:.0f}m hoyde, {d:.0f}m unna")
+    neighbor_text = "\n".join(neighbor_lines[:15]) if neighbor_lines else "    Ingen naboer registrert"
 
     # Terreng
-    terrain_text = "Flatt (ingen terrengdata)"
+    terrain_text = "Flatt"
     if terrain and terrain.get('point_count', 0) > 0:
-        terrain_text = (
-            f"Fall: {terrain.get('slope_pct', 0):.1f}%, "
-            f"relieff: {terrain.get('relief_m', 0):.1f}m, "
-            f"helning ost-vest: {terrain.get('grade_ew_pct', 0):.2f}%, "
-            f"helning nord-sor: {terrain.get('grade_ns_pct', 0):.2f}%"
-        )
+        terrain_text = f"Fall {terrain.get('slope_pct', 0):.1f}%, relieff {terrain.get('relief_m', 0):.1f}m, helning N-S {terrain.get('grade_ns_pct', 0):.2f}%, O-V {terrain.get('grade_ew_pct', 0):.2f}%"
 
     # Site intelligence
-    si_text = "Ingen site intelligence tilgjengelig."
+    si_text = ""
     if site_intelligence and site_intelligence.get('available'):
-        plan = site_intelligence.get('plan', {})
         transport = site_intelligence.get('transport', {})
-        si_text = (
-            f"Site score: {site_intelligence.get('site_score', 0):.0f}/100\n"
-            f"  Regulering: {plan.get('dominant_plan', 'ukjent')}\n"
-            f"  Risikoflagger: {', '.join(plan.get('risk_flags', [])) or 'ingen'}\n"
-            f"  Kollektiv innen 600m: {transport.get('transit_within_600_m', 0)}\n"
-            f"  Mobilitetsscore: {transport.get('mobility_score', 50):.0f}/100\n"
-            f"  Vegadkomst: {'ja' if transport.get('road_access') else 'nei'}"
-        )
+        si_text = f"Mobilitet {transport.get('mobility_score', 50):.0f}/100, kollektiv innen 600m: {transport.get('transit_within_600_m', 0)}"
 
-    prompt = f"""Du er en erfaren norsk arkitekt som gjor volumstudier og mulighetsstudier for boligutvikling.
+    # Typologispesifikke instruksjoner
+    typo_instructions = {
+        "Lamell": """LAMELL-REGLER:
+    - Hver lamell: 35-55m lang, 12-14m dyp
+    - Orienter ALLE lameller med langfasaden mot sor/sorvest for maks dagslys
+    - Minimum 18m mellom parallelle lameller (TEK17 dagslys + utsyn)
+    - Plasser i parallelle rader — IKKE i klynge
+    - Spre radene over HELE tomtens bredde og dybde
+    - Varier lengden paa lamellene for aa skape variasjon""",
 
-TOMT:
-  Totalareal: {site_area:.0f} m2
-  Byggbart areal (etter inntrekk): {bp_area:.0f} m2
-  Bredde: {site_width:.0f}m, Dybde: {site_depth:.0f}m
-  Koordinater (UTM33): {coord_str}
-  Breddegrad: {(site_inputs or {}).get('latitude_deg', 63.4):.2f} (sol/skygge)
+        "Punkthus": """PUNKTHUS-REGLER:
+    - Hvert punkthus: 16-22m x 16-22m (tilnaermet kvadratisk)
+    - Minimum 22m mellom punkthus
+    - Plasser i et aapent grid-monster over HELE tomten
+    - Roter annen-hvert punkthus 15-30 grader for variasjon
+    - La det vaere tydelige siktlinjer mellom bygningene
+    - Posisjoner saa hvert hus faar sol fra minst to sider""",
 
-REGULERING:
-  Maks BYA: {max_bya_pct:.0f}%
-  Maks etasjer: {max_floors}
-  Maks hoyde: {max_height_m:.1f}m
-  Onsket BTA: {target_bta_m2:.0f} m2
-  Etasjehoyde: {floor_to_floor_m:.1f}m
+        "Karré": """KARRE-REGLER:
+    - Hvert kvartal: 40-50m ytre side, 10-12m ringdybde
+    - Gaardrom i midten (ca 18-28m x 18-28m)
+    - Aapning i sorvest-hjornet for sol inn i gaardsrommet
+    - Sett "courtyard": true og "ring_depth": 11 i JSON
+    - Minimum 20m mellom kvartaler
+    - Plasser 2-4 kvartaler spredt over tomten""",
 
-NABOBEBYGGELSE (retning, hoyde, avstand, fotavtrykk):
+        "Tårn": """TAARN-REGLER:
+    - Hvert taarn: 18-25m x 18-25m
+    - Minimum 28m mellom taarn
+    - Plasser spredt over hele tomten
+    - Varier hoyde mellom taarnene (noen lavere, noen hoyere)
+    - Orienter for aa unngaa skygge paa nabotaarn""",
+
+        "Rekke": """REKKE-REGLER:
+    - Hver rad: 40-60m lang, 9-11m dyp
+    - Radene skal vaere parallelle
+    - 14-18m mellom rader
+    - Orienter radene ost-vest slik at alle faar sorfasade
+    - Spre radene over HELE tomtens utstrekning""",
+
+        "Tun": """TUN-REGLER:
+    - Hovedbygg: 35-45m langt, 10-12m dypt
+    - 1-2 sidefloyer vinkelrett paa hovedbygget, 20-30m lange
+    - Floyene danner et beskyttet uterom (tun) aapent mot sor
+    - Lag 2-3 separate tun-grupper spredt over tomten""",
+
+        "Podium + Tårn": """PODIUM+TAARN-REGLER:
+    - Podium: 40-55m x 18-25m, 2-3 etasjer
+    - Taarn: 16-20m x 16-20m, plassert paa podiumet, full hoyde
+    - Sett role="main" paa podium og role="tower" paa taarn
+    - Lag 1-3 slike kombinasjoner spredt over tomten""",
+    }
+
+    typo_rules = typo_instructions.get(typology, "Plasser realistiske bygningskropper spredt over hele tomten.")
+
+    # Beregn maks fotavtrykk og antall bygninger
+    max_footprint = bp_area * (max_bya_pct / 100.0)
+    floors_estimate = min(max_floors, max(2, int(target_bta_m2 / max(max_footprint, 1.0)) + 1))
+
+    prompt = f"""Du er Norges beste arkitekt for volumstudier. Du planlegger bebyggelse som maksimerer
+bokvalitet, dagslys, uterom og arealutnyttelse paa en reell tomt i Trondheim.
+
+═══════════════════════════════════════════════════════
+TOMTENS BYGGBARE OMRAADE (UTM33 EUREF89 koordinater)
+═══════════════════════════════════════════════════════
+Senterpunkt: ({cx:.1f}, {cy:.1f})
+Byggbart areal: {bp_area:.0f} m2
+Tomteareal totalt: {site_area:.0f} m2
+Bounding box: x=[{bp_minx:.0f} til {bp_maxx:.0f}], y=[{bp_miny:.0f} til {bp_maxy:.0f}]
+Bredde: {site_width:.0f}m, Dybde: {site_depth:.0f}m
+
+Byggbart polygon (ALLE bygninger SKAL ligge INNENFOR disse koordinatene):
+{bp_coord_str}
+
+TILGJENGELIGE PLASSERINGSSONER (bruk disse som guide for aa spre bygninger):
+{zone_str}
+
+═══════════════════════════════════════════════════════
+REGULERING
+═══════════════════════════════════════════════════════
+Maks BYA: {max_bya_pct:.0f}% (maks samlet fotavtrykk: {max_footprint:.0f} m2)
+Maks etasjer: {max_floors}
+Maks hoyde: {max_height_m:.0f}m
+Onsket total BTA: {target_bta_m2:.0f} m2
+Etasjehoyde: {floor_to_floor_m:.1f}m
+Estimert etasjer for aa naa BTA: {floors_estimate}
+
+═══════════════════════════════════════════════════════
+NABOBEBYGGELSE
+═══════════════════════════════════════════════════════
 {neighbor_text}
 
-TERRENG:
-  {terrain_text}
+═══════════════════════════════════════════════════════
+TERRENG OG KONTEKST
+═══════════════════════════════════════════════════════
+Terreng: {terrain_text}
+Breddegrad: {(site_inputs or {}).get('latitude_deg', 63.4):.1f} (sol staar lavt — sorfasade er kritisk)
+{si_text}
 
-STEDSKONTEKST:
-  {si_text}
+═══════════════════════════════════════════════════════
+TYPOLOGI: {typology.upper()}
+═══════════════════════════════════════════════════════
+{typo_rules}
 
-TYPOLOGI: {typology}
+═══════════════════════════════════════════════════════
+KRITISKE REGLER (BRUDD = FORKASTET)
+═══════════════════════════════════════════════════════
+1. ALLE bygninger SKAL ha cx/cy-koordinater INNENFOR det byggbare polygonet ovenfor
+2. Bygningene SKAL spre seg over HELE tomtens utstrekning — IKKE klumpe seg i ett hjorne
+3. Bruk sonene ovenfor: plasser minst en bygning i HVER tilgjengelige sone der det er plass
+4. Maks samlet fotavtrykk: {max_footprint:.0f} m2 (BYA {max_bya_pct:.0f}%)
+5. Maks {max_floors} etasjer, maks {max_height_m:.0f}m hoyde per bygning
+6. Minimum avstand mellom bygninger: se typologiregler ovenfor
+7. Orienter for maks sol paa breddegrad {(site_inputs or {}).get('latitude_deg', 63.4):.1f}
 
-OPPGAVE:
-Plasser bygninger av typen "{typology}" paa denne tomten. Tenk som en arkitekt:
-- Maksimer dagslys og soltilgang (breddegrad {(site_inputs or {}).get('latitude_deg', 63.4):.1f})
-- Skap gode uterom og siktlinjer mellom bygningene
-- Respekter avstand til naboer og byggegrenser
-- Optimaliser for den valgte typologien
-- Tilpass til terrengfall
-- Orienter bygningene for best mulig sol (sorvest-eksponering er ideelt paa denne breddegraden)
+═══════════════════════════════════════════════════════
+SVAR-FORMAT
+═══════════════════════════════════════════════════════
+Returner BARE en JSON-array. Ingen annen tekst, ingen forklaring.
 
-{"For Karre: lag kvartaler med gaardrom, typisk 35-50m ytre side, 10-12m ringbredde." if typology == "Karré" else ""}
-{"For Tun: lag L- eller U-form med tydelig beskyttet uterom." if typology == "Tun" else ""}
-{"For Podium + Taarn: lag et lavt podium (2-3 etasjer) med et smalere taarn (full hoyde) oppaa." if typology == "Podium + Tårn" else ""}
+[
+  {{
+    "name": "Bygning A",
+    "cx": {cx:.0f},
+    "cy": {cy:.0f},
+    "width": 45.0,
+    "depth": 14.0,
+    "angle_deg": 15.0,
+    "floors": {floors_estimate},
+    "role": "main",
+    "notes": "Sorvest-orientert for optimal sol"
+  }}
+]
 
-Returner BARE en JSON-array med bygninger. Ingen annen tekst.
-Hvert element:
-{{
-  "name": "Bygning A",
-  "cx": <UTM33 x-koordinat for senterpunkt>,
-  "cy": <UTM33 y-koordinat for senterpunkt>,
-  "width": <bredde i meter (langs fasade)>,
-  "depth": <dybde i meter (vinkelrett paa fasade)>,
-  "angle_deg": <orientering i grader fra nord>,
-  "floors": <antall etasjer>,
-  "role": "main" | "wing" | "tower" | "row",
-  "notes": "<kort arkitektfaglig begrunnelse>"
-}}
-
-Regler:
-- Lamell: maks 55m bred, 12-14m dyp
-- Punkthus: 16-22m x 16-22m
-- Karre: 35-50m per side, ring 10-12m, med gaardrom
-- Taarn: 18-25m x 18-25m
-- Rekke: rader paa maks 60m, 9-11m dype, 14m mellom rader
-- Alle bygninger SKAL ligge innenfor byggbart areal
-- Maks {max_floors} etasjer, maks {max_height_m:.0f}m hoyde
-- Minimum 16m avstand mellom parallelle bygningsfasader (dagslysregel TEK17)
+Felter: name (string), cx/cy (UTM33 floats), width/depth (meter), angle_deg (grader fra ost-aksen),
+floors (int), role ("main"|"wing"|"tower"|"row"), notes (kort begrunnelse).
+{"Legg til courtyard: true og ring_depth: 11 for karre-blokker." if typology == "Karré" else ""}
 """
     return prompt
-
 
 def _call_claude(prompt: str, api_key: str, model: str = DEFAULT_MODEL) -> Optional[str]:
     """Kall Anthropic API og returner svarteksten."""
