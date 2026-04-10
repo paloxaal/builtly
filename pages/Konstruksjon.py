@@ -1156,7 +1156,7 @@ def list_available_models() -> List[str]:
                 tag = f"anthropic:{preferred_anthropic}"
                 if tag not in models:
                     models.append(tag)
-            for candidate in ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
+            for candidate in ["claude-opus-4-20250514", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]:
                 tagged = f"anthropic:{candidate}"
                 if tagged not in models:
                     models.append(tagged)
@@ -1179,7 +1179,7 @@ def list_available_models() -> List[str]:
 
     # Ensure all available providers are included even if not in BUILTLY_PROVIDER_ORDER
     if HAS_ANTHROPIC_BACKEND and not any(m.startswith("anthropic:") for m in models):
-        models.append("anthropic:claude-sonnet-4-20250514")
+        models.append("anthropic:claude-opus-4-20250514")
     if HAS_OPENAI_BACKEND and not any(m.startswith("openai:") for m in models):
         models.append("openai:gpt-4.1")
     if HAS_GEMINI_BACKEND:
@@ -1205,6 +1205,7 @@ def pick_model(valid_models: List[str]) -> Optional[str]:
             if preferred_anthropic:
                 preferred.append(f"anthropic:{preferred_anthropic}")
             preferred.extend([
+                "anthropic:claude-opus-4-20250514",
                 "anthropic:claude-sonnet-4-20250514",
                 "anthropic:claude-haiku-4-5-20251001",
             ])
@@ -1258,7 +1259,7 @@ def generate_text(model, parts: List[Any], temperature: float = 0.2) -> str:
         if client is None:
             raise RuntimeError("Anthropic-backend er valgt, men klienten kunne ikke initialiseres.")
 
-        model_name = clean_pdf_text(model.get("model_name") or "claude-sonnet-4-20250514").strip()
+        model_name = clean_pdf_text(model.get("model_name") or "claude-opus-4-20250514").strip()
         content: List[Dict[str, Any]] = []
         for part in parts:
             if isinstance(part, Image.Image):
