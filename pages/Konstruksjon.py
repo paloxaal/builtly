@@ -60,6 +60,48 @@ try:
 except ImportError:
     HAS_DOCKER_EDITOR = False
 
+# ── Builtly v20 integrasjoner: RIB-editor, IFC, BCF, dRofus, SIMIEN ──
+try:
+    from builtly_rib_editor_bridge import render_rib_editor
+    HAS_RIB_EDITOR_V2 = True
+except ImportError:
+    HAS_RIB_EDITOR_V2 = False
+
+try:
+    from builtly_ifc_analyzer import analyze_ifc, ifc_to_rib_sketch
+    HAS_IFC_ANALYZER = True
+except ImportError:
+    HAS_IFC_ANALYZER = False
+
+try:
+    from builtly_bcf_exporter import (
+        create_bcf, BcfIssue, rib_analysis_to_bcf_issues,
+        tek17_checks_to_bcf_issues, u_value_checks_to_bcf_issues,
+        render_bcf_export_button,
+    )
+    HAS_BCF_EXPORTER = True
+except ImportError:
+    HAS_BCF_EXPORTER = False
+
+try:
+    from builtly_drofus_integration import (
+        DrofusClient, DrofusRoom, verify_room_program,
+        parse_room_program_from_excel, deviations_to_bcf_issues,
+    )
+    HAS_DROFUS = True
+except ImportError:
+    HAS_DROFUS = False
+
+try:
+    from builtly_simien_integration import (
+        generate_simien_input, parse_simien_results,
+        ifc_to_simien_model, verify_tek17_energy,
+        render_simien_export, CLIMATE_DATA,
+    )
+    HAS_SIMIEN = True
+except ImportError:
+    HAS_SIMIEN = False
+
 
 # ------------------------------------------------------------
 # 1. TEKNISK OPPSETT
@@ -2949,7 +2991,141 @@ with st.expander("4. Hva modulen gjør i denne versjonen", expanded=False):
 """
     )
 
-st.markdown("<br>", unsafe_allow_html=True)
+# ── 5. INTEGRASJONER: IFC, BCF, dRofus, SIMIEN ──
+with st.expander("5. Integrasjoner (IFC / BCF / dRofus / SIMIEN)", expanded=False):
+    integ_tabs = st.tabs(["IFC-analyse", "BCF-eksport", "dRofus romprogram", "SIMIEN energi"])
+
+    # ── IFC-analyse ──
+    with integ_tabs[0]:
+        if HAS_IFC_ANALYZER:
+            st.markdown("**IFC-analyse** — last opp IFC2x3/IFC4 direkte fra ArchiCAD eller Revit.")
+            ifc_file = st.file_uploader("Last opp IFC-fil", type=["ifc"], key="ifc_upload_integ")
+            if ifc_file:
+                ifc_tmp = Path(tempfile.mkdtemp()) / ifc_file.name
+                ifc_tmp.write_bytes(ifc_file.read())
+                with st.spinner("Analyserer IFC-modell..."):
+                    ifc_result = analyze_ifc(str(ifc_tmp))
+                if "error" in ifc_result:
+                    st.error(ifc_result["error"])
+                else:
+                    s = ifc_result["summary"]
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Vegger", s["walls"])
+                    c2.metric("Bærevegger", s["bearing_walls"])
+                    c3.metric("Søyler", s["columns"])
+                    c4.metric("Rom", s["rooms"])
+
+                    if ifc_result.get("u_values"):
+                        st.markdown("**U-verdier (beregnet fra IfcMaterialLayerSet):**")
+                        for uv in ifc_result["u_values"][:10]:
+                            status = "✓" if uv["u_value"] <= 0.18 else "⚠️"
+                            st.write(f"{status} {uv['element_name']}: **{uv['u_value']:.3f}** W/(m²·K)")
+
+                    if ifc_result.get("accessibility_checks"):
+                        st.markdown("**Tilgjengelighetsavvik:**")
+                        for check in ifc_result["accessibility_checks"]:
+                            for iss in check["issues"]:
+                                st.warning(iss)
+
+                    if st.button("Importer bæresystem til RIB-editor", key="ifc_import_rib"):
+                        sketch = ifc_to_rib_sketch(str(ifc_tmp))
+                        st.session_state.rib_draft_sketches = [sketch]
+                        st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+                        st.success(f"Importert {len(sketch['elements'])} elementer fra IFC.")
+                        st.rerun()
+
+                    st.session_state["_ifc_result_cache"] = ifc_result
+        else:
+            st.info("IFC-analyse krever `builtly_ifc_analyzer.py` og `ifcopenshell`. Legg filen ved siden av Konstruksjon.py.")
+
+    # ── BCF-eksport ──
+    with integ_tabs[1]:
+        if HAS_BCF_EXPORTER:
+            st.markdown("**BCF 2.1** — eksporter funn til Solibri, BIMcollab, Navisworks.")
+            bcf_issues = []
+
+            analysis_result_for_bcf = st.session_state.get("rib_analysis_result")
+            if analysis_result_for_bcf:
+                bcf_issues.extend(rib_analysis_to_bcf_issues(analysis_result_for_bcf))
+
+            ifc_cache = st.session_state.get("_ifc_result_cache")
+            if ifc_cache:
+                if ifc_cache.get("u_values"):
+                    bcf_issues.extend(u_value_checks_to_bcf_issues(ifc_cache["u_values"]))
+                if ifc_cache.get("accessibility_checks"):
+                    bcf_issues.extend(tek17_checks_to_bcf_issues(ifc_cache["accessibility_checks"]))
+
+            if bcf_issues:
+                render_bcf_export_button(
+                    bcf_issues,
+                    project_name=pd_state.get("name", "Builtly prosjekt"),
+                    filename=f"builtly_rib_{datetime.now().strftime('%Y%m%d')}.bcf",
+                )
+            else:
+                st.caption("Kjør RIB-analyse eller IFC-analyse først for å generere BCF-issues.")
+        else:
+            st.info("BCF-eksport krever `builtly_bcf_exporter.py`. Legg filen ved siden av Konstruksjon.py.")
+
+    # ── dRofus romprogram ──
+    with integ_tabs[2]:
+        if HAS_DROFUS:
+            st.markdown("**dRofus** — verifiser romprogram mot IFC-modell.")
+            drofus_mode = st.radio("Datakilde", ["Excel-fil", "dRofus API"], horizontal=True, key="drofus_mode")
+
+            if drofus_mode == "Excel-fil":
+                xls_file = st.file_uploader("Last opp romprogram (Excel)", type=["xlsx", "xls"], key="drofus_xls")
+                if xls_file:
+                    xls_tmp = Path(tempfile.mkdtemp()) / xls_file.name
+                    xls_tmp.write_bytes(xls_file.read())
+                    program_rooms = parse_room_program_from_excel(str(xls_tmp))
+                    st.success(f"Lastet {len(program_rooms)} rom fra Excel.")
+
+                    ifc_cache = st.session_state.get("_ifc_result_cache")
+                    actual_rooms = ifc_cache.get("rooms", []) if ifc_cache else []
+                    if actual_rooms:
+                        report = verify_room_program(program_rooms, actual_rooms)
+                        s = report["summary"]
+                        rc1, rc2, rc3 = st.columns(3)
+                        rc1.metric("Matchet", f"{s['matched']}/{s['total_programmed']}")
+                        rc2.metric("Kritiske avvik", s["critical_deviations"])
+                        rc3.metric("Arealavvik", f"{s['area_deviation_pct']:+.1f}%")
+
+                        for m in report["matches"]:
+                            if m["has_critical"]:
+                                st.error(f"**{m['drofus_room']['room_name']}**: {m['deviations'][0]['description']}")
+                            elif m["deviation_count"] > 0:
+                                st.warning(f"**{m['drofus_room']['room_name']}**: {m['deviation_count']} avvik")
+
+                        if HAS_BCF_EXPORTER:
+                            bcf_dev_issues = deviations_to_bcf_issues(report)
+                            if bcf_dev_issues:
+                                render_bcf_export_button(
+                                    bcf_dev_issues,
+                                    project_name=pd_state.get("name", "Builtly"),
+                                    filename="drofus_avvik.bcf",
+                                )
+                    else:
+                        st.caption("Last opp IFC-fil i IFC-analyse-fanen for å matche mot faktiske rom.")
+            else:
+                st.text_input("dRofus API URL", key="drofus_url", placeholder="https://firma.drofus.com/api/v1")
+                st.text_input("API-nøkkel", key="drofus_key", type="password")
+                st.text_input("Prosjekt-ID", key="drofus_project")
+                st.caption("Kobler til dRofus REST API for å hente romprogram direkte.")
+        else:
+            st.info("dRofus-integrasjon krever `builtly_drofus_integration.py`. Legg filen ved siden av Konstruksjon.py.")
+
+    # ── SIMIEN energi ──
+    with integ_tabs[3]:
+        if HAS_SIMIEN:
+            ifc_cache = st.session_state.get("_ifc_result_cache")
+            render_simien_export(
+                ifc_data=ifc_cache,
+                building_type="boligblokk",
+                location="trondheim",
+                project_name=pd_state.get("name", "Builtly prosjekt"),
+            )
+        else:
+            st.info("SIMIEN-integrasjon krever `builtly_simien_integration.py`. Legg filen ved siden av Konstruksjon.py.")
 
 
 # ------------------------------------------------------------
@@ -5268,44 +5444,58 @@ def render_rib_draft_editor_ui() -> None:
 
     left_col, right_col = st.columns([1.5, 1.0])
     with left_col:
-        tool = st.radio(
-            "Klikkverktøy",
-            options=[
-                ("add_column", "Legg til søyle"),
-                ("delete_column", "Slett nærmeste søyle"),
-                ("move_column", "Flytt søyle (to klikk)"),
-                ("move_core", "Flytt kjerne"),
-                ("none", "Ingen endring"),
-            ],
-            format_func=lambda item: item[1],
-            horizontal=False,
-            key="rib_editor_tool_choice",
-        )[0]
-        st.caption("Flytt søyle: klikk først nær søylen, deretter på ny posisjon.")
-        click = render_plotly_sketch_editor(
-            drawing_record,
-            selected_sketch,
-            editor_key=f"rib_plotly_editor_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
-        )
-        if click and tool != "none":
-            click_sig = click_event_signature(selected_sketch_uid, tool, click)
-            if st.session_state.get("rib_draft_last_click_sig") != click_sig:
-                changed, message, updated_sketch = apply_click_edit_to_sketch(
-                    selected_sketch,
-                    drawing_record,
-                    tool,
-                    click["x"],
-                    click["y"],
-                )
-                st.session_state.rib_draft_last_click_sig = click_sig
-                if changed:
-                    draft_sketches[sketch_idx] = updated_sketch
-                    st.session_state.rib_draft_sketches = draft_sketches
-                    st.session_state.rib_draft_updated_at = datetime.now().isoformat()
-                    st.success(message)
-                    st.rerun()
-                else:
-                    st.info(message)
+        # ── Builtly RIB Editor v2 (interaktiv) med fallback til klikk-editor ──
+        if HAS_RIB_EDITOR_V2:
+            updated_elements = render_rib_editor(
+                drawing_record,
+                selected_sketch,
+                editor_key=f"rib_editor_v2_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+            )
+            if updated_elements is not None:
+                draft_sketches[sketch_idx]["elements"] = updated_elements
+                st.session_state.rib_draft_sketches = draft_sketches
+                st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+                st.success(f"Bæresystem oppdatert — {len(updated_elements)} elementer.")
+                st.rerun()
+        else:
+            tool = st.radio(
+                "Klikkverktøy",
+                options=[
+                    ("add_column", "Legg til søyle"),
+                    ("delete_column", "Slett nærmeste søyle"),
+                    ("move_column", "Flytt søyle (to klikk)"),
+                    ("move_core", "Flytt kjerne"),
+                    ("none", "Ingen endring"),
+                ],
+                format_func=lambda item: item[1],
+                horizontal=False,
+                key="rib_editor_tool_choice",
+            )[0]
+            st.caption("Flytt søyle: klikk først nær søylen, deretter på ny posisjon.")
+            click = render_plotly_sketch_editor(
+                drawing_record,
+                selected_sketch,
+                editor_key=f"rib_plotly_editor_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+            )
+            if click and tool != "none":
+                click_sig = click_event_signature(selected_sketch_uid, tool, click)
+                if st.session_state.get("rib_draft_last_click_sig") != click_sig:
+                    changed, message, updated_sketch = apply_click_edit_to_sketch(
+                        selected_sketch,
+                        drawing_record,
+                        tool,
+                        click["x"],
+                        click["y"],
+                    )
+                    st.session_state.rib_draft_last_click_sig = click_sig
+                    if changed:
+                        draft_sketches[sketch_idx] = updated_sketch
+                        st.session_state.rib_draft_sketches = draft_sketches
+                        st.session_state.rib_draft_updated_at = datetime.now().isoformat()
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.info(message)
 
         preview_img = render_overlay_image(
             drawing_record,
@@ -6731,12 +6921,26 @@ def render_rib_draft_editor_ui() -> None:
 
     left_col, right_col = st.columns([1.6, 1.0])
     with left_col:
-        st.markdown("##### Zoomet planutsnitt for klikk-redigering")
-        click = render_plotly_sketch_editor(
-            drawing_record,
-            selected_sketch,
-            editor_key=f"rib_plotly_editor_v3_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
-        )
+        st.markdown("##### Bæresystem-editor")
+        if HAS_RIB_EDITOR_V2:
+            updated_elements = render_rib_editor(
+                drawing_record,
+                selected_sketch,
+                editor_key=f"rib_editor_v2_b_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+            )
+            if updated_elements is not None:
+                push_draft_history()
+                draft_sketches[sketch_idx]["elements"] = updated_elements
+                st.session_state.rib_draft_sketches = draft_sketches
+                mark_draft_changed()
+                st.success(f"Bæresystem oppdatert — {len(updated_elements)} elementer.")
+                st.rerun()
+        else:
+            click = render_plotly_sketch_editor(
+                drawing_record,
+                selected_sketch,
+                editor_key=f"rib_plotly_editor_v3_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+            )
         action_row = st.columns([1, 1, 1])
         with action_row[0]:
             if st.button("↩ Angre siste endring", use_container_width=True, key=f"rib_undo_{selected_sketch_uid}"):
@@ -6765,7 +6969,7 @@ def render_rib_draft_editor_ui() -> None:
                         st.rerun()
                         break
 
-        if click and tool != "none":
+        if not HAS_RIB_EDITOR_V2 and click and tool != "none":
             click_sig = click_event_signature(selected_sketch_uid, tool, click)
             if st.session_state.get("rib_draft_last_click_sig") != click_sig:
                 changed, message, updated_sketch = apply_pointer_click_to_sketch(
