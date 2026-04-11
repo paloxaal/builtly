@@ -1052,6 +1052,11 @@ with tabs[9]:
     st.download_button("Download report (.md)", md_report, "tdd_report.md", "text/markdown")
     pdf_bytes = build_tdd_pdf(records, rules, config, ai_result)
     if pdf_bytes:
+        try:
+            from builtly_auth import save_report
+            save_report(project_name=config.get("p_name", ""), report_name=f"TDD — {config.get('p_name', '')}", module="TDD", file_path="tdd_report.pdf")
+        except ImportError:
+            pass
         st.download_button("Download report (.pdf)", pdf_bytes, "tdd_report.pdf", "application/pdf")
     st.download_button("Download AI result (.json)", json.dumps(safe_get(ai_result, "data") or {}, indent=2, ensure_ascii=False, default=str), "tdd_result.json", "application/json")
     st.download_button("Download config (.json)", json.dumps(config, indent=2, ensure_ascii=False, default=str), "tdd_config.json", "application/json")
