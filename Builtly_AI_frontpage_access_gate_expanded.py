@@ -2481,6 +2481,7 @@ AVAILABLE_COUNTRIES = [
     ("DE", "Deutschland (DIN / EnEV)"),
     ("GB", "United Kingdom (Building Regs)"),
     ("NL", "Nederland (Bouwbesluit)"),
+    ("US", "United States (IBC / ASCE)"),
 ]
 
 CONTRACT_BINDING_MONTHS = 12
