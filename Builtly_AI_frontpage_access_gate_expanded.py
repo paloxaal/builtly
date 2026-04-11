@@ -4938,6 +4938,32 @@ st.markdown(
             height: 60px;
         }
     }
+
+    /* Force top bar to stay horizontal on mobile */
+    [data-testid="stHorizontalBlock"]:first-of-type {
+        flex-wrap: nowrap !important;
+        gap: 0.5rem !important;
+    }
+    [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"] {
+        min-width: 0 !important;
+    }
+    @media (max-width: 760px) {
+        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:first-child {
+            flex: 2 !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(3) {
+            flex: 1 !important;
+            max-width: 130px !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] {
+            font-size: 0.8rem !important;
+            min-height: 36px !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] > div {
+            padding: 4px 8px !important;
+        }
+    }
 </style>
 """,
     unsafe_allow_html=True,
