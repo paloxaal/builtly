@@ -171,8 +171,10 @@ T = {
     "client": "Client / Owner" if _en else "Tiltakshaver / Oppdragsgiver",
     "description": "Project description / Narrative" if _en else "Prosjektbeskrivelse / Narrativ",
     "sec_location": "🌍 02 Location & API" if _en else "🌍 " + T['sec_location'] + "",
-    "api_hint_no": "💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.",
-    "api_hint_en": "💡 **Property lookup:** Enter address or parcel ID and click the button to auto-fill.",
+    "api_hint_no": ("💡 **Kartverket API:** Enter address *or* parcel number (Gnr/Bnr) and click the button to auto-fill." if _en else
+                    "💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten."),
+    "api_hint_en": "💡 **Property lookup:** Enter address or parcel ID and click the button to auto-fill." if _en else
+                   "💡 **Eiendomsoppslag:** Skriv inn adresse eller eiendoms-ID og klikk for å autoutfylle.",
     "address": "Street address" if _en else "Gateadresse",
     "municipality": "Municipality" if _en else "Kommune",
     "gnr": "Parcel number (Gnr)" if _en else "Gårdsnummer (Gnr)",
