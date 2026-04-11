@@ -5613,7 +5613,7 @@ render_html(
         </div>
         <div class="cta-actions">
             {hero_action('project', lang['cta_btn1'], 'primary')}
-            <a href="?auth=plans" target="_self" class="hero-action secondary">Se priser</a>
+            <a href="?auth=register" target="_self" class="hero-action secondary">Se kontoplaner</a>
         </div>
     </div>
     """
