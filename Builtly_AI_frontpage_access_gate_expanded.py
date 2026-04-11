@@ -3142,16 +3142,23 @@ def render_user_dashboard(lang_key: str) -> None:
                 country_names.append(c_label.split(" (")[0])
                 break
 
+    _is_en = "English" in lang_key
+
     render_html(f"""
         <div class="access-gate-head">
-            <div class="assistant-kicker">MIN KONTO</div>
-            <div class="access-gate-title">Hei, {html.escape(user_name)}</div>
+            <div class="assistant-kicker">{'MY ACCOUNT' if _is_en else 'MIN KONTO'}</div>
+            <div class="access-gate-title">{'Hi' if _is_en else 'Hei'}, {html.escape(user_name)}</div>
             <div style="color:var(--soft,#c8d3df);font-size:0.95rem;line-height:1.6;max-width:700px;margin-top:0.5rem;">
-                Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter
-                du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned
-                når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a>
-                for å opprette nye prosjekter og generere rapporter.
-                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{'View plans and pricing →' if 'English' in lang_key else 'Se kontoplaner og priser →'}</a>
+                {('Here you find an overview of your subscription, account information and all reports '
+                  f'you have generated. Reports are stored for {REPORT_RETENTION_DAYS} days and can be downloaded '
+                  'at any time during this period. Go to the <a href="/" target="_self" style="color:#38bdf8;">front page</a> '
+                  'to create new projects and generate reports.')
+                 if _is_en else
+                 (f'Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter '
+                  f'du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned '
+                  'når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a> '
+                  'for å opprette nye prosjekter og generere rapporter.')}
+                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{'View plans and pricing →' if _is_en else 'Se kontoplaner og priser →'}</a>
             </div>
         </div>
     """)
@@ -3183,12 +3190,12 @@ def render_user_dashboard(lang_key: str) -> None:
         render_html(f"""
             <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
                         padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">KONTOINFORMASJON</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Navn:</strong> {html.escape(user_name)}</div>
-                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Selskap:</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>E-post:</strong> {html.escape(user_email)}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Land:</strong> {html.escape(', '.join(country_names)) if country_names else 'Ikke valgt'}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Betaling:</strong> {'Kort (Stripe)' if user_payment == 'card' else 'Faktura' if user_payment == 'invoice' else 'Ikke satt opp'}</div>
+                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{'ACCOUNT INFORMATION' if _is_en else 'KONTOINFORMASJON'}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Name' if _is_en else 'Navn'}:</strong> {html.escape(user_name)}</div>
+                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>' + ('Company' if _is_en else 'Selskap') + ':</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Email' if _is_en else 'E-post'}:</strong> {html.escape(user_email)}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Countries' if _is_en else 'Land'}:</strong> {html.escape(', '.join(country_names)) if country_names else ('Not selected' if _is_en else 'Ikke valgt')}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Payment' if _is_en else 'Betaling'}:</strong> {'Card (Stripe)' if _is_en and user_payment == 'card' else 'Kort (Stripe)' if user_payment == 'card' else 'Invoice' if _is_en and user_payment == 'invoice' else 'Faktura' if user_payment == 'invoice' else ('Not set up' if _is_en else 'Ikke satt opp')}</div>
                 <div style="margin-top:0.5rem;"><strong style="color:{status_color};">{status_text}</strong></div>
             </div>
         """)
@@ -3198,16 +3205,16 @@ def render_user_dashboard(lang_key: str) -> None:
             render_html(f"""
                 <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
                             padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">DITT ABONNEMENT</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{'YOUR SUBSCRIPTION' if _is_en else 'DITT ABONNEMENT'}</div>
                     <div style="color:#22d3ee;font-size:1.2rem;font-weight:700;">{plan_info['name']} — {plan_info['price_label']}</div>
                     <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-top:0.3rem;">{plan_info['price_detail']}</div>
                 </div>
             """)
         else:
             render_html('<div style="border:1px solid rgba(56,189,248,0.10);border-radius:1rem;padding:1.5rem;background:rgba(6,17,26,0.55);">')
-            render_html('<div style="color:var(--soft,#c8d3df);">Ingen aktiv plan.</div>')
+            render_html(f'<div style="color:var(--soft,#c8d3df);">{"No active plan." if _is_en else "Ingen aktiv plan."}</div>')
             render_html('</div>')
-            if st.button("Velg abonnement", use_container_width=True):
+            if st.button("Choose plan" if _is_en else "Velg abonnement", use_container_width=True):
                 try:
                     st.query_params["auth"] = "plans"
                 except Exception:
@@ -3218,19 +3225,19 @@ def render_user_dashboard(lang_key: str) -> None:
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
     render_html(f"""
         <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;">
-            Mine rapporter
+            {'My reports' if _is_en else 'Mine rapporter'}
         </div>
         <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:1rem;">
-            Rapporter lagres i {REPORT_RETENTION_DAYS} dager. {REVISION_NOTICE}
+            {'Reports are stored for' if _is_en else 'Rapporter lagres i'} {REPORT_RETENTION_DAYS} {'days.' if _is_en else 'dager.'} {REVISION_NOTICE}
         </div>
     """)
 
     if not reports:
-        render_html("""
+        render_html(f"""
             <div style="border:1px dashed rgba(56,189,248,0.20);border-radius:1rem;padding:3rem;
                         text-align:center;color:var(--soft,#c8d3df);">
                 <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
-                <div>Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.</div>
+                <div>{'No reports yet. Create your first project to get started.' if _is_en else 'Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.'}</div>
             </div>
         """)
     else:
@@ -3309,7 +3316,7 @@ def render_user_dashboard(lang_key: str) -> None:
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
     act_col1, act_col2, act_col3 = st.columns(3)
     with act_col1:
-        if st.button("← Tilbake til forsiden", use_container_width=True):
+        if st.button("← Back to front page" if _is_en else "← Tilbake til forsiden", use_container_width=True):
             try:
                 params = get_query_params_dict()
                 params.pop("auth", None)
@@ -3318,14 +3325,14 @@ def render_user_dashboard(lang_key: str) -> None:
                 pass
             st.rerun()
     with act_col2:
-        if st.button("Endre abonnement", use_container_width=True):
+        if st.button("Change plan" if _is_en else "Endre abonnement", use_container_width=True):
             try:
                 st.query_params["auth"] = "plans"
             except Exception:
                 pass
             st.rerun()
     with act_col3:
-        if st.button("Logg ut", use_container_width=True):
+        if st.button("Log out" if _is_en else "Logg ut", use_container_width=True):
             if _HAS_AUTH:
                 builtly_auth.logout()
             else:
@@ -5070,31 +5077,43 @@ st.markdown(
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 65px !important;
-            max-width: 65px !important;
-            width: 65px !important;
+            flex: 0 0 auto !important;
+            max-width: 70px !important;
+            width: auto !important;
         }
+        /* Strip all heavy styling from top bar selectboxes on mobile */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            font-size: 0.6rem !important;
-            min-height: 26px !important;
+            font-size: 0.65rem !important;
+            min-height: 24px !important;
+            border: none !important;
+            background: transparent !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            padding: 1px 3px !important;
-            min-height: 26px !important;
+            padding: 2px 4px !important;
+            min-height: 24px !important;
+            border: none !important;
+            background: rgba(255,255,255,0.05) !important;
+            border-radius: 8px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             width: 10px !important;
             height: 10px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.6rem !important;
+            font-size: 0.65rem !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
             white-space: nowrap !important;
         }
-        /* Hide emoji flags on mobile to save space */
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
-            margin-top: 0.5rem !important;
+            margin-top: 0.3rem !important;
+        }
+        /* Remove Streamlit's default selectbox container borders on mobile top bar */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
+            border: none !important;
+            box-shadow: none !important;
+            background: transparent !important;
         }
 
         .mini-stat-grid,
@@ -5116,6 +5135,8 @@ st.markdown(
             padding: 1.5rem !important;
             min-height: auto !important;
             border-radius: 16px !important;
+            position: relative !important;
+            z-index: 1 !important;
         }
         .hero::before {
             display: none !important;
@@ -5571,7 +5592,7 @@ top_l, top_m, top_r = st.columns([4, 1, 1], gap="small")
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
-    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="/" target="_self" style="text-decoration:none;">{logo_html}</a></div></div>')
+    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="javascript:void(0)" onclick="const u=new URL(window.parent.location);u.searchParams.delete(\'auth\');u.searchParams.delete(\'gate\');window.parent.location.href=u.toString();" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
 
 with top_m:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
