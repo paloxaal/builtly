@@ -28,7 +28,7 @@ except ImportError:
 # -------------------------------------------------
 st.set_page_config(
     page_title="Builtly | Engineering Portal",
-    page_icon="🏗️",
+    page_icon="BuiltlyAI_logo_icon.png",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -3043,7 +3043,7 @@ def render_user_dashboard(lang_key: str) -> None:
                 du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned
                 når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a>
                 for å opprette nye prosjekter og generere rapporter.
-                <a href="?auth=register" target="_self" style="color:#22d3ee;margin-left:0.3rem;">Se kontoplaner og priser →</a>
+                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">Se kontoplaner og priser →</a>
             </div>
         </div>
     """)
