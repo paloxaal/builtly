@@ -420,7 +420,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'm_mop_btn': 'Åpne MOP',
               'btn_dev': 'Under utvikling',
               'cta_title': 'Klar til å revolusjonere prosjekteringen?',
-              'cta_desc': 'Start med ett prosjekt. Se hva AI kan levere på minutter – ikke dager. '
+              'cta_desc': 'Start med ett prosjekt. Se hva Builtly kan levere på minutter – ikke dager og uker. '
                           'Builtly er bygget for de som vil ligge foran, ikke henge etter.',
               'cta_btn1': 'Start i Project Setup',
               'cta_btn2': 'Gå til kontroll-kø',
