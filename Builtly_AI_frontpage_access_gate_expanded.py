@@ -4941,15 +4941,8 @@ st.markdown(
         max-width: 100vw !important;
         overflow-x: hidden !important;
     }
-
-    /* All column rows: never overflow */
-    [data-testid="stHorizontalBlock"] {
-        max-width: 100% !important;
-        overflow: hidden !important;
-    }
     [data-testid="stColumn"] {
         min-width: 0 !important;
-        overflow: hidden !important;
     }
 
     @media (max-width: 760px) {
@@ -4957,6 +4950,47 @@ st.markdown(
             padding-left: 0.75rem !important;
             padding-right: 0.75rem !important;
         }
+
+        /* Stack ALL column rows vertically on mobile */
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: column !important;
+            gap: 0.5rem !important;
+        }
+        [data-testid="stColumn"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+            max-width: 100% !important;
+        }
+
+        /* EXCEPTION: top bar stays horizontal */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) {
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            align-items: center !important;
+            gap: 0.3rem !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
+            flex: 2 1 0 !important;
+            max-width: none !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
+            flex: 0 0 75px !important;
+            max-width: 75px !important;
+            width: 75px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
+            font-size: 0.7rem !important;
+            min-height: 30px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
+            padding: 2px 4px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
+            width: 12px !important;
+            height: 12px !important;
+        }
+
         .mini-stat-grid,
         .stats-row,
         .trust-grid,
@@ -4972,10 +5006,12 @@ st.markdown(
         .brand-logo {
             height: 45px !important;
         }
+        .hero-title {
+            font-size: 2rem !important;
+        }
         .cta-band, .hero-panel, .card {
             max-width: 100% !important;
             box-sizing: border-box !important;
-            word-break: break-word !important;
         }
         .hero-action {
             white-space: normal !important;
@@ -4994,34 +5030,6 @@ st.markdown(
         }
         .assistant-rail {
             display: none;
-        }
-    }
-
-    /* ── TOP BAR: keep logo + dropdowns on one line ── */
-    [data-testid="stHorizontalBlock"]:has(.brand-left) {
-        flex-wrap: nowrap !important;
-        gap: 0.3rem !important;
-        align-items: center !important;
-    }
-    @media (max-width: 760px) {
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
-            flex: 2 !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 80px !important;
-            max-width: 80px !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            font-size: 0.7rem !important;
-            min-height: 30px !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            padding: 2px 4px !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
-            width: 12px !important;
-            height: 12px !important;
         }
     }
 </style>
