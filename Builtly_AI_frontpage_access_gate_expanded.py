@@ -4942,26 +4942,39 @@ st.markdown(
     /* Force top bar to stay horizontal on mobile */
     [data-testid="stHorizontalBlock"]:first-of-type {
         flex-wrap: nowrap !important;
-        gap: 0.5rem !important;
+        gap: 0.3rem !important;
     }
     [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"] {
         min-width: 0 !important;
     }
     @media (max-width: 760px) {
         [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:first-child {
-            flex: 2 !important;
+            flex: 3 !important;
         }
         [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(3) {
             flex: 1 !important;
-            max-width: 130px !important;
+            max-width: 90px !important;
         }
         [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] {
-            font-size: 0.8rem !important;
-            min-height: 36px !important;
+            font-size: 0.7rem !important;
+            min-height: 32px !important;
         }
         [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] > div {
-            padding: 4px 8px !important;
+            padding: 2px 6px !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] svg {
+            display: none !important;
+        }
+        .brand-logo {
+            height: 45px !important;
+        }
+
+        /* Stack hero + trust grid on mobile */
+        .hero-panel,
+        .hero {
+            min-height: auto !important;
+            height: auto !important;
         }
     }
 </style>
