@@ -3086,6 +3086,19 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                     st.session_state.generated_fire_drawings_pdf = fire_pdf
                     st.session_state.brann_manual_edits_dirty = False
                     st.success("Brannkonsept og vedlagte branntegninger er generert.")
+
+                    # Save report to user dashboard
+                    try:
+                        from builtly_auth import save_report
+                        _fire_fname = f"Builtly_Brannkonsept_{pd_state.get('p_name', '')}.pdf"
+                        save_report(
+                            project_name=pd_state.get("p_name", ""),
+                            report_name=f"Brannkonsept — {pd_state.get('p_name', '')}",
+                            module="Brannkonsept",
+                            file_path=_fire_fname,
+                        )
+                    except ImportError:
+                        pass
                 except Exception as exc:
                     st.session_state.generated_pdf = None
                     st.error(f"Generering av rapport/vedlegg feilet: {exc}")
