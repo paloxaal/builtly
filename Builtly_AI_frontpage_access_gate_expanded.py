@@ -76,6 +76,28 @@ if "site_access_error" not in st.session_state:
 if "site_access_input_nonce" not in st.session_state:
     st.session_state.site_access_input_nonce = 0
 
+# -- User auth & subscription state --
+if "user_authenticated" not in st.session_state:
+    st.session_state.user_authenticated = False
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
+if "user_name" not in st.session_state:
+    st.session_state.user_name = ""
+if "user_plan" not in st.session_state:
+    st.session_state.user_plan = ""  # "modul", "team", "enterprise"
+if "user_company" not in st.session_state:
+    st.session_state.user_company = ""
+if "user_countries" not in st.session_state:
+    st.session_state.user_countries = []  # list of country codes
+if "user_payment_method" not in st.session_state:
+    st.session_state.user_payment_method = ""  # "card" or "invoice"
+if "user_account_status" not in st.session_state:
+    st.session_state.user_account_status = ""  # "active", "pending_invoice", "inactive"
+if "user_reports" not in st.session_state:
+    st.session_state.user_reports = []  # list of dicts: {name, module, created, expires, download_url}
+if "auth_page" not in st.session_state:
+    st.session_state.auth_page = ""  # "login", "register", "plans", "dashboard"
+
 ASSISTANT_END_MARKER = "[[BUILTLY_DONE]]"
 
 ACCESS_GATE_COPY = {
@@ -2392,6 +2414,662 @@ def _module_gate_dialog(lang_key: str, dest_key: str) -> None:
             st.rerun()
 
 
+# -------------------------------------------------
+# 5b) SUBSCRIPTION TIERS & USER AUTH
+# -------------------------------------------------
+
+SUBSCRIPTION_PLANS = {
+    "modul": {
+        "name": "Modul",
+        "price_label": "5 000 kr/modul/mnd",
+        "price_detail": "+ 15 000–40 000 kr per rapport",
+        "features": [
+            "Tilgang til enkeltmoduler",
+            "AI-genererte rapporter (Nivå 1 — Auto)",
+            "30 dagers rapportlagring",
+            "E-poststøtte",
+        ],
+        "badge": "STARTER",
+    },
+    "team": {
+        "name": "Team",
+        "price_label": "Fra 12 000 kr/mnd",
+        "price_detail": "Volumrabatter tilgjengelig",
+        "features": [
+            "Alle moduler inkludert",
+            "Nivå 1 & 2 rapporter (Auto + Reviewed)",
+            "30 dagers rapportlagring",
+            "Flerbrukertilgang",
+            "Prioritert støtte",
+        ],
+        "badge": "POPULÆR",
+    },
+    "enterprise": {
+        "name": "Enterprise",
+        "price_label": "50 000–200 000 kr/mnd",
+        "price_detail": "SSO, SLA, dedikert kontakt",
+        "features": [
+            "Alle moduler + Nivå 3 (Attestert)",
+            "Ubegrenset rapportlagring",
+            "Portefølje-API for banker",
+            "White-label muligheter",
+            "Dedikert rådgiver",
+            "SSO / SAML",
+        ],
+        "badge": "ENTERPRISE",
+    },
+}
+
+REPORT_RETENTION_DAYS = 30  # Reports auto-deleted after 30 days
+REVISION_NOTICE = (
+    "Eventuelle revideringer av rapport som følge av endring av forutsetninger "
+    "fra kundens ståsted må avtales direkte med rådgiver tilknyttet Builtly Engineering AS."
+)
+
+AVAILABLE_COUNTRIES = [
+    ("NO", "Norge (TEK17 / NS-standarder)"),
+    ("SE", "Sverige (BBR / Boverket)"),
+    ("DK", "Danmark (BR18 / SBi)"),
+    ("FI", "Finland (Ympäristöministeriö)"),
+    ("DE", "Deutschland (DIN / EnEV)"),
+    ("GB", "United Kingdom (Building Regs)"),
+    ("NL", "Nederland (Bouwbesluit)"),
+]
+
+CONTRACT_BINDING_MONTHS = 12
+
+GDPR_CONSENT_TEXT = (
+    "Jeg bekrefter at jeg har lest og aksepterer Builtly Engineering AS sine "
+    "[vilkår for bruk](https://builtly.ai/terms) og "
+    "[personvernerklæring](https://builtly.ai/privacy). "
+    "Builtly behandler personopplysninger i henhold til GDPR / personopplysningsloven. "
+    "Data lagres innenfor EØS og slettes ved oppsigelse av abonnement. "
+    "Du kan når som helst be om innsyn, retting eller sletting av dine data ved å kontakte post@builtly.ai."
+)
+
+CONTRACT_TERMS_TEXT = (
+    "Abonnementet har {months} måneders bindingstid fra aktivering. "
+    "Etter bindingstiden fornyes abonnementet månedlig med 1 måneds oppsigelsestid. "
+    "Priser gjelder per land — tilgang til flere land faktureres separat per land."
+)
+
+# Payment provider: Stripe recommended for card payments
+# Env vars needed: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
+PAYMENT_PROVIDER = "stripe"  # "stripe" or "vipps"
+
+
+def _is_user_logged_in() -> bool:
+    return st.session_state.get("user_authenticated", False) and bool(st.session_state.get("user_email"))
+
+
+def _user_has_plan() -> bool:
+    return _is_user_logged_in() and bool(st.session_state.get("user_plan"))
+
+
+def _get_auth_page() -> str:
+    """Check query params for auth page routing."""
+    try:
+        return st.query_params.get("auth", "").strip()
+    except Exception:
+        return ""
+
+
+def render_login_page(lang_key: str) -> None:
+    """Render login form. Currently mock — connect to Supabase/Auth0 for production."""
+    copy = get_access_copy(lang_key)
+
+    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    with outer_center:
+        render_html("""
+            <div class="access-gate-head">
+                <div class="assistant-kicker">LOGG INN</div>
+                <div class="access-gate-title">Velkommen tilbake</div>
+                <div class="access-gate-subtitle">Logg inn for å se dine rapporter og administrere abonnement.</div>
+            </div>
+        """)
+
+        with st.form("login_form"):
+            email = st.text_input("E-post", placeholder="din@epost.no")
+            password = st.text_input("Passord", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Logg inn", use_container_width=True)
+
+        if submitted:
+            if email.strip() and password.strip():
+                # TODO: Replace with real auth (Supabase, Auth0, etc.)
+                st.session_state.user_authenticated = True
+                st.session_state.user_email = email.strip()
+                st.session_state.user_name = email.split("@")[0].title()
+                st.session_state.site_access_granted = True
+                try:
+                    params = get_query_params_dict()
+                    params.pop("auth", None)
+                    set_query_params_dict(params)
+                except Exception:
+                    pass
+                st.rerun()
+            else:
+                st.error("Vennligst fyll ut e-post og passord.")
+
+        st.markdown("---")
+
+        col_reg, col_demo = st.columns(2)
+        with col_reg:
+            render_html('<a href="?auth=register" target="_self" class="module-cta" style="text-align:center;display:block;">Opprett konto</a>')
+        with col_demo:
+            render_html('<a href="?auth=demo" target="_self" class="module-cta" style="text-align:center;display:block;">Demo-tilgang</a>')
+
+
+def render_register_page(lang_key: str) -> None:
+    """Render registration form with company, country, and GDPR consent."""
+    outer_left, outer_center, outer_right = st.columns([1.0, 1.5, 1.0], gap="large")
+    with outer_center:
+        render_html("""
+            <div class="access-gate-head">
+                <div class="assistant-kicker">OPPRETT KONTO</div>
+                <div class="access-gate-title">Kom i gang med Builtly</div>
+                <div class="access-gate-subtitle">Opprett bedriftskonto for å få tilgang til AI-drevne prosjekteringsverktøy.</div>
+            </div>
+        """)
+
+        with st.form("register_form"):
+            st.markdown("##### Kontaktperson")
+            r_col1, r_col2 = st.columns(2)
+            with r_col1:
+                reg_name = st.text_input("Fullt navn *", placeholder="Ola Nordmann")
+            with r_col2:
+                reg_phone = st.text_input("Telefon", placeholder="+47 900 00 000")
+
+            reg_email = st.text_input("E-post *", placeholder="din@bedrift.no")
+
+            st.markdown("##### Bedriftsinformasjon")
+            b_col1, b_col2 = st.columns(2)
+            with b_col1:
+                reg_company = st.text_input("Selskapsnavn *", placeholder="Selskap AS")
+            with b_col2:
+                reg_org_nr = st.text_input("Org.nr.", placeholder="999 999 999")
+
+            reg_countries = st.multiselect(
+                "Land for prosjektering *",
+                options=[c[1] for c in AVAILABLE_COUNTRIES],
+                default=["Norge (TEK17 / NS-standarder)"],
+                help="Priser gjelder per land. Velg alle land du ønsker tilgang til.",
+            )
+
+            n_countries = max(len(reg_countries), 1)
+            if n_countries > 1:
+                render_html(f"""
+                    <div style="color:#22d3ee;font-size:0.85rem;margin:-0.5rem 0 0.5rem 0;">
+                        ℹ️ {n_countries} land valgt — abonnementspris gjelder per land.
+                    </div>
+                """)
+
+            st.markdown("##### Passord")
+            p_col1, p_col2 = st.columns(2)
+            with p_col1:
+                reg_password = st.text_input("Passord *", type="password", placeholder="Minimum 8 tegn")
+            with p_col2:
+                reg_password2 = st.text_input("Bekreft passord *", type="password", placeholder="Gjenta passord")
+
+            st.markdown("---")
+
+            # GDPR consent
+            reg_gdpr = st.checkbox(GDPR_CONSENT_TEXT, value=False)
+
+            # Contract terms
+            reg_terms = st.checkbox(
+                CONTRACT_TERMS_TEXT.format(months=CONTRACT_BINDING_MONTHS)
+                + " Jeg aksepterer kontraktsvilkårene.",
+                value=False,
+            )
+
+            reg_submitted = st.form_submit_button("Opprett konto og velg abonnement", use_container_width=True)
+
+        if reg_submitted:
+            errors = []
+            if not reg_name.strip():
+                errors.append("Fullt navn er påkrevd.")
+            if not reg_email.strip() or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", reg_email.strip()):
+                errors.append("Gyldig e-postadresse er påkrevd.")
+            if not reg_company.strip():
+                errors.append("Selskapsnavn er påkrevd.")
+            if not reg_countries:
+                errors.append("Velg minst ett land.")
+            if len(reg_password) < 8:
+                errors.append("Passord må være minst 8 tegn.")
+            if reg_password != reg_password2:
+                errors.append("Passordene stemmer ikke overens.")
+            if not reg_gdpr:
+                errors.append("Du må akseptere personvernerklæringen.")
+            if not reg_terms:
+                errors.append("Du må akseptere kontraktsvilkårene.")
+
+            if errors:
+                for e in errors:
+                    st.error(e)
+            else:
+                # Map display names back to country codes
+                country_codes = []
+                for sel in reg_countries:
+                    for code, label in AVAILABLE_COUNTRIES:
+                        if label == sel:
+                            country_codes.append(code)
+                            break
+
+                # TODO: Replace with real user creation (Supabase, etc.)
+                st.session_state.user_authenticated = True
+                st.session_state.user_email = reg_email.strip()
+                st.session_state.user_name = reg_name.strip()
+                st.session_state.user_company = reg_company.strip()
+                st.session_state.user_countries = country_codes
+                st.session_state.user_account_status = "inactive"  # Not yet paid
+                st.session_state.site_access_granted = True
+                try:
+                    params = get_query_params_dict()
+                    params["auth"] = "plans"
+                    set_query_params_dict(params)
+                except Exception:
+                    pass
+                st.rerun()
+
+        st.markdown("---")
+        render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Har du allerede konto? Logg inn</a></div>')
+
+
+def render_demo_gate(lang_key: str) -> None:
+    """Render the original demo access code gate."""
+    copy = get_access_copy(lang_key)
+    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    with outer_center:
+        render_html(f"""
+            <div class="access-gate-head">
+                <div class="assistant-kicker">DEMO-TILGANG</div>
+                <div class="access-gate-title">{copy['title']}</div>
+                <div class="access-gate-subtitle">{copy['subtitle']}</div>
+            </div>
+        """)
+
+        if not access_gate_configured():
+            st.warning(copy["admin_missing"])
+            return
+
+        nonce = st.session_state.get("site_access_input_nonce", 0)
+        with st.form("demo_gate_form"):
+            code = st.text_input(
+                copy["label"],
+                key=f"demo_gate_code_{nonce}",
+                type="password",
+                placeholder=copy["placeholder"],
+            )
+            submitted = st.form_submit_button(copy["button"], use_container_width=True)
+
+        if submitted:
+            if verify_site_access_code(code):
+                st.session_state.site_access_granted = True
+                st.session_state.site_access_error = ""
+                token = _generate_session_token(code)
+                params = get_query_params_dict()
+                params.pop("auth", None)
+                params.pop("gate", None)
+                params["s"] = token
+                set_query_params_dict(params)
+                st.rerun()
+            else:
+                st.error(copy["error_invalid"])
+                bump_site_access_nonce()
+                st.rerun()
+
+        st.markdown("---")
+        render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Logg inn med konto i stedet</a></div>')
+
+
+def render_plans_page(lang_key: str) -> None:
+    """Render subscription plan selection with payment method choice."""
+    user_countries = st.session_state.get("user_countries", ["NO"])
+    n_countries = max(len(user_countries), 1)
+    country_names = []
+    for code in user_countries:
+        for c_code, c_label in AVAILABLE_COUNTRIES:
+            if c_code == code:
+                country_names.append(c_label.split(" (")[0])
+                break
+
+    render_html(f"""
+        <div class="access-gate-head" style="text-align:center;">
+            <div class="assistant-kicker">VELG ABONNEMENT</div>
+            <div class="access-gate-title">Tre nivåer — fra fullt automatisert til attestert</div>
+            <div class="access-gate-subtitle">
+                {'Land: ' + ', '.join(country_names) + '.' if country_names else ''}
+                {'Prisene nedenfor gjelder per land ×' + str(n_countries) + '.' if n_countries > 1 else 'Prisene gjelder for 1 land.'}
+                Alle planer har {CONTRACT_BINDING_MONTHS} måneders bindingstid.
+            </div>
+        </div>
+    """)
+
+    cols = st.columns(3, gap="medium")
+    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
+        with cols[idx]:
+            is_popular = plan_key == "team"
+            border_color = "#38bdf8" if is_popular else "var(--card-border, rgba(56,189,248,0.10))"
+            badge_color = "#38bdf8" if is_popular else "#22d3ee"
+
+            features_html = "".join(
+                f'<div style="padding:0.3rem 0;color:var(--soft,#c8d3df);font-size:0.9rem;">✓ {f}</div>'
+                for f in plan["features"]
+            )
+
+            multi_note = ""
+            if n_countries > 1:
+                multi_note = f'<div style="color:#f59e0b;font-size:0.8rem;margin-top:0.5rem;">× {n_countries} land</div>'
+
+            render_html(f"""
+                <div style="border:1px solid {border_color};border-radius:1rem;padding:1.8rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:450px;
+                            display:flex;flex-direction:column;position:relative;">
+                    <div style="color:{badge_color};font-weight:700;font-size:0.75rem;
+                                letter-spacing:0.08em;margin-bottom:0.5rem;">{plan['badge']}</div>
+                    <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;
+                                margin-bottom:0.25rem;">{plan['name']}</div>
+                    <div style="color:#22d3ee;font-size:1.4rem;font-weight:800;
+                                margin-bottom:0.25rem;">{plan['price_label']}</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;
+                                margin-bottom:0.3rem;">{plan['price_detail']}</div>
+                    {multi_note}
+                    <div style="color:var(--soft,#c8d3df);font-size:0.75rem;
+                                margin-bottom:1rem;">{CONTRACT_BINDING_MONTHS} mnd bindingstid</div>
+                    <div style="flex:1;">{features_html}</div>
+                </div>
+            """)
+            if st.button(f"Velg {plan['name']}", key=f"select_plan_{plan_key}", use_container_width=True):
+                st.session_state.user_plan = plan_key
+                st.rerun()
+
+    # -- Payment method selection (shown after plan is selected) --
+    selected_plan = st.session_state.get("user_plan", "")
+    if selected_plan and selected_plan in SUBSCRIPTION_PLANS:
+        plan_info = SUBSCRIPTION_PLANS[selected_plan]
+        st.markdown("---")
+
+        render_html(f"""
+            <div style="text-align:center;margin-bottom:1.5rem;">
+                <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;">
+                    Valgt plan: {plan_info['name']} — {plan_info['price_label']}
+                    {' × ' + str(n_countries) + ' land' if n_countries > 1 else ''}
+                </div>
+            </div>
+        """)
+
+        render_html("""
+            <div style="text-align:center;margin-bottom:1rem;">
+                <div style="color:var(--bright,#f1f5f9);font-size:1rem;font-weight:600;">Velg betalingsmetode</div>
+            </div>
+        """)
+
+        pay_col1, pay_col2 = st.columns(2, gap="large")
+        with pay_col1:
+            render_html("""
+                <div style="border:1px solid rgba(56,189,248,0.15);border-radius:1rem;padding:1.5rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));text-align:center;">
+                    <div style="font-size:2rem;margin-bottom:0.5rem;">💳</div>
+                    <div style="color:var(--bright,#f1f5f9);font-weight:700;margin-bottom:0.3rem;">Kortbetaling</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:0.5rem;">
+                        Automatisk aktivering ved godkjent betaling. Stripe sikker betaling.
+                    </div>
+                    <div style="color:#22d3ee;font-size:0.8rem;">Aktiv umiddelbart</div>
+                </div>
+            """)
+            if st.button("Betal med kort", key="pay_card", use_container_width=True):
+                st.session_state.user_payment_method = "card"
+                # TODO: Redirect to Stripe Checkout session
+                # stripe.checkout.Session.create(...)
+                # For now, simulate successful payment:
+                st.session_state.user_account_status = "active"
+                st.session_state.site_access_granted = True
+                st.success("✅ Betaling godkjent! Kontoen din er nå aktiv.")
+                try:
+                    params = get_query_params_dict()
+                    params.pop("auth", None)
+                    set_query_params_dict(params)
+                except Exception:
+                    pass
+                st.rerun()
+
+        with pay_col2:
+            render_html("""
+                <div style="border:1px solid rgba(56,189,248,0.15);border-radius:1rem;padding:1.5rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));text-align:center;">
+                    <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
+                    <div style="color:var(--bright,#f1f5f9);font-weight:700;margin-bottom:0.3rem;">Faktura</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:0.5rem;">
+                        Faktura sendes til oppgitt e-post. Konto aktiveres manuelt etter mottatt betaling.
+                    </div>
+                    <div style="color:#f59e0b;font-size:0.8rem;">Manuell godkjenning (1–3 virkedager)</div>
+                </div>
+            """)
+            if st.button("Bestill på faktura", key="pay_invoice", use_container_width=True):
+                st.session_state.user_payment_method = "invoice"
+                st.session_state.user_account_status = "pending_invoice"
+                # TODO: Send notification email to Builtly admin + confirmation to customer
+                # send_contact_email(...) or similar
+                st.info(
+                    "📄 Bestilling mottatt! Faktura sendes til din e-post. "
+                    "Kontoen aktiveres når betaling er registrert (1–3 virkedager). "
+                    "Du vil motta bekreftelse på e-post."
+                )
+
+        # Contract summary
+        render_html(f"""
+            <div style="text-align:center;color:var(--soft,#c8d3df);font-size:0.8rem;
+                        max-width:600px;margin:1.5rem auto 0 auto;padding:1rem;
+                        border:1px solid rgba(56,189,248,0.08);border-radius:0.75rem;">
+                <strong>Kontraktsvilkår:</strong> {CONTRACT_TERMS_TEXT.format(months=CONTRACT_BINDING_MONTHS)}<br><br>
+                <strong>Personvern:</strong> Data behandles iht. GDPR/personopplysningsloven og lagres innenfor EØS.<br><br>
+                <strong>Betalingsleverandør:</strong> Stripe (PCI DSS-sertifisert). Builtly lagrer ikke kortinformasjon.
+            </div>
+        """)
+
+    # Platform pricing info
+    st.markdown("---")
+    render_html(f"""
+        <div style="text-align:center;color:var(--soft,#c8d3df);font-size:0.85rem;
+                    max-width:700px;margin:0 auto;padding:1rem 0;">
+            <strong style="color:#22d3ee;">PLATTFORMPRISING (SaaS)</strong><br>
+            <strong>Portefølje-API (bank):</strong> 150 000–500 000 kr/år · 10 banker = 2 MNOK ARR uten én fagpersontime<br>
+            <strong>White-label partnerprogram:</strong> Lisens + revenue share · 25 000–2 000 000 kr/år<br><br>
+            <em>{REVISION_NOTICE}</em>
+        </div>
+    """)
+
+
+def render_user_dashboard(lang_key: str) -> None:
+    """Render user dashboard with saved reports and account info."""
+    user_name = st.session_state.get("user_name", "Bruker")
+    user_email = st.session_state.get("user_email", "")
+    user_company = st.session_state.get("user_company", "")
+    user_plan = st.session_state.get("user_plan", "")
+    user_countries = st.session_state.get("user_countries", [])
+    user_status = st.session_state.get("user_account_status", "inactive")
+    user_payment = st.session_state.get("user_payment_method", "")
+    reports = st.session_state.get("user_reports", [])
+
+    status_labels = {
+        "active": ("✅ Aktiv", "#22c55e"),
+        "pending_invoice": ("⏳ Venter på betaling", "#f59e0b"),
+        "inactive": ("⚠️ Inaktiv", "#ef4444"),
+    }
+    status_text, status_color = status_labels.get(user_status, ("Ukjent", "#c8d3df"))
+
+    country_names = []
+    for code in user_countries:
+        for c_code, c_label in AVAILABLE_COUNTRIES:
+            if c_code == code:
+                country_names.append(c_label.split(" (")[0])
+                break
+
+    render_html(f"""
+        <div class="access-gate-head">
+            <div class="assistant-kicker">MIN KONTO</div>
+            <div class="access-gate-title">Hei, {html.escape(user_name)}</div>
+        </div>
+    """)
+
+    # -- Account status banner --
+    if user_status == "pending_invoice":
+        render_html("""
+            <div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);
+                        border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
+                        color:#f59e0b;font-size:0.9rem;">
+                ⏳ <strong>Kontoen venter på betalingsbekreftelse.</strong>
+                Faktura er sendt — kontoen aktiveres når betaling er registrert (1–3 virkedager).
+                Kontakt post@builtly.ai ved spørsmål.
+            </div>
+        """)
+    elif user_status == "inactive":
+        render_html("""
+            <div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);
+                        border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
+                        color:#ef4444;font-size:0.9rem;">
+                ⚠️ <strong>Ingen aktiv plan.</strong>
+                Velg et abonnement for å få tilgang til Builtly sine moduler.
+            </div>
+        """)
+
+    # -- Account info --
+    info_col, plan_col = st.columns([1, 1], gap="large")
+    with info_col:
+        render_html(f"""
+            <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
+                        padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
+                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">KONTOINFORMASJON</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Navn:</strong> {html.escape(user_name)}</div>
+                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Selskap:</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>E-post:</strong> {html.escape(user_email)}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Land:</strong> {html.escape(', '.join(country_names)) if country_names else 'Ikke valgt'}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>Betaling:</strong> {'Kort (Stripe)' if user_payment == 'card' else 'Faktura' if user_payment == 'invoice' else 'Ikke satt opp'}</div>
+                <div style="margin-top:0.5rem;"><strong style="color:{status_color};">{status_text}</strong></div>
+            </div>
+        """)
+    with plan_col:
+        plan_info = SUBSCRIPTION_PLANS.get(user_plan, {})
+        if plan_info:
+            render_html(f"""
+                <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
+                            padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
+                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">DITT ABONNEMENT</div>
+                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:700;">{plan_info['name']} — {plan_info['price_label']}</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-top:0.3rem;">{plan_info['price_detail']}</div>
+                </div>
+            """)
+        else:
+            render_html('<div style="border:1px solid rgba(56,189,248,0.10);border-radius:1rem;padding:1.5rem;background:rgba(6,17,26,0.55);">')
+            render_html('<div style="color:var(--soft,#c8d3df);">Ingen aktiv plan.</div>')
+            render_html('</div>')
+            if st.button("Velg abonnement", use_container_width=True):
+                try:
+                    st.query_params["auth"] = "plans"
+                except Exception:
+                    pass
+                st.rerun()
+
+    # -- Saved reports --
+    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
+    render_html(f"""
+        <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;">
+            Mine rapporter
+        </div>
+        <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:1rem;">
+            Rapporter lagres i {REPORT_RETENTION_DAYS} dager. {REVISION_NOTICE}
+        </div>
+    """)
+
+    if not reports:
+        render_html("""
+            <div style="border:1px dashed rgba(56,189,248,0.20);border-radius:1rem;padding:3rem;
+                        text-align:center;color:var(--soft,#c8d3df);">
+                <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
+                <div>Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.</div>
+            </div>
+        """)
+    else:
+        for i, report in enumerate(reports):
+            exp_text = report.get("expires", "—")
+            render_html(f"""
+                <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:0.75rem;
+                            padding:1rem 1.5rem;margin-bottom:0.5rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));
+                            display:flex;align-items:center;justify-content:space-between;">
+                    <div>
+                        <div style="color:var(--bright,#f1f5f9);font-weight:600;">{html.escape(report.get('name', 'Rapport'))}</div>
+                        <div style="color:var(--soft,#c8d3df);font-size:0.8rem;">
+                            {html.escape(report.get('module', ''))} · Opprettet: {html.escape(report.get('created', '—'))} · Utløper: {html.escape(exp_text)}
+                        </div>
+                    </div>
+                    <div style="color:#38bdf8;font-size:0.85rem;">Last ned ↓</div>
+                </div>
+            """)
+
+    # -- Actions --
+    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
+    act_col1, act_col2, act_col3 = st.columns(3)
+    with act_col1:
+        if st.button("← Tilbake til forsiden", use_container_width=True):
+            try:
+                params = get_query_params_dict()
+                params.pop("auth", None)
+                set_query_params_dict(params)
+            except Exception:
+                pass
+            st.rerun()
+    with act_col2:
+        if st.button("Endre abonnement", use_container_width=True):
+            try:
+                st.query_params["auth"] = "plans"
+            except Exception:
+                pass
+            st.rerun()
+    with act_col3:
+        if st.button("Logg ut", use_container_width=True):
+            st.session_state.user_authenticated = False
+            st.session_state.user_email = ""
+            st.session_state.user_name = ""
+            st.session_state.user_plan = ""
+            st.session_state.user_reports = []
+            # Keep site_access_granted if they had demo code
+            try:
+                params = get_query_params_dict()
+                params.pop("auth", None)
+                set_query_params_dict(params)
+            except Exception:
+                pass
+            st.rerun()
+
+
+def handle_auth_routing(lang_key: str) -> bool:
+    """Check if we need to show an auth page. Returns True if an auth page was rendered (caller should st.stop)."""
+    auth_page = _get_auth_page()
+    if not auth_page:
+        return False
+
+    if auth_page == "login":
+        render_login_page(lang_key)
+        return True
+    elif auth_page == "register":
+        render_register_page(lang_key)
+        return True
+    elif auth_page == "demo":
+        render_demo_gate(lang_key)
+        return True
+    elif auth_page == "plans":
+        render_plans_page(lang_key)
+        return True
+    elif auth_page == "dashboard":
+        if _is_user_logged_in():
+            render_user_dashboard(lang_key)
+        else:
+            render_login_page(lang_key)
+        return True
+    return False
+
+
 def reference_base_dir() -> Path:
     return Path(os.getenv("BUILTLY_REFERENCE_DIR") or "knowledge_base")
 
@@ -4416,12 +5094,20 @@ st.markdown(
 # -------------------------------------------------
 apply_language_from_query()
 
-top_l, top_r = st.columns([5, 1])
+top_l, top_m, top_r = st.columns([4, 1.5, 1], gap="small")
 
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
     render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left">{logo_html}</div></div>')
+
+with top_m:
+    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
+    if _is_user_logged_in():
+        _acct_label = f"👤 {st.session_state.get('user_name', 'Konto')}"
+        render_html(f'<a href="?auth=dashboard" target="_self" style="color:#38bdf8;font-size:0.9rem;text-decoration:none;white-space:nowrap;">{html.escape(_acct_label)}</a>')
+    else:
+        render_html('<a href="?auth=login" target="_self" style="color:#38bdf8;font-size:0.9rem;text-decoration:none;">Logg inn</a>')
 
 with top_r:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
@@ -4455,6 +5141,10 @@ if not st.session_state.get("site_access_granted"):
 _gate_dest = get_query_params_dict().get("gate", "").strip()
 if _gate_dest and access_gate_enabled() and not st.session_state.get("site_access_granted"):
     _module_gate_dialog(st.session_state.app_lang, _gate_dest)
+
+# Auth page routing (login, register, plans, dashboard, demo)
+if handle_auth_routing(st.session_state.app_lang):
+    st.stop()
 
 # -------------------------------------------------
 # 8) HERO + ASSISTANT ENTRYPOINT
@@ -4633,6 +5323,7 @@ render_html(
         <div class="cta-actions">
             {hero_action('project', lang['cta_btn1'], 'primary')}
             {hero_action('review', lang['cta_btn2'], 'secondary')}
+            <a href="?auth=plans" target="_self" class="hero-action secondary">Se priser</a>
         </div>
     </div>
     """
