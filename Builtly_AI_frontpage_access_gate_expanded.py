@@ -2812,6 +2812,32 @@ def render_demo_gate(lang_key: str) -> None:
 
 def render_plans_page(lang_key: str) -> None:
     """Render subscription plan selection with payment method choice."""
+    # Require registration before viewing plans
+    if not _is_user_logged_in():
+        render_html("""
+            <div class="access-gate-head" style="text-align:center;">
+                <div class="assistant-kicker">REGISTRERING PÅKREVD</div>
+                <div class="access-gate-title">Opprett konto først</div>
+                <div class="access-gate-subtitle">Du må registrere deg før du kan velge abonnement og betale.</div>
+            </div>
+        """)
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Opprett konto", type="primary", use_container_width=True):
+                try:
+                    st.query_params["auth"] = "register"
+                except Exception:
+                    pass
+                st.rerun()
+        with col_b:
+            if st.button("Logg inn", type="secondary", use_container_width=True):
+                try:
+                    st.query_params["auth"] = "login"
+                except Exception:
+                    pass
+                st.rerun()
+        return
+
     user_countries = st.session_state.get("user_countries", ["NO"])
     n_countries = max(len(user_countries), 1)
     country_names = []
