@@ -3911,8 +3911,8 @@ KRAV:
 
     # Save report to user dashboard
     try:
-        from Builtly_AI_frontpage_access_gate_expanded import save_user_report
-        save_user_report(
+        from builtly_auth import save_report
+        save_report(
             project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
             report_name=f"Mulighetsstudie — {p_name}",
             module="Mulighetsstudie",
