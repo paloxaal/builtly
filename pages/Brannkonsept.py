@@ -2505,365 +2505,99 @@ st.markdown(
 
 
 def render_mouse_canvas_editor(page: SourcePage, elements: List[Dict[str, Any]], bridge_label: str, component_key: str) -> None:
-    editable_elements = []
-    passthrough = []
-    for element in elements or []:
-        if element.get("type") in {"box", "area_fill", "arrow"}:
-            editable_elements.append(normalize_element(element))
-        else:
-            passthrough.append(normalize_element(element))
-
+    all_elements = [normalize_element(e) for e in (elements or [])]
     image_data_url = image_to_data_url(page.image, max_width=1500)
-    payload = {
-        "image": image_data_url,
-        "editable": editable_elements,
-        "passthrough": passthrough,
-        "bridgeLabel": bridge_label,
-        "styles": list(FIRE_STYLE_LIBRARY.keys()),
-    }
+    payload = {"image": image_data_url, "elements": all_elements, "bridgeLabel": bridge_label}
 
     html = f"""
-    <div style=\"font-family: Inter, Arial, sans-serif; color: #e5eef8;\">
-      <div style=\"margin-bottom:8px; color:#9fb0c3; font-size:13px;\">Museeditor (beta): flytt, tegn og juster bokser/felt/piler. Klikk deretter <b>Send til Streamlit</b> og bruk knappen under for å importere.</div>
-      <div style=\"display:flex; gap:12px; align-items:flex-start;\">
-        <div style=\"width:220px; background:#0c1520; border:1px solid rgba(120,145,170,0.25); border-radius:12px; padding:12px; box-sizing:border-box;\">
-          <div style=\"font-weight:700; margin-bottom:8px; color:#f5f7fb;\">Verktøy</div>
-          <div style=\"display:grid; grid-template-columns:1fr; gap:8px;\">
-            <button id=\"toolSelect\">Velg / flytt</button>
-            <button id=\"toolBox\">Ny boks</button>
-            <button id=\"toolArea\">Nytt felt</button>
-            <button id=\"toolArrow\">Ny pil</button>
-            <button id=\"deleteBtn\">Slett valgt</button>
-          </div>
-          <div style=\"margin-top:14px; font-weight:700; color:#f5f7fb;\">Egenskaper</div>
-          <label style=\"display:block; font-size:12px; color:#9fb0c3; margin-top:10px;\">Etikett</label>
-          <input id=\"labelInput\" type=\"text\" style=\"width:100%; box-sizing:border-box; background:#0d1824; color:white; border:1px solid rgba(120,145,170,0.35); border-radius:8px; padding:8px;\" />
-          <label style=\"display:block; font-size:12px; color:#9fb0c3; margin-top:10px;\">Stil</label>
-          <select id=\"styleInput\" style=\"width:100%; box-sizing:border-box; background:#0d1824; color:white; border:1px solid rgba(120,145,170,0.35); border-radius:8px; padding:8px;\"></select>
-          <button id=\"saveBtn\" style=\"margin-top:14px; width:100%;\">Send til Streamlit</button>
-          <div id=\"statusBox\" style=\"margin-top:10px; font-size:12px; color:#9fb0c3;\"></div>
-        </div>
-        <div style=\"flex:1; min-width:0;\">
-          <canvas id=\"editorCanvas\" style=\"width:100%; background:#ffffff; border-radius:14px; border:1px solid rgba(120,145,170,0.25); cursor:crosshair;\"></canvas>
-          <textarea id=\"exportPayload\" style=\"width:100%; min-height:110px; margin-top:10px; background:#0c1520; color:#c8d3df; border:1px solid rgba(120,145,170,0.25); border-radius:12px; padding:10px; box-sizing:border-box;\" readonly></textarea>
-        </div>
+    <div style="font-family:system-ui,-apple-system,sans-serif;color:#e2e8f0">
+      <div style="display:flex;gap:3px;padding:6px 8px;background:#0a1929;border:1px solid #1a2a3a;border-radius:10px 10px 0 0;flex-wrap:wrap;align-items:center">
+        <button onclick="FE.setTool('select')" id="t_select" class="ft active" style="--tc:#38bdf8">Velg</button>
+        <span style="width:1px;height:16px;background:#1a2a3a"></span>
+        <button onclick="FE.setTool('branncelle')" id="t_branncelle" class="ft" style="--tc:#e53935">Branncelle</button>
+        <button onclick="FE.setTool('romning')" id="t_romning" class="ft" style="--tc:#22c55e">Romningsvei</button>
+        <button onclick="FE.setTool('romning_pil')" id="t_romning_pil" class="ft" style="--tc:#22c55e">Romningsretn.</button>
+        <button onclick="FE.setTool('redning')" id="t_redning" class="ft" style="--tc:#f59e0b">Redningsvei</button>
+        <button onclick="FE.setTool('atkomst')" id="t_atkomst" class="ft" style="--tc:#2563eb">Brannatkomst</button>
+        <button onclick="FE.setTool('innsats')" id="t_innsats" class="ft" style="--tc:#ef4444">Innsatsvei</button>
+        <button onclick="FE.setTool('kjerne')" id="t_kjerne" class="ft" style="--tc:#2e7d32">Kjerne</button>
+        <button onclick="FE.setTool('oppstilling')" id="t_oppstilling" class="ft" style="--tc:#ef4444">Oppstilling</button>
+        <button onclick="FE.setTool('dor')" id="t_dor" class="ft" style="--tc:#ef4444">Branndor</button>
+        <button onclick="FE.setTool('notat')" id="t_notat" class="ft" style="--tc:#94a3b8">Notat</button>
+        <span style="flex:1"></span>
+        <button onclick="FE.deleteSelected()" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.3)">Slett</button>
+        <button onclick="FE.sendToStreamlit()" style="background:#38bdf8;color:#06111a;font-weight:700;border-color:#38bdf8">Lagre</button>
       </div>
+      <canvas id="FC" style="width:100%;display:block;background:#0d1b2a;border:1px solid #1a2a3a;border-top:none;cursor:crosshair"></canvas>
+      <div style="display:flex;gap:8px;padding:5px 10px;background:#0a1929;border:1px solid #1a2a3a;border-top:none;border-radius:0 0 10px 10px;align-items:center">
+        <span id="FE_status" style="font-size:10px;color:#475569;font-family:monospace;flex:1"></span>
+        <label style="font-size:10px;color:#64748b">Etikett:</label>
+        <input id="FE_label" type="text" style="background:#1a2a3a;border:1px solid #334155;border-radius:4px;color:#e2e8f0;padding:2px 8px;font-size:11px;width:160px" oninput="FE.updateLabel(this.value)"/>
+      </div>
+      <textarea id="FE_export" style="display:none">{json.dumps(all_elements, ensure_ascii=False)}</textarea>
     </div>
-    <style>
-      button {{ background: rgba(56,194,201,0.15); color:#f5f7fb; border:1px solid rgba(56,194,201,0.35); border-radius:10px; padding:8px 10px; cursor:pointer; }}
-      button:hover {{ background: rgba(56,194,201,0.22); }}
-      button.active {{ background: rgba(56,194,201,0.35); }}
-    </style>
+    <style>.ft{{background:rgba(30,41,59,0.8);color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:500;transition:all .15s}}.ft:hover{{background:rgba(56,189,248,0.1);color:#e2e8f0}}.ft.active{{background:var(--tc,#38bdf8);color:#fff;font-weight:700;border-color:var(--tc,#38bdf8)}}</style>
     <script>
-    const payload = {json.dumps(payload, ensure_ascii=False)};
-    const canvas = document.getElementById('editorCanvas');
-    const ctx = canvas.getContext('2d');
-    const exportBox = document.getElementById('exportPayload');
-    const labelInput = document.getElementById('labelInput');
-    const styleInput = document.getElementById('styleInput');
-    const statusBox = document.getElementById('statusBox');
-    const img = new Image();
-    img.src = payload.image;
-
-    payload.styles.forEach(style => {{
-      const opt = document.createElement('option');
-      opt.value = style;
-      opt.textContent = style;
-      styleInput.appendChild(opt);
-    }});
-
-    let tool = 'select';
-    let activeIndex = -1;
-    let dragMode = null;
-    let start = null;
-    let scale = 1;
-    let offsetX = 0;
-    let offsetY = 0;
-    let imageW = 0;
-    let imageH = 0;
-    let elements = JSON.parse(JSON.stringify(payload.editable || []));
-    const passthrough = JSON.parse(JSON.stringify(payload.passthrough || []));
-
-    const buttons = {{
-      select: document.getElementById('toolSelect'),
-      box: document.getElementById('toolBox'),
-      area_fill: document.getElementById('toolArea'),
-      arrow: document.getElementById('toolArrow'),
-    }};
-
-    function setTool(next) {{
-      tool = next;
-      Object.entries(buttons).forEach(([key, btn]) => btn.classList.toggle('active', key === next));
-      canvas.style.cursor = next === 'select' ? 'default' : 'crosshair';
-    }}
-    document.getElementById('toolSelect').onclick = () => setTool('select');
-    document.getElementById('toolBox').onclick = () => setTool('box');
-    document.getElementById('toolArea').onclick = () => setTool('area_fill');
-    document.getElementById('toolArrow').onclick = () => setTool('arrow');
-    setTool('select');
-
-    function resizeCanvas() {{
-      const maxW = canvas.parentElement.clientWidth || 980;
-      const ratio = Math.min(1, maxW / img.width);
-      imageW = Math.max(1, Math.round(img.width * ratio));
-      imageH = Math.max(1, Math.round(img.height * ratio));
-      canvas.width = imageW;
-      canvas.height = imageH;
-      scale = imageW / img.width;
-      offsetX = 0;
-      offsetY = 0;
-      render();
-    }}
-
-    function normToPx(pt) {{
-      return [pt[0] * imageW, pt[1] * imageH];
-    }}
-    function pxToNorm(x, y) {{
-      return [Math.max(0, Math.min(1, x / imageW)), Math.max(0, Math.min(1, y / imageH))];
-    }}
-    function rectToPx(rect) {{
-      return [rect[0] * imageW, rect[1] * imageH, rect[2] * imageW, rect[3] * imageH];
-    }}
-    function hitRect(rect, x, y) {{
-      const [x0, y0, x1, y1] = rectToPx(rect);
-      return x >= Math.min(x0, x1) && x <= Math.max(x0, x1) && y >= Math.min(y0, y1) && y <= Math.max(y0, y1);
-    }}
-    function lineDistance(x, y, x1, y1, x2, y2) {{
-      const A = x - x1;
-      const B = y - y1;
-      const C = x2 - x1;
-      const D = y2 - y1;
-      const dot = A * C + B * D;
-      const lenSq = C * C + D * D;
-      let param = -1;
-      if (lenSq !== 0) param = dot / lenSq;
-      let xx, yy;
-      if (param < 0) {{ xx = x1; yy = y1; }}
-      else if (param > 1) {{ xx = x2; yy = y2; }}
-      else {{ xx = x1 + param * C; yy = y1 + param * D; }}
-      const dx = x - xx;
-      const dy = y - yy;
-      return Math.sqrt(dx * dx + dy * dy);
-    }}
-    function hitArrow(points, x, y) {{
-      if (!points || points.length < 2) return false;
-      const p1 = normToPx(points[0]);
-      const p2 = normToPx(points[points.length - 1]);
-      return lineDistance(x, y, p1[0], p1[1], p2[0], p2[1]) < 12;
-    }}
-    function getMouse(evt) {{
-      const rect = canvas.getBoundingClientRect();
-      return {{ x: (evt.clientX - rect.left) * (canvas.width / rect.width), y: (evt.clientY - rect.top) * (canvas.height / rect.height) }};
-    }}
-    function updateForm() {{
-      if (activeIndex < 0 || !elements[activeIndex]) {{
-        labelInput.value = '';
-        return;
-      }}
-      labelInput.value = elements[activeIndex].label || '';
-      styleInput.value = elements[activeIndex].style || 'fire_compartment';
-    }}
-    function findElementAt(x, y) {{
-      for (let i = elements.length - 1; i >= 0; i--) {{
-        const el = elements[i];
-        if ((el.type === 'box' || el.type === 'area_fill') && el.rect && hitRect(el.rect, x, y)) return i;
-        if (el.type === 'arrow' && el.points && hitArrow(el.points, x, y)) return i;
-      }}
-      return -1;
-    }}
-
-    function render() {{
-      if (!img.complete) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, imageW, imageH);
-      elements.forEach((el, idx) => {{
-        const style = el.style || 'fire_compartment';
-        let stroke = '#e53935';
-        let fill = null;
-        if (style === 'escape_route') {{ stroke = '#2e7d32'; fill = 'rgba(110,231,183,0.35)'; }}
-        if (style === 'rescue_route') {{ stroke = '#f59e0b'; fill = 'rgba(253,186,116,0.30)'; }}
-        if (style === 'attack_route') {{ stroke = '#ef4444'; }}
-        if (style === 'fire_access') {{ stroke = '#2563eb'; fill = 'rgba(219,234,254,0.35)'; }}
-        ctx.lineWidth = idx === activeIndex ? 4 : 3;
-        ctx.strokeStyle = stroke;
-        ctx.fillStyle = fill || 'transparent';
-        if ((el.type === 'box' || el.type === 'area_fill') && el.rect) {{
-          const [x0, y0, x1, y1] = rectToPx(el.rect);
-          const w = x1 - x0;
-          const h = y1 - y0;
-          if (fill) ctx.fillRect(x0, y0, w, h);
-          ctx.strokeRect(x0, y0, w, h);
-          const hx = x1;
-          const hy = y1;
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = stroke;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.rect(hx - 6, hy - 6, 12, 12);
-          ctx.fill();
-          ctx.stroke();
-        }}
-        if (el.type === 'arrow' && el.points && el.points.length >= 2) {{
-          const p1 = normToPx(el.points[0]);
-          const p2 = normToPx(el.points[el.points.length - 1]);
-          ctx.strokeStyle = stroke;
-          ctx.lineWidth = idx === activeIndex ? 4 : 3;
-          ctx.beginPath();
-          ctx.moveTo(p1[0], p1[1]);
-          ctx.lineTo(p2[0], p2[1]);
-          ctx.stroke();
-          const angle = Math.atan2(p2[1] - p1[1], p2[0] - p1[0]);
-          const head = 14;
-          ctx.beginPath();
-          ctx.moveTo(p2[0], p2[1]);
-          ctx.lineTo(p2[0] - head * Math.cos(angle - Math.PI / 6), p2[1] - head * Math.sin(angle - Math.PI / 6));
-          ctx.lineTo(p2[0] - head * Math.cos(angle + Math.PI / 6), p2[1] - head * Math.sin(angle + Math.PI / 6));
-          ctx.closePath();
-          ctx.fillStyle = stroke;
-          ctx.fill();
-          [p1, p2].forEach(pt => {{
-            ctx.beginPath();
-            ctx.fillStyle = '#ffffff';
-            ctx.strokeStyle = stroke;
-            ctx.lineWidth = 2;
-            ctx.arc(pt[0], pt[1], 6, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-          }});
-        }}
-      }});
-      exportBox.value = JSON.stringify([...passthrough, ...elements], null, 2);
-    }}
-
-    canvas.addEventListener('mousedown', (evt) => {{
-      const pos = getMouse(evt);
-      start = pos;
-      if (tool === 'select') {{
-        activeIndex = findElementAt(pos.x, pos.y);
-        dragMode = activeIndex >= 0 ? 'move' : null;
-        if (activeIndex >= 0) {{
-          const el = elements[activeIndex];
-          if ((el.type === 'box' || el.type === 'area_fill') && el.rect) {{
-            const [x0, y0, x1, y1] = rectToPx(el.rect);
-            if (Math.abs(pos.x - x1) < 12 && Math.abs(pos.y - y1) < 12) dragMode = 'resize-br';
+    window.FE=(function(){{
+      const P={json.dumps(payload, ensure_ascii=False)};
+      const cv=document.getElementById('FC'),ctx=cv.getContext('2d'),st=document.getElementById('FE_status'),lb=document.getElementById('FE_label'),ex=document.getElementById('FE_export');
+      const img=new Image();img.src=P.image;
+      let els=JSON.parse(JSON.stringify(P.elements||[]));
+      let tool='select',sel=-1,drag=null,sp=null,IW=0,IH=0;
+      const TMAP={{branncelle:['box','fire_compartment','Branncelle'],romning:['area_fill','escape_route','Romningsvei'],romning_pil:['arrow','escape_arrow','Romningsretning'],redning:['area_fill','rescue_route','Redningsvei / balkong'],atkomst:['area_fill','fire_access','Brannatkomst'],innsats:['arrow','attack_route','Innsatsvei'],kjerne:['box','core_fill','Trapperom / kjerne'],oppstilling:['box','staging_area','Oppstillingsplass'],dor:['box','door_class','EI2 30-C'],notat:['box','note_box','Notat']}};
+      const SC={{fire_compartment:['#e53935',null],escape_route:['#2e7d32','rgba(110,231,183,0.35)'],escape_arrow:['#22c55e',null],rescue_route:['#f59e0b','rgba(253,186,116,0.3)'],attack_route:['#ef4444',null],fire_access:['#2563eb','rgba(219,234,254,0.35)'],staging_area:['#ef4444','rgba(252,165,165,0.3)'],note_box:['#94a3b8','rgba(255,255,255,0.85)'],door_class:['#ef4444','rgba(255,255,255,0.9)'],core_fill:['#2e7d32','rgba(187,247,208,0.3)']}};
+      function uid(){{return Math.random().toString(36).slice(2,12)}}
+      function n2p(v,s){{return v*s}}
+      function p2n(v,s){{return Math.max(0,Math.min(1,v/s))}}
+      function gP(e){{const r=cv.getBoundingClientRect();return{{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)}}}}
+      function dist(a,b,c,d){{return Math.sqrt((c-a)**2+(d-b)**2)}}
+      function render(){{
+        if(!img.complete)return;ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,IW,IH);
+        els.forEach((e,i)=>{{
+          const s=SC[e.style]||SC.fire_compartment,stroke=s[0],fill=s[1],isSel=i===sel;
+          ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=stroke;
+          if(e.rect){{
+            const x0=n2p(e.rect[0],IW),y0=n2p(e.rect[1],IH),x1=n2p(e.rect[2],IW),y1=n2p(e.rect[3],IH),w=x1-x0,h=y1-y0;
+            if(fill){{ctx.fillStyle=fill;ctx.fillRect(x0,y0,w,h)}}
+            if(e.style==='fire_compartment'){{ctx.setLineDash([8,5]);ctx.strokeRect(x0,y0,w,h);ctx.setLineDash([])}}else{{ctx.strokeRect(x0,y0,w,h)}}
+            if(isSel){{ctx.fillStyle='#fff';ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.beginPath();ctx.rect(x1-5,y1-5,10,10);ctx.fill();ctx.stroke()}}
+            ctx.font='bold 11px system-ui';const lbl=e.label||'';const tw=ctx.measureText(lbl).width;
+            ctx.fillStyle='rgba(10,25,41,0.75)';ctx.fillRect(x0,y0-16,tw+8,15);ctx.fillStyle=stroke;ctx.fillText(lbl,x0+4,y0-4);
           }}
-          if (el.type === 'arrow' && el.points && el.points.length >= 2) {{
-            const p1 = normToPx(el.points[0]);
-            const p2 = normToPx(el.points[el.points.length - 1]);
-            const dist1 = Math.hypot(pos.x - p1[0], pos.y - p1[1]);
-            const dist2 = Math.hypot(pos.x - p2[0], pos.y - p2[1]);
-            if (dist1 < 12) dragMode = 'move-start';
-            else if (dist2 < 12) dragMode = 'move-end';
+          if(e.points&&e.points.length>=2){{
+            const p1=[n2p(e.points[0][0],IW),n2p(e.points[0][1],IH)],p2=[n2p(e.points[e.points.length-1][0],IW),n2p(e.points[e.points.length-1][1],IH)];
+            ctx.beginPath();ctx.moveTo(p1[0],p1[1]);ctx.lineTo(p2[0],p2[1]);ctx.stroke();
+            const ang=Math.atan2(p2[1]-p1[1],p2[0]-p1[0]),hd=14;
+            ctx.beginPath();ctx.moveTo(p2[0],p2[1]);ctx.lineTo(p2[0]-hd*Math.cos(ang-0.5),p2[1]-hd*Math.sin(ang-0.5));ctx.lineTo(p2[0]-hd*Math.cos(ang+0.5),p2[1]-hd*Math.sin(ang+0.5));ctx.closePath();ctx.fillStyle=stroke;ctx.fill();
+            if(isSel){{[p1,p2].forEach(pt=>{{ctx.beginPath();ctx.arc(pt[0],pt[1],6,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke()}})}}
+            const mx=(p1[0]+p2[0])/2,my=(p1[1]+p2[1])/2;ctx.font='bold 10px system-ui';const lbl=e.label||'';const tw=ctx.measureText(lbl).width;
+            ctx.fillStyle='rgba(10,25,41,0.75)';ctx.fillRect(mx-tw/2-3,my-18,tw+6,14);ctx.fillStyle=stroke;ctx.fillText(lbl,mx-tw/2,my-7);
           }}
+        }});
+        st.textContent=els.length+' elementer | '+(tool==='select'?'Velg/flytt':TMAP[tool]?TMAP[tool][2]:tool);
+        ex.value=JSON.stringify(els,null,2);
+      }}
+      function resize(){{const mw=cv.parentElement.clientWidth||980,r=Math.min(1,mw/img.width);IW=Math.max(1,Math.round(img.width*r));IH=Math.max(1,Math.round(img.height*r));cv.width=IW;cv.height=IH;render()}}
+      function hitTest(x,y){{for(let i=els.length-1;i>=0;i--){{const e=els[i];if(e.rect){{const x0=n2p(e.rect[0],IW),y0=n2p(e.rect[1],IH),x1=n2p(e.rect[2],IW),y1=n2p(e.rect[3],IH);if(x>=Math.min(x0,x1)&&x<=Math.max(x0,x1)&&y>=Math.min(y0,y1)&&y<=Math.max(y0,y1))return i}}if(e.points&&e.points.length>=2){{const p1=[n2p(e.points[0][0],IW),n2p(e.points[0][1],IH)],p2=[n2p(e.points[e.points.length-1][0],IW),n2p(e.points[e.points.length-1][1],IH)];const dx=p2[0]-p1[0],dy=p2[1]-p1[1],l2=dx*dx+dy*dy;let t=l2===0?0:((x-p1[0])*dx+(y-p1[1])*dy)/l2;t=Math.max(0,Math.min(1,t));if(dist(x,y,p1[0]+t*dx,p1[1]+t*dy)<14)return i}}}}return -1}}
+      cv.addEventListener('mousedown',function(e){{const p=gP(e);sp=p;if(tool==='select'){{sel=hitTest(p.x,p.y);if(sel>=0){{const el=els[sel];lb.value=el.label||'';if(el.rect){{const x1=n2p(el.rect[2],IW),y1=n2p(el.rect[3],IH);drag=Math.abs(p.x-x1)<12&&Math.abs(p.y-y1)<12?'resize':'move'}}else if(el.points){{const p1=[n2p(el.points[0][0],IW),n2p(el.points[0][1],IH)],p2=[n2p(el.points[el.points.length-1][0],IW),n2p(el.points[el.points.length-1][1],IH)];drag=dist(p.x,p.y,p1[0],p1[1])<12?'pt0':dist(p.x,p.y,p2[0],p2[1])<12?'pt1':'move'}}}}else{{lb.value=''}}}}else{{const tm=TMAP[tool];if(!tm)return;const[et,es,el]=tm;if(et==='box'||et==='area_fill'){{const nn=p2n(p.x,IW),nm=p2n(p.y,IH);els.push({{element_id:uid(),type:et,style:es,label:el,rect:[nn,nm,nn,nm]}});sel=els.length-1;drag='draw';lb.value=el}}else if(et==='arrow'){{const nn=p2n(p.x,IW),nm=p2n(p.y,IH);els.push({{element_id:uid(),type:'arrow',style:es,label:el,points:[[nn,nm],[nn,nm]]}});sel=els.length-1;drag='drawArrow';lb.value=el}}}}render()}});
+      cv.addEventListener('mousemove',function(e){{if(sel<0||!drag||!sp)return;const p=gP(e),el=els[sel];if(drag==='move'&&el.rect){{const dx=(p.x-sp.x)/IW,dy=(p.y-sp.y)/IH;el.rect=[el.rect[0]+dx,el.rect[1]+dy,el.rect[2]+dx,el.rect[3]+dy].map(v=>Math.max(0,Math.min(1,v)));sp=p}}else if((drag==='resize'||drag==='draw')&&el.rect){{el.rect[2]=p2n(p.x,IW);el.rect[3]=p2n(p.y,IH)}}else if(drag==='move'&&el.points){{const dx=(p.x-sp.x)/IW,dy=(p.y-sp.y)/IH;el.points=el.points.map(pt=>[Math.max(0,Math.min(1,pt[0]+dx)),Math.max(0,Math.min(1,pt[1]+dy))]);sp=p}}else if(drag==='pt0'&&el.points){{el.points[0]=[p2n(p.x,IW),p2n(p.y,IH)]}}else if((drag==='pt1'||drag==='drawArrow')&&el.points){{el.points[el.points.length-1]=[p2n(p.x,IW),p2n(p.y,IH)]}}render()}});
+      window.addEventListener('mouseup',function(){{if(sel>=0&&els[sel]&&els[sel].rect){{const r=els[sel].rect;els[sel].rect=[Math.min(r[0],r[2]),Math.min(r[1],r[3]),Math.max(r[0],r[2]),Math.max(r[1],r[3])]}}drag=null;render()}});
+      document.addEventListener('keydown',function(e){{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;if((e.key==='Delete'||e.key==='Backspace')&&sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}});
+      return{{
+        setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.ft').forEach(b=>b.classList.remove('active'));const btn=document.getElementById('t_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
+        deleteSelected:function(){{if(sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}},
+        updateLabel:function(v){{if(sel>=0&&els[sel]){{els[sel].label=v;render()}}}},
+        sendToStreamlit:function(){{
+          ex.value=JSON.stringify(els,null,2);
+          try{{const ta=window.parent.document.querySelector('textarea[aria-label="'+P.bridgeLabel+'"]');if(!ta)throw 0;const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));st.textContent='Lagret! Klikk Bruk museendringer under.'}}catch(e){{st.textContent='Kopier JSON manuelt.';ex.style.display='block'}}
         }}
-      }} else if (tool === 'box' || tool === 'area_fill') {{
-        elements.push({{ element_id: Math.random().toString(16).slice(2), type: tool === 'box' ? 'box' : 'area_fill', style: tool === 'box' ? 'fire_compartment' : 'escape_route', label: tool === 'box' ? 'Brannskille' : 'Rømningsvei', rect: [...pxToNorm(pos.x, pos.y), ...pxToNorm(pos.x, pos.y)] }});
-        activeIndex = elements.length - 1;
-        dragMode = 'draw-rect';
-      }} else if (tool === 'arrow') {{
-        elements.push({{ element_id: Math.random().toString(16).slice(2), type: 'arrow', style: 'attack_route', label: 'Innsatsvei', points: [pxToNorm(pos.x, pos.y), pxToNorm(pos.x, pos.y)] }});
-        activeIndex = elements.length - 1;
-        dragMode = 'draw-arrow';
-      }}
-      updateForm();
-      render();
-    }});
-
-    canvas.addEventListener('mousemove', (evt) => {{
-      if (activeIndex < 0 || !dragMode || !start) return;
-      const pos = getMouse(evt);
-      const dx = (pos.x - start.x) / imageW;
-      const dy = (pos.y - start.y) / imageH;
-      const el = elements[activeIndex];
-      if ((dragMode === 'move' || dragMode === 'resize-br' || dragMode === 'draw-rect') && el.rect) {{
-        if (dragMode === 'move') {{
-          el.rect = [
-            Math.max(0, Math.min(1, el.rect[0] + dx)),
-            Math.max(0, Math.min(1, el.rect[1] + dy)),
-            Math.max(0, Math.min(1, el.rect[2] + dx)),
-            Math.max(0, Math.min(1, el.rect[3] + dy)),
-          ];
-          start = pos;
-        }} else {{
-          const p = pxToNorm(pos.x, pos.y);
-          el.rect[2] = p[0];
-          el.rect[3] = p[1];
-        }}
-      }}
-      if ((dragMode === 'move' || dragMode === 'move-start' || dragMode === 'move-end' || dragMode === 'draw-arrow') && el.type === 'arrow' && el.points) {{
-        if (dragMode === 'move') {{
-          el.points = el.points.map(pt => [Math.max(0, Math.min(1, pt[0] + dx)), Math.max(0, Math.min(1, pt[1] + dy))]);
-          start = pos;
-        }} else if (dragMode === 'move-start') {{
-          el.points[0] = pxToNorm(pos.x, pos.y);
-        }} else {{
-          el.points[el.points.length - 1] = pxToNorm(pos.x, pos.y);
-        }}
-      }}
-      render();
-    }});
-
-    function normalizeActive() {{
-      const el = elements[activeIndex];
-      if (!el) return;
-      if (el.rect) {{
-        const x0 = Math.min(el.rect[0], el.rect[2]);
-        const y0 = Math.min(el.rect[1], el.rect[3]);
-        const x1 = Math.max(el.rect[0], el.rect[2]);
-        const y1 = Math.max(el.rect[1], el.rect[3]);
-        el.rect = [x0, y0, x1, y1];
-      }}
-    }}
-
-    window.addEventListener('mouseup', () => {{
-      if (activeIndex >= 0) normalizeActive();
-      dragMode = null;
-      render();
-    }});
-
-    labelInput.addEventListener('input', () => {{
-      if (activeIndex >= 0 && elements[activeIndex]) {{
-        elements[activeIndex].label = labelInput.value;
-        render();
-      }}
-    }});
-    styleInput.addEventListener('change', () => {{
-      if (activeIndex >= 0 && elements[activeIndex]) {{
-        elements[activeIndex].style = styleInput.value;
-        render();
-      }}
-    }});
-    document.getElementById('deleteBtn').onclick = () => {{
-      if (activeIndex >= 0) {{
-        elements.splice(activeIndex, 1);
-        activeIndex = -1;
-        updateForm();
-        render();
-      }}
-    }};
-
-    function sendToStreamlit() {{
-      exportBox.value = JSON.stringify([...passthrough, ...elements], null, 2);
-      try {{
-        const ta = window.parent.document.querySelector(`textarea[aria-label="${{payload.bridgeLabel}}"]`);
-        if (!ta) throw new Error('Fant ikke Streamlit-broen.');
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-        setter.call(ta, exportBox.value);
-        ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
-        ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        statusBox.textContent = 'JSON er sendt til Streamlit. Klikk nå på "Bruk museendringer" under.';
-      }} catch (err) {{
-        statusBox.textContent = 'Automatisk sending feilet. Kopier innholdet i boksen under manuelt til bufferfeltet i appen og klikk "Bruk museendringer".';
-      }}
-    }}
-    document.getElementById('saveBtn').onclick = sendToStreamlit;
-
-    img.onload = resizeCanvas;
-    window.addEventListener('resize', resizeCanvas);
+      }};
+      img.onload=resize;window.addEventListener('resize',resize);
+    }})();
     </script>
     """
     html = f"<!-- {component_key} -->\n" + html
-    components.html(html, height=980, scrolling=False)
+    components.html(html, height=820, scrolling=False)
 
 
 
