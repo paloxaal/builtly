@@ -2436,47 +2436,57 @@ def _module_gate_dialog(lang_key: str, dest_key: str) -> None:
 # 5b) SUBSCRIPTION TIERS & USER AUTH
 # -------------------------------------------------
 
-SUBSCRIPTION_PLANS = {
-    "modul": {
-        "name": "Modul",
-        "price_label": "5 000 kr/modul/mnd",
-        "price_detail": "+ 15 000–40 000 kr per rapport",
-        "features": [
-            "Tilgang til enkeltmoduler",
-            "AI-genererte rapporter (Nivå 1 — Auto)",
-            "30 dagers rapportlagring",
-            "E-poststøtte",
-        ],
-        "badge": "STARTER",
+SUBSCRIPTION_PLANS_LOCALIZED = {
+    "🇳🇴 Norsk": {
+        "modul": {
+            "name": "Modul", "price_label": "5 000 kr/modul/mnd",
+            "price_detail": "+ 15 000–40 000 kr per rapport",
+            "features": ["Tilgang til enkeltmoduler", "AI-genererte rapporter (Nivå 1 — Auto)", "30 dagers rapportlagring", "E-poststøtte"],
+            "badge": "STARTER",
+        },
+        "team": {
+            "name": "Team", "price_label": "Fra 12 000 kr/mnd",
+            "price_detail": "Volumrabatter tilgjengelig",
+            "features": ["Alle moduler inkludert", "Nivå 1 & 2 rapporter (Auto + Reviewed)", "30 dagers rapportlagring", "Flerbrukertilgang", "Prioritert støtte"],
+            "badge": "POPULÆR",
+        },
+        "enterprise": {
+            "name": "Enterprise", "price_label": "50 000–200 000 kr/mnd",
+            "price_detail": "SSO, SLA, dedikert kontakt",
+            "features": ["Alle moduler + Nivå 3 (Attestert)", "Ubegrenset rapportlagring", "Portefølje-API for banker", "White-label muligheter", "Dedikert rådgiver", "SSO / SAML"],
+            "badge": "ENTERPRISE",
+        },
     },
-    "team": {
-        "name": "Team",
-        "price_label": "Fra 12 000 kr/mnd",
-        "price_detail": "Volumrabatter tilgjengelig",
-        "features": [
-            "Alle moduler inkludert",
-            "Nivå 1 & 2 rapporter (Auto + Reviewed)",
-            "30 dagers rapportlagring",
-            "Flerbrukertilgang",
-            "Prioritert støtte",
-        ],
-        "badge": "POPULÆR",
-    },
-    "enterprise": {
-        "name": "Enterprise",
-        "price_label": "50 000–200 000 kr/mnd",
-        "price_detail": "SSO, SLA, dedikert kontakt",
-        "features": [
-            "Alle moduler + Nivå 3 (Attestert)",
-            "Ubegrenset rapportlagring",
-            "Portefølje-API for banker",
-            "White-label muligheter",
-            "Dedikert rådgiver",
-            "SSO / SAML",
-        ],
-        "badge": "ENTERPRISE",
+    "_default": {
+        "modul": {
+            "name": "Module", "price_label": "$500/module/mo",
+            "price_detail": "+ $1,500–4,000 per report",
+            "features": ["Access to individual modules", "AI-generated reports (Level 1 — Auto)", "30-day report storage", "Email support"],
+            "badge": "STARTER",
+        },
+        "team": {
+            "name": "Team", "price_label": "From $1,200/mo",
+            "price_detail": "Volume discounts available",
+            "features": ["All modules included", "Level 1 & 2 reports (Auto + Reviewed)", "30-day report storage", "Multi-user access", "Priority support"],
+            "badge": "POPULAR",
+        },
+        "enterprise": {
+            "name": "Enterprise", "price_label": "$5,000–20,000/mo",
+            "price_detail": "SSO, SLA, dedicated contact",
+            "features": ["All modules + Level 3 (Attested)", "Unlimited report storage", "Portfolio API for banks", "White-label options", "Dedicated advisor", "SSO / SAML"],
+            "badge": "ENTERPRISE",
+        },
     },
 }
+
+
+def get_subscription_plans(lang_key: str = "") -> dict:
+    lk = lang_key or st.session_state.get("app_lang", "")
+    return SUBSCRIPTION_PLANS_LOCALIZED.get(lk, SUBSCRIPTION_PLANS_LOCALIZED["_default"])
+
+
+# Keep backward compat reference
+SUBSCRIPTION_PLANS = SUBSCRIPTION_PLANS_LOCALIZED["🇳🇴 Norsk"]
 
 REPORT_RETENTION_DAYS = 30  # Reports auto-deleted after 30 days
 REVISION_NOTICE = (
@@ -2497,20 +2507,105 @@ AVAILABLE_COUNTRIES = [
 
 CONTRACT_BINDING_MONTHS = 12
 
-GDPR_CONSENT_TEXT = (
-    "Jeg bekrefter at jeg har lest og aksepterer Builtly Engineering AS sine "
-    "[vilkår for bruk](https://builtly.ai/terms) og "
-    "[personvernerklæring](https://builtly.ai/privacy). "
-    "Builtly behandler personopplysninger i henhold til GDPR / personopplysningsloven. "
-    "Data lagres innenfor EØS og slettes ved oppsigelse av abonnement. "
-    "Du kan når som helst be om innsyn, retting eller sletting av dine data ved å kontakte post@builtly.ai."
-)
+_AUTH_TEXTS = {
+    "🇳🇴 Norsk": {
+        "gdpr": (
+            "Jeg bekrefter at jeg har lest og aksepterer Builtly Engineering AS sine "
+            "[vilkår for bruk](https://builtly.ai/terms) og "
+            "[personvernerklæring](https://builtly.ai/privacy). "
+            "Builtly behandler personopplysninger i henhold til GDPR / personopplysningsloven. "
+            "Data lagres innenfor EØS og slettes ved oppsigelse av abonnement. "
+            "Du kan når som helst be om innsyn, retting eller sletting av dine data ved å kontakte post@builtly.ai."
+        ),
+        "contract": (
+            "Abonnementet har {months} måneders bindingstid fra aktivering. "
+            "Etter bindingstiden fornyes abonnementet månedlig med 1 måneds oppsigelsestid. "
+            "Priser gjelder per land — tilgang til flere land faktureres separat per land."
+        ),
+        "revision": (
+            "Eventuelle revideringer av rapport som følge av endring av forutsetninger "
+            "fra kundens ståsted må avtales direkte med rådgiver tilknyttet Builtly Engineering AS."
+        ),
+        "register_kicker": "OPPRETT KONTO",
+        "register_title": "Kom i gang med Builtly",
+        "register_subtitle": "Opprett bedriftskonto for å få tilgang til AI-drevne prosjekteringsverktøy.",
+        "plans_kicker": "ABONNEMENTER",
+        "plans_title": "Tre nivåer — fra fullt automatisert til attestert",
+        "plans_subtitle": "Alle priser gjelder per land. {months} måneders bindingstid.",
+        "login_kicker": "LOGG INN",
+        "login_title": "Velkommen tilbake",
+        "login_subtitle": "Logg inn for å se dine rapporter og administrere abonnement.",
+        "has_account": "Har du allerede konto? Logg inn",
+        "contact_person": "Kontaktperson",
+        "company_info": "Bedriftsinformasjon",
+        "full_name": "Fullt navn *",
+        "phone": "Telefon",
+        "email": "E-post *",
+        "company_name": "Selskapsnavn *",
+        "org_nr": "Org.nr.",
+        "country_select": "Land for prosjektering *",
+        "password": "Passord *",
+        "confirm_password": "Bekreft passord *",
+        "create_account": "Opprett konto og velg abonnement",
+        "login_btn": "Logg inn",
+        "register_link": "Opprett konto",
+        "demo_link": "Demo-tilgang",
+    },
+    "_default": {
+        "gdpr": (
+            "I confirm that I have read and accept Builtly Engineering AS "
+            "[terms of service](https://builtly.ai/terms) and "
+            "[privacy policy](https://builtly.ai/privacy). "
+            "Builtly processes personal data in accordance with GDPR. "
+            "Data is stored within the EEA and deleted upon subscription cancellation. "
+            "You may request access, correction, or deletion of your data at any time by contacting post@builtly.ai."
+        ),
+        "contract": (
+            "The subscription has a {months}-month binding period from activation. "
+            "After the binding period, the subscription renews monthly with 1 month notice. "
+            "Prices apply per country — access to multiple countries is billed separately."
+        ),
+        "revision": (
+            "Any report revisions due to changes in client assumptions must be arranged "
+            "directly with an advisor at Builtly Engineering AS."
+        ),
+        "register_kicker": "CREATE ACCOUNT",
+        "register_title": "Get started with Builtly",
+        "register_subtitle": "Create a business account to access AI-powered engineering tools.",
+        "plans_kicker": "SUBSCRIPTIONS",
+        "plans_title": "Three levels — from fully automated to attested",
+        "plans_subtitle": "All prices apply per country. {months}-month commitment.",
+        "login_kicker": "LOG IN",
+        "login_title": "Welcome back",
+        "login_subtitle": "Log in to view your reports and manage your subscription.",
+        "has_account": "Already have an account? Log in",
+        "contact_person": "Contact person",
+        "company_info": "Company information",
+        "full_name": "Full name *",
+        "phone": "Phone",
+        "email": "Email *",
+        "company_name": "Company name *",
+        "org_nr": "Org. no.",
+        "country_select": "Countries for engineering *",
+        "password": "Password *",
+        "confirm_password": "Confirm password *",
+        "create_account": "Create account and choose plan",
+        "login_btn": "Log in",
+        "register_link": "Create account",
+        "demo_link": "Demo access",
+    },
+}
 
-CONTRACT_TERMS_TEXT = (
-    "Abonnementet har {months} måneders bindingstid fra aktivering. "
-    "Etter bindingstiden fornyes abonnementet månedlig med 1 måneds oppsigelsestid. "
-    "Priser gjelder per land — tilgang til flere land faktureres separat per land."
-)
+
+def get_auth_text(lang_key: str = "") -> dict:
+    lk = lang_key or st.session_state.get("app_lang", "")
+    return _AUTH_TEXTS.get(lk, _AUTH_TEXTS["_default"])
+
+
+# Backward compat
+GDPR_CONSENT_TEXT = _AUTH_TEXTS["🇳🇴 Norsk"]["gdpr"]
+CONTRACT_TERMS_TEXT = _AUTH_TEXTS["🇳🇴 Norsk"]["contract"]
+REVISION_NOTICE = _AUTH_TEXTS["🇳🇴 Norsk"]["revision"]
 
 # Payment provider: Stripe recommended for card payments
 # Env vars needed: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
@@ -2598,21 +2693,22 @@ def _get_auth_page() -> str:
 def render_login_page(lang_key: str) -> None:
     """Render login form. Currently mock — connect to Supabase/Auth0 for production."""
     copy = get_access_copy(lang_key)
+    at = get_auth_text(lang_key)
 
     outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
-        render_html("""
+        render_html(f"""
             <div class="access-gate-head">
-                <div class="assistant-kicker">LOGG INN</div>
-                <div class="access-gate-title">Velkommen tilbake</div>
-                <div class="access-gate-subtitle">Logg inn for å se dine rapporter og administrere abonnement.</div>
+                <div class="assistant-kicker">{at['login_kicker']}</div>
+                <div class="access-gate-title">{at['login_title']}</div>
+                <div class="access-gate-subtitle">{at['login_subtitle']}</div>
             </div>
         """)
 
         with st.form("login_form"):
-            email = st.text_input("E-post", placeholder="din@epost.no")
-            password = st.text_input("Passord", type="password", placeholder="••••••••")
-            submitted = st.form_submit_button("Logg inn", use_container_width=True)
+            email = st.text_input(at["email"].replace(" *", ""), placeholder="you@company.com")
+            password = st.text_input(at["password"].replace(" *", ""), type="password", placeholder="••••••••")
+            submitted = st.form_submit_button(at["login_btn"], use_container_width=True)
 
         if submitted:
             if email.strip() and password.strip():
@@ -2652,16 +2748,18 @@ def render_login_page(lang_key: str) -> None:
 def render_register_page(lang_key: str) -> None:
     """Render registration form with company, country, and GDPR consent."""
 
+    at = get_auth_text(lang_key)
+
     # Plans overview first
-    render_html("""
+    render_html(f"""
         <div style="text-align:center;margin-bottom:1.5rem;margin-top:1rem;">
-            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">ABONNEMENTER</div>
-            <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;">Tre nivåer — fra fullt automatisert til attestert</div>
-            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">Alle priser gjelder per land. 12 måneders bindingstid.</div>
+            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">{at['plans_kicker']}</div>
+            <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;">{at['plans_title']}</div>
+            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">{at['plans_subtitle'].format(months=CONTRACT_BINDING_MONTHS)}</div>
         </div>
     """)
     plan_cols = st.columns(3, gap="medium")
-    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
+    for idx, (plan_key, plan) in enumerate(get_subscription_plans().items()):
         with plan_cols[idx]:
             is_pop = plan_key == "team"
             bc = "#38bdf8" if is_pop else "rgba(56,189,248,0.10)"
@@ -2681,66 +2779,60 @@ def render_register_page(lang_key: str) -> None:
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
     outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
-        render_html("""
+        render_html(f"""
             <div class="access-gate-head">
-                <div class="assistant-kicker">OPPRETT KONTO</div>
-                <div class="access-gate-title">Kom i gang med Builtly</div>
-                <div class="access-gate-subtitle">Opprett bedriftskonto for å få tilgang til AI-drevne prosjekteringsverktøy.</div>
+                <div class="assistant-kicker">{at['register_kicker']}</div>
+                <div class="access-gate-title">{at['register_title']}</div>
+                <div class="access-gate-subtitle">{at['register_subtitle']}</div>
             </div>
         """)
 
         with st.form("register_form"):
-            st.markdown("##### Kontaktperson")
+            st.markdown(f"##### {at['contact_person']}")
             r_col1, r_col2 = st.columns(2)
             with r_col1:
-                reg_name = st.text_input("Fullt navn *", placeholder="Ola Nordmann")
+                reg_name = st.text_input(at["full_name"], placeholder="John Smith")
             with r_col2:
-                reg_phone = st.text_input("Telefon", placeholder="+47 900 00 000")
+                reg_phone = st.text_input(at["phone"], placeholder="+1 555 000 0000")
 
-            reg_email = st.text_input("E-post *", placeholder="din@bedrift.no")
+            reg_email = st.text_input(at["email"], placeholder="you@company.com")
 
-            st.markdown("##### Bedriftsinformasjon")
+            st.markdown(f"##### {at['company_info']}")
             b_col1, b_col2 = st.columns(2)
             with b_col1:
-                reg_company = st.text_input("Selskapsnavn *", placeholder="Selskap AS")
+                reg_company = st.text_input(at["company_name"], placeholder="Company Inc.")
             with b_col2:
-                reg_org_nr = st.text_input("Org.nr.", placeholder="999 999 999")
+                reg_org_nr = st.text_input(at["org_nr"], placeholder="123 456 789")
 
+            _default_country = "United States (IBC / ASCE)" if "English" in lang_key or "US" in lang_key else "Norge (TEK17 / NS-standarder)"
             reg_countries = st.multiselect(
-                "Land for prosjektering *",
+                at["country_select"],
                 options=[c[1] for c in AVAILABLE_COUNTRIES],
-                default=["Norge (TEK17 / NS-standarder)"],
-                help="Priser gjelder per land. Velg alle land du ønsker tilgang til.",
+                default=[_default_country] if _default_country in [c[1] for c in AVAILABLE_COUNTRIES] else [AVAILABLE_COUNTRIES[0][1]],
             )
 
             n_countries = max(len(reg_countries), 1)
-            if n_countries > 1:
-                render_html(f"""
-                    <div style="color:#22d3ee;font-size:0.85rem;margin:-0.5rem 0 0.5rem 0;">
-                        ℹ️ {n_countries} land valgt — abonnementspris gjelder per land.
-                    </div>
-                """)
 
-            st.markdown("##### Passord")
+            st.markdown(f"##### {at['password'].replace(' *', '')}")
             p_col1, p_col2 = st.columns(2)
             with p_col1:
-                reg_password = st.text_input("Passord *", type="password", placeholder="Minimum 8 tegn")
+                reg_password = st.text_input(at["password"], type="password", placeholder="Min. 8 characters")
             with p_col2:
-                reg_password2 = st.text_input("Bekreft passord *", type="password", placeholder="Gjenta passord")
+                reg_password2 = st.text_input(at["confirm_password"], type="password", placeholder="Repeat password")
 
             st.markdown("---")
 
             # GDPR consent
-            reg_gdpr = st.checkbox(GDPR_CONSENT_TEXT, value=False)
+            reg_gdpr = st.checkbox(at["gdpr"], value=False)
 
             # Contract terms
+            _accept = "Jeg aksepterer kontraktsvilkårene." if "Norsk" in lang_key else "I accept the contract terms."
             reg_terms = st.checkbox(
-                CONTRACT_TERMS_TEXT.format(months=CONTRACT_BINDING_MONTHS)
-                + " Jeg aksepterer kontraktsvilkårene.",
+                at["contract"].format(months=CONTRACT_BINDING_MONTHS) + " " + _accept,
                 value=False,
             )
 
-            reg_submitted = st.form_submit_button("Opprett konto og velg abonnement", use_container_width=True)
+            reg_submitted = st.form_submit_button(at["create_account"], use_container_width=True)
 
         if reg_submitted:
             errors = []
@@ -2892,7 +2984,7 @@ def render_plans_page(lang_key: str) -> None:
     """)
 
     cols = st.columns(3, gap="medium")
-    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
+    for idx, (plan_key, plan) in enumerate(get_subscription_plans().items()):
         with cols[idx]:
             is_popular = plan_key == "team"
             border_color = "#38bdf8" if is_popular else "var(--card-border, rgba(56,189,248,0.10))"
@@ -2931,8 +3023,8 @@ def render_plans_page(lang_key: str) -> None:
 
     # -- Payment method selection (shown after plan is selected) --
     selected_plan = st.session_state.get("user_plan", "")
-    if selected_plan and selected_plan in SUBSCRIPTION_PLANS:
-        plan_info = SUBSCRIPTION_PLANS[selected_plan]
+    if selected_plan and selected_plan in get_subscription_plans():
+        plan_info = get_subscription_plans()[selected_plan]
         st.markdown("---")
 
         render_html(f"""
@@ -3096,7 +3188,7 @@ def render_user_dashboard(lang_key: str) -> None:
             </div>
         """)
     with plan_col:
-        plan_info = SUBSCRIPTION_PLANS.get(user_plan, {})
+        plan_info = get_subscription_plans().get(user_plan, {})
         if plan_info:
             render_html(f"""
                 <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
@@ -4967,28 +5059,40 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 0.3rem !important;
+            gap: 0.2rem !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
-            flex: 2 1 0 !important;
+            flex: 1 1 auto !important;
             max-width: none !important;
+            width: auto !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 75px !important;
-            max-width: 75px !important;
-            width: 75px !important;
+            flex: 0 0 65px !important;
+            max-width: 65px !important;
+            width: 65px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            font-size: 0.7rem !important;
-            min-height: 30px !important;
+            font-size: 0.6rem !important;
+            min-height: 26px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            padding: 2px 4px !important;
+            padding: 1px 3px !important;
+            min-height: 26px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
-            width: 12px !important;
-            height: 12px !important;
+            width: 10px !important;
+            height: 10px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
+            font-size: 0.6rem !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+        }
+        /* Hide emoji flags on mobile to save space */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
+            margin-top: 0.5rem !important;
         }
 
         .mini-stat-grid,
@@ -5409,17 +5513,19 @@ with top_l:
 
 with top_m:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
+    _is_en = "English" in st.session_state.app_lang
     if _is_user_logged_in():
-        _acct_options = ["👤 Konto", "Min side", "Logg ut"]
+        _acct_options = (["👤 Account", "My page", "Log out"] if _is_en
+                         else ["👤 Konto", "Min side", "Logg ut"])
         _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice == "Min side" and _get_auth_page() != "dashboard":
+        if _acct_choice in ("Min side", "My page") and _get_auth_page() != "dashboard":
             del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "dashboard"
             except Exception:
                 pass
             st.rerun()
-        elif _acct_choice == "Logg ut":
+        elif _acct_choice in ("Logg ut", "Log out"):
             if _HAS_AUTH:
                 builtly_auth.logout()
             else:
@@ -5436,16 +5542,17 @@ with top_m:
                 pass
             st.rerun()
     else:
-        _acct_options = ["👤 Konto", "Logg inn", "Se planer / Opprett konto"]
+        _acct_options = (["👤 Account", "Log in", "Plans / Sign up"] if _is_en
+                         else ["👤 Konto", "Logg inn", "Se planer / Opprett konto"])
         _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice == "Logg inn" and _get_auth_page() != "login":
+        if _acct_choice in ("Logg inn", "Log in") and _get_auth_page() != "login":
             del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "login"
             except Exception:
                 pass
             st.rerun()
-        elif _acct_choice == "Se planer / Opprett konto" and _get_auth_page() != "register":
+        elif _acct_choice in ("Se planer / Opprett konto", "Plans / Sign up") and _get_auth_page() != "register":
             del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "register"
