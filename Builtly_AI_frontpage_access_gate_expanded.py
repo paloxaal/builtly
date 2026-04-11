@@ -3042,6 +3042,7 @@ def render_user_dashboard(lang_key: str) -> None:
                 du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned
                 når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a>
                 for å opprette nye prosjekter og generere rapporter.
+                <a href="?auth=register" target="_self" style="color:#22d3ee;margin-left:0.3rem;">Se kontoplaner og priser →</a>
             </div>
         </div>
     """)
@@ -5340,7 +5341,7 @@ with top_m:
                 pass
             st.rerun()
     else:
-        _acct_options = ["👤 Konto", "Logg inn", "Opprett konto"]
+        _acct_options = ["👤 Konto", "Logg inn", "Se planer / Opprett konto"]
         _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
         if _acct_choice == "Logg inn" and _get_auth_page() != "login":
             del st.session_state["acct_menu"]
@@ -5349,7 +5350,7 @@ with top_m:
             except Exception:
                 pass
             st.rerun()
-        elif _acct_choice == "Opprett konto" and _get_auth_page() != "register":
+        elif _acct_choice == "Se planer / Opprett konto" and _get_auth_page() != "register":
             del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "register"
@@ -5570,7 +5571,6 @@ render_html(
         </div>
         <div class="cta-actions">
             {hero_action('project', lang['cta_btn1'], 'primary')}
-            {hero_action('review', lang['cta_btn2'], 'secondary')}
             <a href="?auth=plans" target="_self" class="hero-action secondary">Se priser</a>
         </div>
     </div>
