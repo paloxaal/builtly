@@ -28,10 +28,21 @@ except ImportError:
 # -------------------------------------------------
 st.set_page_config(
     page_title="Builtly | Engineering Portal",
-    page_icon="BuiltlyAI_logo_icon.png",
+    page_icon="favicon.png",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# Open Graph meta tags for link previews (iMessage, WhatsApp, LinkedIn, etc.)
+st.markdown("""
+<meta property="og:title" content="Builtly | AI-assisted Engineering. Human-verified." />
+<meta property="og:description" content="AI-drevet prosjektering for bygg og eiendom. Last opp rådata – AI analyserer, beregner og utarbeider rapporten." />
+<meta property="og:image" content="https://builtly.ai/logo-white.png" />
+<meta property="og:url" content="https://builtly.ai" />
+<meta property="og:type" content="website" />
+<link rel="icon" type="image/png" href="./favicon.png" />
+<link rel="apple-touch-icon" href="./favicon.png" />
+""", unsafe_allow_html=True)
 
 # -------------------------------------------------
 # 2) LANGUAGE NORMALIZATION & SESSION STATE
