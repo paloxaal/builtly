@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import base64
@@ -1664,6 +1663,13 @@ if not bundle:
     st.info(tx("empty"))
 else:
     st.success(tx("ready"))
+
+    try:
+        from builtly_auth import save_report
+        save_report(project_name=bundle.get("cover", {}).get("project", ""), report_name=f"Yield Optimizer — {bundle.get('cover', {}).get('project', '')}", module="YieldOptimizer", file_path="builtly_yield_report.pdf")
+    except ImportError:
+        pass
+
     m_best = best_scenario(bundle["scenario_df"], bundle["goal"])
     render_metric_cards([
         {"label": tx("best"), "value": clean_text(m_best["Scenario"]), "desc": clean_text(m_best["Recommendation"])},
