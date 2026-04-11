@@ -2736,6 +2736,32 @@ def render_register_page(lang_key: str) -> None:
         st.markdown("---")
         render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Har du allerede konto? Logg inn</a></div>')
 
+    # Plans preview below registration form
+    st.markdown("<div style='margin-top:3rem;'></div>", unsafe_allow_html=True)
+    render_html("""
+        <div style="text-align:center;margin-bottom:1.5rem;">
+            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">ABONNEMENTER</div>
+            <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">Velg plan etter registrering</div>
+            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">Alle priser gjelder per land. 12 måneders bindingstid.</div>
+        </div>
+    """)
+    plan_cols = st.columns(3, gap="medium")
+    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
+        with plan_cols[idx]:
+            is_pop = plan_key == "team"
+            bc = "#38bdf8" if is_pop else "rgba(56,189,248,0.10)"
+            feats = "".join(f'<div style="padding:0.2rem 0;color:var(--soft,#c8d3df);font-size:0.85rem;">✓ {f}</div>' for f in plan["features"])
+            render_html(f"""
+                <div style="border:1px solid {bc};border-radius:1rem;padding:1.5rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:320px;">
+                    <div style="color:#22d3ee;font-weight:700;font-size:0.7rem;letter-spacing:0.08em;margin-bottom:0.3rem;">{plan['badge']}</div>
+                    <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">{plan['name']}</div>
+                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:800;margin-bottom:0.2rem;">{plan['price_label']}</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:1rem;">{plan['price_detail']}</div>
+                    {feats}
+                </div>
+            """)
+
 
 def render_demo_gate(lang_key: str) -> None:
     """Render the original demo access code gate."""
@@ -5210,20 +5236,52 @@ st.markdown(
 # -------------------------------------------------
 apply_language_from_query()
 
-top_l, top_m, top_r = st.columns([4, 1.5, 1], gap="small")
+top_l, top_m, top_r = st.columns([4, 1, 1], gap="small")
 
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
-    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left">{logo_html}</div></div>')
+    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="/" target="_self" style="text-decoration:none;">{logo_html}</a></div></div>')
 
 with top_m:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
     if _is_user_logged_in():
-        _acct_label = f"👤 {st.session_state.get('user_name', 'Konto')}"
-        render_html(f'<a href="?auth=dashboard" target="_self" style="color:#38bdf8;font-size:0.9rem;text-decoration:none;white-space:nowrap;">{html.escape(_acct_label)}</a>')
+        _acct_options = ["👤 Konto", "Min side", "Logg ut"]
+        _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
+        if _acct_choice == "Min side":
+            try:
+                st.query_params["auth"] = "dashboard"
+            except Exception:
+                pass
+            st.rerun()
+        elif _acct_choice == "Logg ut":
+            st.session_state.user_authenticated = False
+            st.session_state.user_email = ""
+            st.session_state.user_name = ""
+            st.session_state.user_plan = ""
+            st.session_state.user_reports = []
+            try:
+                params = get_query_params_dict()
+                params.pop("auth", None)
+                set_query_params_dict(params)
+            except Exception:
+                pass
+            st.rerun()
     else:
-        render_html('<a href="?auth=login" target="_self" style="color:#38bdf8;font-size:0.9rem;text-decoration:none;">Logg inn</a>')
+        _acct_options = ["👤 Konto", "Logg inn", "Opprett konto"]
+        _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
+        if _acct_choice == "Logg inn":
+            try:
+                st.query_params["auth"] = "login"
+            except Exception:
+                pass
+            st.rerun()
+        elif _acct_choice == "Opprett konto":
+            try:
+                st.query_params["auth"] = "register"
+            except Exception:
+                pass
+            st.rerun()
 
 with top_r:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
