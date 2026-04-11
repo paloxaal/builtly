@@ -5609,7 +5609,7 @@ top_l, top_m, top_r = st.columns([4, 1, 1], gap="small")
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
-    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="javascript:void(0)" onclick="const u=new URL(window.parent.location);u.searchParams.delete(\'auth\');u.searchParams.delete(\'gate\');window.parent.location.href=u.toString();" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
+    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="/" target="_self" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
 
 with top_m:
     st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
