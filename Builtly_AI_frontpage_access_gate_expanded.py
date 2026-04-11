@@ -103,6 +103,10 @@ if "user_name" not in st.session_state:
     st.session_state.user_name = ""
 if "user_plan" not in st.session_state:
     st.session_state.user_plan = ""  # "modul", "team", "enterprise"
+
+# Keep access granted if user is already authenticated
+if st.session_state.get("user_authenticated") and st.session_state.get("user_email"):
+    st.session_state.site_access_granted = True
 if "user_company" not in st.session_state:
     st.session_state.user_company = ""
 if "user_countries" not in st.session_state:
@@ -2724,6 +2728,7 @@ def render_login_page(lang_key: str) -> None:
                 if _HAS_AUTH:
                     ok, msg = builtly_auth.login(email.strip(), password.strip())
                     if ok:
+                        st.session_state.site_access_granted = True
                         try:
                             params = get_query_params_dict()
                             params.pop("auth", None)
@@ -5078,29 +5083,28 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
             flex: 0 0 auto !important;
-            max-width: 70px !important;
+            max-width: 58px !important;
             width: auto !important;
         }
         /* Strip all heavy styling from top bar selectboxes on mobile */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            font-size: 0.65rem !important;
-            min-height: 24px !important;
+            font-size: 0.55rem !important;
+            min-height: 22px !important;
             border: none !important;
             background: transparent !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            padding: 2px 4px !important;
-            min-height: 24px !important;
+            padding: 1px 3px !important;
+            min-height: 22px !important;
             border: none !important;
             background: rgba(255,255,255,0.05) !important;
-            border-radius: 8px !important;
+            border-radius: 6px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
-            width: 10px !important;
-            height: 10px !important;
+            display: none !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.65rem !important;
+            font-size: 0.55rem !important;
             overflow: hidden !important;
             text-overflow: ellipsis !important;
             white-space: nowrap !important;
