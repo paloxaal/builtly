@@ -28,6 +28,212 @@ try:
 except ImportError:
     fitz = None
 
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+import streamlit.components.v1 as components
+
+
+# ── NVDB API (Statens vegvesen) for trafikkdata ──────────────────────
+
+NVDB_API_BASE = "https://nvdbapiles-v3.atlas.vegvesen.no"
+
+def fetch_nvdb_traffic(lat: float, lon: float, radius_m: int = 300):
+    """Hent ÅDT og fartsgrense fra NVDB API (Statens vegvesen)."""
+    if not HAS_REQUESTS:
+        return {"error": "requests mangler"}
+    
+    results = {"adt": None, "fartsgrense": None, "vegkategori": None, "veglenkeid": None, "vegnummer": None}
+    headers = {"Accept": "application/vnd.vegvesen.nvdb-v3-rev1+json"}
+    
+    # Hent nærmeste veg
+    try:
+        resp = requests.get(
+            f"{NVDB_API_BASE}/veg",
+            params={"lat": lat, "lon": lon, "maks_avstand": radius_m, "srid": "4326"},
+            headers=headers, timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            results["vegkategori"] = data.get("veglenkesekvens", {}).get("veglenke", [{}])[0].get("vegkategori") if data.get("veglenkesekvens") else None
+            results["vegnummer"] = data.get("vegnummer", {}).get("nummer") if isinstance(data.get("vegnummer"), dict) else None
+    except Exception:
+        pass
+    
+    # Hent ÅDT (vegobjekttype 540 = Trafikkmengde)
+    try:
+        resp = requests.get(
+            f"{NVDB_API_BASE}/vegobjekter/540",
+            params={"inkluder": "egenskaper", "srid": "4326",
+                    "kartutsnitt": f"{lon-0.005},{lat-0.005},{lon+0.005},{lat+0.005}"},
+            headers=headers, timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for obj in data.get("objekter", []):
+                for egenskap in obj.get("egenskaper", []):
+                    if egenskap.get("id") == 4621:  # ÅDT, total
+                        results["adt"] = int(egenskap.get("verdi", 0))
+                    elif egenskap.get("id") == 4623:  # ÅDT, tunge
+                        results["adt_tunge"] = int(egenskap.get("verdi", 0))
+                if results["adt"]:
+                    break
+    except Exception:
+        pass
+    
+    # Hent fartsgrense (vegobjekttype 105)
+    try:
+        resp = requests.get(
+            f"{NVDB_API_BASE}/vegobjekter/105",
+            params={"inkluder": "egenskaper", "srid": "4326",
+                    "kartutsnitt": f"{lon-0.003},{lat-0.003},{lon+0.003},{lat+0.003}"},
+            headers=headers, timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for obj in data.get("objekter", []):
+                for egenskap in obj.get("egenskaper", []):
+                    if egenskap.get("id") == 2021:  # Fartsgrense
+                        results["fartsgrense"] = int(egenskap.get("verdi", 0))
+                if results["fartsgrense"]:
+                    break
+    except Exception:
+        pass
+    
+    return results
+
+
+# ── Geodata støykart API (gjenbrukt fra Akustikk) ───────────────────
+
+STOYKART_URL = "https://services.geodataonline.no/arcgis/rest/services/Geonorge/Stoykart_veg/MapServer"
+
+def fetch_stoykart_for_traffic(lat: float, lon: float, buffer_m: int = 400):
+    """Hent støykart-bilde for trafikkrapport."""
+    if not HAS_REQUESTS:
+        return None
+    try:
+        import math
+        k0=0.9996;a=6378137.0;e=0.0818192;lon0=15.0
+        lat_rad=math.radians(lat);lon_rad=math.radians(lon);lon0_rad=math.radians(lon0)
+        N=a/math.sqrt(1-e**2*math.sin(lat_rad)**2);T=math.tan(lat_rad)**2
+        C=(e**2/(1-e**2))*math.cos(lat_rad)**2;A_val=(lon_rad-lon0_rad)*math.cos(lat_rad)
+        M=a*((1-e**2/4-3*e**4/64)*lat_rad-(3*e**2/8+3*e**4/32)*math.sin(2*lat_rad)+(15*e**4/256)*math.sin(4*lat_rad))
+        easting=k0*N*(A_val+(1-T+C)*A_val**3/6)+500000
+        northing=k0*(M+N*math.tan(lat_rad)*(A_val**2/2))
+        
+        params = {"bbox": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
+                  "bboxSR":"25833","imageSR":"25833","size":"800,600","format":"png","transparent":"true","f":"image"}
+        resp = requests.get(f"{STOYKART_URL}/export", params=params, timeout=15)
+        if resp.status_code == 200 and "image" in resp.headers.get("content-type",""):
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+# ── Interaktiv trafikk-editor ────────────────────────────────────────
+
+def render_traffic_editor(images_with_markers, bridge_label: str, component_key: str):
+    """Interaktiv editor for trafikkmarkører."""
+    if not images_with_markers:
+        return
+    
+    img_data = images_with_markers[0]
+    image = img_data["image"]
+    markers = img_data.get("markers", [])
+    
+    buf = io.BytesIO()
+    thumb = image.copy()
+    if max(thumb.size) > 1400:
+        ratio = 1400 / max(thumb.size)
+        thumb = thumb.resize((int(thumb.width*ratio), int(thumb.height*ratio)), Image.LANCZOS)
+    thumb.save(buf, format="PNG", optimize=True)
+    img_uri = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+    
+    payload = json.dumps({"image": img_uri, "markers": markers}, ensure_ascii=False)
+    
+    html = f"""
+    <div style="font-family:system-ui;color:#e2e8f0">
+      <div style="display:flex;gap:3px;padding:6px 8px;background:#0a1929;border:1px solid #1a2a3a;border-radius:10px 10px 0 0;flex-wrap:wrap;align-items:center">
+        <button onclick="TE.setTool('select')" id="tt_select" class="tt active" style="--tc:#38bdf8">Velg</button>
+        <span style="width:1px;height:16px;background:#1a2a3a"></span>
+        <button onclick="TE.setTool('adkomst')" id="tt_adkomst" class="tt" style="--tc:#22c55e">→ Adkomst</button>
+        <button onclick="TE.setTool('innkjoring')" id="tt_innkjoring" class="tt" style="--tc:#3b82f6">→ Innkjøring</button>
+        <button onclick="TE.setTool('gangfelt')" id="tt_gangfelt" class="tt" style="--tc:#f59e0b">▭ Gangfelt</button>
+        <button onclick="TE.setTool('konflikt')" id="tt_konflikt" class="tt" style="--tc:#ef4444">⚠ Konflikt</button>
+        <button onclick="TE.setTool('sikt')" id="tt_sikt" class="tt" style="--tc:#a78bfa">◠ Siktlinje</button>
+        <button onclick="TE.setTool('parkering')" id="tt_parkering" class="tt" style="--tc:#06b6d4">▭ P-areal</button>
+        <button onclick="TE.setTool('varemottak')" id="tt_varemottak" class="tt" style="--tc:#f97316">▭ Varemottak</button>
+        <button onclick="TE.setTool('renovasjon')" id="tt_renovasjon" class="tt" style="--tc:#84cc16">→ Renovasjon</button>
+        <button onclick="TE.setTool('adt')" id="tt_adt" class="tt" style="--tc:#94a3b8">● ÅDT</button>
+        <span style="flex:1"></span>
+        <button onclick="TE.del()" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.3)">Slett</button>
+        <button onclick="TE.save()" style="background:#38bdf8;color:#06111a;font-weight:700;border-color:#38bdf8">Lagre</button>
+      </div>
+      <canvas id="TC" style="width:100%;display:block;background:#0d1b2a;border:1px solid #1a2a3a;border-top:none;cursor:crosshair"></canvas>
+      <div style="display:flex;gap:8px;padding:5px 10px;background:#0a1929;border:1px solid #1a2a3a;border-top:none;border-radius:0 0 10px 10px;align-items:center">
+        <span id="TE_st" style="font-size:10px;color:#475569;font-family:monospace;flex:1"></span>
+        <label style="font-size:10px;color:#64748b">Etikett:</label>
+        <input id="TE_lb" type="text" style="background:#1a2a3a;border:1px solid #334155;border-radius:4px;color:#e2e8f0;padding:2px 8px;font-size:11px;width:160px" oninput="TE.updLbl(this.value)"/>
+      </div>
+      <textarea id="TE_ex" style="display:none"></textarea>
+    </div>
+    <style>.tt{{background:rgba(30,41,59,0.8);color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:500}}.tt:hover{{background:rgba(56,189,248,0.1)}}.tt.active{{background:var(--tc,#38bdf8);color:#fff;font-weight:700;border-color:var(--tc)}}</style>
+    <script>
+    window.TE=(function(){{
+      const P={payload};const cv=document.getElementById('TC'),ctx=cv.getContext('2d'),sts=document.getElementById('TE_st'),lb=document.getElementById('TE_lb'),ex=document.getElementById('TE_ex');
+      const img=new Image();img.src=P.image;let els=P.markers.map((m,i)=>{{return{{...m,id:'t'+i}}}});
+      let tool='select',sel=-1,drag=null,sp=null,IW=0,IH=0;
+      const TM={{adkomst:['arrow','#22c55e','Adkomst'],innkjoring:['arrow','#3b82f6','Innkjøring bil'],gangfelt:['rect','rgba(245,158,11,0.3)','Gangfelt/fortau'],konflikt:['circle','#ef4444','Konfliktpunkt'],sikt:['arrow','#a78bfa','Siktlinje'],parkering:['rect','rgba(6,182,212,0.25)','Parkering'],varemottak:['rect','rgba(249,115,22,0.25)','Varemottak'],renovasjon:['arrow','#84cc16','Renovasjonskjøring'],adt:['circle','#94a3b8','ÅDT']}};
+      function uid(){{return Math.random().toString(36).slice(2,10)}}
+      function dist(a,b,c,d){{return Math.sqrt((c-a)**2+(d-b)**2)}}
+      function render(){{
+        if(!img.complete)return;ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,IW,IH);
+        els.forEach((e,i)=>{{
+          const isSel=i===sel,x=(e.x_pct/100)*IW,y=(e.y_pct/100)*IH,c=e.color||'#38bdf8';
+          ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=c;
+          if(e.type==='circle'){{
+            const r=IW*0.03;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+            if(isSel){{ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fill()}}
+            const txt=e.label||'';ctx.font='bold '+Math.max(10,IW*0.015)+'px system-ui';const tw=ctx.measureText(txt).width;
+            ctx.fillStyle='rgba(10,25,41,0.8)';ctx.fillRect(x-tw/2-4,y-8,tw+8,16);ctx.fillStyle=c;ctx.fillText(txt,x-tw/2,y+5);
+          }}else if(e.type==='rect'){{
+            const w=(e.w_pct||8)/100*IW,h=(e.h_pct||6)/100*IH;
+            ctx.fillStyle=c;ctx.fillRect(x,y,w,h);ctx.strokeStyle=c.replace(/[\d.]+\)/,'1)');ctx.strokeRect(x,y,w,h);
+            ctx.font='bold 10px system-ui';ctx.fillStyle='#fff';ctx.fillText(e.label||'',x+4,y+14);
+          }}else if(e.type==='arrow'){{
+            const x2=(e.x2_pct||e.x_pct+5)/100*IW,y2=(e.y2_pct||e.y_pct)/100*IH;
+            ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();
+            const ang=Math.atan2(y2-y,x2-x),hd=12;ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-hd*Math.cos(ang-0.5),y2-hd*Math.sin(ang-0.5));ctx.lineTo(x2-hd*Math.cos(ang+0.5),y2-hd*Math.sin(ang+0.5));ctx.closePath();ctx.fillStyle=c;ctx.fill();
+            if(isSel){{[{{x:x,y:y}},{{x:x2,y:y2}}].forEach(pt=>{{ctx.beginPath();ctx.arc(pt.x,pt.y,5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.stroke()}})}}
+            const mx=(x+x2)/2,my=(y+y2)/2;ctx.font='bold 10px system-ui';const txt=e.label||'';const tw=ctx.measureText(txt).width;
+            ctx.fillStyle='rgba(10,25,41,0.8)';ctx.fillRect(mx-tw/2-3,my-16,tw+6,14);ctx.fillStyle=c;ctx.fillText(txt,mx-tw/2,my-5);
+          }}
+        }});
+        sts.textContent=els.length+' markører | '+(tool==='select'?'Velg/flytt':TM[tool]?TM[tool][2]:tool);
+      }}
+      function resize(){{const mw=cv.parentElement.clientWidth||900,r=Math.min(1,mw/img.width);IW=Math.max(1,Math.round(img.width*r));IH=Math.max(1,Math.round(img.height*r));cv.width=IW;cv.height=IH;render()}}
+      function gP(e){{const r=cv.getBoundingClientRect();return{{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)}}}}
+      function hit(x,y){{for(let i=els.length-1;i>=0;i--){{const e=els[i],ex=(e.x_pct/100)*IW,ey=(e.y_pct/100)*IH;if(dist(x,y,ex,ey)<IW*0.04)return i}}return -1}}
+      cv.addEventListener('mousedown',function(e){{const p=gP(e);sp=p;if(tool==='select'){{sel=hit(p.x,p.y);if(sel>=0){{drag='move';lb.value=els[sel].label||''}}else lb.value=''}}else{{const tm=TM[tool];if(!tm)return;const xp=p.x/IW*100,yp=p.y/IH*100;if(tm[0]==='circle'){{els.push({{id:uid(),type:'circle',x_pct:xp,y_pct:yp,color:tm[1],label:tm[2]}})}}else if(tm[0]==='rect'){{els.push({{id:uid(),type:'rect',x_pct:xp,y_pct:yp,w_pct:8,h_pct:6,color:tm[1],label:tm[2]}});drag='drawRect'}}else{{els.push({{id:uid(),type:'arrow',x_pct:xp,y_pct:yp,x2_pct:xp,y2_pct:yp,color:tm[1],label:tm[2]}});drag='drawArrow'}}sel=els.length-1;lb.value=tm[2]}}render()}});
+      cv.addEventListener('mousemove',function(e){{if(sel<0||!drag||!sp)return;const p=gP(e),el=els[sel];if(drag==='move'){{const dx=(p.x-sp.x)/IW*100,dy=(p.y-sp.y)/IH*100;el.x_pct+=dx;el.y_pct+=dy;sp=p}}else if(drag==='drawRect'){{el.w_pct=(p.x/IW*100)-el.x_pct;el.h_pct=(p.y/IH*100)-el.y_pct}}else if(drag==='drawArrow'){{el.x2_pct=p.x/IW*100;el.y2_pct=p.y/IH*100}}render()}});
+      window.addEventListener('mouseup',function(){{drag=null;render()}});
+      document.addEventListener('keydown',function(e){{if(e.target.tagName==='INPUT')return;if((e.key==='Delete'||e.key==='Backspace')&&sel>=0){{els.splice(sel,1);sel=-1;render()}}}});
+      return{{
+        setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.tt').forEach(b=>b.classList.remove('active'));const btn=document.getElementById('tt_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
+        del:function(){{if(sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}},
+        updLbl:function(v){{if(sel>=0&&els[sel]){{els[sel].label=v;render()}}}},
+        save:function(){{ex.value=JSON.stringify(els,null,2);try{{const ta=window.parent.document.querySelector('textarea[aria-label="'+'{bridge_label}'+'"]');if(!ta)throw 0;const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));sts.textContent='Lagret!'}}catch(e){{sts.textContent='Kopier JSON manuelt.';ex.style.display='block'}}}}
+      }};
+      img.onload=resize;window.addEventListener('resize',resize);
+    }})();
+    </script>
+    """
+    components.html(f"<!-- {component_key} -->\n" + html, height=700, scrolling=False)
+
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
 
@@ -297,6 +503,42 @@ with st.expander("2. Trafikale Rammebetingelser", expanded=True):
     sykkel_norm = c6.selectbox("Parkeringsnorm Sykkel", ["Høy (Krav til trygg innendørs parkering og vask)", "Standard", "Ingen krav"], index=0)
     kollektiv = st.selectbox("Kollektivdekning i området", ["Veldig god (Nær knutepunkt)", "Middels (Gangavstand til buss/bane)", "Dårlig (Avhengig av bil)"], index=1)
 
+    # ── NVDB og Geodata ──
+    st.markdown("##### Trafikkdata fra NVDB og støykart")
+    nvdb_col1, nvdb_col2, nvdb_col3 = st.columns(3)
+    nvdb_lat = nvdb_col1.number_input("Breddegrad", value=63.43, format="%.4f", key="nvdb_lat")
+    nvdb_lon = nvdb_col2.number_input("Lengdegrad", value=10.40, format="%.4f", key="nvdb_lon")
+    nvdb_radius = nvdb_col3.number_input("Søkeradius (m)", value=300, min_value=50, max_value=1000, key="nvdb_radius")
+    
+    fetch_col1, fetch_col2 = st.columns(2)
+    if fetch_col1.button("📡 Hent trafikkdata fra NVDB", key="fetch_nvdb", use_container_width=True):
+        with st.spinner("Henter ÅDT og fartsgrense fra Statens vegvesen NVDB..."):
+            nvdb_data = fetch_nvdb_traffic(nvdb_lat, nvdb_lon, nvdb_radius)
+            st.session_state["nvdb_data"] = nvdb_data
+            if nvdb_data.get("adt"):
+                st.success(f"ÅDT: **{nvdb_data['adt']}** kjt/døgn | Fartsgrense: **{nvdb_data.get('fartsgrense', '?')} km/t**")
+            else:
+                st.warning("Fant ikke ÅDT-data i NVDB for denne posisjonen. Prøv å justere koordinatene.")
+    
+    if fetch_col2.button("📡 Hent støykart fra Geodata", key="fetch_stoy_traffic", use_container_width=True):
+        with st.spinner("Henter veitrafikkstøy fra Geodata Online..."):
+            stoy_img = fetch_stoykart_for_traffic(nvdb_lat, nvdb_lon, buffer_m=nvdb_radius + 100)
+            if stoy_img:
+                st.session_state["traffic_stoykart"] = stoy_img
+                st.success("Støykart hentet!")
+            else:
+                st.warning("Kunne ikke hente støykart.")
+    
+    if "nvdb_data" in st.session_state and st.session_state["nvdb_data"].get("adt"):
+        nd = st.session_state["nvdb_data"]
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("ÅDT (total)", f"{nd.get('adt', '?')} kjt/døgn")
+        mc2.metric("Fartsgrense", f"{nd.get('fartsgrense', '?')} km/t")
+        mc3.metric("Vegkategori", nd.get("vegkategori", "?"))
+    
+    if "traffic_stoykart" in st.session_state:
+        st.image(st.session_state["traffic_stoykart"], caption="Støykart veitrafikk (Geonorge)", use_container_width=True)
+
 with st.expander("3. Visuelt Grunnlag (Situasjonsplan / Kjellerplan)", expanded=True):
     st.info("Last opp situasjonsplan, utomhusplan eller kjellerplan. Agenten vil vurdere innkjøring, svingradier for renovasjon/varelevering og konflikter med myke trafikanter.")
     
@@ -354,11 +596,33 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
         
         model = genai.GenerativeModel(valgt_modell)
 
+        # Inkluder støykart hvis tilgjengelig
+        if "traffic_stoykart" in st.session_state:
+            stoy_rgb = st.session_state["traffic_stoykart"].convert("RGB")
+            stoy_rgb.thumbnail((1200, 1200))
+            images_for_ai.insert(0, stoy_rgb)
+        
+        nvdb_info = ""
+        if "nvdb_data" in st.session_state:
+            nd = st.session_state["nvdb_data"]
+            if nd.get("adt"):
+                nvdb_info = f"""
+        TRAFIKKDATA FRA NVDB (Statens vegvesen):
+        - ÅDT (total): {nd.get('adt', '?')} kjt/døgn
+        - ÅDT (tunge): {nd.get('adt_tunge', '?')} kjt/døgn
+        - Fartsgrense: {nd.get('fartsgrense', '?')} km/t
+        - Vegkategori: {nd.get('vegkategori', '?')}
+        - Vegnummer: {nd.get('vegnummer', '?')}
+        Bruk disse FAKTISKE tallene i rapporten i stedet for å estimere.
+        """
+
         prompt_text = f"""
         Du er en senior trafikkrådgiver (RITra) for norske bygge- og eiendomsprosjekter. Din oppgave er UTELUKKENDE å skrive innholdet i et formelt Trafikknotat.
 
         PROSJEKT: {p_name} ({pd_state.get('b_type')}, Bygg {pd_state.get('bta')} m2, Tomt {pd_state.get('tomteareal')} m2).
         LOKASJON: {pd_state.get('adresse')}.
+        {nvdb_info}
+        {"STØYKART: Første bilde er et offisielt veitrafikkstøykart fra Geonorge. Bruk dette for å vurdere støybelastning på fasader." if "traffic_stoykart" in st.session_state else ""}
         
         KUNDENS PROSJEKTBESKRIVELSE: 
         "{pd_state.get('p_desc', '')}"
@@ -368,33 +632,38 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
         - Sykkelparkering: {sykkel_norm}
         - Kollektivdekning: {kollektiv}
         
-        EKSTREMT VIKTIGE REGLER FOR FORMATERING:
-        1. START RESPONSEN DIREKTE med overskriften "# 1. OPPSUMMERING OG KONKLUSJON". IKKE skriv noen form for introduksjon, hilsen, eller metatekst som f.eks "Som RITra AI har jeg analysert...".
-        2. Aldri nevn at du ser på bilder eller at du har mottatt filer. Skriv som en fagperson som har studert prosjektet.
+        EKSTREMT VIKTIGE REGLER:
+        1. START direkte med "# 1. OPPSUMMERING OG KONKLUSJON". IKKE skriv introduksjon.
+        2. Skriv som en fagperson som har studert prosjektet — aldri nevn bilder/filer.
         3. IKKE bruk Markdown-tabeller (forbudt tegn: "|").
-        4. For underoverskrifter, bruk alltid ### foran.
-        5. For utdyping av punkter (spesielt under kapittel 5 og 6), MÅ du skrive NØYAKTIG disse nøkkelordene etterfulgt av kolon (IKKE bruk bindestrek foran ordene):
-        
-        Tema: [Tekst]
-        Vurdering: [Tekst]
-        Risiko: [Tekst]
-        Tiltak: [Tekst]
-        Anbefaling: [Tekst]
-        Kapasitet: [Tekst]
+        4. {"Bruk ÅDT=" + str(st.session_state.get('nvdb_data', {}).get('adt', '?')) + " og fartsgrense=" + str(st.session_state.get('nvdb_data', {}).get('fartsgrense', '?')) + " km/t som FAKTISKE tall." if st.session_state.get('nvdb_data', {}).get('adt') else "Estimer ÅDT basert på lokasjon og vegtype."}
         
         MANDAT:
-        - Vurder adkomst, intern logistikk (varemottak, renovasjon), parkering, og myke trafikanter basert på de vedlagte tegningene.
-        - Ta spesielt hensyn til konflikter mellom biltrafikk og myke trafikanter hvis tomten er trang (sammenlign tomt {pd_state.get('tomteareal')} m2 mot BTA {pd_state.get('bta')} m2).
+        - Vurder adkomst, intern logistikk (varemottak, renovasjon), parkering, og myke trafikanter.
+        - Ta spesielt hensyn til konflikter mellom biltrafikk og myke trafikanter.
+        - Beregn parkeringsbehov basert på normen og BTA.
+        - Vurder siktforhold ved avkjørsler (Håndbok N100).
         
-        STRUKTUR PÅ RAPPORTEN:
+        STRUKTUR:
         # 1. OPPSUMMERING OG KONKLUSJON
-        # 2. VURDERING AV GRUNNLAG (Hva observerer vi rent objektivt om adkomst/parkering i prosjektet?)
-        # 3. VIKTIGSTE FORUTSETNINGER
-        # 4. TRAFIKALT HOVEDGREP (Beskriv adkomst og internveier)
-        # 5. KRITISKE PUNKTER (Bruk underoverskrifter ### og nøkkelordene over for å bygge opp corporate design!)
+        # 2. VURDERING AV GRUNNLAG
+        # 3. VIKTIGSTE FORUTSETNINGER (inkl. ÅDT og fartsgrense)
+        # 4. TRAFIKALT HOVEDGREP
+        # 5. KRITISKE PUNKTER
         # 6. RISIKO OG USIKKERHET
         # 7. ANBEFALT LØSNING / MOBILITETSPLAN
         # 8. BEHOV FOR VIDERE AVKLARINGER
+
+        VIKTIG — JSON FOR TRAFIKKMARKØRER:
+        Returner HELT NEDERST en JSON-blokk med markører for situasjonsplanen:
+        ```json
+        [
+          {{"type": "arrow", "x_pct": 30, "y_pct": 50, "x2_pct": 40, "y2_pct": 50, "color": "#22c55e", "label": "Adkomst bil"}},
+          {{"type": "circle", "x_pct": 45, "y_pct": 60, "color": "#ef4444", "label": "Konfliktpunkt"}},
+          {{"type": "rect", "x_pct": 60, "y_pct": 70, "w_pct": 15, "h_pct": 10, "color": "rgba(6,182,212,0.3)", "label": "P-kjeller innkjøring"}}
+        ]
+        ```
+        Typer: arrow (pil), circle (punkt), rect (område). Koordinater i prosent (0-100).
         """
         
         prompt_parts = [prompt_text] + images_for_ai
@@ -402,8 +671,24 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
         try:
             res = model.generate_content(prompt_parts)
             
+            # ── Parse trafikkmarkører fra JSON ──
+            ai_raw = res.text
+            clean_text = ai_raw
+            traffic_markers = []
+            json_match = re.search(r'```json\s*(.*?)\s*```', ai_raw, re.DOTALL)
+            if json_match:
+                try:
+                    traffic_markers = json.loads(json_match.group(1))
+                    clean_text = re.sub(r'```json\s*.*?\s*```', '', ai_raw, flags=re.DOTALL)
+                except Exception:
+                    pass
+            
+            st.session_state["traffic_markers"] = traffic_markers
+            st.session_state["traffic_images"] = images_for_ai
+            st.session_state["traffic_ai_text"] = clean_text
+            
             with st.spinner("Kompilerer Trafikk-PDF med corporate design..."):
-                pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), res.text, images_for_ai)
+                pdf_data = create_full_report_pdf(p_name, pd_state.get('c_name', ''), clean_text, images_for_ai)
                 
                 # --- SENDER TIL QA-KØ ---
                 if "pending_reviews" not in st.session_state:
@@ -426,6 +711,19 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
 
             st.session_state.generated_ritra_pdf = pdf_data
             st.session_state.generated_ritra_filename = f"Builtly_RITra_{p_name}.pdf"
+
+            # Save report to user dashboard
+            try:
+                from builtly_auth import save_report
+                save_report(
+                    project_name=p_name,
+                    report_name=f"Trafikk & Mobilitet — {p_name}",
+                    module="Trafikk",
+                    file_path=f"Builtly_RITra_{p_name}.pdf",
+                )
+            except ImportError:
+                pass
+
             st.rerun() 
                 
         except Exception as e: 
@@ -442,3 +740,32 @@ if "generated_ritra_pdf" in st.session_state:
         if find_page("Review"):
             if st.button("🔍 Gå til QA for å vurdere", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
+
+    # ── Interaktiv redigering av trafikkmarkører ──
+    if st.session_state.get("traffic_markers") is not None and st.session_state.get("traffic_images"):
+        with st.expander("Rediger trafikkmarkører (adkomst, konflikter, sikt)", expanded=False):
+            st.caption("Flytt, legg til eller slett markører for adkomst, innkjøring, konfliktpunkter, parkering etc.")
+            
+            bridge_label = "TRAFFIC_MARKER_BRIDGE"
+            images_data = [{"image": img, "markers": st.session_state.get("traffic_markers", [])} for img in st.session_state.get("traffic_images", [])[:1]]
+            
+            render_traffic_editor(images_data, bridge_label=bridge_label, component_key="traffic_editor_main")
+            
+            marker_buffer_key = "traffic_marker_buffer"
+            if marker_buffer_key not in st.session_state:
+                st.session_state[marker_buffer_key] = json.dumps(st.session_state.get("traffic_markers", []), ensure_ascii=False, indent=2)
+            
+            st.text_area("Markør-data", key=marker_buffer_key, height=80, label_visibility="collapsed")
+            
+            ec = st.columns(2)
+            if ec[0].button("Bruk endringer", key="traffic_apply", use_container_width=True):
+                try:
+                    new_markers = json.loads(st.session_state.get(marker_buffer_key, "[]") or "[]")
+                    st.session_state["traffic_markers"] = new_markers
+                    st.success("Markører oppdatert!")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Feil: {exc}")
+            if ec[1].button("Nullstill", key="traffic_reset", use_container_width=True):
+                st.session_state[marker_buffer_key] = json.dumps(st.session_state.get("traffic_markers", []), ensure_ascii=False, indent=2)
+                st.rerun()
