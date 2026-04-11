@@ -238,7 +238,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                      'sec_val_kicker': 'The platform',
                      'sec_val_title': 'One platform. Every discipline. One source of truth.',
                      'sec_val_sub': 'Builtly is not a tool – it is the infrastructure that connects every stakeholder in the value chain. '
-                                    'Developer, engineer, contractor, bank and insurer on one traceable foundation.',
+                                    'Developer, engineer, contractor, bank and investor on one traceable foundation.',
                      'val_1_t': 'Every discipline. One flow.',
                      'val_1_d': 'GEO, Fire, Structural, Acoustics, SHA, TDD, Climate risk and more – from the same project data, in one portal.',
                      'val_2_t': 'Rules-first AI',
@@ -322,6 +322,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                                  'Builtly is built for those who want to lead, not follow.',
                      'cta_btn1': 'Start in project setup',
                      'cta_btn2': 'Go to review queue',
+                     'cta_btn_plans': 'View plans',
                      'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
                      'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
                      'label_input': 'Input',
@@ -384,7 +385,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'sec_val_kicker': 'Plattformen',
               'sec_val_title': 'Én plattform. Alle fag. Én sannhet.',
               'sec_val_sub': 'Builtly er ikke et verktøy – det er infrastrukturen som binder alle aktører i verdikjeden. '
-                             'Utbygger, rådgiver, entreprenør, bank og forsikring på ett sporbart grunnlag.',
+                             'Utbygger, rådgiver, entreprenør, bank og investor på ett sporbart grunnlag.',
               'val_1_t': 'Alle fag. Én flyt.',
               'val_1_d': 'GEO, Brann, RIB, Akustikk, SHA, TDD, Klimarisiko og mer – fra samme prosjektgrunnlag, i én portal.',
               'val_2_t': 'Regelstyrt AI',
@@ -464,6 +465,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                           'Builtly er bygget for de som vil ligge foran, ikke henge etter.',
               'cta_btn1': 'Start i Project Setup',
               'cta_btn2': 'Gå til kontroll-kø',
+              'cta_btn_plans': 'Se kontoplaner',
               'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
               'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
               'label_input': 'Input',
@@ -523,7 +525,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                 'sec_val_kicker': 'Plattformen',
                 'sec_val_title': 'En plattform. Alla discipliner. En källa till sanning.',
                 'sec_val_sub': 'Builtly är inte ett verktyg – det är infrastrukturen som förbinder alla aktörer i värdekedjan. '
-                               'Byggherre, ingenjör, entreprenör, bank och försäkring på ett spårbart underlag.',
+                               'Byggherre, ingenjör, entreprenör, bank och investerare på ett spårbart underlag.',
                 'val_1_t': 'Alla discipliner. Ett flöde.',
                 'val_1_d': 'GEO, Brand, Konstruktion, Akustik, SHA, TDD, Klimatrisk och mer – från samma projektdata, i en portal.',
                 'val_2_t': 'Regelbaserad AI',
@@ -616,6 +618,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                 'cta_desc': 'Builtly kombinerar insamling, AI och professionell signering i en portal.',
                 'cta_btn1': 'Starta i Project Setup',
                 'cta_btn2': 'Gå till QA-kö',
+                'cta_btn_plans': 'Se kontoplaner',
                 'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
                 'footer_meta': '© 2026 Builtly Engineering AS. Alla rättigheter förbehållna.',
                 'label_input': 'Input',
@@ -675,7 +678,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'sec_val_kicker': 'Platformen',
               'sec_val_title': 'Én platform. Alle fag. Én sandhed.',
               'sec_val_sub': 'Builtly er ikke et værktøj – det er infrastrukturen der forbinder alle aktører i værdikæden. '
-                             'Bygherre, rådgiver, entreprenør, bank og forsikring på ét sporbart grundlag.',
+                             'Bygherre, rådgiver, entreprenør, bank og investor på ét sporbart grundlag.',
               'val_1_t': 'Alle fag. Ét flow.',
               'val_1_d': 'GEO, Brand, Konstruktion, Akustik, SHA, TDD, Klimarisiko og mere – fra samme projektdata, i én portal.',
               'val_2_t': 'Regelbaseret AI',
@@ -767,6 +770,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
               'cta_desc': 'Builtly kombinerer dataindsamling, AI og faglig signering i én portal.',
               'cta_btn1': 'Start i Project Setup',
               'cta_btn2': 'Gå til QA',
+              'cta_btn_plans': 'Se kontoplaner',
               'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
               'footer_meta': '© 2026 Builtly Engineering AS. Alle rettigheder forbeholdes.',
               'label_input': 'Input',
@@ -827,7 +831,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                      'sec_val_kicker': 'The platform',
                      'sec_val_title': 'One platform. Every discipline. One source of truth.',
                      'sec_val_sub': 'Builtly is not a tool – it is the infrastructure that connects every stakeholder in the value chain. '
-                                    'Developer, engineer, contractor, bank and insurer on one traceable foundation.',
+                                    'Developer, engineer, contractor, bank and investor on one traceable foundation.',
                      'val_1_t': 'Every discipline. One flow.',
                      'val_1_d': 'GEO, Fire, Structural, Acoustics, SHA, TDD, Climate risk and more – from the same project data, in one portal.',
                      'val_2_t': 'Rules-first AI',
@@ -913,6 +917,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                                  'Builtly is built for those who want to lead, not follow.',
                      'cta_btn1': 'Start in project setup',
                      'cta_btn2': 'Go to review queue',
+                     'cta_btn_plans': 'View plans',
                      'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
                      'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
                      'label_input': 'Input',
@@ -1073,6 +1078,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                           'hyväksynnän yhteen portaaliin.',
               'cta_btn1': 'Aloita projektin aloituksessa',
               'cta_btn2': 'Siirry tarkastusjonoon',
+              'cta_btn_plans': 'Katso suunnitelmat',
               'footer_copy': 'AI-avusteinen suunnittelu. Ihmisen varmistama. Compliance-grade.',
               'footer_meta': '© 2026 Builtly Engineering AS. Kaikki oikeudet pidätetään.',
               'label_input': 'Syöte',
@@ -1134,7 +1140,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                 'sec_val_kicker': 'Die Plattform',
                 'sec_val_title': 'Eine Plattform. Alle Disziplinen. Eine Wahrheit.',
                 'sec_val_sub': 'Builtly ist kein Werkzeug – es ist die Infrastruktur, die alle Akteure der Wertschöpfungskette verbindet. '
-                               'Bauherr, Ingenieur, Unternehmer, Bank und Versicherung auf einer nachvollziehbaren Grundlage.',
+                               'Bauherr, Ingenieur, Unternehmer, Bank und Investor auf einer nachvollziehbaren Grundlage.',
                 'val_1_t': 'Alle Disziplinen. Ein Workflow.',
                 'val_1_d': 'GEO, Brand, Tragwerk, Akustik, SHA, TDD, Klimarisiko und mehr – aus denselben Projektdaten, in einem Portal.',
                 'val_2_t': 'Regelbasierte KI',
@@ -1232,6 +1238,7 @@ TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulat
                             'Freigabe in einem Portal.',
                 'cta_btn1': 'Im Projekt-Setup starten',
                 'cta_btn2': 'Zur Review-Warteschlange',
+                'cta_btn_plans': 'Kontopläne ansehen',
                 'footer_copy': 'KI-gestützte Planung. Menschlich verifiziert. Compliance-grade.',
                 'footer_meta': '© 2026 Builtly Engineering AS. Alle Rechte vorbehalten.',
                 'label_input': 'Input',
@@ -2152,7 +2159,7 @@ def _truthy_env(value: Optional[str], default: bool = False) -> bool:
 
 
 def contact_recipient() -> str:
-    return _env_or_secret("BUILTLY_CONTACT_TO") or "kontakt@builtly.ai"
+    return _env_or_secret("BUILTLY_CONTACT_TO") or "hello@builtly.ai"
 
 
 def contact_mailto_url(*, name: str, email: str, company: str, message: str, lang_bundle: Dict) -> str:
@@ -2549,6 +2556,7 @@ _AUTH_TEXTS = {
         "create_account": "Opprett konto og velg abonnement",
         "login_btn": "Logg inn",
         "register_link": "Opprett konto",
+        "no_account": "Har du ikke konto? Opprett konto",
         "demo_link": "Demo-tilgang",
     },
     "_default": {
@@ -2592,6 +2600,7 @@ _AUTH_TEXTS = {
         "create_account": "Create account and choose plan",
         "login_btn": "Log in",
         "register_link": "Create account",
+        "no_account": "Don't have an account? Sign up",
         "demo_link": "Demo access",
     },
 }
@@ -2737,7 +2746,7 @@ def render_login_page(lang_key: str) -> None:
                 st.error("Vennligst fyll ut e-post og passord.")
 
         st.markdown("---")
-        render_html('<div style="text-align:center;"><a href="?auth=register" target="_self" style="color:var(--cyan,#38bdf8);">Har du ikke konto? Opprett konto</a></div>')
+        render_html(f'<div style="text-align:center;"><a href="?auth=register" target="_self" style="color:var(--cyan,#38bdf8);">{at["no_account"]}</a></div>')
 
 
 def render_register_page(lang_key: str) -> None:
@@ -2879,7 +2888,7 @@ def render_register_page(lang_key: str) -> None:
                     st.error("Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.")
 
         st.markdown("---")
-        render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Har du allerede konto? Logg inn</a></div>')
+        render_html(f'<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">{at["has_account"]}</a></div>')
 
 
 def render_demo_gate(lang_key: str) -> None:
@@ -2932,24 +2941,25 @@ def render_demo_gate(lang_key: str) -> None:
 def render_plans_page(lang_key: str) -> None:
     """Render subscription plan selection with payment method choice."""
     # Require registration before viewing plans
+    _is_en = "English" in lang_key
     if not _is_user_logged_in():
-        render_html("""
+        render_html(f"""
             <div class="access-gate-head" style="text-align:center;">
-                <div class="assistant-kicker">REGISTRERING PÅKREVD</div>
-                <div class="access-gate-title">Opprett konto først</div>
-                <div class="access-gate-subtitle">Du må registrere deg før du kan velge abonnement og betale.</div>
+                <div class="assistant-kicker">{'REGISTRATION REQUIRED' if _is_en else 'REGISTRERING PÅKREVD'}</div>
+                <div class="access-gate-title">{'Create an account first' if _is_en else 'Opprett konto først'}</div>
+                <div class="access-gate-subtitle">{'You must register before you can choose a plan and pay.' if _is_en else 'Du må registrere deg før du kan velge abonnement og betale.'}</div>
             </div>
         """)
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("Opprett konto", type="primary", use_container_width=True):
+            if st.button("Create account" if _is_en else "Opprett konto", type="primary", use_container_width=True):
                 try:
                     st.query_params["auth"] = "register"
                 except Exception:
                     pass
                 st.rerun()
         with col_b:
-            if st.button("Logg inn", type="secondary", use_container_width=True):
+            if st.button("Log in" if _is_en else "Logg inn", type="secondary", use_container_width=True):
                 try:
                     st.query_params["auth"] = "login"
                 except Exception:
@@ -3141,7 +3151,7 @@ def render_user_dashboard(lang_key: str) -> None:
                 du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned
                 når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a>
                 for å opprette nye prosjekter og generere rapporter.
-                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">Se kontoplaner og priser →</a>
+                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{'View plans and pricing →' if 'English' in lang_key else 'Se kontoplaner og priser →'}</a>
             </div>
         </div>
     """)
@@ -5102,22 +5112,82 @@ st.markdown(
         .brand-logo {
             height: 45px !important;
         }
+        .hero {
+            padding: 1.5rem !important;
+            min-height: auto !important;
+            border-radius: 16px !important;
+        }
+        .hero::before {
+            display: none !important;
+        }
+        .eyebrow {
+            font-size: 0.65rem !important;
+            letter-spacing: 0.1em !important;
+            margin-bottom: 0.5rem !important;
+        }
         .hero-title {
-            font-size: 2rem !important;
+            font-size: 1.8rem !important;
+            margin-bottom: 0.6rem !important;
+        }
+        .hero-subtitle {
+            font-size: 0.9rem !important;
+            line-height: 1.6 !important;
+            margin-bottom: 1rem !important;
+        }
+        .hero-actions {
+            gap: 0.5rem !important;
+            margin-bottom: 1rem !important;
+        }
+        .hero-action {
+            white-space: normal !important;
+            font-size: 0.8rem !important;
+            padding: 8px 14px !important;
+            min-height: 38px !important;
+            border-radius: 10px !important;
+        }
+        .proof-strip {
+            gap: 0.35rem !important;
+        }
+        .proof-chip {
+            font-size: 0.68rem !important;
+            padding: 0.25rem 0.5rem !important;
+        }
+        .hero-panel {
+            padding: 1rem !important;
+            border-radius: 16px !important;
+        }
+        .panel-title {
+            font-size: 0.75rem !important;
+        }
+        .mini-stat {
+            padding: 0.8rem !important;
+        }
+        .mini-stat-value {
+            font-size: 1rem !important;
+        }
+        .mini-stat-label {
+            font-size: 0.78rem !important;
         }
         .cta-band, .hero-panel, .card {
             max-width: 100% !important;
             box-sizing: border-box !important;
         }
-        .hero-action {
-            white-space: normal !important;
-            font-size: 0.85rem !important;
-            padding: 10px 16px !important;
+        .module-card {
+            padding: 1.2rem !important;
+            border-radius: 16px !important;
         }
         .cta-band {
             flex-direction: column;
             align-items: flex-start;
-            padding: 1.5rem;
+            padding: 1.2rem;
+            border-radius: 16px !important;
+        }
+        .cta-title {
+            font-size: 1.3rem !important;
+        }
+        .cta-desc {
+            font-size: 0.85rem !important;
+        }
         }
         .cta-actions {
             margin-top: 1rem;
@@ -5769,7 +5839,7 @@ render_html(
         </div>
         <div class="cta-actions">
             {hero_action('project', lang['cta_btn1'], 'primary')}
-            <a href="?auth=register" target="_self" class="hero-action secondary">Se kontoplaner</a>
+            <a href="?auth=register" target="_self" class="hero-action secondary">{lang.get('cta_btn_plans', 'View plans')}</a>
         </div>
     </div>
     """
