@@ -3945,9 +3945,11 @@ st.markdown(
 
     html, body, [class*="css"] {
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        overflow-x: hidden !important;
     }
 
     .stApp {
+        overflow-x: hidden !important;
         background:
             radial-gradient(1100px 500px at 15% -5%, rgba(56,194,201,0.18), transparent 50%),
             radial-gradient(900px 500px at 100% 0%, rgba(64,170,255,0.12), transparent 45%),
