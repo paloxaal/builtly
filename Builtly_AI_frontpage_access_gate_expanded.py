@@ -2316,7 +2316,7 @@ def render_site_access_gate(lang_key: str) -> None:
     lang_bundle = get_text_bundle(lang_key)
     locale_profile = get_locale_profile(lang_key)
 
-    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html(
             f"""
@@ -2587,7 +2587,7 @@ def render_login_page(lang_key: str) -> None:
     """Render login form. Currently mock — connect to Supabase/Auth0 for production."""
     copy = get_access_copy(lang_key)
 
-    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html("""
             <div class="access-gate-head">
@@ -2639,7 +2639,7 @@ def render_login_page(lang_key: str) -> None:
 
 def render_register_page(lang_key: str) -> None:
     """Render registration form with company, country, and GDPR consent."""
-    outer_left, outer_center, outer_right = st.columns([1.0, 1.5, 1.0], gap="large")
+    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html("""
             <div class="access-gate-head">
@@ -2784,7 +2784,7 @@ def render_register_page(lang_key: str) -> None:
 def render_demo_gate(lang_key: str) -> None:
     """Render the original demo access code gate."""
     copy = get_access_copy(lang_key)
-    outer_left, outer_center, outer_right = st.columns([1.0, 1.3, 1.0], gap="large")
+    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html(f"""
             <div class="access-gate-head">
