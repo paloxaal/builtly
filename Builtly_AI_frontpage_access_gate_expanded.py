@@ -1801,9 +1801,9 @@ def href_or_none(page_key: str) -> Optional[str]:
     route = page_route(page_key)
     if route is None:
         return None
-    # If gate is enabled and user is not yet authenticated, intercept the click
-    if access_gate_enabled() and not st.session_state.get("site_access_granted"):
-        return f"?gate={page_key}"
+    # If user is not logged in, redirect to login page
+    if not st.session_state.get("site_access_granted"):
+        return "?auth=login"
     return route
 
 
@@ -2737,12 +2737,7 @@ def render_login_page(lang_key: str) -> None:
                 st.error("Vennligst fyll ut e-post og passord.")
 
         st.markdown("---")
-
-        col_reg, col_demo = st.columns(2)
-        with col_reg:
-            render_html('<a href="?auth=register" target="_self" class="module-cta" style="text-align:center;display:block;">Opprett konto</a>')
-        with col_demo:
-            render_html('<a href="?auth=demo" target="_self" class="module-cta" style="text-align:center;display:block;">Demo-tilgang</a>')
+        render_html('<div style="text-align:center;"><a href="?auth=register" target="_self" style="color:var(--cyan,#38bdf8);">Har du ikke konto? Opprett konto</a></div>')
 
 
 def render_register_page(lang_key: str) -> None:
@@ -3349,9 +3344,6 @@ def handle_auth_routing(lang_key: str) -> bool:
         return True
     elif auth_page == "register":
         render_register_page(lang_key)
-        return True
-    elif auth_page == "demo":
-        render_demo_gate(lang_key)
         return True
     elif auth_page == "plans":
         render_plans_page(lang_key)
@@ -5588,10 +5580,14 @@ st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
 if not st.session_state.get("site_access_granted"):
     _restore_session_from_url()
 
-# If user clicked a module card while unauthenticated, show gate dialog
+# If user clicked a module card while unauthenticated, redirect to login
 _gate_dest = get_query_params_dict().get("gate", "").strip()
-if _gate_dest and access_gate_enabled() and not st.session_state.get("site_access_granted"):
-    _module_gate_dialog(st.session_state.app_lang, _gate_dest)
+if _gate_dest and not st.session_state.get("site_access_granted"):
+    try:
+        st.query_params["auth"] = "login"
+    except Exception:
+        pass
+    st.rerun()
 
 # Auth page routing (login, register, plans, dashboard, demo)
 if handle_auth_routing(st.session_state.app_lang):
