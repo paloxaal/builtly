@@ -5073,7 +5073,7 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 0.2rem !important;
+            gap: 0.15rem !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
             flex: 1 1 auto !important;
@@ -5083,41 +5083,44 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
             flex: 0 0 auto !important;
-            max-width: 58px !important;
+            max-width: 60px !important;
             width: auto !important;
         }
-        /* Strip all heavy styling from top bar selectboxes on mobile */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            font-size: 0.55rem !important;
-            min-height: 22px !important;
+        /* NUCLEAR: strip every wrapper in top bar selectboxes */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
             border: none !important;
+            box-shadow: none !important;
             background: transparent !important;
+            outline: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            min-height: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            padding: 1px 3px !important;
-            min-height: 22px !important;
-            border: none !important;
-            background: rgba(255,255,255,0.05) !important;
+        /* Then style only the visible value container */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] [data-testid="stSelectboxVirtualDropdown"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div:first-child {
+            background: rgba(255,255,255,0.06) !important;
             border-radius: 6px !important;
+            padding: 3px 6px !important;
+            min-height: 22px !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
+            font-size: 0.58rem !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+            color: #c8d3df !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.55rem !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            white-space: nowrap !important;
-        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
-            margin-top: 0.3rem !important;
-        }
-        /* Remove Streamlit's default selectbox container borders on mobile top bar */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
-            border: none !important;
-            box-shadow: none !important;
-            background: transparent !important;
+            margin-top: 0.2rem !important;
         }
 
         .mini-stat-grid,
