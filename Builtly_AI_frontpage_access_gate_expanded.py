@@ -5073,51 +5073,61 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 0.15rem !important;
+            gap: 4px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
-            flex: 1 1 auto !important;
-            max-width: none !important;
-            width: auto !important;
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) {
+            flex: 0 0 42px !important;
+            max-width: 42px !important;
+            width: 42px !important;
+            min-width: 42px !important;
+        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 auto !important;
-            max-width: 60px !important;
-            width: auto !important;
+            flex: 0 0 42px !important;
+            max-width: 42px !important;
+            width: 42px !important;
+            min-width: 42px !important;
         }
-        /* NUCLEAR: strip every wrapper in top bar selectboxes */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
+        /* NUCLEAR: strip every wrapper */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) *,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) * {
             border: none !important;
             box-shadow: none !important;
-            background: transparent !important;
             outline: none !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
+            background: transparent !important;
             padding: 0 !important;
             margin: 0 !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
+            background: transparent !important;
             min-height: 0 !important;
         }
-        /* Then style only the visible value container */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] [data-testid="stSelectboxVirtualDropdown"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div:first-child {
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
             background: rgba(255,255,255,0.06) !important;
-            border-radius: 6px !important;
-            padding: 3px 6px !important;
-            min-height: 22px !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.58rem !important;
+            border-radius: 8px !important;
+            padding: 4px 6px !important;
+            min-height: 28px !important;
+            max-width: 42px !important;
             overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            white-space: nowrap !important;
-            color: #c8d3df !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
+        }
+        /* Show only first 2 chars (emoji) by truncating */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
+            font-size: 0.8rem !important;
+            display: block !important;
+            max-width: 24px !important;
+            overflow: hidden !important;
+            text-overflow: clip !important;
+            white-space: nowrap !important;
+            line-height: 1.2 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
             margin-top: 0.2rem !important;
