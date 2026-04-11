@@ -53,7 +53,7 @@ LANG_ALIASES = {
 }
 
 if "app_lang" not in st.session_state:
-    st.session_state.app_lang = "🇳🇴 Norsk"
+    st.session_state.app_lang = "🇺🇸 English (US)"
 
 st.session_state.app_lang = LANG_ALIASES.get(st.session_state.app_lang, st.session_state.app_lang)
 
@@ -4933,7 +4933,30 @@ st.markdown(
         }
     }
 
+    /* ── MOBILE FIXES ── */
+
+    /* Prevent ALL horizontal overflow */
+    html, body, .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewBlockContainer"], .block-container {
+        max-width: 100vw !important;
+        overflow-x: hidden !important;
+    }
+
+    /* All column rows: never overflow */
+    [data-testid="stHorizontalBlock"] {
+        max-width: 100% !important;
+        overflow: hidden !important;
+    }
+    [data-testid="stColumn"] {
+        min-width: 0 !important;
+        overflow: hidden !important;
+    }
+
     @media (max-width: 760px) {
+        .block-container {
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+        }
         .mini-stat-grid,
         .stats-row,
         .trust-grid,
@@ -4942,41 +4965,63 @@ st.markdown(
         .module-grid-two {
             grid-template-columns: 1fr;
         }
-        .hero,
-        .hero-panel {
+        .hero, .hero-panel {
             min-height: auto;
             height: auto;
         }
         .brand-logo {
-            height: 60px;
+            height: 45px !important;
+        }
+        .cta-band, .hero-panel, .card {
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+            word-break: break-word !important;
+        }
+        .hero-action {
+            white-space: normal !important;
+            font-size: 0.85rem !important;
+            padding: 10px 16px !important;
+        }
+        .cta-band {
+            flex-direction: column;
+            align-items: flex-start;
+            padding: 1.5rem;
+        }
+        .cta-actions {
+            margin-top: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .assistant-rail {
+            display: none;
         }
     }
 
-    /* Top bar: keep horizontal on mobile */
-    [data-testid="stHorizontalBlock"]:first-of-type {
+    /* ── TOP BAR: keep logo + dropdowns on one line ── */
+    [data-testid="stHorizontalBlock"]:has(.brand-left) {
         flex-wrap: nowrap !important;
         gap: 0.3rem !important;
+        align-items: center !important;
     }
     @media (max-width: 760px) {
-        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:first-child {
-            flex: 3 !important;
-            min-width: 0 !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
+            flex: 2 !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(2),
-        [data-testid="stHorizontalBlock"]:first-of-type [data-testid="stColumn"]:nth-child(3) {
-            flex: 1 !important;
-            min-width: 0 !important;
-            max-width: 90px !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
+            flex: 0 0 80px !important;
+            max-width: 80px !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] {
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
             font-size: 0.7rem !important;
-            min-height: 32px !important;
+            min-height: 30px !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] > div {
-            padding: 2px 6px !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
+            padding: 2px 4px !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type [data-baseweb="select"] svg {
-            display: none !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
+            width: 12px !important;
+            height: 12px !important;
         }
     }
 </style>
