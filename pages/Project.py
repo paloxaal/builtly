@@ -312,7 +312,7 @@ def fetch_ortofoto_thumbnail(bounds, buffer_m=80):
 # --- 5. HEADER ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
-    logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    logo_html = f'<a href="/" target="_self" style="text-decoration:none;"><img src="{logo_data_uri()}" class="brand-logo"></a>' if logo_data_uri() else '<a href="/" target="_self"><h2 style="margin:0; color:white;">Builtly</h2></a>'
     render_html(logo_html)
 with c2:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
