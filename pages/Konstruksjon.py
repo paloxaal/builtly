@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 import base64
 import importlib.util
@@ -2871,6 +2870,18 @@ def persist_generation_to_session(
     st.session_state.generated_rib_analysis = analysis_result
     st.session_state.generated_rib_report_text = report_text
     st.session_state.generated_rib_candidate_df = candidate_df
+
+    # Save report to user dashboard
+    try:
+        from builtly_auth import save_report
+        save_report(
+            project_name=st.session_state.get("project_data", {}).get("p_name", ""),
+            report_name=f"RIB Konstruksjon — {filename}",
+            module="Konstruksjon",
+            file_path=filename,
+        )
+    except ImportError:
+        pass
     st.session_state.generated_rib_overlay_package = [
         {
             "page_index": item["page_index"],
