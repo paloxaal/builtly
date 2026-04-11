@@ -1729,6 +1729,11 @@ with tabs[0]:
 
     pdf_bytes = build_pdf_report(records, rules, ai_result, config)
     if pdf_bytes:
+        try:
+            from builtly_auth import save_report
+            save_report(project_name=config.get("p_name", ""), report_name=f"Anbudskontroll — {config.get('p_name', '')}", module="TenderControl", file_path="tender_report.pdf")
+        except ImportError:
+            pass
         st.download_button(
             "Last ned anbudsrapport (.pdf)",
             data=pdf_bytes,
