@@ -16,6 +16,13 @@ from urllib import request as urlrequest
 
 import streamlit as st
 
+# Auth & payment integration (Supabase + Stripe)
+try:
+    import builtly_auth
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
 # -------------------------------------------------
 # 1) PAGE CONFIG
 # -------------------------------------------------
@@ -2597,18 +2604,27 @@ def render_login_page(lang_key: str) -> None:
 
         if submitted:
             if email.strip() and password.strip():
-                # TODO: Replace with real auth (Supabase, Auth0, etc.)
-                st.session_state.user_authenticated = True
-                st.session_state.user_email = email.strip()
-                st.session_state.user_name = email.split("@")[0].title()
-                st.session_state.site_access_granted = True
-                try:
-                    params = get_query_params_dict()
-                    params.pop("auth", None)
-                    set_query_params_dict(params)
-                except Exception:
-                    pass
-                st.rerun()
+                if _HAS_AUTH:
+                    ok, msg = builtly_auth.login(email.strip(), password.strip())
+                    if ok:
+                        try:
+                            params = get_query_params_dict()
+                            params.pop("auth", None)
+                            set_query_params_dict(params)
+                        except Exception:
+                            pass
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                        if "ikke bekreftet" in msg.lower():
+                            if st.button("Send bekreftelseslenke på nytt"):
+                                rok, rmsg = builtly_auth.resend_verification(email.strip())
+                                if rok:
+                                    st.success(rmsg)
+                                else:
+                                    st.error(rmsg)
+                else:
+                    st.error("Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.")
             else:
                 st.error("Vennligst fyll ut e-post og passord.")
 
@@ -2717,21 +2733,23 @@ def render_register_page(lang_key: str) -> None:
                             country_codes.append(code)
                             break
 
-                # TODO: Replace with real user creation (Supabase, etc.)
-                st.session_state.user_authenticated = True
-                st.session_state.user_email = reg_email.strip()
-                st.session_state.user_name = reg_name.strip()
-                st.session_state.user_company = reg_company.strip()
-                st.session_state.user_countries = country_codes
-                st.session_state.user_account_status = "inactive"  # Not yet paid
-                st.session_state.site_access_granted = True
-                try:
-                    params = get_query_params_dict()
-                    params["auth"] = "plans"
-                    set_query_params_dict(params)
-                except Exception:
-                    pass
-                st.rerun()
+                if _HAS_AUTH:
+                    ok, msg = builtly_auth.register(
+                        email=reg_email.strip(),
+                        password=reg_password,
+                        name=reg_name.strip(),
+                        company=reg_company.strip(),
+                        org_nr=reg_org_nr.strip(),
+                        phone=reg_phone.strip(),
+                        countries=country_codes,
+                    )
+                    if ok:
+                        st.success(msg)
+                        st.info("Etter at du har bekreftet e-posten, kan du logge inn og velge abonnement.")
+                    else:
+                        st.error(msg)
+                else:
+                    st.error("Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.")
 
         st.markdown("---")
         render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Har du allerede konto? Logg inn</a></div>')
@@ -2932,20 +2950,15 @@ def render_plans_page(lang_key: str) -> None:
                 </div>
             """)
             if st.button("Betal med kort", key="pay_card", use_container_width=True):
-                st.session_state.user_payment_method = "card"
-                # TODO: Redirect to Stripe Checkout session
-                # stripe.checkout.Session.create(...)
-                # For now, simulate successful payment:
-                st.session_state.user_account_status = "active"
-                st.session_state.site_access_granted = True
-                st.success("✅ Betaling godkjent! Kontoen din er nå aktiv.")
-                try:
-                    params = get_query_params_dict()
-                    params.pop("auth", None)
-                    set_query_params_dict(params)
-                except Exception:
-                    pass
-                st.rerun()
+                if _HAS_AUTH:
+                    checkout_url, err = builtly_auth.create_checkout(selected_plan, n_countries)
+                    if checkout_url:
+                        st.markdown(f'<meta http-equiv="refresh" content="0;url={checkout_url}">', unsafe_allow_html=True)
+                        st.info("Omdirigerer til Stripe...")
+                    else:
+                        st.error(err)
+                else:
+                    st.error("Betalingsmodul ikke installert.")
 
         with pay_col2:
             render_html("""
@@ -2960,15 +2973,14 @@ def render_plans_page(lang_key: str) -> None:
                 </div>
             """)
             if st.button("Bestill på faktura", key="pay_invoice", use_container_width=True):
-                st.session_state.user_payment_method = "invoice"
-                st.session_state.user_account_status = "pending_invoice"
-                # TODO: Send notification email to Builtly admin + confirmation to customer
-                # send_contact_email(...) or similar
-                st.info(
-                    "📄 Bestilling mottatt! Faktura sendes til din e-post. "
-                    "Kontoen aktiveres når betaling er registrert (1–3 virkedager). "
-                    "Du vil motta bekreftelse på e-post."
-                )
+                if _HAS_AUTH:
+                    ok, msg = builtly_auth.request_invoice(selected_plan, n_countries)
+                    if ok:
+                        st.info(msg)
+                    else:
+                        st.error(msg)
+                else:
+                    st.error("Betalingsmodul ikke installert.")
 
         # Contract summary
         render_html(f"""
@@ -3196,12 +3208,14 @@ def render_user_dashboard(lang_key: str) -> None:
             st.rerun()
     with act_col3:
         if st.button("Logg ut", use_container_width=True):
-            st.session_state.user_authenticated = False
-            st.session_state.user_email = ""
-            st.session_state.user_name = ""
-            st.session_state.user_plan = ""
-            st.session_state.user_reports = []
-            # Keep site_access_granted if they had demo code
+            if _HAS_AUTH:
+                builtly_auth.logout()
+            else:
+                st.session_state.user_authenticated = False
+                st.session_state.user_email = ""
+                st.session_state.user_name = ""
+                st.session_state.user_plan = ""
+                st.session_state.user_reports = []
             try:
                 params = get_query_params_dict()
                 params.pop("auth", None)
@@ -3234,6 +3248,26 @@ def handle_auth_routing(lang_key: str) -> bool:
             render_user_dashboard(lang_key)
         else:
             render_login_page(lang_key)
+        return True
+    elif auth_page == "payment_success":
+        # Stripe redirects here after successful checkout
+        if _HAS_AUTH:
+            session_id = ""
+            try:
+                session_id = st.query_params.get("session_id", "")
+            except Exception:
+                pass
+            if session_id:
+                ok, msg = builtly_auth.verify_checkout(session_id)
+                if ok:
+                    st.success(msg)
+                    render_html('<div style="text-align:center;margin-top:2rem;">')
+                    render_html('<a href="/" target="_self" class="hero-action primary">Gå til Builtly</a>')
+                    render_html('</div>')
+                else:
+                    st.error(msg)
+            else:
+                st.error("Mangler session-ID fra Stripe.")
         return True
     return False
 
@@ -5281,11 +5315,14 @@ with top_m:
                 pass
             st.rerun()
         elif _acct_choice == "Logg ut":
-            st.session_state.user_authenticated = False
-            st.session_state.user_email = ""
-            st.session_state.user_name = ""
-            st.session_state.user_plan = ""
-            st.session_state.user_reports = []
+            if _HAS_AUTH:
+                builtly_auth.logout()
+            else:
+                st.session_state.user_authenticated = False
+                st.session_state.user_email = ""
+                st.session_state.user_name = ""
+                st.session_state.user_plan = ""
+                st.session_state.user_reports = []
             try:
                 params = get_query_params_dict()
                 params.pop("auth", None)
