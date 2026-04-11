@@ -1232,6 +1232,11 @@ with left:
         )
         pdf_bytes = build_pdf_report(quantity_df, area_df, delta_df, config, ai_result)
         if pdf_bytes:
+            try:
+                from builtly_auth import save_report
+                save_report(project_name=config.get("p_name", ""), report_name=f"Mengde & Scope — {config.get('p_name', '')}", module="QuantityScope", file_path="builtly_quantity_report.pdf")
+            except ImportError:
+                pass
             st.download_button(
                 "Last ned mengderapport (.pdf)", data=pdf_bytes,
                 file_name="builtly_quantity_report.pdf", mime="application/pdf",
