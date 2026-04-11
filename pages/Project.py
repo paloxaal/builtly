@@ -203,6 +203,112 @@ def fetch_from_kartverket(adresse, kommune, gnr, bnr):
         if res: return res
     return None
 
+
+def fetch_parcel_from_wfs(kommune: str, gnr: str, bnr: str):
+    """Fetch parcel polygon from Kartverket WFS (same as Mulighetsstudie)."""
+    # Resolve kommunenummer
+    knr = None
+    s = kommune.strip()
+    if s.isdigit() and len(s) >= 3:
+        knr = s.zfill(4)
+    else:
+        try:
+            resp = requests.get("https://ws.geonorge.no/kommuneinfo/v1/kommuner", timeout=5)
+            if resp.status_code == 200:
+                for k in resp.json():
+                    if k.get("kommunenavn", "").lower() == s.lower():
+                        knr = k.get("kommunenummer")
+                        break
+        except Exception:
+            pass
+    if not knr:
+        return None
+
+    gnr_clean = str(gnr).strip()
+    bnr_clean = str(bnr).strip()
+    cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
+
+    services = [
+        ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
+        ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig"),
+    ]
+
+    for url, layer in services:
+        params = {
+            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+            "typenames": layer, "srsName": "EPSG:25833",
+            "outputFormat": "application/json", "cql_filter": cql,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=12)
+            if resp.status_code != 200:
+                params["outputFormat"] = "json"
+                resp = requests.get(url, params=params, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                features = data.get("features", [])
+                if features:
+                    geom = features[0].get("geometry", {})
+                    coords = geom.get("coordinates", [])
+                    # Calculate bounds and area from polygon coordinates
+                    if geom.get("type") == "Polygon" and coords:
+                        ring = coords[0]
+                        xs = [p[0] for p in ring]
+                        ys = [p[1] for p in ring]
+                        # Shoelace formula for area
+                        n = len(ring)
+                        area = 0.0
+                        for i in range(n - 1):
+                            area += ring[i][0] * ring[i + 1][1]
+                            area -= ring[i + 1][0] * ring[i][1]
+                        area = abs(area) / 2.0
+                        return {
+                            "area_m2": round(area, 1),
+                            "bounds": (min(xs), min(ys), max(xs), max(ys)),
+                            "source": f"Kartverket WFS ({layer})",
+                        }
+                    elif geom.get("type") == "MultiPolygon" and coords:
+                        all_xs, all_ys, total_area = [], [], 0.0
+                        for polygon in coords:
+                            ring = polygon[0]
+                            all_xs.extend(p[0] for p in ring)
+                            all_ys.extend(p[1] for p in ring)
+                            n = len(ring)
+                            a = 0.0
+                            for i in range(n - 1):
+                                a += ring[i][0] * ring[i + 1][1]
+                                a -= ring[i + 1][0] * ring[i][1]
+                            total_area += abs(a) / 2.0
+                        return {
+                            "area_m2": round(total_area, 1),
+                            "bounds": (min(all_xs), min(all_ys), max(all_xs), max(all_ys)),
+                            "source": f"Kartverket WFS ({layer})",
+                        }
+        except Exception:
+            continue
+    return None
+
+
+def fetch_ortofoto_thumbnail(bounds, buffer_m=80):
+    """Fetch ortofoto from Kartverket WMS for the given EPSG:25833 bounds."""
+    if not bounds:
+        return None
+    minx, miny, maxx, maxy = bounds
+    url = (
+        "https://wms.geonorge.no/skwms1/wms.nib"
+        "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
+        f"&styles=&srs=EPSG:25833&bbox={minx - buffer_m},{miny - buffer_m},{maxx + buffer_m},{maxy + buffer_m}"
+        "&width=800&height=800&format=image/png"
+    )
+    try:
+        resp = requests.get(url, timeout=12)
+        if resp.status_code == 200 and len(resp.content) > 3000:
+            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+            return img
+    except Exception:
+        pass
+    return None
+
 # --- 5. HEADER ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
@@ -292,17 +398,55 @@ with input_col:
     new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state.get("bnr", ""))
     
     if "Norge" in new_land:
-        if st.button("🔍 Søk i Matrikkel (Kartverket)", type="secondary"):
+        if st.button("🔍 Søk i Matrikkel + Hent Tomtedata (Kartverket)", type="secondary"):
             st.session_state.project_data.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
             with st.spinner("Søker i Nasjonalt Adresseregister..."):
                 res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
                 if res:
                     st.session_state.project_data.update(res)
-                    st.success("✅ Fant eiendom! Husk å trykke Lagre i bunnen for å bekrefte.")
-                    time.sleep(1)
-                    st.rerun()
-                else: 
-                    st.warning("Fant ingen treff i Matrikkelen. Prøv en annen skrivemåte eller fyll inn manuelt.")
+                    st.success("✅ Fant eiendom i adresseregisteret!")
+                else:
+                    st.warning("Fant ingen adressetreff. Prøver å hente tomtegrense direkte fra Gnr/Bnr...")
+
+            # Use resolved values (from API or user input)
+            resolved_kommune = st.session_state.project_data.get("kommune", new_kommune)
+            resolved_gnr = st.session_state.project_data.get("gnr", new_gnr)
+            resolved_bnr = st.session_state.project_data.get("bnr", new_bnr)
+
+            if resolved_gnr and resolved_bnr and resolved_kommune:
+                with st.spinner("Henter tomtegrense fra Kartverket WFS..."):
+                    parcel = fetch_parcel_from_wfs(resolved_kommune, resolved_gnr, resolved_bnr)
+                    if parcel:
+                        st.session_state.project_data["tomteareal"] = int(parcel["area_m2"])
+                        st.session_state.project_data["_parcel_bounds"] = list(parcel["bounds"])
+                        st.session_state.project_data["_parcel_source"] = parcel["source"]
+                        st.success(f"✅ Tomtegrense hentet! Areal: **{int(parcel['area_m2']):,} m²** ({parcel['source']})")
+
+                        # Fetch ortofoto
+                        with st.spinner("Henter ortofoto fra Kartverket..."):
+                            ortofoto = fetch_ortofoto_thumbnail(parcel["bounds"])
+                            if ortofoto:
+                                buf = io.BytesIO()
+                                ortofoto.save(buf, format="JPEG", quality=85)
+                                st.session_state["_project_ortofoto"] = buf.getvalue()
+                                st.success("✅ Ortofoto hentet!")
+                            else:
+                                st.info("Kunne ikke hente ortofoto for denne eiendommen.")
+                    else:
+                        st.warning("Fant ingen tomtegrense i WFS-tjenesten. Tomteareal må fylles inn manuelt.")
+
+            time.sleep(0.5)
+            st.rerun()
+
+    # Show ortofoto if available
+    if st.session_state.get("_project_ortofoto"):
+        st.markdown("""<div style="margin-top:0.5rem;margin-bottom:0.5rem;">
+            <div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.3rem;">📸 Ortofoto fra Kartverket</div>
+        </div>""", unsafe_allow_html=True)
+        st.image(st.session_state["_project_ortofoto"], use_container_width=True)
+        parcel_src = pd_state.get("_parcel_source", "")
+        if parcel_src:
+            st.caption(f"Kilde: {parcel_src} · Tomteareal: {pd_state.get('tomteareal', '?')} m²")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🏢 03 Bygg- og Tomtedata</h4></div>""", unsafe_allow_html=True)
