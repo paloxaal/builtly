@@ -3037,6 +3037,12 @@ def render_user_dashboard(lang_key: str) -> None:
         <div class="access-gate-head">
             <div class="assistant-kicker">MIN KONTO</div>
             <div class="access-gate-title">Hei, {html.escape(user_name)}</div>
+            <div style="color:var(--soft,#c8d3df);font-size:0.95rem;line-height:1.6;max-width:700px;margin-top:0.5rem;">
+                Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter
+                du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned
+                når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a>
+                for å opprette nye prosjekter og generere rapporter.
+            </div>
         </div>
     """)
 
