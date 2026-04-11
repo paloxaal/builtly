@@ -5310,7 +5310,8 @@ with top_m:
     if _is_user_logged_in():
         _acct_options = ["👤 Konto", "Min side", "Logg ut"]
         _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice == "Min side":
+        if _acct_choice == "Min side" and _get_auth_page() != "dashboard":
+            del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "dashboard"
             except Exception:
@@ -5335,13 +5336,15 @@ with top_m:
     else:
         _acct_options = ["👤 Konto", "Logg inn", "Opprett konto"]
         _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice == "Logg inn":
+        if _acct_choice == "Logg inn" and _get_auth_page() != "login":
+            del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "login"
             except Exception:
                 pass
             st.rerun()
-        elif _acct_choice == "Opprett konto":
+        elif _acct_choice == "Opprett konto" and _get_auth_page() != "register":
+            del st.session_state["acct_menu"]
             try:
                 st.query_params["auth"] = "register"
             except Exception:
