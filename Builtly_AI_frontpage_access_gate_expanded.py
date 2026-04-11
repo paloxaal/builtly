@@ -2639,6 +2639,34 @@ def render_login_page(lang_key: str) -> None:
 
 def render_register_page(lang_key: str) -> None:
     """Render registration form with company, country, and GDPR consent."""
+
+    # Plans overview first
+    render_html("""
+        <div style="text-align:center;margin-bottom:1.5rem;margin-top:1rem;">
+            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">ABONNEMENTER</div>
+            <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;">Tre nivåer — fra fullt automatisert til attestert</div>
+            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">Alle priser gjelder per land. 12 måneders bindingstid.</div>
+        </div>
+    """)
+    plan_cols = st.columns(3, gap="medium")
+    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
+        with plan_cols[idx]:
+            is_pop = plan_key == "team"
+            bc = "#38bdf8" if is_pop else "rgba(56,189,248,0.10)"
+            feats = "".join(f'<div style="padding:0.2rem 0;color:var(--soft,#c8d3df);font-size:0.85rem;">✓ {f}</div>' for f in plan["features"])
+            render_html(f"""
+                <div style="border:1px solid {bc};border-radius:1rem;padding:1.5rem;
+                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:320px;">
+                    <div style="color:#22d3ee;font-weight:700;font-size:0.7rem;letter-spacing:0.08em;margin-bottom:0.3rem;">{plan['badge']}</div>
+                    <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">{plan['name']}</div>
+                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:800;margin-bottom:0.2rem;">{plan['price_label']}</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:1rem;">{plan['price_detail']}</div>
+                    {feats}
+                </div>
+            """)
+
+    # Registration form below plans
+    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
     outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html("""
@@ -2753,32 +2781,6 @@ def render_register_page(lang_key: str) -> None:
 
         st.markdown("---")
         render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Har du allerede konto? Logg inn</a></div>')
-
-    # Plans preview below registration form
-    st.markdown("<div style='margin-top:3rem;'></div>", unsafe_allow_html=True)
-    render_html("""
-        <div style="text-align:center;margin-bottom:1.5rem;">
-            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">ABONNEMENTER</div>
-            <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">Velg plan etter registrering</div>
-            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">Alle priser gjelder per land. 12 måneders bindingstid.</div>
-        </div>
-    """)
-    plan_cols = st.columns(3, gap="medium")
-    for idx, (plan_key, plan) in enumerate(SUBSCRIPTION_PLANS.items()):
-        with plan_cols[idx]:
-            is_pop = plan_key == "team"
-            bc = "#38bdf8" if is_pop else "rgba(56,189,248,0.10)"
-            feats = "".join(f'<div style="padding:0.2rem 0;color:var(--soft,#c8d3df);font-size:0.85rem;">✓ {f}</div>' for f in plan["features"])
-            render_html(f"""
-                <div style="border:1px solid {bc};border-radius:1rem;padding:1.5rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:320px;">
-                    <div style="color:#22d3ee;font-weight:700;font-size:0.7rem;letter-spacing:0.08em;margin-bottom:0.3rem;">{plan['badge']}</div>
-                    <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">{plan['name']}</div>
-                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:800;margin-bottom:0.2rem;">{plan['price_label']}</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:1rem;">{plan['price_detail']}</div>
-                    {feats}
-                </div>
-            """)
 
 
 def render_demo_gate(lang_key: str) -> None:
