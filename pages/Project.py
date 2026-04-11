@@ -135,7 +135,105 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 4. SESSION STATE LOGIKK (MED SELVHELBRENDENDE SIKKERHETSNETT) ---
+# --- 4. LANGUAGE & TRANSLATIONS ---
+_lang = st.session_state.get("app_lang", "🇺🇸 English (US)")
+_en = "English" in _lang
+
+T = {
+    "back": "← Back to Portal" if _en else "← Tilbake til Portal",
+    "qa_btn": "QA & Sign-off",
+    "hero_title": "Project Configuration",
+    "hero_sub": ("One control center for your project's core parameters. Sync project context seamlessly "
+                 "to technical engineering, sustainability analyses and project management.") if _en else
+                ("Ett kontrollsenter for prosjektets kjerneparametere. Synkroniser prosjektets kontekst "
+                 "sømløst til teknisk prosjektering, bærekraftsanalyser og prosjektledelse."),
+    "sync_status": "Sync Status",
+    "draft": "Draft",
+    "ready": "Ready",
+    "fields_filled": "{n} of {total} key fields are filled and available for AI modules." if _en else
+                     "{n} av {total} nøkkelfelt er fylt ut og tilgjengelige for AI-modulene.",
+    "completeness": "Completeness" if _en else "Kompletthet",
+    "last_updated": "Last updated" if _en else "Sist oppdatert",
+    "not_synced": "Not synced yet" if _en else "Ikke synket enda",
+    "location_set": "Location set" if _en else "Lokasjon satt",
+    "yes": "Yes" if _en else "Ja",
+    "no": "No" if _en else "Nei",
+    "data_completeness": "Data completeness" if _en else "Datakompletthet",
+    "primary_use": "Primary Use" if _en else "Primær Bruk",
+    "building_area": "Building Area" if _en else "Bygningsareal",
+    "site_area": "Site Area" if _en else "Tomteareal",
+    "update_title": "Update the project control center" if _en else "Oppdater prosjektets kontrollsenter",
+    "update_sub": ("Fill in the data below. This is automatically fed into all AI agents to ensure consistency.") if _en else
+                  ("Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar."),
+    "sec_general": "📌 01 General" if _en else "📌 01 Generelt",
+    "country_label": "🌍 Country / Local Regulations" if _en else "🌍 Land / Lokalt Regelverk",
+    "project_name": "Project name" if _en else "Prosjektnavn",
+    "client": "Client / Owner" if _en else "Tiltakshaver / Oppdragsgiver",
+    "description": "Project description / Narrative" if _en else "Prosjektbeskrivelse / Narrativ",
+    "sec_location": "🌍 02 Location & API" if _en else "🌍 " + T['sec_location'] + "",
+    "api_hint_no": "💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.",
+    "api_hint_en": "💡 **Property lookup:** Enter address or parcel ID and click the button to auto-fill.",
+    "address": "Street address" if _en else "Gateadresse",
+    "municipality": "Municipality" if _en else "Kommune",
+    "gnr": "Parcel number (Gnr)" if _en else "Gårdsnummer (Gnr)",
+    "bnr": "Sub-parcel (Bnr)" if _en else "Bruksnummer (Bnr)",
+    "search_btn": "🔍 Search cadastre + Fetch site data" if _en else "🔍 Søk i Matrikkel + Hent Tomtedata (Kartverket)",
+    "found_address": "✅ Found property in address registry!" if _en else "✅ Fant eiendom i adresseregisteret!",
+    "no_address": ("No address match. Trying to fetch parcel boundary from Gnr/Bnr...") if _en else
+                  ("Fant ingen adressetreff. Prøver å hente tomtegrense direkte fra Gnr/Bnr..."),
+    "parcel_ok": "✅ Parcel boundary fetched! Area: **{area} m²** ({source})" if _en else
+                 "✅ Tomtegrense hentet! Areal: **{area} m²** ({source})",
+    "ortofoto_ok": "✅ Aerial photo fetched!" if _en else "✅ Ortofoto hentet!",
+    "ortofoto_fail": "Could not fetch aerial photo for this property." if _en else "Kunne ikke hente ortofoto for denne eiendommen.",
+    "parcel_fail": ("No parcel boundary found. Site area must be entered manually.") if _en else
+                   ("Fant ingen tomtegrense i WFS-tjenesten. Tomteareal må fylles inn manuelt."),
+    "ortofoto_label": "📸 Aerial photo" if _en else "📸 Ortofoto",
+    "sec_building": "🏢 03 Building & Site Data" if _en else "🏢 03 Bygg- og Tomtedata",
+    "use_type": "Primary Use" if _en else "Primær Bruk",
+    "floors": "Floors" if _en else "Etasjer",
+    "bta": "Building area (GFA m²)" if _en else "Bygningsareal (BTA m²)",
+    "site_m2": "Site area (m²)" if _en else "Tomteareal (m²)",
+    "sec_drawings": "📁 04 Drawings (AI Quality Check)" if _en else "📁 04 Tegningsgrunnlag (AI Kvalitetssikring)",
+    "drawings_hint": ("Upload drawings to let AI assess the quality of the documentation *before* it is sent to the engineering modules. "
+                      "AI will check whether plan, section, elevation and site plan are complete.") if _en else
+                     ("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. "
+                      "AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett."),
+    "upload_drawings": "Upload Elevation, Plan, Section and Site Plan (PDF/Images)" if _en else
+                       T["upload_drawings"],
+    "upload_other": "Upload other project documents (DWG, IFC, DXF, XLSX, DOCX)" if _en else
+                    T["upload_other"],
+    "upload_other_help": ("These files are stored in the project folder and available to all engineering modules.") if _en else
+                         ("Disse filene lagres i prosjektmappen og er tilgjengelig for alle fagmoduler (TDD, Anbudskontroll, Mengde & Scope, Yield osv)."),
+    "ai_analyze": "🤖 Analyze & QA Drawings with AI" if _en else "🤖 Analyser & Kvalitetssikre Tegninger med AI",
+    "ai_missing_key": "Google API key missing!" if _en else "Google API-nøkkel mangler!",
+    "ai_spinner": "AI is studying the drawings..." if _en else "AI studerer tegningene...",
+    "ai_result_title": "📊 AI Drawing Assessment" if _en else "📊 AI-Vurdering av Tegningsgrunnlag",
+    "qa_required": ("⚠️ **Action required:** You have uploaded new drawings. Run the AI quality check (button above) before saving.") if _en else
+                   ("⚠️ **Handling kreves:** Du har lastet opp nye tegninger. Du må kjøre AI-kvalitetssikringen (knappen over) før du kan lagre prosjektet."),
+    "save_btn": "💾 Save & Sync SSOT Data" if _en else "💾 Lagre & Synkroniser SSOT Data",
+    "save_ok": "✅ Data saved! Project '{name}' is now available to all modules." if _en else
+               "✅ Data er lagret trygt på serveren! Prosjektet '{name}' er nå tilgjengelig for alle moduler.",
+    "snapshot_title": "Project Summary" if _en else "Prosjektsammendrag",
+    "snapshot_sub": ("A quick overview of the SSOT data as it currently exists in the database.") if _en else
+                    (T["snapshot_sub"]),
+    "snap_rules": "Regulations" if _en else "Regelverk",
+    "snap_project": "Project" if _en else "Prosjekt",
+    "snap_client": "Client" if _en else "Oppdragsgiver",
+    "snap_address": "Address" if _en else "Adresse",
+    "snap_municipality": "Municipality" if _en else "Kommune",
+    "snap_gnr_bnr": "Gnr / Bnr",
+    "snap_type": "Type",
+    "snap_volume": "Volume/Site" if _en else "Volum/Tomt",
+    "snap_drawings": "Drawings stored" if _en else "Tegninger lagret",
+    "snap_drawings_val": "{n} pages ready" if _en else "{n} pages ready" if _en else "{saved_image_count} sider klare",
+    "snap_files": "Project files" if _en else "Prosjektfiler",
+    "snap_files_val": "{n} files stored" if _en else "{n} files stored" if _en else "{saved_files_count} filer lagret",
+    "mod_title": "🛠️ Engineering & Modules" if _en else "🛠️ Prosjektering & Fagmoduler",
+    "use_types": (["Residential (Apartment/Townhouse)", "Commercial / Office", "Retail", "Public / School", "Industrial / Warehouse"] if _en else
+                  T["use_types"]),
+}
+
+# --- 5. SESSION STATE LOGIKK (MED SELVHELBRENDENDE SIKKERHETSNETT) ---
 default_data = {
     "land": "Norge (TEK17 / Kartverket)", "p_name": "", "c_name": "", "p_desc": "",
     "adresse": "", "kommune": "", "gnr": "", "bnr": "",
@@ -316,7 +414,7 @@ with c1:
     render_html(logo_html)
 with c2:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
-    if st.button("← Tilbake til Portal", use_container_width=True, type="secondary"):
+    if st.button(T["back"], use_container_width=True, type="secondary"):
         go_home()
 with c3:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
@@ -329,84 +427,85 @@ render_html(f"""
 <div class="dash-grid">
     <div class="card card-hero">
         <div class="hero-kicker">✦ Builtly AI • Project SSOT</div>
-        <h1 class="hero-title">Project Configuration</h1>
-        <div class="hero-sub">Ett kontrollsenter for prosjektets kjerneparametere. Synkroniser prosjektets kontekst sømløst til teknisk prosjektering, bærekraftsanalyser og prosjektledelse.</div>
+        <h1 class="hero-title">{T['hero_title']}</h1>
+        <div class="hero-sub">{T['hero_sub']}</div>
     </div>
     
     <div class="card">
-        <div class="status-kicker">Sync Status</div>
+        <div class="status-kicker">{T['sync_status']}</div>
         <div class="status-title">{sync_status}</div>
-        <div class="status-desc">{filled_fields} av {len(fields_to_check)} nøkkelfelt er fylt ut og tilgjengelige for AI-modulene.</div>
+        <div class="status-desc">{T['fields_filled'].format(n=filled_fields, total=len(fields_to_check))}</div>
         
         <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:0.5rem; color: #c8d3df;">
-            <span>Kompletthet</span><span style="font-weight:700;">{completeness}%</span>
+            <span>{T['completeness']}</span><span style="font-weight:700;">{completeness}%</span>
         </div>
         <div class="prog-bar-bg"><div style="width: {completeness}%; height: 100%; background: {progress_color}; border-radius: 999px;"></div></div>
         
-        <div class="meta-row"><span class="meta-label">Sist oppdatert</span><span class="meta-value">{pd_state.get("last_sync", "Ikke synket enda")}</span></div>
-        <div class="meta-row"><span class="meta-label">Lokasjon satt</span><span class="meta-value">{"Ja" if pd_state.get("adresse") or pd_state.get("gnr") else "Nei"}</span></div>
+        <div class="meta-row"><span class="meta-label">{T['last_updated']}</span><span class="meta-value">{pd_state.get("last_sync", T['not_synced'])}</span></div>
+        <div class="meta-row"><span class="meta-label">{T['location_set']}</span><span class="meta-value">{T['yes'] if pd_state.get("adresse") or pd_state.get("gnr") else T['no']}</span></div>
     </div>
 </div>
 
 <div class="stat-grid">
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Datakompletthet</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
+        <div class="stat-title">{T['data_completeness']}</div><div class="stat-value" style="color:{progress_color};">{completeness}%</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Primær Bruk</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state.get("b_type", "-")}</div>
+        <div class="stat-title">{T['primary_use']}</div><div class="stat-value" style="font-size:1.4rem; padding-top:0.4rem;">{pd_state.get("b_type", "-")}</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Bygningsareal</div><div class="stat-value">{pd_state.get("bta", "0")} m²</div>
+        <div class="stat-title">{T['building_area']}</div><div class="stat-value">{pd_state.get("bta", "0")} m²</div>
     </div>
     <div class="card" style="padding: 1.5rem;">
-        <div class="stat-title">Tomteareal</div><div class="stat-value">{pd_state.get("tomteareal", "0")} m²</div>
+        <div class="stat-title">{T['site_area']}</div><div class="stat-value">{pd_state.get("tomteareal", "0")} m²</div>
     </div>
 </div>
 """)
 
 # --- 7. INPUT SEKSJON ---
-st.markdown("<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>Oppdater prosjektets kontrollsenter</h3>", unsafe_allow_html=True)
-st.markdown("<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>Fyll ut dataene under. Dette mates automatisk inn i alle AI-agenter for å sikre samsvar.</p>", unsafe_allow_html=True)
+st.markdown(f"<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>{T['update_title']}</h3>", unsafe_allow_html=True)
+st.markdown(f"<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>{T['update_sub']}</p>", unsafe_allow_html=True)
 
 input_col, snap_col = st.columns([2, 1], gap="large")
 
 with input_col:
-    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📌 01 Generelt</h4></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">{T['sec_general']}</h4></div>""", unsafe_allow_html=True)
     
     land_options = ["Norge (TEK17 / Kartverket)", "Sverige (BBR)", "Danmark (BR18)", "UK (Building Regs)"]
     try: l_idx = land_options.index(pd_state.get("land", "Norge (TEK17 / Kartverket)"))
     except: l_idx = 0
-    new_land = st.selectbox("🌍 Land / Lokalt Regelverk", land_options, index=l_idx)
+    new_land = st.selectbox(T["country_label"], land_options, index=l_idx)
     
     c1, c2 = st.columns(2)
-    new_p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name", ""))
-    new_c_name = c2.text_input("Tiltakshaver / Oppdragsgiver", value=pd_state.get("c_name", ""))
+    new_p_name = c1.text_input(T["project_name"], value=pd_state.get("p_name", ""))
+    new_c_name = c2.text_input(T["client"], value=pd_state.get("c_name", ""))
     
-    new_p_desc = st.text_area("Prosjektbeskrivelse / Narrativ", value=pd_state.get("p_desc", ""), height=140)
+    new_p_desc = st.text_area(T["description"], value=pd_state.get("p_desc", ""), height=140)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🌍 02 Lokasjon & API</h4></div>""", unsafe_allow_html=True)
+    st.markdown(f"""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">{T['sec_location']}</h4></div>""", unsafe_allow_html=True)
     
-    if "Norge" in new_land: st.info("💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten.")
+    if "Norge" in new_land: st.info(T["api_hint_no"])
+    else: st.info(T["api_hint_en"])
         
     c3, c4 = st.columns(2)
-    new_adresse = c3.text_input("Gateadresse", value=pd_state.get("adresse", ""))
-    new_kommune = c4.text_input("Kommune", value=pd_state.get("kommune", ""))
+    new_adresse = c3.text_input(T["address"], value=pd_state.get("adresse", ""))
+    new_kommune = c4.text_input(T["municipality"], value=pd_state.get("kommune", ""))
     
     c5, c6 = st.columns(2)
-    new_gnr = c5.text_input("Gårdsnummer (Gnr)", value=pd_state.get("gnr", ""))
-    new_bnr = c6.text_input("Bruksnummer (Bnr)", value=pd_state.get("bnr", ""))
+    new_gnr = c5.text_input(T["gnr"], value=pd_state.get("gnr", ""))
+    new_bnr = c6.text_input(T["bnr"], value=pd_state.get("bnr", ""))
     
     if "Norge" in new_land:
-        if st.button("🔍 Søk i Matrikkel + Hent Tomtedata (Kartverket)", type="secondary"):
+        if st.button(T["search_btn"], type="secondary"):
             st.session_state.project_data.update({"p_name": new_p_name, "c_name": new_c_name, "p_desc": new_p_desc})
-            with st.spinner("Søker i Nasjonalt Adresseregister..."):
+            with st.spinner("..."):
                 res = fetch_from_kartverket(new_adresse, new_kommune, new_gnr, new_bnr)
                 if res:
                     st.session_state.project_data.update(res)
-                    st.success("✅ Fant eiendom i adresseregisteret!")
+                    st.success(T["found_address"])
                 else:
-                    st.warning("Fant ingen adressetreff. Prøver å hente tomtegrense direkte fra Gnr/Bnr...")
+                    st.warning(T["no_address"])
 
             # Use resolved values (from API or user input)
             resolved_kommune = st.session_state.project_data.get("kommune", new_kommune)
@@ -420,7 +519,7 @@ with input_col:
                         st.session_state.project_data["tomteareal"] = int(parcel["area_m2"])
                         st.session_state.project_data["_parcel_bounds"] = list(parcel["bounds"])
                         st.session_state.project_data["_parcel_source"] = parcel["source"]
-                        st.success(f"✅ Tomtegrense hentet! Areal: **{int(parcel['area_m2']):,} m²** ({parcel['source']})")
+                        st.success(T["parcel_ok"].format(area=f"{int(parcel['area_m2']):,}", source=parcel["source"]))
 
                         # Fetch ortofoto
                         with st.spinner("Henter ortofoto fra Kartverket..."):
@@ -429,11 +528,11 @@ with input_col:
                                 buf = io.BytesIO()
                                 ortofoto.save(buf, format="JPEG", quality=85)
                                 st.session_state["_project_ortofoto"] = buf.getvalue()
-                                st.success("✅ Ortofoto hentet!")
+                                st.success(T["ortofoto_ok"])
                             else:
-                                st.info("Kunne ikke hente ortofoto for denne eiendommen.")
+                                st.info(T["ortofoto_fail"])
                     else:
-                        st.warning("Fant ingen tomtegrense i WFS-tjenesten. Tomteareal må fylles inn manuelt.")
+                        st.warning(T["parcel_fail"])
 
             time.sleep(0.5)
             st.rerun()
@@ -441,7 +540,7 @@ with input_col:
     # Show ortofoto if available
     if st.session_state.get("_project_ortofoto"):
         st.markdown("""<div style="margin-top:0.5rem;margin-bottom:0.5rem;">
-            <div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.3rem;">📸 Ortofoto fra Kartverket</div>
+            <div style="font-size:0.8rem;color:var(--muted);margin-bottom:0.3rem;">{T["ortofoto_label"]}</div>
         </div>""", unsafe_allow_html=True)
         st.image(st.session_state["_project_ortofoto"], use_container_width=True)
         parcel_src = pd_state.get("_parcel_source", "")
@@ -452,23 +551,23 @@ with input_col:
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">🏢 03 Bygg- og Tomtedata</h4></div>""", unsafe_allow_html=True)
     
     c7, c8, c9, c10 = st.columns(4)
-    type_options = ["Bolig (Blokk/Rekkehus)", "Næring / Kontor", "Handel / Kjøpesenter", "Offentlig / Skole", "Industri / Lager"]
+    type_options = T["use_types"]
     try: default_idx = type_options.index(pd_state.get("b_type", "Næring / Kontor"))
     except: default_idx = 1
     
-    new_b_type = c7.selectbox("Primær Bruk", type_options, index=default_idx)
-    new_etasjer = c8.number_input("Etasjer", value=int(pd_state.get("etasjer", 1)), min_value=1)
-    new_bta = c9.number_input("Bygningsareal (BTA m²)", value=int(pd_state.get("bta", 0)), step=100)
-    new_tomteareal = c10.number_input("Tomteareal (m²)", value=int(pd_state.get("tomteareal", 0)), step=100)
+    new_b_type = c7.selectbox(T["use_type"], type_options, index=default_idx)
+    new_etasjer = c8.number_input(T["floors"], value=int(pd_state.get("etasjer", 1)), min_value=1)
+    new_bta = c9.number_input(T["bta"], value=int(pd_state.get("bta", 0)), step=100)
+    new_tomteareal = c10.number_input(T["site_m2"], value=int(pd_state.get("tomteareal", 0)), step=100)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""<div style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);"><h4 style="color: #f5f7fb; margin: 0;">📁 04 Tegningsgrunnlag (AI Kvalitetssikring)</h4></div>""", unsafe_allow_html=True)
-    st.info("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett.")
+    st.info(T["drawings_hint"])
     
-    uploaded_drawings = st.file_uploader("Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)", accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
+    uploaded_drawings = st.file_uploader(T["upload_drawings"], accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
     st.file_uploader(
-        "Last opp øvrige prosjektdokumenter (DWG, IFC, DXF, XLSX, DOCX)",
+        T["upload_other"],
         accept_multiple_files=True,
         type=['dwg', 'dxf', 'ifc', 'xlsx', 'xls', 'docx', 'csv', 'zip'],
         key="project_extra_files",
@@ -477,9 +576,9 @@ with input_col:
     current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
     
     if uploaded_drawings:
-        if st.button("🤖 Analyser & Kvalitetssikre Tegninger med AI", type="secondary"):
+        if st.button(T["ai_analyze"], type="secondary"):
             if not google_key:
-                st.error("Google API-nøkkel mangler!")
+                st.error(T["ai_missing_key"])
             else:
                 with st.spinner("AI studerer tegningene. Større filer komprimeres automatisk for å forhindre minnekrasj..."):
                     images_for_qa = []
@@ -546,10 +645,10 @@ with input_col:
     mangler_qa = uploaded_drawings and set(current_file_names) != set(st.session_state.analyzed_file_names)
     
     if mangler_qa:
-        st.warning("⚠️ **Handling kreves:** Du har lastet opp nye tegninger. Du må kjøre AI-kvalitetssikringen (knappen over) før du kan lagre prosjektet.")
-        st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", disabled=True, use_container_width=True)
+        st.warning(T["qa_required"])
+        st.button(T["save_btn"], type="primary", disabled=True, use_container_width=True)
     else:
-        if st.button("💾 Lagre & Synkroniser SSOT Data", type="primary", use_container_width=True):
+        if st.button(T["save_btn"], type="primary", use_container_width=True):
             
             for p in IMG_DIR.glob("*.jpg"):
                 p.unlink()
@@ -610,7 +709,7 @@ with input_col:
             with open(SSOT_FILE, "w", encoding="utf-8") as f:
                 json.dump(st.session_state.project_data, f, ensure_ascii=False, indent=4)
                 
-            st.success(f"✅ Data er lagret trygt på serveren! Prosjektet '{new_p_name}' er nå tilgjengelig for alle moduler.")
+            st.success(T["save_ok"].format(name=new_p_name))
             time.sleep(1)
             st.rerun()
 
@@ -618,18 +717,18 @@ with snap_col:
     render_html(f"""
     <div class="card" style="padding: 1.5rem; position: sticky; top: 2rem;">
         <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--muted); margin-bottom:0.2rem;">Live Snapshot</div>
-        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">Prosjektsammendrag</h3>
-        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">Et raskt overblikk over SSOT-dataene slik de ligger i databasen nå.</p>
-        <div class="snap-row"><div class="snap-label">Regelverk</div><div class="snap-val" style="color:var(--accent);">{pd_state.get("land", "-").split(' ')[0]}</div></div>
-        <div class="snap-row"><div class="snap-label">Prosjekt</div><div class="snap-val">{pd_state.get("p_name") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Oppdragsgiver</div><div class="snap-val">{pd_state.get("c_name") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Adresse</div><div class="snap-val">{pd_state.get("adresse") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Kommune</div><div class="snap-val">{pd_state.get("kommune") or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Gnr / Bnr</div><div class="snap-val">{' / '.join(filter(None, [pd_state.get("gnr"), pd_state.get("bnr")])) or '-'}</div></div>
-        <div class="snap-row"><div class="snap-label">Type</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
-        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Volum/Tomt</div><div class="snap-val">{pd_state.get("bta", "0")} m² / {pd_state.get("tomteareal", "0")} m²</div></div>
-        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">Tegninger lagret</div><div class="snap-val" style="color:#7ee081;">{saved_image_count} sider klare</div></div>
-        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">Prosjektfiler</div><div class="snap-val" style="color:#7ee081;">{saved_files_count} filer lagret</div></div>
+        <h3 style="margin-top:0; margin-bottom:0.5rem; font-size:1.2rem;">{T["snapshot_title"]}</h3>
+        <p style="color:var(--soft); font-size:0.85rem; margin-bottom:1.5rem; line-height:1.5;">{T["snapshot_sub"]}</p>
+        <div class="snap-row"><div class="snap-label">{T["snap_rules"]}</div><div class="snap-val" style="color:var(--accent);">{pd_state.get("land", "-").split(' ')[0]}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_project"]}</div><div class="snap-val">{pd_state.get("p_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_client"]}</div><div class="snap-val">{pd_state.get("c_name") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_address"]}</div><div class="snap-val">{pd_state.get("adresse") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_municipality"]}</div><div class="snap-val">{pd_state.get("kommune") or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_gnr_bnr"]}</div><div class="snap-val">{' / '.join(filter(None, [pd_state.get("gnr"), pd_state.get("bnr")])) or '-'}</div></div>
+        <div class="snap-row"><div class="snap-label">{T["snap_type"]}</div><div class="snap-val">{pd_state.get("b_type", "-")}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">{T["snap_volume"]}</div><div class="snap-val">{pd_state.get("bta", "0")} m² / {pd_state.get("tomteareal", "0")} m²</div></div>
+        <div class="snap-row" style="border-bottom:none; margin-top:0.5rem;"><div class="snap-label">{T["snap_drawings"]}</div><div class="snap-val" style="color:#7ee081;">{T["snap_drawings_val"].format(n=saved_image_count)}</div></div>
+        <div class="snap-row" style="border-bottom:none;"><div class="snap-label">{T["snap_files"]}</div><div class="snap-val" style="color:#7ee081;">{T["snap_files_val"].format(n=saved_files_count)}</div></div>
     </div>
     """)
 
