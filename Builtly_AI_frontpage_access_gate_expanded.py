@@ -94,7 +94,7 @@ if "user_payment_method" not in st.session_state:
 if "user_account_status" not in st.session_state:
     st.session_state.user_account_status = ""  # "active", "pending_invoice", "inactive"
 if "user_reports" not in st.session_state:
-    st.session_state.user_reports = []  # list of dicts: {name, module, created, expires, download_url}
+    st.session_state.user_reports = []  # list of dicts: {project, name, module, created, expires, download_url}
 if "auth_page" not in st.session_state:
     st.session_state.auth_page = ""  # "login", "register", "plans", "dashboard"
 
@@ -2498,6 +2498,68 @@ CONTRACT_TERMS_TEXT = (
 PAYMENT_PROVIDER = "stripe"  # "stripe" or "vipps"
 
 
+def save_user_report(
+    project_name: str,
+    report_name: str,
+    module: str,
+    download_url: str = "",
+    file_path: str = "",
+) -> None:
+    """
+    Call this from ANY module when a report is generated.
+    Adds the report to the user's dashboard with automatic 30-day expiry.
+
+    Usage in modules (e.g. Mulighetsstudie, GEO, RIB, TDD, etc.):
+        from frontpage import save_user_report
+        save_user_report(
+            project_name="Linås Ski",
+            report_name="Mulighetsstudie — Alternativ B",
+            module="Mulighetsstudie",
+            file_path="/path/to/generated_report.pdf",
+        )
+
+    Parameters:
+        project_name: The project this report belongs to (from st.session_state.project_data["p_name"])
+        report_name:  Display name for the report
+        module:       Module code/name (e.g. "Mulighetsstudie", "GEO", "RIB", "TDD", "Klimarisiko", etc.)
+        download_url: URL to download the report (if hosted)
+        file_path:    Local file path to the generated PDF/file
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.now()
+    expires = now + timedelta(days=REPORT_RETENTION_DAYS)
+
+    report_entry = {
+        "project": project_name or st.session_state.get("project_data", {}).get("p_name", "Uten prosjekt"),
+        "name": report_name,
+        "module": module,
+        "created": now.strftime("%Y-%m-%d %H:%M"),
+        "expires": expires.strftime("%Y-%m-%d"),
+        "download_url": download_url,
+        "file_path": file_path,
+    }
+
+    if "user_reports" not in st.session_state:
+        st.session_state.user_reports = []
+    st.session_state.user_reports.append(report_entry)
+
+    # TODO: In production, also persist to database (Supabase, etc.)
+    # and set up a cron/scheduled task to delete expired reports.
+
+
+def purge_expired_reports() -> None:
+    """Remove reports older than REPORT_RETENTION_DAYS. Call on login or page load."""
+    from datetime import datetime
+    if "user_reports" not in st.session_state:
+        return
+    today = datetime.now().strftime("%Y-%m-%d")
+    st.session_state.user_reports = [
+        r for r in st.session_state.user_reports
+        if r.get("expires", "9999-99-99") >= today
+    ]
+
+
 def _is_user_logged_in() -> bool:
     return st.session_state.get("user_authenticated", False) and bool(st.session_state.get("user_email"))
 
@@ -2990,22 +3052,76 @@ def render_user_dashboard(lang_key: str) -> None:
             </div>
         """)
     else:
-        for i, report in enumerate(reports):
-            exp_text = report.get("expires", "—")
+        # Sort options
+        sort_col, filter_col = st.columns([1, 1])
+        with sort_col:
+            sort_by = st.selectbox(
+                "Sorter etter",
+                ["Prosjekt (A–Å)", "Prosjekt (Å–A)", "Nyeste først", "Eldste først", "Modul"],
+                index=0,
+                key="report_sort",
+            )
+        with filter_col:
+            # Collect unique project names
+            all_projects = sorted(set(r.get("project", "Uten prosjekt") for r in reports))
+            filter_project = st.selectbox(
+                "Filtrer på prosjekt",
+                ["Alle prosjekter"] + all_projects,
+                index=0,
+                key="report_filter_project",
+            )
+
+        # Filter
+        filtered = reports
+        if filter_project != "Alle prosjekter":
+            filtered = [r for r in reports if r.get("project", "Uten prosjekt") == filter_project]
+
+        # Sort
+        if sort_by == "Prosjekt (A–Å)":
+            filtered = sorted(filtered, key=lambda r: (r.get("project", "Uten prosjekt").lower(), r.get("created", "")))
+        elif sort_by == "Prosjekt (Å–A)":
+            filtered = sorted(filtered, key=lambda r: r.get("project", "Uten prosjekt").lower(), reverse=True)
+        elif sort_by == "Nyeste først":
+            filtered = sorted(filtered, key=lambda r: r.get("created", ""), reverse=True)
+        elif sort_by == "Eldste først":
+            filtered = sorted(filtered, key=lambda r: r.get("created", ""))
+        elif sort_by == "Modul":
+            filtered = sorted(filtered, key=lambda r: (r.get("module", ""), r.get("created", "")))
+
+        # Group by project
+        from collections import OrderedDict
+        grouped: dict = OrderedDict()
+        for r in filtered:
+            proj = r.get("project", "Uten prosjekt")
+            grouped.setdefault(proj, []).append(r)
+
+        for proj_name, proj_reports in grouped.items():
             render_html(f"""
-                <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:0.75rem;
-                            padding:1rem 1.5rem;margin-bottom:0.5rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));
-                            display:flex;align-items:center;justify-content:space-between;">
-                    <div>
-                        <div style="color:var(--bright,#f1f5f9);font-weight:600;">{html.escape(report.get('name', 'Rapport'))}</div>
-                        <div style="color:var(--soft,#c8d3df);font-size:0.8rem;">
-                            {html.escape(report.get('module', ''))} · Opprettet: {html.escape(report.get('created', '—'))} · Utløper: {html.escape(exp_text)}
-                        </div>
-                    </div>
-                    <div style="color:#38bdf8;font-size:0.85rem;">Last ned ↓</div>
+                <div style="color:#38bdf8;font-weight:700;font-size:0.95rem;margin-top:1.2rem;
+                            margin-bottom:0.4rem;padding-bottom:0.3rem;
+                            border-bottom:1px solid rgba(56,189,248,0.15);">
+                    📁 {html.escape(proj_name)}
+                    <span style="color:var(--soft,#c8d3df);font-weight:400;font-size:0.8rem;margin-left:0.5rem;">
+                        {len(proj_reports)} rapport{'er' if len(proj_reports) != 1 else ''}
+                    </span>
                 </div>
             """)
+            for report in proj_reports:
+                exp_text = report.get("expires", "—")
+                render_html(f"""
+                    <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:0.75rem;
+                                padding:1rem 1.5rem;margin-bottom:0.4rem;margin-left:1rem;
+                                background:var(--card-bg,rgba(6,17,26,0.55));
+                                display:flex;align-items:center;justify-content:space-between;">
+                        <div>
+                            <div style="color:var(--bright,#f1f5f9);font-weight:600;">{html.escape(report.get('name', 'Rapport'))}</div>
+                            <div style="color:var(--soft,#c8d3df);font-size:0.8rem;">
+                                {html.escape(report.get('module', ''))} · Opprettet: {html.escape(report.get('created', '—'))} · Utløper: {html.escape(exp_text)}
+                            </div>
+                        </div>
+                        <div style="color:#38bdf8;font-size:0.85rem;cursor:pointer;">Last ned ↓</div>
+                    </div>
+                """)
 
     # -- Actions --
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
