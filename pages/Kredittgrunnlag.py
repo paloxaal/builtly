@@ -2711,6 +2711,11 @@ if "credit_analysis" in st.session_state:
         project_info["_traffic_light"] = st.session_state.get("traffic_light", {})
         pdf_bytes = generate_credit_pdf(project_info, analysis)
         if pdf_bytes:
+            try:
+                from builtly_auth import save_report
+                save_report(project_name=project_info.get("navn", ""), report_name=f"Kredittgrunnlag — {project_info.get('navn', '')}", module="Kredittgrunnlag", file_path=f"kredittnotat_{project_info.get('navn', 'prosjekt')}.pdf")
+            except ImportError:
+                pass
             st.download_button(
                 "Last ned kredittnotat (PDF)",
                 data=pdf_bytes,
