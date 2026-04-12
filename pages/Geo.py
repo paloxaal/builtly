@@ -242,6 +242,200 @@ def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
         return img.convert("RGB")
     return None
 
+
+# ── HISTORISKE FLYBILDER ─────────────────────────────────────────────────────
+
+def _parse_nib_capabilities_for_oldest(xml_text: str, bbox_25833: tuple) -> Optional[str]:
+    """Parse GetCapabilities XML from Norge i Bilder prosjekter and find the
+    oldest layer whose bounding box overlaps the target bbox.
+    
+    Layer names in nib-prosjekter typically contain year info like
+    'Trondheim_2005', 'Soer-Troendelag_1964', etc.
+    Returns the layer name of the oldest matching project, or None.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+    # WMS 1.1.1 and 1.3.0 namespace handling
+    ns = ""
+    if root.tag.startswith("{"):
+        ns = root.tag.split("}")[0] + "}"
+
+    target_minx, target_miny, target_maxx, target_maxy = bbox_25833
+    candidates = []
+
+    for layer_el in root.iter(f"{ns}Layer"):
+        name_el = layer_el.find(f"{ns}Name")
+        if name_el is None or not name_el.text:
+            continue
+        layer_name = name_el.text.strip()
+
+        # Extract year from layer name (look for 4-digit year pattern)
+        year_match = re.search(r'(19\d{2}|20[0-2]\d)', layer_name)
+        if not year_match:
+            continue
+        year = int(year_match.group(1))
+
+        # Check geographic overlap via BoundingBox element
+        has_overlap = False
+        for bbox_el in layer_el.findall(f"{ns}BoundingBox"):
+            srs = bbox_el.get("SRS") or bbox_el.get("CRS") or bbox_el.get("crs") or ""
+            if "25833" not in srs and "32633" not in srs:
+                continue
+            try:
+                lx = float(bbox_el.get("minx", 0))
+                ly = float(bbox_el.get("miny", 0))
+                ux = float(bbox_el.get("maxx", 0))
+                uy = float(bbox_el.get("maxy", 0))
+                # Check overlap
+                if lx <= target_maxx and ux >= target_minx and ly <= target_maxy and uy >= target_miny:
+                    has_overlap = True
+                    break
+            except (ValueError, TypeError):
+                continue
+
+        # If no BoundingBox with EPSG:25833 found, try LatLonBoundingBox as fallback
+        if not has_overlap:
+            ll_el = layer_el.find(f"{ns}LatLonBoundingBox")
+            if ll_el is not None:
+                # We can't easily check overlap without projection, so accept it
+                has_overlap = True
+
+        # Also accept EX_GeographicBoundingBox for WMS 1.3.0
+        if not has_overlap:
+            geo_el = layer_el.find(f"{ns}EX_GeographicBoundingBox")
+            if geo_el is not None:
+                has_overlap = True
+
+        if has_overlap:
+            candidates.append((year, layer_name))
+
+    if not candidates:
+        return None
+
+    # Sort by year ascending, return the oldest
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
+
+def fetch_nib_historisk_ortofoto(bbox: tuple, max_age_years: int = 80) -> tuple:
+    """Fetch historical aerial photo from Norge i Bilder prosjekter WMS.
+    
+    Strategy:
+    1. GetCapabilities from wms.nib-prosjekter
+    2. Parse XML to find the oldest available project covering our bbox
+    3. Fetch GetMap for that specific layer
+    
+    Returns (PIL.Image, source_label, year) or (None, error_msg, None).
+    """
+    base_url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+    
+    # Step 1: Get capabilities (limit scope with bbox if supported)
+    try:
+        caps_resp = requests.get(base_url, params={
+            "service": "WMS",
+            "request": "GetCapabilities",
+            "version": "1.1.1",
+        }, timeout=20)
+        if caps_resp.status_code != 200:
+            return None, f"NIB prosjekter GetCapabilities feilet ({caps_resp.status_code})", None
+    except Exception as e:
+        return None, f"NIB prosjekter GetCapabilities timeout: {str(e)[:60]}", None
+
+    # Step 2: Parse and find oldest layer
+    oldest_layer = _parse_nib_capabilities_for_oldest(caps_resp.text, bbox)
+    if not oldest_layer:
+        return None, "NIB prosjekter: ingen historiske lag funnet for området", None
+
+    # Extract year for labeling
+    year_match = re.search(r'(19\d{2}|20[0-2]\d)', oldest_layer)
+    year_str = year_match.group(1) if year_match else "ukjent"
+
+    # Step 3: Fetch the map image
+    img = _wms_get_map(base_url, oldest_layer, bbox, width=800, height=800)
+    if img:
+        return img.convert("RGB"), f"Norge i Bilder ({oldest_layer})", year_str
+
+    return None, f"NIB prosjekter: lag '{oldest_layer}' ga intet bilde", None
+
+
+def fetch_kartverket_historiske_kart(bbox: tuple) -> tuple:
+    """Fetch historical maps from Kartverket Historiske Kart WMS.
+    
+    Contains georeferenced amtskart (county maps) from the 1800s.
+    Useful as supplementary context for environmental assessments.
+    
+    Returns (PIL.Image, source_label) or (None, error_msg).
+    """
+    base_url = "https://wms.geonorge.no/skwms1/wms.historiskekart"
+    for layers in ["historiskekart", "amt_kart", "0"]:
+        img = _wms_get_map(base_url, layers, bbox, width=800, height=800)
+        if img:
+            return img.convert("RGB"), f"Kartverket Historiske Kart ({layers})"
+    return None, "Kartverket Historiske Kart: ingen data for området"
+
+
+def fetch_historical_ortofoto(bbox: tuple) -> dict:
+    """Fetch historical aerial imagery from all available sources.
+    
+    Priority:
+    1. Geodata Online historical imagery services (GeomapBilder variants)
+    2. Norge i Bilder prosjekter WMS (oldest available project)
+    3. Kartverket Historiske Kart WMS (amtskart fallback)
+    
+    Returns dict with keys: image, source, year, log
+    """
+    result = {"image": None, "source": "", "year": None, "log": []}
+
+    # Source 1: Geodata Online historical imagery
+    if _GDO_TOKEN_OK:
+        try:
+            img, src = _gdo.fetch_historical_ortofoto(bbox=bbox, buffer_m=80.0,
+                                                       width=1200, height=1200)
+            if img:
+                result["image"] = img
+                result["source"] = src
+                result["log"].append(f"✅ Historisk ortofoto: {src}")
+                return result
+            else:
+                result["log"].append(f"⚠️ Geodata Online historisk: {src}")
+        except Exception as e:
+            result["log"].append(f"⚠️ Geodata Online historisk feilet: {str(e)[:60]}")
+
+    # Source 2: Norge i Bilder prosjekter (oldest available)
+    try:
+        img, src, year = fetch_nib_historisk_ortofoto(bbox)
+        if img:
+            result["image"] = img
+            result["source"] = src
+            result["year"] = year
+            result["log"].append(f"✅ Historisk ortofoto: {src} (år {year})")
+            return result
+        else:
+            result["log"].append(f"⚠️ {src}")
+    except Exception as e:
+        result["log"].append(f"⚠️ NIB prosjekter feilet: {str(e)[:60]}")
+
+    # Source 3: Kartverket Historiske Kart (amtskart - last resort)
+    try:
+        img, src = fetch_kartverket_historiske_kart(bbox)
+        if img:
+            result["image"] = img
+            result["source"] = src
+            result["log"].append(f"✅ Historisk kart (amtskart): {src}")
+            return result
+        else:
+            result["log"].append(f"⚠️ {src}")
+    except Exception as e:
+        result["log"].append(f"⚠️ Historiske kart feilet: {str(e)[:60]}")
+
+    result["log"].append("❌ Historisk flyfoto: Ingen kilde tilgjengelig — bruk manuell opplasting")
+    return result
+
+
 def fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
     """Miljødirektoratet — kjente forurensinglokaliteter i nærheten."""
     try:
@@ -280,6 +474,7 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
     """Fetch all available geodata for a location. Returns dict with maps and data."""
     result = {
         "ortofoto": None, "ortofoto_source": "",
+        "historisk": None, "historisk_source": "", "historisk_year": None,
         "losmasser": None, "berggrunn": None, "radon": None,
         "flom": None, "kvikkleire": None, "skred": None,
         "geologi_gdo": None,
@@ -351,6 +546,14 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         else:
             result["log"].append("❌ Ortofoto: Ingen kilde tilgjengelig")
 
+    # Step 2b: Historisk ortofoto — Geodata Online → Norge i Bilder prosjekter → Kartverket historiske kart
+    hist_result = fetch_historical_ortofoto(bbox)
+    if hist_result.get("image"):
+        result["historisk"] = hist_result["image"]
+        result["historisk_source"] = hist_result.get("source", "")
+        result["historisk_year"] = hist_result.get("year")
+    result["log"].extend(hist_result.get("log", []))
+
     # Step 3: Geodata Online — geologi temakart (MapServer export)
     if _GDO_TOKEN_OK:
         try:
@@ -407,8 +610,6 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
 
     return result
 
-    return result
-
 
 def geodata_summary_text(gd: dict) -> str:
     """Build a text summary of geodata findings for the AI prompt."""
@@ -416,6 +617,16 @@ def geodata_summary_text(gd: dict) -> str:
 
     if gd.get("ortofoto"):
         lines.append(f"Ortofoto hentet fra {gd.get('ortofoto_source', 'ukjent kilde')}.")
+
+    if gd.get("historisk"):
+        hist_src = gd.get('historisk_source', 'ukjent kilde')
+        hist_year = gd.get('historisk_year')
+        if hist_year:
+            lines.append(f"Historisk flyfoto fra {hist_year} er hentet og vedlagt ({hist_src}). Analyser bildet for å identifisere tidligere arealbruk og potensielle forurensningskilder.")
+        else:
+            lines.append(f"Historisk kart/flyfoto er hentet fra {hist_src} og vedlagt for analyse av historisk arealbruk.")
+    else:
+        lines.append("Historisk flyfoto er ikke tilgjengelig automatisk. Vurder historisk arealbruk basert på andre tilgjengelige kilder.")
 
     map_names = {
         "losmasser": "NGU Løsmassekart (kvartærgeologi)",
@@ -1553,12 +1764,14 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
     col_btn, col_status = st.columns([1, 2])
     with col_btn:
         if st.button("🌐 Hent alle geodata automatisk", type="primary", use_container_width=True):
-            with st.spinner("Henter geodata fra NGU, NVE, Kartverket, Miljødirektoratet..."):
+            with st.spinner("Henter geodata fra NGU, NVE, Kartverket, Geodata Online, Miljødirektoratet..."):
                 gd = fetch_all_geodata(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"])
                 st.session_state.geodata_result = gd
                 if gd.get("ortofoto"):
                     st.session_state.geo_maps["recent"] = gd["ortofoto"]
                     st.session_state.geo_maps["source"] = gd.get("ortofoto_source", "Geodata")
+                if gd.get("historisk"):
+                    st.session_state.geo_maps["historical"] = gd["historisk"]
                 if gd.get("errors"):
                     for err in gd["errors"]:
                         st.warning(f"⚠️ {err}")
@@ -1567,9 +1780,13 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
     gd = st.session_state.geodata_result
     if gd:
         with col_status:
-            n_maps = sum(1 for k in ["ortofoto", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"] if gd.get(k) is not None)
+            n_maps = sum(1 for k in ["ortofoto", "historisk", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"] if gd.get(k) is not None)
             n_contam = len(gd.get("grunnforurensning", []))
-            st.success(f"✅ {n_maps} kartlag hentet | {n_contam} forurensinglokaliteter funnet")
+            hist_label = ""
+            if gd.get("historisk"):
+                hist_year = gd.get("historisk_year", "")
+                hist_label = f" | Historisk flyfoto: {hist_year}" if hist_year else " | Historisk kart hentet"
+            st.success(f"✅ {n_maps} kartlag hentet | {n_contam} forurensinglokaliteter{hist_label}")
 
         # --- Diagnostikk-logg ---
         if gd.get("log"):
@@ -1581,10 +1798,27 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
             for err in gd["errors"]:
                 st.warning(f"⚠️ {err}")
 
-        # --- Ortofoto ---
-        if gd.get("ortofoto"):
+        # --- Ortofoto (nyeste + historisk) ---
+        has_recent = gd.get("ortofoto") is not None
+        has_hist = gd.get("historisk") is not None
+
+        if has_recent and has_hist:
+            st.markdown("##### 📸 Ortofoto — Nyeste vs. Historisk")
+            col_recent, col_hist = st.columns(2)
+            with col_recent:
+                st.image(gd["ortofoto"], caption=f"Nyeste ({gd.get('ortofoto_source', '')})", use_container_width=True)
+            with col_hist:
+                hist_year = gd.get("historisk_year", "")
+                hist_caption = f"Historisk ({hist_year})" if hist_year else "Historisk"
+                hist_caption += f" — {gd.get('historisk_source', '')}"
+                st.image(gd["historisk"], caption=hist_caption, use_container_width=True)
+        elif has_recent:
             st.markdown(f"##### 📸 Ortofoto — {gd.get('ortofoto_source', '')}")
             st.image(gd["ortofoto"], use_container_width=True)
+        elif has_hist:
+            hist_year = gd.get("historisk_year", "")
+            st.markdown(f"##### 📸 Historisk flyfoto ({hist_year})")
+            st.image(gd["historisk"], caption=gd.get("historisk_source", ""), use_container_width=True)
 
         # --- Geodata Online geologi ---
         if gd.get("geologi_gdo"):
@@ -1640,6 +1874,8 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
             st.session_state.geo_maps["recent"] = Image.open(man_recent).convert("RGB")
             st.session_state.geo_maps["source"] = "Manuelt opplastet"
 
+        if st.session_state.geo_maps.get("historical"):
+            st.info("✅ Historisk flyfoto er allerede hentet automatisk. Du kan overstyre med manuell opplasting nedenfor.")
         man_hist = st.file_uploader("Last opp historisk flyfoto (f.eks. 1950-tallet)", type=["png", "jpg", "jpeg"], key="man_hist")
         if man_hist:
             st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
@@ -1693,7 +1929,16 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             st.stop()
 
         model = genai.GenerativeModel(valgt_modell)
-        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse basert på tilgjengelige data."
+        # Build historical imagery prompt text
+        if st.session_state.geo_maps["historical"]:
+            hist_year = (gd or {}).get("historisk_year", "")
+            hist_source = (gd or {}).get("historisk_source", "")
+            if hist_year:
+                hist_tekst = f"Et historisk flyfoto fra {hist_year} er lagt ved ({hist_source}). Analyser dette for å identifisere tidligere arealbruk, industrivirksomhet, tankanlegg, deponier eller annen aktivitet som kan ha medført forurensning."
+            else:
+                hist_tekst = f"Et historisk kart/flyfoto er lagt ved ({hist_source}). Analyser dette for å identifisere historisk arealbruk."
+        else:
+            hist_tekst = "Historisk flyfoto mangler, gjør en kvalifisert antakelse basert på tilgjengelige data."
 
         prompt = f"""
         Du er Builtly RIG-M AI, en presis senior miljørådgiver og geotekniker.
@@ -1714,7 +1959,8 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
 
         VIKTIG OM VEDLAGTE BILDER:
         Du har fått tilsendt flere bilder. Disse inkluderer:
-        - Ortofoto (flyfoto) av eiendommen
+        - Ortofoto (flyfoto) av eiendommen — nyeste tilgjengelige
+        - Historisk flyfoto/kart (hvis tilgjengelig) — brukes for å vurdere historisk arealbruk og potensielle forurensningskilder
         - NGU Løsmassekart: Viser kvartærgeologiske avsetninger (marin leire, morene, bart fjell, etc.)
         - NGU Bergrunnskart: Viser bergartstyper under løsmassene
         - NGU Radonkart: Viser aktsomhetsnivå for radon (lav/moderat/høy)
