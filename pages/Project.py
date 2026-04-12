@@ -42,7 +42,15 @@ def find_page(base_name: str) -> str:
         if p.exists(): return str(p)
     return ""
 
+_SLUG_MAP = {"🇳🇴 Norsk": "no", "🇺🇸 English (US)": "en-us", "🇬🇧 English (UK)": "en-gb",
+             "🇸🇪 Svenska": "sv", "🇩🇰 Dansk": "da", "🇫🇮 Suomi": "fi", "🇩🇪 Deutsch": "de"}
+
 def go_home():
+    _slug = _SLUG_MAP.get(st.session_state.get("app_lang", "🇺🇸 English (US)"), "en-us")
+    try:
+        st.query_params["lang"] = _slug
+    except Exception:
+        pass
     st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
 
 # --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
@@ -421,7 +429,7 @@ def fetch_ortofoto_thumbnail(bounds, buffer_m=80):
 # --- 5. HEADER ---
 c1, c2, c3 = st.columns([2.5, 1, 1])
 with c1:
-    logo_html = f'<a href="/" target="_self" style="text-decoration:none;"><img src="{logo_data_uri()}" class="brand-logo"></a>' if logo_data_uri() else '<a href="/" target="_self"><h2 style="margin:0; color:white;">Builtly</h2></a>'
+    logo_html = f'<a href="/?lang={_SLUG_MAP.get(_lang, "en-us")}" target="_self" style="text-decoration:none;"><img src="{logo_data_uri()}" class="brand-logo"></a>' if logo_data_uri() else f'<a href="/?lang={_SLUG_MAP.get(_lang, "en-us")}" target="_self"><h2 style="margin:0; color:white;">Builtly</h2></a>'
     render_html(logo_html)
 with c2:
     st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
