@@ -24,6 +24,13 @@ except Exception:
     _gdo = None
     _HAS_GDO = False
 
+# --- Auth integration (for saving reports to user account) ---
+try:
+    import builtly_auth
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
 
 # ── OPEN NORWEGIAN GEODATA APIs (no auth required) ─────────────────────────
 
@@ -1608,6 +1615,18 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
 
                 st.session_state.generated_geo_pdf = pdf_data
                 st.session_state.generated_geo_filename = f"Builtly_GEO_{pd_state['p_name'].replace(' ', '_')}.pdf"
+
+                # Save report to user account (Supabase)
+                if _HAS_AUTH and st.session_state.get("user_authenticated"):
+                    try:
+                        builtly_auth.save_report(
+                            project_name=pd_state.get("p_name", ""),
+                            report_name=st.session_state.generated_geo_filename,
+                            module="RIG-M (Geo & Miljø)",
+                        )
+                    except Exception:
+                        pass
+
                 st.rerun()
 
         except Exception as e:
