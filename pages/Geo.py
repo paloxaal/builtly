@@ -18,12 +18,20 @@ from typing import Optional
 
 # --- Geodata Online client (if credentials configured) ---
 try:
-    from geodata_client import GeodataOnlineClient
+    from geodata_client import GeodataOnlineClient, geodata_buildings_to_neighbors
     _gdo = GeodataOnlineClient()
     _HAS_GDO = _gdo.is_available()
+    _GDO_TOKEN_OK = False
+    if _HAS_GDO:
+        try:
+            _gdo.get_token()
+            _GDO_TOKEN_OK = True
+        except Exception:
+            _GDO_TOKEN_OK = False
 except Exception:
     _gdo = None
     _HAS_GDO = False
+    _GDO_TOKEN_OK = False
 
 # --- Auth integration (for saving reports to user account) ---
 try:
@@ -79,6 +87,7 @@ def _geodata_online_map(service: str, bbox: tuple, width: int = 800, height: int
 
 def _coords_from_address(adresse: str, kommune: str, gnr: str, bnr: str) -> Optional[tuple]:
     """Resolve address/gnr-bnr to UTM33 coordinates via Geonorge."""
+    # Method 1: Address search
     queries = []
     adr = (adresse or "").replace(",", "").strip()
     kom = (kommune or "").replace(",", "").strip()
@@ -100,6 +109,74 @@ def _coords_from_address(adresse: str, kommune: str, gnr: str, bnr: str) -> Opti
                     nord, ost = rp.get("nord"), rp.get("øst")
                     if nord and ost:
                         return (float(ost), float(nord))
+        except Exception:
+            pass
+
+    # Method 2: WFS parcel lookup by gnr/bnr (same as Project Setup uses)
+    if gnr and bnr and kom:
+        coords = _coords_from_gnr_bnr(kom, gnr, bnr)
+        if coords:
+            return coords
+
+    return None
+
+
+def _resolve_kommunenummer(kommune: str) -> Optional[str]:
+    """Resolve kommune name to kommunenummer."""
+    s = kommune.strip()
+    if s.isdigit() and len(s) >= 3:
+        return s.zfill(4)
+    try:
+        resp = requests.get("https://ws.geonorge.no/kommuneinfo/v1/kommuner", timeout=5)
+        if resp.status_code == 200:
+            for k in resp.json():
+                if k.get("kommunenavn", "").lower() == s.lower():
+                    return k.get("kommunenummer")
+    except Exception:
+        pass
+    return None
+
+
+def _coords_from_gnr_bnr(kommune: str, gnr: str, bnr: str) -> Optional[tuple]:
+    """Get centroid coordinates from Kartverket WFS using gnr/bnr."""
+    knr = _resolve_kommunenummer(kommune)
+    if not knr:
+        return None
+
+    gnr_clean = str(gnr).strip()
+    bnr_clean = str(bnr).strip()
+    cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
+
+    for wfs_url, layer in [
+        ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
+        ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig"),
+    ]:
+        try:
+            resp = requests.get(wfs_url, params={
+                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                "typenames": layer, "srsName": "EPSG:25833",
+                "outputFormat": "application/json", "cql_filter": cql,
+            }, timeout=12)
+            if resp.status_code != 200:
+                resp = requests.get(wfs_url, params={
+                    "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                    "typenames": layer, "srsName": "EPSG:25833",
+                    "outputFormat": "json", "cql_filter": cql,
+                }, timeout=12)
+            if resp.status_code == 200:
+                features = resp.json().get("features", [])
+                if features:
+                    geom = features[0].get("geometry", {})
+                    coords = geom.get("coordinates", [])
+                    if coords:
+                        # Calculate centroid from polygon
+                        ring = coords[0] if isinstance(coords[0], list) and isinstance(coords[0][0], list) else coords
+                        if isinstance(ring[0], list):
+                            ring = ring[0]
+                        xs = [p[0] for p in ring if isinstance(p, (list, tuple)) and len(p) >= 2]
+                        ys = [p[1] for p in ring if isinstance(p, (list, tuple)) and len(p) >= 2]
+                        if xs and ys:
+                            return (sum(xs) / len(xs), sum(ys) / len(ys))
         except Exception:
             pass
     return None
@@ -205,11 +282,30 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         "errors": [], "log": [],
     }
 
-    # Step 1: Geocode address
+    # Step 1: Geocode — try multiple methods
     coords = _coords_from_address(adresse, kommune, gnr, bnr)
 
-    # Fallback: try Geodata Online geocoder
-    if not coords and _HAS_GDO:
+    # Primary method for Geodata Online users: fetch_tomt_polygon (same as Mulighetsstudie)
+    site_polygon = None
+    if _GDO_TOKEN_OK and gnr and bnr and kommune:
+        try:
+            knr = _resolve_kommunenummer(kommune)
+            if knr:
+                poly, msg = _gdo.fetch_tomt_polygon(knr, [(str(gnr).strip(), str(bnr).strip())])
+                if poly:
+                    site_polygon = poly
+                    # Derive coordinates from polygon centroid
+                    centroid = poly.centroid
+                    coords = (centroid.x, centroid.y)
+                    result["log"].append(f"✅ Tomt hentet via Geodata Online: {msg}")
+                    result["log"].append(f"   Tomteareal: {int(poly.area)} m²")
+                else:
+                    result["log"].append(f"⚠️ Geodata Online tomt: {msg}")
+        except Exception as e:
+            result["log"].append(f"⚠️ Geodata Online tomt: {str(e)[:60]}")
+
+    # Fallback: Geodata Online address search
+    if not coords and _GDO_TOKEN_OK:
         try:
             hits = _gdo.address_search(adresse or "", kommune or "")
             if hits:
@@ -225,13 +321,13 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
     x, y = coords
     result["coords"] = (x, y)
     result["log"].append(f"Koordinater: Ø={x:.0f}, N={y:.0f} (EPSG:25833)")
-    bbox = _bbox_from_center(x, y, radius_m)
+    bbox = site_polygon.bounds if site_polygon else _bbox_from_center(x, y, radius_m)
     result["bbox"] = bbox
 
-    # Step 2: Ortofoto — Geodata Online first, then Kartverket
-    if _HAS_GDO:
+    # Step 2: Ortofoto — Geodata Online HD first (like Mulighetsstudie), then Kartverket
+    if _GDO_TOKEN_OK:
         try:
-            img, src = _gdo.fetch_ortofoto(bbox, buffer_m=0)
+            img, src = _gdo.fetch_ortofoto(bbox=bbox, buffer_m=80.0, width=1200, height=1200)
             if img:
                 result["ortofoto"] = img
                 result["ortofoto_source"] = src
@@ -249,7 +345,7 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
             result["log"].append("❌ Ortofoto: Ingen kilde tilgjengelig")
 
     # Step 3: Geodata Online — geologi temakart (MapServer export)
-    if _HAS_GDO:
+    if _GDO_TOKEN_OK:
         try:
             from geodata_client import GEOMAP_DOKGEOLOGI_MS
             img = _geodata_online_map(GEOMAP_DOKGEOLOGI_MS, bbox)
@@ -290,11 +386,13 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
     result["log"].append(f"✅ Miljødirektoratet: {len(result['grunnforurensning'])} lokaliteter")
 
     # Step 7: Geodata Online geology context (attribute data)
-    if _HAS_GDO:
+    if _GDO_TOKEN_OK:
         try:
-            from shapely.geometry import box
-            site_poly = box(*bbox)
-            result["geology_context"] = _gdo.fetch_geology_context(site_poly, buffer_m=100.0)
+            geo_poly = site_polygon
+            if geo_poly is None:
+                from shapely.geometry import box
+                geo_poly = box(*bbox)
+            result["geology_context"] = _gdo.fetch_geology_context(geo_poly, buffer_m=100.0)
             n_feat = len((result["geology_context"] or {}).get("features", []))
             result["log"].append(f"✅ Geodata Online geologi kontekst: {n_feat} objekter")
         except Exception as e:
