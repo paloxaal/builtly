@@ -450,13 +450,25 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
         save:function(){{
           ex.value=JSON.stringify(els,null,2);
           try{{
-            var ta=window.parent.document.querySelector('textarea[aria-label="'+BRIDGE_LABEL+'"]');
-            if(!ta)throw new Error('bridge not found');
+            var pd=window.parent.document;
+            // Try multiple ways to find the bridge textarea
+            var ta=pd.querySelector('textarea[aria-label="'+BRIDGE_LABEL+'"]');
+            if(!ta){{ // Fallback: search all textareas for one with matching label sibling
+              var all=pd.querySelectorAll('textarea');
+              for(var i=0;i<all.length;i++){{
+                var lbl=all[i].closest('[data-testid="stTextArea"]');
+                if(lbl&&lbl.textContent.indexOf(BRIDGE_LABEL)>=0){{ta=all[i];break}}
+                // Also check aria-label on wrapper
+                var al=all[i].getAttribute('aria-label')||'';
+                if(al.indexOf('MARKER_BRIDGE')>=0){{ta=all[i];break}}
+              }}
+            }}
+            if(!ta)throw new Error('textarea not found');
             var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
             setter.call(ta,ex.value);
             ta.dispatchEvent(new Event('input',{{bubbles:true}}));
             ta.dispatchEvent(new Event('change',{{bubbles:true}}));
-            sts.textContent='Lagret! Klikk Bruk endringer under.';
+            sts.textContent='Lagret! Klikk Bruk endringer og oppdater PDF under.';
           }}catch(err){{
             sts.textContent='Kopier JSON fra feltet under manuelt.';
             ex.style.display='block';
@@ -1032,16 +1044,16 @@ if "generated_aku_pdf" in st.session_state:
                     break
                 with tab:
                     all_markers = st.session_state.get("aku_markers", [])
-                    img_markers = [m for m in all_markers if int(m.get("image_index", 0)) == img_idx]
-                    bridge_label = f"AKU_MARKER_BRIDGE_{img_idx}"
-                    images_data = [{"image": all_images[img_idx], "markers": img_markers}]
+                    bridge_label = "AKU_MARKER_BRIDGE"
+                    images_data = [{"image": all_images[img_idx], "markers": all_markers}]
                     render_acoustic_editor(images_data, bridge_label=bridge_label, component_key=f"aku_editor_{img_idx}")
             
             marker_buffer_key = "aku_marker_buffer"
             if marker_buffer_key not in st.session_state:
                 st.session_state[marker_buffer_key] = json.dumps(st.session_state.get("aku_markers", []), ensure_ascii=False, indent=2)
             
-            st.text_area("Markør-data (alle bilder)", key=marker_buffer_key, height=100, label_visibility="collapsed")
+            st.text_area("AKU_MARKER_BRIDGE", key=marker_buffer_key, height=60, label_visibility="visible",
+                         help="Teknisk buffer — editoren skriver markørdata hit. Du kan også redigere JSON direkte.")
             
             edit_cols = st.columns(3)
             if edit_cols[0].button("Bruk endringer og oppdater PDF", key="aku_apply_markers", use_container_width=True, type="primary"):
