@@ -5073,7 +5073,7 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 8px !important;
+            gap: 4px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
@@ -5082,33 +5082,37 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
             flex: 0 0 auto !important;
             width: auto !important;
-            max-width: none !important;
+            max-width: 160px !important;
         }
-        /* Inner sub-columns: always horizontal */
+        /* Inner sub-columns: always horizontal, compact */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 6px !important;
+            gap: 4px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
             flex: 0 0 auto !important;
             width: auto !important;
-            max-width: none !important;
+            max-width: 76px !important;
         }
         /* Compact selectboxes */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
             background: rgba(200,215,230,0.10) !important;
             border: 1px solid rgba(200,215,230,0.15) !important;
             border-radius: 10px !important;
-            min-height: 34px !important;
-            padding: 4px 8px !important;
+            min-height: 32px !important;
+            padding: 2px 6px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.7rem !important;
+            font-size: 0.62rem !important;
             white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            max-width: 56px !important;
+            display: block !important;
         }
 
         .mini-stat-grid,
@@ -5582,7 +5586,7 @@ st.markdown(
 # -------------------------------------------------
 apply_language_from_query()
 
-top_l, top_r_wrap = st.columns([3, 1], gap="small")
+top_l, top_r_wrap = st.columns([5, 1.5], gap="small")
 
 with top_l:
     logo_uri = logo_data_uri()
