@@ -82,9 +82,7 @@ def _geodata_online_map(service: str, bbox: tuple, width: int = 800, height: int
     if not _HAS_GDO:
         return None
     try:
-        minx, miny, maxx, maxy = bbox
-        img_bytes = _gdo._image_export(service, f"{minx},{miny},{maxx},{maxy}",
-                                        width=width, height=height)
+        img_bytes = _gdo._image_export(service, bbox, width=width, height=height)
         if img_bytes:
             return Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception:
@@ -245,192 +243,111 @@ def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
 
 # ── HISTORISKE FLYBILDER ─────────────────────────────────────────────────────
 
-def _parse_nib_capabilities_for_oldest(xml_text: str, bbox_25833: tuple) -> Optional[str]:
-    """Parse GetCapabilities XML from Norge i Bilder prosjekter and find the
-    oldest layer whose bounding box overlaps the target bbox.
+def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
+    """Try to fetch historical orthophotos from Norge i Bilder WMS.
     
-    Layer names in nib-prosjekter typically contain year info like
-    'Trondheim_2005', 'Soer-Troendelag_1964', etc.
-    Returns the layer name of the oldest matching project, or None.
-    """
-    import xml.etree.ElementTree as ET
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return None
-
-    # WMS 1.1.1 and 1.3.0 namespace handling
-    ns = ""
-    if root.tag.startswith("{"):
-        ns = root.tag.split("}")[0] + "}"
-
-    target_minx, target_miny, target_maxx, target_maxy = bbox_25833
-    candidates = []
-
-    for layer_el in root.iter(f"{ns}Layer"):
-        name_el = layer_el.find(f"{ns}Name")
-        if name_el is None or not name_el.text:
-            continue
-        layer_name = name_el.text.strip()
-
-        # Extract year from layer name (look for 4-digit year pattern)
-        year_match = re.search(r'(19\d{2}|20[0-2]\d)', layer_name)
-        if not year_match:
-            continue
-        year = int(year_match.group(1))
-
-        # Check geographic overlap via BoundingBox element
-        has_overlap = False
-        for bbox_el in layer_el.findall(f"{ns}BoundingBox"):
-            srs = bbox_el.get("SRS") or bbox_el.get("CRS") or bbox_el.get("crs") or ""
-            if "25833" not in srs and "32633" not in srs:
-                continue
-            try:
-                lx = float(bbox_el.get("minx", 0))
-                ly = float(bbox_el.get("miny", 0))
-                ux = float(bbox_el.get("maxx", 0))
-                uy = float(bbox_el.get("maxy", 0))
-                # Check overlap
-                if lx <= target_maxx and ux >= target_minx and ly <= target_maxy and uy >= target_miny:
-                    has_overlap = True
-                    break
-            except (ValueError, TypeError):
-                continue
-
-        # If no BoundingBox with EPSG:25833 found, try LatLonBoundingBox as fallback
-        if not has_overlap:
-            ll_el = layer_el.find(f"{ns}LatLonBoundingBox")
-            if ll_el is not None:
-                # We can't easily check overlap without projection, so accept it
-                has_overlap = True
-
-        # Also accept EX_GeographicBoundingBox for WMS 1.3.0
-        if not has_overlap:
-            geo_el = layer_el.find(f"{ns}EX_GeographicBoundingBox")
-            if geo_el is not None:
-                has_overlap = True
-
-        if has_overlap:
-            candidates.append((year, layer_name))
-
-    if not candidates:
-        return None
-
-    # Sort by year ascending, return the oldest
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0][1]
-
-
-def fetch_nib_historisk_ortofoto(bbox: tuple, max_age_years: int = 80) -> tuple:
-    """Fetch historical aerial photo from Norge i Bilder prosjekter WMS.
-    
-    Strategy:
-    1. GetCapabilities from wms.nib-prosjekter
-    2. Parse XML to find the oldest available project covering our bbox
-    3. Fetch GetMap for that specific layer
-    
+    Tries multiple Kartverket WMS services that may contain older imagery.
     Returns (PIL.Image, source_label, year) or (None, error_msg, None).
     """
-    base_url = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
-    
-    # Step 1: Get capabilities (limit scope with bbox if supported)
+    # Approach 1: Norge i Bilder prosjekter — try direct GetMap with 'ortofoto' layer
+    # (this sometimes returns older imagery depending on the area)
+    base_nib_proj = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
     try:
-        caps_resp = requests.get(base_url, params={
-            "service": "WMS",
-            "request": "GetCapabilities",
-            "version": "1.1.1",
-        }, timeout=20)
-        if caps_resp.status_code != 200:
-            return None, f"NIB prosjekter GetCapabilities feilet ({caps_resp.status_code})", None
-    except Exception as e:
-        return None, f"NIB prosjekter GetCapabilities timeout: {str(e)[:60]}", None
+        # Try a general 'Ortofoto' layer from nib-prosjekter
+        for layer_name in ["ortofoto", "Ortofoto"]:
+            img = _wms_get_map(base_nib_proj, layer_name, bbox, width=800, height=800)
+            if img:
+                return img.convert("RGB"), f"Norge i Bilder prosjekter ({layer_name})", None
+    except Exception:
+        pass
 
-    # Step 2: Parse and find oldest layer
-    oldest_layer = _parse_nib_capabilities_for_oldest(caps_resp.text, bbox)
-    if not oldest_layer:
-        return None, "NIB prosjekter: ingen historiske lag funnet for området", None
+    # Approach 2: Kartverket historiske kart (amtskart from 1800s — georeferenced)
+    hist_kart_url = "https://wms.geonorge.no/skwms1/wms.historiskekart"
+    for layers in ["historiskekart", "amt_kart", "0", "1", "2"]:
+        try:
+            img = _wms_get_map(hist_kart_url, layers, bbox, width=800, height=800)
+            if img:
+                return img.convert("RGB"), f"Kartverket Historiske Kart ({layers})", "1800-tallet"
+        except Exception:
+            continue
 
-    # Extract year for labeling
-    year_match = re.search(r'(19\d{2}|20[0-2]\d)', oldest_layer)
-    year_str = year_match.group(1) if year_match else "ukjent"
-
-    # Step 3: Fetch the map image
-    img = _wms_get_map(base_url, oldest_layer, bbox, width=800, height=800)
-    if img:
-        return img.convert("RGB"), f"Norge i Bilder ({oldest_layer})", year_str
-
-    return None, f"NIB prosjekter: lag '{oldest_layer}' ga intet bilde", None
-
-
-def fetch_kartverket_historiske_kart(bbox: tuple) -> tuple:
-    """Fetch historical maps from Kartverket Historiske Kart WMS.
-    
-    Contains georeferenced amtskart (county maps) from the 1800s.
-    Useful as supplementary context for environmental assessments.
-    
-    Returns (PIL.Image, source_label) or (None, error_msg).
-    """
-    base_url = "https://wms.geonorge.no/skwms1/wms.historiskekart"
-    for layers in ["historiskekart", "amt_kart", "0"]:
-        img = _wms_get_map(base_url, layers, bbox, width=800, height=800)
-        if img:
-            return img.convert("RGB"), f"Kartverket Historiske Kart ({layers})"
-    return None, "Kartverket Historiske Kart: ingen data for området"
+    return None, "Kartverket historiske tjenester: ingen data for området", None
 
 
 def fetch_historical_ortofoto(bbox: tuple) -> dict:
     """Fetch historical aerial imagery from all available sources.
     
     Priority:
-    1. Geodata Online historical imagery services (GeomapBilder variants)
-    2. Norge i Bilder prosjekter WMS (oldest available project)
-    3. Kartverket Historiske Kart WMS (amtskart fallback)
+    1. Geodata Online — dynamically discover imagery services (GeomapBilder variants)
+    2. Norge i Bilder prosjekter WMS
+    3. Kartverket Historiske Kart WMS
     
     Returns dict with keys: image, source, year, log
     """
     result = {"image": None, "source": "", "year": None, "log": []}
 
-    # Source 1: Geodata Online historical imagery
-    if _GDO_TOKEN_OK:
-        try:
-            img, src = _gdo.fetch_historical_ortofoto(bbox=bbox, buffer_m=80.0,
-                                                       width=1200, height=1200)
-            if img:
-                result["image"] = img
-                result["source"] = src
-                result["log"].append(f"✅ Historisk ortofoto: {src}")
-                return result
-            else:
-                result["log"].append(f"⚠️ Geodata Online historisk: {src}")
-        except Exception as e:
-            result["log"].append(f"⚠️ Geodata Online historisk feilet: {str(e)[:60]}")
+    # Expand bbox for historical imagery (parcel bounds might be too tight)
+    minx, miny, maxx, maxy = bbox
+    buf = 100.0  # 100m buffer
+    expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
 
-    # Source 2: Norge i Bilder prosjekter (oldest available)
+    # Source 1: Geodata Online — dynamic discovery of imagery services
+    if _GDO_TOKEN_OK:
+        # First: try the known candidate service paths
+        try:
+            from geodata_client import GEOMAP_BILDER_HISTORICAL_CANDIDATES
+            for service, label in GEOMAP_BILDER_HISTORICAL_CANDIDATES:
+                try:
+                    img_bytes = _gdo._image_export(service, expanded_bbox, width=1200, height=1200)
+                    if img_bytes and len(img_bytes) > 2000:
+                        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                        result["image"] = img
+                        result["source"] = label
+                        result["log"].append(f"✅ Historisk ortofoto: {label}")
+                        return result
+                except Exception:
+                    continue
+            result["log"].append("⚠️ Geodata Online historisk: kandidattjenester ga ingen data")
+        except ImportError:
+            result["log"].append("⚠️ Geodata Online historisk: importfeil")
+
+        # Second: dynamically discover available imagery services
+        try:
+            discovered = _gdo.discover_historical_imagery_services()
+            if discovered:
+                svc_names = [s.get("name", "") for s in discovered]
+                result["log"].append(f"📋 Geodata Online bildetjenester funnet: {', '.join(svc_names)}")
+                for svc_info in discovered:
+                    svc_path = svc_info.get("service", "")
+                    svc_name = svc_info.get("name", "")
+                    try:
+                        img_bytes = _gdo._image_export(svc_path, expanded_bbox, width=1200, height=1200)
+                        if img_bytes and len(img_bytes) > 2000:
+                            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                            result["image"] = img
+                            result["source"] = f"Geodata Online {svc_name}"
+                            result["log"].append(f"✅ Historisk ortofoto: {svc_name}")
+                            return result
+                    except Exception:
+                        continue
+            else:
+                result["log"].append("⚠️ Geodata Online: ingen alternative bildetjenester funnet")
+        except Exception as e:
+            result["log"].append(f"⚠️ Geodata Online discovery feilet: {str(e)[:80]}")
+
+    # Source 2: Norge i Bilder / Kartverket historiske tjenester
     try:
-        img, src, year = fetch_nib_historisk_ortofoto(bbox)
+        img, src, year = fetch_nib_historisk_ortofoto(expanded_bbox)
         if img:
             result["image"] = img
             result["source"] = src
             result["year"] = year
-            result["log"].append(f"✅ Historisk ortofoto: {src} (år {year})")
+            result["log"].append(f"✅ Historisk ortofoto: {src}")
             return result
         else:
             result["log"].append(f"⚠️ {src}")
     except Exception as e:
-        result["log"].append(f"⚠️ NIB prosjekter feilet: {str(e)[:60]}")
-
-    # Source 3: Kartverket Historiske Kart (amtskart - last resort)
-    try:
-        img, src = fetch_kartverket_historiske_kart(bbox)
-        if img:
-            result["image"] = img
-            result["source"] = src
-            result["log"].append(f"✅ Historisk kart (amtskart): {src}")
-            return result
-        else:
-            result["log"].append(f"⚠️ {src}")
-    except Exception as e:
-        result["log"].append(f"⚠️ Historiske kart feilet: {str(e)[:60]}")
+        result["log"].append(f"⚠️ Kartverket historisk feilet: {str(e)[:80]}")
 
     result["log"].append("❌ Historisk flyfoto: Ingen kilde tilgjengelig — bruk manuell opplasting")
     return result
