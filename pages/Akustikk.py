@@ -28,6 +28,20 @@ try:
 except ImportError:
     fitz = None
 
+# --- Auth integration (for saving reports to user account) ---
+try:
+    import builtly_auth
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
+if _HAS_AUTH:
+    if not st.session_state.get("user_authenticated"):
+        builtly_auth.try_restore_from_browser()
+    elif st.session_state.get("_sb_access_token"):
+        builtly_auth.restore_session()
+
+
 try:
     import requests
     HAS_REQUESTS = True
@@ -328,15 +342,17 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
           var c=e.color||'#ef4444';
           ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=c;
           if(e.type==='circle'||!e.type){{
-            var r=IW*0.04;
+            var r=Math.max(8,IW*0.015);
             ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
             if(isSel){{ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fill()}}
-            var txt=(e.db||'??')+' dB';
-            ctx.font='bold '+Math.max(11,IW*0.018)+'px system-ui';
+            var txt=(e.db||'??');
+            ctx.font='bold '+Math.max(8,IW*0.01)+'px system-ui';
             var tw=ctx.measureText(txt).width;
-            ctx.fillStyle=c;ctx.fillRect(x-tw/2-4,y-8,tw+8,16);
-            ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+5);
-            if(e.label){{ctx.font='10px system-ui';ctx.fillStyle=c;ctx.fillText(e.label,x-tw/2,y+20)}}
+            // Number inside circle
+            ctx.fillStyle=c;ctx.fillRect(x-tw/2-2,y-5,tw+4,11);
+            ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+4);
+            // Label below
+            if(e.label){{ctx.font=Math.max(7,IW*0.008)+'px system-ui';ctx.fillStyle=c;ctx.fillText(e.label,x-r,y+r+10)}}
           }}else if(e.type==='rect'){{
             var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;
             ctx.fillStyle=c;ctx.fillRect(x,y,w,h);
@@ -369,7 +385,7 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
       function hitTest(x,y){{
         for(var i=els.length-1;i>=0;i--){{
           var e=els[i],ex=(e.x_pct/100)*IW,ey=(e.y_pct/100)*IH;
-          if(dist(x,y,ex,ey)<IW*0.05)return i;
+          if(dist(x,y,ex,ey)<IW*0.025)return i;
           if(e.type==='rect'){{var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;if(x>=ex&&x<=ex+w&&y>=ey&&y<=ey+h)return i}}
         }}
         return -1;
@@ -752,6 +768,9 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                 st.error(f"Feil under bildebehandling: {e}")
                 
     st.info(f"Klar! Sender totalt {len(images_for_ai)} bilder/tegninger til AI-en for vurdering.")
+    
+    # Lagre rene kopier FØR AI tegner på dem
+    saved_images_clean = [img.copy() for img in images_for_ai]
                 
     with st.spinner(f"🤖 Pinpointer støysoner og tegner fysiske sirkler på bildene..."):
         try:
@@ -779,28 +798,32 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
         
         VIKTIGE REGLER FOR NØYAKTIGHET:
         1. Les støykartet nøye. Fargekoder på offisielle støykart: rød=Lden>65dB, oransje=60-65, gul=55-60, grønn=<55.
-        2. Plasser dB-markører BARE der du kan se at en bygningsfasade faktisk treffes av en støysone.
-        3. Ikke gjett — hvis du ikke kan lese støynivået, merk det som "??" dB.
-        4. Skille mellom nordfasade, sørfasade, østfasade, vestfasade i etikettene.
-        5. Henvis til NS 8175 lydklassekrav og TEK17 §13-6 for fasadeisolasjon.
+        2. Plasser dB-markører PRESIST på hver bygningsfasade som treffes av støy — ett punkt per fasaderetning per bygg.
+        3. Bruk FASADENIVÅER fra støykartet, ikke generelle estimater. Eksempel: "Bygg A1, Nord-øst fasade: Lden 64 dB".
+        4. Ikke bruk store sirkler — plasser markører som PUNKTER rett på fasadelinjen der støyen treffer.
+        5. Merk stille sider (Lden < 55 dB) med grønn markør.
+        6. Henvis til NS 8175 lydklassekrav og TEK17 §13-6 for fasadeisolasjon.
+        7. Vurder tiltak: støyskjerm, tett rekkverk, absorbenter, skjermvegg, lavt luftevindu.
         
-        EKSTREMT VIKTIG FOR TEGNING AV STØY-SIRKLER:
+        EKSTREMT VIKTIG FOR TEGNING AV STØY-MARKØRER:
         Returner en maskinlesbar JSON-blokk HELT NEDERST i teksten din.
-        Anslå X- og Y-koordinater (i prosent av bildet) for hver fasade som treffes.
+        Plasser MANGE presise punkter — ett per fasadeside per bygg, som i en profesjonell støyrapport.
+        Bruk EKSAKTE dB-verdier (heltall), ikke intervaller.
         
         JSON-format:
         ```json
         [
-          {{"image_index": 0, "x_pct": 50, "y_pct": 20, "db": "72", "color": "red", "label": "Nordfasade"}},
-          {{"image_index": 0, "x_pct": 80, "y_pct": 80, "db": "54", "color": "green", "label": "Sørfasade (skjermet)"}}
+          {{"image_index": 0, "x_pct": 72, "y_pct": 35, "db": "64", "color": "red", "label": "A1 NØ-fasade"}},
+          {{"image_index": 0, "x_pct": 65, "y_pct": 45, "db": "58", "color": "yellow", "label": "A1 SV-fasade"}},
+          {{"image_index": 0, "x_pct": 60, "y_pct": 40, "db": "43", "color": "green", "label": "A1 stille side V"}}
         ]
         ```
         Regler for JSON:
-        - `image_index`: Hvilket bilde (0, 1, 2...). Bruk 0 for støykartet/situasjonsplanen.
-        - `x_pct` og `y_pct`: Prosent (0-100) fra øvre venstre hjørne.
-        - `db`: Estimert dB-verdi som tekst. Bruk "??" hvis usikkert.
+        - `image_index`: Bilde nr (0=støykart/situasjonsplan, 1=plantegning osv).
+        - `x_pct` og `y_pct`: Prosent (0-100) — plasser PRESIST på fasadelinjen, ikke midt i bygget.
+        - `db`: Eksakt Lden-verdi som heltall. Bruk "??" KUN hvis helt umulig å estimere.
         - `color`: "red" (>65 dB), "yellow" (55-65 dB), eller "green" (<55 dB).
-        - `label`: Kort beskrivelse av fasaden/punktet (f.eks. "Nordfasade mot E6").
+        - `label`: Kort: "Bygg [X], [retning] fasade" — f.eks. "A2 NV-fasade", "B stille side S".
         
         Tekstlig vurdering (skriv OVER JSON-blokken):
         # 1. SAMMENDRAG OG KONKLUSJON
@@ -836,38 +859,49 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                             # Regn ut piksel-posisjon ut fra prosent
                             x = int((marker.get("x_pct", 50) / 100.0) * w)
                             y = int((marker.get("y_pct", 50) / 100.0) * h)
-                            db_str = str(marker.get("db", "??")) + " dB"
+                            db_str = str(marker.get("db", "??"))
+                            label = str(marker.get("label", ""))
                             
                             color_name = marker.get("color", "red").lower()
                             if "green" in color_name:
-                                color_rgb = (46, 204, 113) # Pen grønnfarge
+                                color_rgb = (46, 204, 113)
                             elif "yellow" in color_name:
-                                color_rgb = (241, 196, 15) # Pen gulfarge
+                                color_rgb = (241, 196, 15)
                             else:
-                                color_rgb = (231, 76, 60) # Alvorlig rødfarge
+                                color_rgb = (231, 76, 60)
                             
-                            # Tegn en stor, tydelig sirkel
-                            radius = int(w * 0.05)
-                            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color_rgb, width=max(4, int(w*0.008)))
+                            # Liten, presis sirkel som i profesjonell rapport
+                            radius = int(w * 0.014)
+                            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color_rgb, width=max(2, int(w*0.003)))
                             
-                            # Prøv å bruke en font, eller fallback til standard tegning
                             try:
-                                font = ImageFont.truetype("arial.ttf", int(w * 0.03))
+                                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(w * 0.013))
+                                font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", int(w * 0.009))
                             except:
                                 font = ImageFont.load_default()
+                                font_small = font
                             
-                            # Tegn bakgrunnsboks for teksten slik at den blir lesbar over kartet
+                            # dB-tall inne i sirkelen
                             try:
                                 bbox = draw.textbbox((0,0), db_str, font=font)
                                 tw = bbox[2] - bbox[0]
                                 th = bbox[3] - bbox[1]
                             except:
-                                tw, th = 60, 20
+                                tw, th = 20, 12
                                 
-                            draw.rectangle((x - tw/2 - 8, y - th/2 - 8, x + tw/2 + 8, y + th/2 + 8), fill=color_rgb)
+                            # Tall inne i sirkel med halvtransparent bakgrunn
+                            draw.rectangle((x - tw/2 - 2, y - th/2 - 1, x + tw/2 + 2, y + th/2 + 1), fill=color_rgb)
                             draw.text((x - tw/2, y - th/2), db_str, fill=(255, 255, 255), font=font)
                             
-                            # Oppdaterer bildet i listen slik at FPDF får den overtegnede versjonen
+                            # Label under sirkelen (bygg + fasaderetning)
+                            if label:
+                                try:
+                                    lbbox = draw.textbbox((0,0), label, font=font_small)
+                                    lw = lbbox[2] - lbbox[0]
+                                except:
+                                    lw = len(label) * 6
+                                draw.text((x - lw/2, y + radius + 3), label, fill=color_rgb, font=font_small)
+                            
                             images_for_ai[idx] = img
 
                 except Exception as e:
@@ -875,7 +909,9 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
             
             # ── Lagre markører for interaktiv redigering ──
             st.session_state["aku_markers"] = markers if json_match else []
-            st.session_state["aku_images"] = images_for_ai
+            st.session_state["aku_images"] = images_for_ai  # påtegnet versjon for PDF
+            # Lagre RENE originaler for re-rendering
+            st.session_state["aku_images_original"] = [img.copy() for img in saved_images_clean]
             st.session_state["aku_ai_text"] = clean_text
             
             with st.spinner("Kompilerer Akustikk-PDF og fletter inn tegninger med tegnede sirkler..."):
@@ -914,16 +950,21 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                 st.session_state.generated_aku_filename = f"Builtly_RIAku_{p_name}.pdf"
 
                 # Lagre til Supabase dashboard
-                try:
-                    from builtly_auth import save_report
-                    save_report(
+                if _HAS_AUTH:
+
+                    try:
+
+                        builtly_auth.save_report(
                         project_name=pd_state.get("p_name", p_name),
                         report_name=f"Akustikk — Builtly_RIAku_{p_name}.pdf",
                         module="RIAku (Akustikk)",
                         file_path=f"Builtly_RIAku_{p_name}.pdf",
-                    )
-                except Exception:
-                    pass
+
+                        )
+
+                    except Exception:
+
+                        pass
                 try:
                     report_dir = DB_DIR / "reports"
                     report_dir.mkdir(exist_ok=True)
@@ -975,30 +1016,45 @@ if "generated_aku_pdf" in st.session_state:
     # ── Interaktiv redigering av støymarkører ──
     if st.session_state.get("aku_markers") is not None and st.session_state.get("aku_images"):
         with st.expander("Rediger støymarkører (dB-sirkler)", expanded=False):
-            st.caption("Flytt, legg til eller slett dB-sirkler, støysoner og skjermer. Klikk Lagre, deretter Bruk endringer for å oppdatere tegningen.")
+            st.caption("Flytt, legg til eller slett dB-sirkler på alle bilder. Klikk Lagre i editoren, deretter **Bruk endringer** for å oppdatere PDF-en.")
             
-            bridge_label = "AKU_MARKER_BRIDGE"
-            images_data = [{"image": img, "markers": st.session_state.get("aku_markers", [])} for img in st.session_state.get("aku_images", [])[:1]]
+            all_images = st.session_state.get("aku_images", [])
+            num_images = len(all_images)
             
-            render_acoustic_editor(images_data, bridge_label=bridge_label, component_key="aku_editor_main")
+            # Vis tabs for hvert bilde
+            if num_images > 1:
+                img_tabs = st.tabs([f"Bilde {i+1}" for i in range(min(num_images, 6))])
+            else:
+                img_tabs = [st.container()]
+            
+            for img_idx, tab in enumerate(img_tabs):
+                if img_idx >= num_images:
+                    break
+                with tab:
+                    all_markers = st.session_state.get("aku_markers", [])
+                    img_markers = [m for m in all_markers if int(m.get("image_index", 0)) == img_idx]
+                    bridge_label = f"AKU_MARKER_BRIDGE_{img_idx}"
+                    images_data = [{"image": all_images[img_idx], "markers": img_markers}]
+                    render_acoustic_editor(images_data, bridge_label=bridge_label, component_key=f"aku_editor_{img_idx}")
             
             marker_buffer_key = "aku_marker_buffer"
             if marker_buffer_key not in st.session_state:
                 st.session_state[marker_buffer_key] = json.dumps(st.session_state.get("aku_markers", []), ensure_ascii=False, indent=2)
             
-            st.text_area("Markør-data (buffer)", key=marker_buffer_key, height=100, label_visibility="collapsed")
+            st.text_area("Markør-data (alle bilder)", key=marker_buffer_key, height=100, label_visibility="collapsed")
             
             edit_cols = st.columns(3)
-            if edit_cols[0].button("Bruk endringer", key="aku_apply_markers", use_container_width=True):
+            if edit_cols[0].button("Bruk endringer og oppdater PDF", key="aku_apply_markers", use_container_width=True, type="primary"):
                 try:
                     new_markers = json.loads(st.session_state.get(marker_buffer_key, "[]") or "[]")
                     if not isinstance(new_markers, list):
                         raise ValueError("Må være en liste")
                     
-                    # Re-tegn sirkler på bildene
-                    fresh_images = []
-                    for orig_img in st.session_state.get("aku_images", []):
-                        fresh_images.append(orig_img.copy())
+                    # Bruk RENE originaler
+                    originals = st.session_state.get("aku_images_original", [])
+                    if not originals:
+                        originals = st.session_state.get("aku_images", [])
+                    fresh_images = [img.copy() for img in originals]
                     
                     for marker in new_markers:
                         idx = int(marker.get("image_index", 0))
@@ -1006,46 +1062,45 @@ if "generated_aku_pdf" in st.session_state:
                             img = fresh_images[idx]
                             draw = ImageDraw.Draw(img)
                             w, h = img.size
-                            x = int((marker.get("x_pct", 50) / 100.0) * w)
-                            y = int((marker.get("y_pct", 50) / 100.0) * h)
-                            db_str = str(marker.get("db", "??")) + " dB"
+                            mx = int((marker.get("x_pct", 50) / 100.0) * w)
+                            my = int((marker.get("y_pct", 50) / 100.0) * h)
+                            db_str = str(marker.get("db", "??"))
                             label = str(marker.get("label", ""))
-                            
                             color_name = marker.get("color", "red").lower()
-                            if "green" in color_name:
-                                color_rgb = (46, 204, 113)
-                            elif "yellow" in color_name:
-                                color_rgb = (241, 196, 15)
-                            else:
-                                color_rgb = (231, 76, 60)
-                            
-                            radius = int(w * 0.05)
-                            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color_rgb, width=max(4, int(w*0.008)))
-                            
+                            color_rgb = (46,204,113) if "green" in color_name else (241,196,15) if "yellow" in color_name else (231,76,60)
+                            radius = int(w * 0.014)
+                            draw.ellipse((mx-radius, my-radius, mx+radius, my+radius), outline=color_rgb, width=max(2, int(w*0.003)))
                             try:
-                                font = ImageFont.truetype("arial.ttf", int(w * 0.025))
+                                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(w * 0.013))
+                                font_s = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", int(w * 0.009))
                             except:
-                                font = ImageFont.load_default()
-                            
-                            display_text = f"{db_str} {label}".strip()
+                                font = ImageFont.load_default(); font_s = font
                             try:
-                                bbox = draw.textbbox((0,0), display_text, font=font)
-                                tw = bbox[2] - bbox[0]
-                                th = bbox[3] - bbox[1]
+                                bb = draw.textbbox((0,0), db_str, font=font); tw=bb[2]-bb[0]; th=bb[3]-bb[1]
                             except:
-                                tw, th = 80, 18
-                            
-                            draw.rectangle((x - tw/2 - 6, y - th/2 - 6, x + tw/2 + 6, y + th/2 + 6), fill=color_rgb)
-                            draw.text((x - tw/2, y - th/2), display_text, fill=(255, 255, 255), font=font)
+                                tw, th = 20, 12
+                            draw.rectangle((mx-tw/2-2, my-th/2-1, mx+tw/2+2, my+th/2+1), fill=color_rgb)
+                            draw.text((mx-tw/2, my-th/2), db_str, fill=(255,255,255), font=font)
+                            if label:
+                                try: lw = draw.textbbox((0,0), label, font=font_s)[2]
+                                except: lw = len(label)*6
+                                draw.text((mx-lw/2, my+radius+3), label, fill=color_rgb, font=font_s)
                     
                     st.session_state["aku_markers"] = new_markers
                     st.session_state["aku_images"] = fresh_images
                     
                     # Regenerer PDF
                     clean_text = st.session_state.get("aku_ai_text", "")
-                    pdf_data = create_full_report_pdf(p_name, pd_state['c_name'], clean_text, fresh_images)
+                    pdf_data = create_full_report_pdf(p_name, pd_state["c_name"], clean_text, fresh_images)
                     st.session_state.generated_aku_pdf = pdf_data
-                    st.success("Markører oppdatert og PDF regenerert!")
+                    
+                    if _HAS_AUTH:
+                        try:
+                            builtly_auth.save_report(project_name=pd_state.get("p_name", p_name), report_name=f"Akustikk — Builtly_RIAku_{p_name}.pdf (revidert)", module="RIAku (Akustikk)", file_path=f"Builtly_RIAku_{p_name}.pdf")
+                        except Exception:
+                            pass
+                    
+                    st.success("Markører oppdatert, bilder re-rendret og PDF regenerert!")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Feil: {exc}")
