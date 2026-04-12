@@ -913,17 +913,47 @@ if st.button("🚀 Kjør Akustisk Analyse (RIAku)", type="primary", use_containe
                 st.session_state.generated_aku_pdf = pdf_data
                 st.session_state.generated_aku_filename = f"Builtly_RIAku_{p_name}.pdf"
 
-                # Save report to user dashboard
+                # Lagre til Supabase dashboard
                 try:
                     from builtly_auth import save_report
                     save_report(
-                        project_name=p_name,
-                        report_name=f"Akustikk — {p_name}",
-                        module="Akustikk",
+                        project_name=pd_state.get("p_name", p_name),
+                        report_name=f"Akustikk — Builtly_RIAku_{p_name}.pdf",
+                        module="RIAku (Akustikk)",
                         file_path=f"Builtly_RIAku_{p_name}.pdf",
                     )
-                except ImportError:
+                except Exception:
                     pass
+                try:
+                    report_dir = DB_DIR / "reports"
+                    report_dir.mkdir(exist_ok=True)
+                    
+                    # Lagre PDF
+                    pdf_path = report_dir / f"Builtly_RIAku_{p_name}.pdf"
+                    pdf_path.write_bytes(pdf_data)
+                    
+                    # Lagre review-metadata til JSON
+                    reviews_file = DB_DIR / "pending_reviews.json"
+                    existing_reviews = {}
+                    if reviews_file.exists():
+                        try:
+                            existing_reviews = json.loads(reviews_file.read_text(encoding="utf-8"))
+                        except Exception:
+                            existing_reviews = {}
+                    
+                    existing_reviews[doc_id] = {
+                        "title": pd_state['p_name'],
+                        "module": "RIAku (Akustikk)",
+                        "drafter": "Builtly AI",
+                        "reviewer": "Senior Akustiker",
+                        "status": status,
+                        "class": badge,
+                        "pdf_file": str(pdf_path),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    reviews_file.write_text(json.dumps(existing_reviews, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception as save_exc:
+                    st.caption(f"Rapport generert men disk-lagring feilet: {save_exc}")
 
                 st.rerun() 
                 
