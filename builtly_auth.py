@@ -490,6 +490,7 @@ def activate_invoice_user(user_id: str) -> Tuple[bool, str]:
 
 def save_report(project_name: str, report_name: str, module: str,
                 file_path: str = "", download_url: str = "") -> bool:
+    sb_admin = _sb_admin()
     sb = _sb()
     uid = st.session_state.get("user_id", "")
     now = datetime.utcnow()
@@ -501,17 +502,26 @@ def save_report(project_name: str, report_name: str, module: str,
         "created_at": now.strftime("%Y-%m-%d %H:%M"),
         "expires_at": expires.strftime("%Y-%m-%d"),
     }
-    if sb and uid:
-        try:
-            sb.table("reports").insert({**entry, "user_id": uid}).execute()
-        except Exception as e:
-            st.warning(f"Rapport kunne ikke lagres til konto: {e}")
-    elif not uid:
-        st.warning("Rapport ble ikke lagret — bruker-ID mangler. Prøv å logge inn på nytt.")
+    saved = False
+    debug = f"save_report: uid={'set' if uid else 'EMPTY'}, admin={'ok' if sb_admin else 'None'}, anon={'ok' if sb else 'None'}"
+    if uid:
+        db_entry = {**entry, "user_id": uid}
+        for client, label in [(sb_admin, "admin"), (sb, "anon")]:
+            if client and not saved:
+                try:
+                    client.table("reports").insert(db_entry).execute()
+                    saved = True
+                    debug += f", insert={label}=OK"
+                except Exception as e:
+                    debug += f", insert={label}=FAIL({str(e)[:50]})"
+    else:
+        debug += ", SKIPPED (no uid)"
+    # Store debug info in session_state so it survives st.rerun()
+    st.session_state["_report_save_debug"] = debug
     if "user_reports" not in st.session_state:
         st.session_state.user_reports = []
     st.session_state.user_reports.append(entry)
-    return True
+    return saved
 
 
 def reload_user_reports():
