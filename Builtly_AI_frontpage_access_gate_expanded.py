@@ -5167,10 +5167,10 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Constrain inner value div */
+        /* Inner value wrapper — left-align content for emoji visibility */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 24px !important;
-            max-width: 24px !important;
+            width: 100% !important;
+            max-width: 100% !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -5181,18 +5181,17 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Show ONLY emoji */
+        /* Emoji — show only the leading emoji, clip trailing text */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 18px !important;
-            line-height: 1 !important;
+            font-size: 17px !important;
+            line-height: 40px !important;
             display: block !important;
-            width: 22px !important;
-            max-width: 22px !important;
-            height: 22px !important;
+            width: 26px !important;
+            max-width: 26px !important;
+            height: 40px !important;
             overflow: hidden !important;
-            text-overflow: clip !important;
             white-space: nowrap !important;
-            text-align: center !important;
+            text-align: left !important;
             padding: 0 !important;
             margin: 0 auto !important;
         }
