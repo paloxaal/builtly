@@ -337,9 +337,8 @@ def fetch_historical_ortofoto(bbox: tuple) -> dict:
     """Fetch historical aerial imagery from all available sources.
     
     Priority:
-    1. Geodata Online — dynamically discover imagery services (GeomapBilder variants)
-    2. Norge i Bilder prosjekter WMS
-    3. Kartverket Historiske Kart WMS
+    1. Norge i Bilder prosjekter WMS (ekte historiske flybilder, 1947+)
+    2. Geodata Online GeomapBilder variants (fallback — nyere årganger)
     
     Returns dict with keys: image, source, year, log
     """
@@ -350,9 +349,22 @@ def fetch_historical_ortofoto(bbox: tuple) -> dict:
     buf = 100.0  # 100m buffer
     expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
 
-    # Source 1: Geodata Online — dynamic discovery of imagery services
+    # Source 1: Norge i Bilder prosjekter — ekte historiske flybilder
+    try:
+        img, src, year = fetch_nib_historisk_ortofoto(expanded_bbox)
+        if img:
+            result["image"] = img
+            result["source"] = src
+            result["year"] = year
+            result["log"].append(f"✅ Historisk ortofoto: {src} (år {year})")
+            return result
+        else:
+            result["log"].append(f"⚠️ {src}")
+    except Exception as e:
+        result["log"].append(f"⚠️ Norge i Bilder feilet: {str(e)[:80]}")
+
+    # Source 2: Geodata Online GeomapBilder variants (not truly historical, but different vintage)
     if _GDO_TOKEN_OK:
-        # First: try the known candidate service paths
         try:
             from geodata_client import GEOMAP_BILDER_HISTORICAL_CANDIDATES
             for service, label in GEOMAP_BILDER_HISTORICAL_CANDIDATES:
@@ -362,51 +374,13 @@ def fetch_historical_ortofoto(bbox: tuple) -> dict:
                         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                         result["image"] = img
                         result["source"] = label
-                        result["log"].append(f"✅ Historisk ortofoto: {label}")
+                        result["log"].append(f"✅ Historisk ortofoto (fallback): {label}")
                         return result
                 except Exception:
                     continue
             result["log"].append("⚠️ Geodata Online historisk: kandidattjenester ga ingen data")
         except ImportError:
-            result["log"].append("⚠️ Geodata Online historisk: importfeil")
-
-        # Second: dynamically discover available imagery services
-        try:
-            discovered = _gdo.discover_historical_imagery_services()
-            if discovered:
-                svc_names = [s.get("name", "") for s in discovered]
-                result["log"].append(f"📋 Geodata Online bildetjenester funnet: {', '.join(svc_names)}")
-                for svc_info in discovered:
-                    svc_path = svc_info.get("service", "")
-                    svc_name = svc_info.get("name", "")
-                    try:
-                        img_bytes = _gdo._image_export(svc_path, expanded_bbox, width=1200, height=1200)
-                        if img_bytes and len(img_bytes) > 2000:
-                            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                            result["image"] = img
-                            result["source"] = f"Geodata Online {svc_name}"
-                            result["log"].append(f"✅ Historisk ortofoto: {svc_name}")
-                            return result
-                    except Exception:
-                        continue
-            else:
-                result["log"].append("⚠️ Geodata Online: ingen alternative bildetjenester funnet")
-        except Exception as e:
-            result["log"].append(f"⚠️ Geodata Online discovery feilet: {str(e)[:80]}")
-
-    # Source 2: Norge i Bilder / Kartverket historiske tjenester
-    try:
-        img, src, year = fetch_nib_historisk_ortofoto(expanded_bbox)
-        if img:
-            result["image"] = img
-            result["source"] = src
-            result["year"] = year
-            result["log"].append(f"✅ Historisk ortofoto: {src}")
-            return result
-        else:
-            result["log"].append(f"⚠️ {src}")
-    except Exception as e:
-        result["log"].append(f"⚠️ Kartverket historisk feilet: {str(e)[:80]}")
+            pass
 
     result["log"].append("❌ Historisk flyfoto: Ingen kilde tilgjengelig — bruk manuell opplasting")
     return result
