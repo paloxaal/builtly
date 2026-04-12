@@ -53,7 +53,27 @@ LANG_ALIASES = {
 }
 
 if "app_lang" not in st.session_state:
-    st.session_state.app_lang = "🇺🇸 English (US)"
+    # Try to restore language from ?lang= query param first
+    _init_lang_param = str(st.query_params.get("lang", "")).strip().lower() if hasattr(st, "query_params") else ""
+    _INIT_LANG_MAP = {"no": "🇳🇴 Norsk", "en-us": "🇺🇸 English (US)", "en-gb": "🇬🇧 English (UK)",
+                      "sv": "🇸🇪 Svenska", "da": "🇩🇰 Dansk", "fi": "🇫🇮 Suomi", "de": "🇩🇪 Deutsch"}
+    if _init_lang_param in _INIT_LANG_MAP:
+        st.session_state.app_lang = _INIT_LANG_MAP[_init_lang_param]
+    else:
+        # No query param — inject JS to read from localStorage and redirect
+        st.session_state.app_lang = "🇺🇸 English (US)"
+        st.components.v1.html("""<script>
+        (function(){
+            try {
+                var saved = localStorage.getItem('builtly_lang');
+                if (!saved) return;
+                var url = new URL(window.parent.location.href);
+                if (url.searchParams.has('lang')) return;
+                url.searchParams.set('lang', saved);
+                window.parent.location.replace(url.toString());
+            } catch(e) {}
+        })();
+        </script>""", height=0)
 
 st.session_state.app_lang = LANG_ALIASES.get(st.session_state.app_lang, st.session_state.app_lang)
 
@@ -6091,3 +6111,8 @@ render_html(
     </div>
     """
 )
+
+# Persist current language to localStorage (runs every render, survives page reload)
+st.components.v1.html(f"""<script>
+try {{ localStorage.setItem('builtly_lang', '{language_slug(st.session_state.app_lang)}'); }} catch(e) {{}}
+</script>""", height=0)
