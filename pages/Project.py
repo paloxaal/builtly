@@ -154,7 +154,9 @@ if _lang_param in _LANG_FROM_QUERY:
     st.session_state.app_lang = _LANG_FROM_QUERY[_lang_param]
 
 _lang = st.session_state.get("app_lang", "🇺🇸 English (US)")
-_en = "English" in _lang
+# For Project Setup, we support Norwegian natively and fall back to English
+# for all other languages (better UX than showing Norwegian to Swedish/Danish/Finnish/German users)
+_en = _lang != "🇳🇴 Norsk"
 
 T = {
     "back": "← Back to Portal" if _en else "← Tilbake til Portal",
