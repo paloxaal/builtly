@@ -14,6 +14,7 @@ import urllib.parse
 import io
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
+from typing import Optional
 
 # --- Geodata Online client (if credentials configured) ---
 try:
