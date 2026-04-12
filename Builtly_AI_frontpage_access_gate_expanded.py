@@ -2578,6 +2578,7 @@ _AUTH_TEXTS = {
             "Etter bindingstiden fornyes abonnementet månedlig med 1 måneds oppsigelsestid. "
             "Priser gjelder per land — tilgang til flere land faktureres separat per land."
         ),
+        "contract_accept": "Jeg aksepterer kontraktsvilkårene.",
         "revision": (
             "Eventuelle revideringer av rapport som følge av endring av forutsetninger "
             "fra kundens ståsted må avtales direkte med rådgiver tilknyttet Builtly Engineering AS."
@@ -2607,8 +2608,26 @@ _AUTH_TEXTS = {
         "register_link": "Opprett konto",
         "no_account": "Har du ikke konto? Opprett konto",
         "demo_link": "Demo-tilgang",
+        "demo_kicker": "DEMO-TILGANG",
+        "resend_btn": "Send bekreftelseslenke på nytt",
+        "auth_not_installed": "Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.",
+        "fill_email_pw": "Vennligst fyll ut e-post og passord.",
+        "email_confirmed_info": "Etter at du har bekreftet e-posten, kan du logge inn og velge abonnement.",
+        "err_name_required": "Fullt navn er påkrevd.",
+        "err_email_required": "Gyldig e-postadresse er påkrevd.",
+        "err_company_required": "Selskapsnavn er påkrevd.",
+        "err_country_required": "Velg minst ett land.",
+        "err_pw_length": "Passord må være minst 8 tegn.",
+        "err_pw_mismatch": "Passordene stemmer ikke overens.",
+        "err_gdpr_required": "Du må akseptere personvernerklæringen.",
+        "err_terms_required": "Du må akseptere kontraktsvilkårene.",
+        "acct_label": "👤 Konto",
+        "acct_my_page": "Min side",
+        "acct_logout": "Logg ut",
+        "acct_login": "Logg inn",
+        "acct_plans": "Se planer / Opprett konto",
     },
-    "_default": {
+    "🇬🇧 English (UK)": {
         "gdpr": (
             "I confirm that I have read and accept Builtly Engineering AS "
             "[terms of service](https://builtly.ai/terms) and "
@@ -2622,6 +2641,7 @@ _AUTH_TEXTS = {
             "After the binding period, the subscription renews monthly with 1 month notice. "
             "Prices apply per country — access to multiple countries is billed separately."
         ),
+        "contract_accept": "I accept the contract terms.",
         "revision": (
             "Any report revisions due to changes in client assumptions must be arranged "
             "directly with an advisor at Builtly Engineering AS."
@@ -2651,8 +2671,345 @@ _AUTH_TEXTS = {
         "register_link": "Create account",
         "no_account": "Don't have an account? Sign up",
         "demo_link": "Demo access",
+        "demo_kicker": "DEMO ACCESS",
+        "resend_btn": "Resend verification link",
+        "auth_not_installed": "Auth module (builtly_auth) is not installed. Contact administrator.",
+        "fill_email_pw": "Please enter email and password.",
+        "email_confirmed_info": "Once you have confirmed your email, you can log in and choose a plan.",
+        "err_name_required": "Full name is required.",
+        "err_email_required": "A valid email address is required.",
+        "err_company_required": "Company name is required.",
+        "err_country_required": "Please select at least one country.",
+        "err_pw_length": "Password must be at least 8 characters.",
+        "err_pw_mismatch": "Passwords do not match.",
+        "err_gdpr_required": "You must accept the privacy policy.",
+        "err_terms_required": "You must accept the contract terms.",
+        "acct_label": "👤 Account",
+        "acct_my_page": "My page",
+        "acct_logout": "Log out",
+        "acct_login": "Log in",
+        "acct_plans": "Plans / Sign up",
+    },
+    "🇺🇸 English (US)": {
+        "gdpr": (
+            "I confirm that I have read and accept Builtly Engineering AS "
+            "[terms of service](https://builtly.ai/terms) and "
+            "[privacy policy](https://builtly.ai/privacy). "
+            "Builtly processes personal data in accordance with GDPR. "
+            "Data is stored within the EEA and deleted upon subscription cancellation. "
+            "You may request access, correction, or deletion of your data at any time by contacting post@builtly.ai."
+        ),
+        "contract": (
+            "The subscription has a {months}-month binding period from activation. "
+            "After the binding period, the subscription renews monthly with 1 month notice. "
+            "Prices apply per country — access to multiple countries is billed separately."
+        ),
+        "contract_accept": "I accept the contract terms.",
+        "revision": (
+            "Any report revisions due to changes in client assumptions must be arranged "
+            "directly with an advisor at Builtly Engineering AS."
+        ),
+        "register_kicker": "CREATE ACCOUNT",
+        "register_title": "Get started with Builtly",
+        "register_subtitle": "Create a business account to access AI-powered engineering tools.",
+        "plans_kicker": "SUBSCRIPTIONS",
+        "plans_title": "Three levels — from fully automated to attested",
+        "plans_subtitle": "All prices apply per country. {months}-month commitment.",
+        "login_kicker": "LOG IN",
+        "login_title": "Welcome back",
+        "login_subtitle": "Log in to view your reports and manage your subscription.",
+        "has_account": "Already have an account? Log in",
+        "contact_person": "Contact person",
+        "company_info": "Company information",
+        "full_name": "Full name *",
+        "phone": "Phone",
+        "email": "Email *",
+        "company_name": "Company name *",
+        "org_nr": "Org. no.",
+        "country_select": "Countries for engineering *",
+        "password": "Password *",
+        "confirm_password": "Confirm password *",
+        "create_account": "Create account and choose plan",
+        "login_btn": "Log in",
+        "register_link": "Create account",
+        "no_account": "Don't have an account? Sign up",
+        "demo_link": "Demo access",
+        "demo_kicker": "DEMO ACCESS",
+        "resend_btn": "Resend verification link",
+        "auth_not_installed": "Auth module (builtly_auth) is not installed. Contact administrator.",
+        "fill_email_pw": "Please enter email and password.",
+        "email_confirmed_info": "Once you have confirmed your email, you can log in and choose a plan.",
+        "err_name_required": "Full name is required.",
+        "err_email_required": "A valid email address is required.",
+        "err_company_required": "Company name is required.",
+        "err_country_required": "Please select at least one country.",
+        "err_pw_length": "Password must be at least 8 characters.",
+        "err_pw_mismatch": "Passwords do not match.",
+        "err_gdpr_required": "You must accept the privacy policy.",
+        "err_terms_required": "You must accept the contract terms.",
+        "acct_label": "👤 Account",
+        "acct_my_page": "My page",
+        "acct_logout": "Log out",
+        "acct_login": "Log in",
+        "acct_plans": "Plans / Sign up",
+    },
+    "🇸🇪 Svenska": {
+        "gdpr": (
+            "Jag bekräftar att jag har läst och accepterar Builtly Engineering AS "
+            "[användarvillkor](https://builtly.ai/terms) och "
+            "[integritetspolicy](https://builtly.ai/privacy). "
+            "Builtly behandlar personuppgifter i enlighet med GDPR. "
+            "Data lagras inom EES och raderas vid avslutad prenumeration. "
+            "Du kan när som helst begära tillgång, rättelse eller radering av dina uppgifter genom att kontakta post@builtly.ai."
+        ),
+        "contract": (
+            "Prenumerationen har {months} månaders bindningstid från aktivering. "
+            "Efter bindningstiden förnyas prenumerationen månadsvis med 1 månads uppsägningstid. "
+            "Priser gäller per land — tillgång till flera länder faktureras separat."
+        ),
+        "contract_accept": "Jag accepterar avtalsvillkoren.",
+        "revision": (
+            "Eventuella revideringar av rapport på grund av ändrade förutsättningar "
+            "från kundens sida måste avtalas direkt med rådgivare hos Builtly Engineering AS."
+        ),
+        "register_kicker": "SKAPA KONTO",
+        "register_title": "Kom igång med Builtly",
+        "register_subtitle": "Skapa ett företagskonto för att få tillgång till AI-drivna projekteringsverktyg.",
+        "plans_kicker": "PRENUMERATIONER",
+        "plans_title": "Tre nivåer — från helautomatiserat till certifierat",
+        "plans_subtitle": "Alla priser gäller per land. {months} månaders bindningstid.",
+        "login_kicker": "LOGGA IN",
+        "login_title": "Välkommen tillbaka",
+        "login_subtitle": "Logga in för att se dina rapporter och hantera prenumeration.",
+        "has_account": "Har du redan ett konto? Logga in",
+        "contact_person": "Kontaktperson",
+        "company_info": "Företagsinformation",
+        "full_name": "Fullständigt namn *",
+        "phone": "Telefon",
+        "email": "E-post *",
+        "company_name": "Företagsnamn *",
+        "org_nr": "Org.nr.",
+        "country_select": "Länder för projektering *",
+        "password": "Lösenord *",
+        "confirm_password": "Bekräfta lösenord *",
+        "create_account": "Skapa konto och välj plan",
+        "login_btn": "Logga in",
+        "register_link": "Skapa konto",
+        "no_account": "Har du inget konto? Skapa konto",
+        "demo_link": "Demo-åtkomst",
+        "demo_kicker": "DEMO-ÅTKOMST",
+        "resend_btn": "Skicka verifieringslänk igen",
+        "auth_not_installed": "Auth-modul (builtly_auth) är inte installerad. Kontakta administratör.",
+        "fill_email_pw": "Vänligen fyll i e-post och lösenord.",
+        "email_confirmed_info": "När du har bekräftat din e-post kan du logga in och välja plan.",
+        "err_name_required": "Fullständigt namn krävs.",
+        "err_email_required": "En giltig e-postadress krävs.",
+        "err_company_required": "Företagsnamn krävs.",
+        "err_country_required": "Välj minst ett land.",
+        "err_pw_length": "Lösenordet måste vara minst 8 tecken.",
+        "err_pw_mismatch": "Lösenorden matchar inte.",
+        "err_gdpr_required": "Du måste acceptera integritetspolicyn.",
+        "err_terms_required": "Du måste acceptera avtalsvillkoren.",
+        "acct_label": "👤 Konto",
+        "acct_my_page": "Min sida",
+        "acct_logout": "Logga ut",
+        "acct_login": "Logga in",
+        "acct_plans": "Planer / Skapa konto",
+    },
+    "🇩🇰 Dansk": {
+        "gdpr": (
+            "Jeg bekræfter, at jeg har læst og accepterer Builtly Engineering AS' "
+            "[brugsvilkår](https://builtly.ai/terms) og "
+            "[privatlivspolitik](https://builtly.ai/privacy). "
+            "Builtly behandler personoplysninger i overensstemmelse med GDPR. "
+            "Data opbevares inden for EØS og slettes ved opsigelse af abonnement. "
+            "Du kan til enhver tid anmode om indsigt, rettelse eller sletning af dine data ved at kontakte post@builtly.ai."
+        ),
+        "contract": (
+            "Abonnementet har {months} måneders bindingsperiode fra aktivering. "
+            "Efter bindingsperioden fornyes abonnementet månedligt med 1 måneds opsigelsesvarsel. "
+            "Priser gælder per land — adgang til flere lande faktureres separat."
+        ),
+        "contract_accept": "Jeg accepterer kontraktvilkårene.",
+        "revision": (
+            "Eventuelle revideringer af rapport som følge af ændrede forudsætninger "
+            "fra kundens side skal aftales direkte med rådgiver hos Builtly Engineering AS."
+        ),
+        "register_kicker": "OPRET KONTO",
+        "register_title": "Kom i gang med Builtly",
+        "register_subtitle": "Opret en virksomhedskonto for at få adgang til AI-drevne projekteringsværktøjer.",
+        "plans_kicker": "ABONNEMENTER",
+        "plans_title": "Tre niveauer — fra fuldautomatisk til attesteret",
+        "plans_subtitle": "Alle priser gælder per land. {months} måneders binding.",
+        "login_kicker": "LOG IND",
+        "login_title": "Velkommen tilbage",
+        "login_subtitle": "Log ind for at se dine rapporter og administrere abonnement.",
+        "has_account": "Har du allerede en konto? Log ind",
+        "contact_person": "Kontaktperson",
+        "company_info": "Virksomhedsinformation",
+        "full_name": "Fulde navn *",
+        "phone": "Telefon",
+        "email": "E-mail *",
+        "company_name": "Virksomhedsnavn *",
+        "org_nr": "CVR-nr.",
+        "country_select": "Lande til projektering *",
+        "password": "Adgangskode *",
+        "confirm_password": "Bekræft adgangskode *",
+        "create_account": "Opret konto og vælg plan",
+        "login_btn": "Log ind",
+        "register_link": "Opret konto",
+        "no_account": "Har du ikke en konto? Opret konto",
+        "demo_link": "Demo-adgang",
+        "demo_kicker": "DEMO-ADGANG",
+        "resend_btn": "Send bekræftelseslink igen",
+        "auth_not_installed": "Auth-modul (builtly_auth) er ikke installeret. Kontakt administrator.",
+        "fill_email_pw": "Udfyld venligst e-mail og adgangskode.",
+        "email_confirmed_info": "Når du har bekræftet din e-mail, kan du logge ind og vælge plan.",
+        "err_name_required": "Fulde navn er påkrævet.",
+        "err_email_required": "En gyldig e-mailadresse er påkrævet.",
+        "err_company_required": "Virksomhedsnavn er påkrævet.",
+        "err_country_required": "Vælg mindst ét land.",
+        "err_pw_length": "Adgangskoden skal være mindst 8 tegn.",
+        "err_pw_mismatch": "Adgangskoderne stemmer ikke overens.",
+        "err_gdpr_required": "Du skal acceptere privatlivspolitikken.",
+        "err_terms_required": "Du skal acceptere kontraktvilkårene.",
+        "acct_label": "👤 Konto",
+        "acct_my_page": "Min side",
+        "acct_logout": "Log ud",
+        "acct_login": "Log ind",
+        "acct_plans": "Planer / Opret konto",
+    },
+    "🇫🇮 Suomi": {
+        "gdpr": (
+            "Vahvistan lukeneeni ja hyväksyväni Builtly Engineering AS:n "
+            "[käyttöehdot](https://builtly.ai/terms) ja "
+            "[tietosuojakäytännön](https://builtly.ai/privacy). "
+            "Builtly käsittelee henkilötietoja GDPR:n mukaisesti. "
+            "Tiedot tallennetaan ETA-alueelle ja poistetaan tilauksen päättyessä. "
+            "Voit milloin tahansa pyytää pääsyä tietoihisi, niiden oikaisua tai poistamista ottamalla yhteyttä post@builtly.ai."
+        ),
+        "contract": (
+            "Tilauksessa on {months} kuukauden sitoutumisaika aktivoinnista. "
+            "Sitoutumisajan jälkeen tilaus uusitaan kuukausittain 1 kuukauden irtisanomisajalla. "
+            "Hinnat ovat maakohtaisia — usean maan käyttö laskutetaan erikseen."
+        ),
+        "contract_accept": "Hyväksyn sopimusehdot.",
+        "revision": (
+            "Mahdolliset raportin muutokset asiakkaan lähtökohtien muuttuessa on sovittava "
+            "suoraan Builtly Engineering AS:n neuvonantajan kanssa."
+        ),
+        "register_kicker": "LUO TILI",
+        "register_title": "Aloita Builtlyn käyttö",
+        "register_subtitle": "Luo yritystili saadaksesi pääsyn AI-pohjaisiin suunnittelutyökaluihin.",
+        "plans_kicker": "TILAUKSET",
+        "plans_title": "Kolme tasoa — täysin automatisoidusta sertifioituun",
+        "plans_subtitle": "Kaikki hinnat maakohtaisia. {months} kuukauden sitoutumisaika.",
+        "login_kicker": "KIRJAUDU",
+        "login_title": "Tervetuloa takaisin",
+        "login_subtitle": "Kirjaudu sisään nähdäksesi raporttisi ja hallitaksesi tilaustasi.",
+        "has_account": "Onko sinulla jo tili? Kirjaudu sisään",
+        "contact_person": "Yhteyshenkilö",
+        "company_info": "Yritystiedot",
+        "full_name": "Koko nimi *",
+        "phone": "Puhelin",
+        "email": "Sähköposti *",
+        "company_name": "Yrityksen nimi *",
+        "org_nr": "Y-tunnus",
+        "country_select": "Suunnittelumaat *",
+        "password": "Salasana *",
+        "confirm_password": "Vahvista salasana *",
+        "create_account": "Luo tili ja valitse tilaus",
+        "login_btn": "Kirjaudu",
+        "register_link": "Luo tili",
+        "no_account": "Eikö sinulla ole tiliä? Luo tili",
+        "demo_link": "Demo-käyttö",
+        "demo_kicker": "DEMO-KÄYTTÖ",
+        "resend_btn": "Lähetä vahvistuslinkki uudelleen",
+        "auth_not_installed": "Auth-moduuli (builtly_auth) ei ole asennettu. Ota yhteyttä ylläpitäjään.",
+        "fill_email_pw": "Täytä sähköposti ja salasana.",
+        "email_confirmed_info": "Vahvistettuasi sähköpostisi voit kirjautua sisään ja valita tilauksen.",
+        "err_name_required": "Koko nimi on pakollinen.",
+        "err_email_required": "Kelvollinen sähköpostiosoite on pakollinen.",
+        "err_company_required": "Yrityksen nimi on pakollinen.",
+        "err_country_required": "Valitse vähintään yksi maa.",
+        "err_pw_length": "Salasanan on oltava vähintään 8 merkkiä.",
+        "err_pw_mismatch": "Salasanat eivät täsmää.",
+        "err_gdpr_required": "Sinun on hyväksyttävä tietosuojakäytäntö.",
+        "err_terms_required": "Sinun on hyväksyttävä sopimusehdot.",
+        "acct_label": "👤 Tili",
+        "acct_my_page": "Oma sivu",
+        "acct_logout": "Kirjaudu ulos",
+        "acct_login": "Kirjaudu",
+        "acct_plans": "Tilaukset / Luo tili",
+    },
+    "🇩🇪 Deutsch": {
+        "gdpr": (
+            "Ich bestätige, dass ich die "
+            "[Nutzungsbedingungen](https://builtly.ai/terms) und die "
+            "[Datenschutzerklärung](https://builtly.ai/privacy) von Builtly Engineering AS "
+            "gelesen habe und akzeptiere. "
+            "Builtly verarbeitet personenbezogene Daten gemäß DSGVO. "
+            "Daten werden im EWR gespeichert und bei Kündigung des Abonnements gelöscht. "
+            "Sie können jederzeit Auskunft, Berichtigung oder Löschung Ihrer Daten verlangen unter post@builtly.ai."
+        ),
+        "contract": (
+            "Das Abonnement hat eine Mindestlaufzeit von {months} Monaten ab Aktivierung. "
+            "Nach der Mindestlaufzeit verlängert sich das Abonnement monatlich mit 1 Monat Kündigungsfrist. "
+            "Preise gelten pro Land — Zugang zu mehreren Ländern wird separat berechnet."
+        ),
+        "contract_accept": "Ich akzeptiere die Vertragsbedingungen.",
+        "revision": (
+            "Eventuelle Berichtsrevisionen aufgrund geänderter Kundenannahmen müssen "
+            "direkt mit einem Berater von Builtly Engineering AS vereinbart werden."
+        ),
+        "register_kicker": "KONTO ERSTELLEN",
+        "register_title": "Starten Sie mit Builtly",
+        "register_subtitle": "Erstellen Sie ein Geschäftskonto für den Zugang zu KI-gestützten Ingenieurtools.",
+        "plans_kicker": "ABONNEMENTS",
+        "plans_title": "Drei Stufen — von vollautomatisiert bis zertifiziert",
+        "plans_subtitle": "Alle Preise gelten pro Land. {months} Monate Mindestlaufzeit.",
+        "login_kicker": "ANMELDEN",
+        "login_title": "Willkommen zurück",
+        "login_subtitle": "Melden Sie sich an, um Ihre Berichte zu sehen und Ihr Abonnement zu verwalten.",
+        "has_account": "Haben Sie schon ein Konto? Anmelden",
+        "contact_person": "Kontaktperson",
+        "company_info": "Unternehmensinformationen",
+        "full_name": "Vollständiger Name *",
+        "phone": "Telefon",
+        "email": "E-Mail *",
+        "company_name": "Firmenname *",
+        "org_nr": "Handelsreg.-Nr.",
+        "country_select": "Länder für Planung *",
+        "password": "Passwort *",
+        "confirm_password": "Passwort bestätigen *",
+        "create_account": "Konto erstellen und Plan wählen",
+        "login_btn": "Anmelden",
+        "register_link": "Konto erstellen",
+        "no_account": "Noch kein Konto? Registrieren",
+        "demo_link": "Demo-Zugang",
+        "demo_kicker": "DEMO-ZUGANG",
+        "resend_btn": "Bestätigungslink erneut senden",
+        "auth_not_installed": "Auth-Modul (builtly_auth) ist nicht installiert. Kontaktieren Sie den Administrator.",
+        "fill_email_pw": "Bitte E-Mail und Passwort eingeben.",
+        "email_confirmed_info": "Sobald Sie Ihre E-Mail bestätigt haben, können Sie sich anmelden und einen Plan wählen.",
+        "err_name_required": "Vollständiger Name ist erforderlich.",
+        "err_email_required": "Eine gültige E-Mail-Adresse ist erforderlich.",
+        "err_company_required": "Firmenname ist erforderlich.",
+        "err_country_required": "Bitte wählen Sie mindestens ein Land.",
+        "err_pw_length": "Das Passwort muss mindestens 8 Zeichen lang sein.",
+        "err_pw_mismatch": "Die Passwörter stimmen nicht überein.",
+        "err_gdpr_required": "Sie müssen die Datenschutzerklärung akzeptieren.",
+        "err_terms_required": "Sie müssen die Vertragsbedingungen akzeptieren.",
+        "acct_label": "👤 Konto",
+        "acct_my_page": "Meine Seite",
+        "acct_logout": "Abmelden",
+        "acct_login": "Anmelden",
+        "acct_plans": "Pläne / Registrieren",
     },
 }
+
+# _default fallback = English (UK)
+_AUTH_TEXTS["_default"] = _AUTH_TEXTS["🇬🇧 English (UK)"]
 
 
 def get_auth_text(lang_key: str = "") -> dict:
@@ -2771,7 +3128,7 @@ def render_login_page(lang_key: str) -> None:
         if submitted:
             if email.strip() and password.strip():
                 if _HAS_AUTH:
-                    ok, msg = builtly_auth.login(email.strip(), password.strip())
+                    ok, msg = builtly_auth.login(email.strip(), password.strip(), lang=lang_key)
                     if ok:
                         st.session_state.site_access_granted = True
                         try:
@@ -2783,17 +3140,19 @@ def render_login_page(lang_key: str) -> None:
                         st.rerun()
                     else:
                         st.error(msg)
-                        if "ikke bekreftet" in msg.lower():
-                            if st.button("Send bekreftelseslenke på nytt"):
-                                rok, rmsg = builtly_auth.resend_verification(email.strip())
+                        # Check for unconfirmed email — match key phrases across languages
+                        _msg_lc = msg.lower()
+                        if any(kw in _msg_lc for kw in ["bekreftet", "confirmed", "bekräftad", "bekræftet", "vahvistettu", "bestätigt"]):
+                            if st.button(at.get("resend_btn", "Resend verification link")):
+                                rok, rmsg = builtly_auth.resend_verification(email.strip(), lang=lang_key)
                                 if rok:
                                     st.success(rmsg)
                                 else:
                                     st.error(rmsg)
                 else:
-                    st.error("Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.")
+                    st.error(at.get("auth_not_installed", "Auth module not installed."))
             else:
-                st.error("Vennligst fyll ut e-post og passord.")
+                st.error(at.get("fill_email_pw", "Please enter email and password."))
 
         st.markdown("---")
         render_html(f'<div style="text-align:center;"><a href="?auth=register" target="_self" style="color:var(--cyan,#38bdf8);">{at["no_account"]}</a></div>')
@@ -2880,9 +3239,8 @@ def render_register_page(lang_key: str) -> None:
             reg_gdpr = st.checkbox(at["gdpr"], value=False)
 
             # Contract terms
-            _accept = "Jeg aksepterer kontraktsvilkårene." if "Norsk" in lang_key else "I accept the contract terms."
             reg_terms = st.checkbox(
-                at["contract"].format(months=CONTRACT_BINDING_MONTHS) + " " + _accept,
+                at["contract"].format(months=CONTRACT_BINDING_MONTHS) + " " + at.get("contract_accept", "I accept the contract terms."),
                 value=False,
             )
 
@@ -2891,21 +3249,21 @@ def render_register_page(lang_key: str) -> None:
         if reg_submitted:
             errors = []
             if not reg_name.strip():
-                errors.append("Fullt navn er påkrevd.")
+                errors.append(at.get("err_name_required", "Full name is required."))
             if not reg_email.strip() or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", reg_email.strip()):
-                errors.append("Gyldig e-postadresse er påkrevd.")
+                errors.append(at.get("err_email_required", "A valid email address is required."))
             if not reg_company.strip():
-                errors.append("Selskapsnavn er påkrevd.")
+                errors.append(at.get("err_company_required", "Company name is required."))
             if not reg_countries:
-                errors.append("Velg minst ett land.")
+                errors.append(at.get("err_country_required", "Please select at least one country."))
             if len(reg_password) < 8:
-                errors.append("Passord må være minst 8 tegn.")
+                errors.append(at.get("err_pw_length", "Password must be at least 8 characters."))
             if reg_password != reg_password2:
-                errors.append("Passordene stemmer ikke overens.")
+                errors.append(at.get("err_pw_mismatch", "Passwords do not match."))
             if not reg_gdpr:
-                errors.append("Du må akseptere personvernerklæringen.")
+                errors.append(at.get("err_gdpr_required", "You must accept the privacy policy."))
             if not reg_terms:
-                errors.append("Du må akseptere kontraktsvilkårene.")
+                errors.append(at.get("err_terms_required", "You must accept the contract terms."))
 
             if errors:
                 for e in errors:
@@ -2928,14 +3286,15 @@ def render_register_page(lang_key: str) -> None:
                         org_nr=reg_org_nr.strip(),
                         phone=reg_phone.strip(),
                         countries=country_codes,
+                        lang=lang_key,
                     )
                     if ok:
                         st.success(msg)
-                        st.info("Etter at du har bekreftet e-posten, kan du logge inn og velge abonnement.")
+                        st.info(at.get("email_confirmed_info", "Once you have confirmed your email, you can log in and choose a plan."))
                     else:
                         st.error(msg)
                 else:
-                    st.error("Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.")
+                    st.error(at.get("auth_not_installed", "Auth module not installed."))
 
         st.markdown("---")
         render_html(f'<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">{at["has_account"]}</a></div>')
@@ -2944,11 +3303,12 @@ def render_register_page(lang_key: str) -> None:
 def render_demo_gate(lang_key: str) -> None:
     """Render the original demo access code gate."""
     copy = get_access_copy(lang_key)
+    at = get_auth_text(lang_key)
     outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
     with outer_center:
         render_html(f"""
             <div class="access-gate-head">
-                <div class="assistant-kicker">DEMO-TILGANG</div>
+                <div class="assistant-kicker">{at.get('demo_kicker', 'DEMO ACCESS')}</div>
                 <div class="access-gate-title">{copy['title']}</div>
                 <div class="access-gate-subtitle">{copy['subtitle']}</div>
             </div>
@@ -2991,25 +3351,33 @@ def render_demo_gate(lang_key: str) -> None:
 def render_plans_page(lang_key: str) -> None:
     """Render subscription plan selection with payment method choice."""
     # Require registration before viewing plans
-    _is_en = "English" in lang_key
+    at = get_auth_text(lang_key)
     if not _is_user_logged_in():
+        _plans_gate = {
+            "🇳🇴 Norsk": ("REGISTRERING PÅKREVD", "Opprett konto først", "Du må registrere deg før du kan velge abonnement og betale."),
+            "🇸🇪 Svenska": ("REGISTRERING KRÄVS", "Skapa konto först", "Du måste registrera dig innan du kan välja plan och betala."),
+            "🇩🇰 Dansk": ("REGISTRERING PÅKRÆVET", "Opret konto først", "Du skal registrere dig, før du kan vælge plan og betale."),
+            "🇫🇮 Suomi": ("REKISTERÖITYMINEN VAADITAAN", "Luo tili ensin", "Sinun on rekisteröidyttävä ennen kuin voit valita tilauksen ja maksaa."),
+            "🇩🇪 Deutsch": ("REGISTRIERUNG ERFORDERLICH", "Erstellen Sie zuerst ein Konto", "Sie müssen sich registrieren, bevor Sie einen Plan wählen und bezahlen können."),
+        }
+        _pg = _plans_gate.get(lang_key, ("REGISTRATION REQUIRED", "Create an account first", "You must register before you can choose a plan and pay."))
         render_html(f"""
             <div class="access-gate-head" style="text-align:center;">
-                <div class="assistant-kicker">{'REGISTRATION REQUIRED' if _is_en else 'REGISTRERING PÅKREVD'}</div>
-                <div class="access-gate-title">{'Create an account first' if _is_en else 'Opprett konto først'}</div>
-                <div class="access-gate-subtitle">{'You must register before you can choose a plan and pay.' if _is_en else 'Du må registrere deg før du kan velge abonnement og betale.'}</div>
+                <div class="assistant-kicker">{_pg[0]}</div>
+                <div class="access-gate-title">{_pg[1]}</div>
+                <div class="access-gate-subtitle">{_pg[2]}</div>
             </div>
         """)
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("Create account" if _is_en else "Opprett konto", type="primary", use_container_width=True):
+            if st.button(at.get("register_link", "Create account"), type="primary", use_container_width=True):
                 try:
                     st.query_params["auth"] = "register"
                 except Exception:
                     pass
                 st.rerun()
         with col_b:
-            if st.button("Log in" if _is_en else "Logg inn", type="secondary", use_container_width=True):
+            if st.button(at.get("login_btn", "Log in"), type="secondary", use_container_width=True):
                 try:
                     st.query_params["auth"] = "login"
                 except Exception:
@@ -3183,12 +3551,23 @@ def render_user_dashboard(lang_key: str) -> None:
         builtly_auth.reload_user_reports()
         reports = st.session_state.get("user_reports", [])
 
-    status_labels = {
-        "active": ("✅ Aktiv", "#22c55e"),
-        "pending_invoice": ("⏳ Venter på betaling", "#f59e0b"),
-        "inactive": ("⚠️ Inaktiv", "#ef4444"),
+    _DASH = {
+        "🇳🇴 Norsk": {"my_account": "MIN KONTO", "hi": "Hei", "dashboard_desc": f"Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned når som helst i denne perioden. Gå til <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">forsiden</a> for å opprette nye prosjekter og generere rapporter.", "view_plans": "Se kontoplaner og priser →", "pending_title": "Kontoen venter på betalingsbekreftelse.", "pending_desc": "Faktura er sendt — kontoen aktiveres når betaling er registrert (1–3 virkedager). Kontakt post@builtly.ai ved spørsmål.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Velg et abonnement for å få tilgang til Builtly sine moduler.", "acct_info": "KONTOINFORMASJON", "name": "Navn", "company": "Selskap", "email_label": "E-post", "countries": "Land", "not_selected": "Ikke valgt", "payment": "Betaling", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Ikke satt opp", "your_sub": "DITT ABONNEMENT", "no_plan": "Ingen aktiv plan.", "choose_plan": "Velg abonnement", "my_reports": "Mine rapporter", "reports_stored": f"Rapporter lagres i {REPORT_RETENTION_DAYS} dager.", "no_reports": "Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.", "sort_label": "Sorter etter", "sort_proj_az": "Prosjekt (A–Å)", "sort_proj_za": "Prosjekt (Å–A)", "sort_newest": "Nyeste først", "sort_oldest": "Eldste først", "sort_module": "Modul", "filter_label": "Filtrer på prosjekt", "filter_all": "Alle prosjekter", "no_project": "Uten prosjekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Opprettet", "expires": "Utløper", "download": "Last ned", "status_active": "✅ Aktiv", "status_pending": "⏳ Venter på betaling", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Ukjent"},
+        "🇸🇪 Svenska": {"my_account": "MITT KONTO", "hi": "Hej", "dashboard_desc": f"Här hittar du en översikt av din prenumeration, kontoinformation och alla rapporter du har genererat. Rapporter sparas i {REPORT_RETENTION_DAYS} dagar och kan laddas ner när som helst under denna period. Gå till <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">startsidan</a> för att skapa nya projekt och generera rapporter.", "view_plans": "Se planer och priser →", "pending_title": "Kontot väntar på betalningsbekräftelse.", "pending_desc": "Faktura har skickats — kontot aktiveras när betalning registrerats (1–3 arbetsdagar). Kontakta post@builtly.ai vid frågor.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Välj en prenumeration för att få tillgång till Builtlys moduler.", "acct_info": "KONTOINFORMATION", "name": "Namn", "company": "Företag", "email_label": "E-post", "countries": "Länder", "not_selected": "Inte valt", "payment": "Betalning", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Inte inställt", "your_sub": "DIN PRENUMERATION", "no_plan": "Ingen aktiv plan.", "choose_plan": "Välj prenumeration", "my_reports": "Mina rapporter", "reports_stored": f"Rapporter sparas i {REPORT_RETENTION_DAYS} dagar.", "no_reports": "Inga rapporter ännu. Skapa ditt första projekt för att komma igång.", "sort_label": "Sortera efter", "sort_proj_az": "Projekt (A–Ö)", "sort_proj_za": "Projekt (Ö–A)", "sort_newest": "Senaste först", "sort_oldest": "Äldsta först", "sort_module": "Modul", "filter_label": "Filtrera på projekt", "filter_all": "Alla projekt", "no_project": "Utan projekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Skapad", "expires": "Utgår", "download": "Ladda ner", "status_active": "✅ Aktiv", "status_pending": "⏳ Väntar på betalning", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Okänd"},
+        "🇩🇰 Dansk": {"my_account": "MIN KONTO", "hi": "Hej", "dashboard_desc": f"Her finder du en oversigt over dit abonnement, kontooplysninger og alle rapporter du har genereret. Rapporter gemmes i {REPORT_RETENTION_DAYS} dage og kan downloades når som helst i denne periode. Gå til <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">forsiden</a> for at oprette nye projekter og generere rapporter.", "view_plans": "Se planer og priser →", "pending_title": "Kontoen venter på betalingsbekræftelse.", "pending_desc": "Faktura er sendt — kontoen aktiveres, når betaling er registreret (1–3 hverdage). Kontakt post@builtly.ai ved spørgsmål.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Vælg et abonnement for at få adgang til Builtlys moduler.", "acct_info": "KONTOOPLYSNINGER", "name": "Navn", "company": "Virksomhed", "email_label": "E-mail", "countries": "Lande", "not_selected": "Ikke valgt", "payment": "Betaling", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Ikke opsat", "your_sub": "DIT ABONNEMENT", "no_plan": "Ingen aktiv plan.", "choose_plan": "Vælg abonnement", "my_reports": "Mine rapporter", "reports_stored": f"Rapporter gemmes i {REPORT_RETENTION_DAYS} dage.", "no_reports": "Ingen rapporter endnu. Opret dit første projekt for at komme i gang.", "sort_label": "Sortér efter", "sort_proj_az": "Projekt (A–Å)", "sort_proj_za": "Projekt (Å–A)", "sort_newest": "Nyeste først", "sort_oldest": "Ældste først", "sort_module": "Modul", "filter_label": "Filtrér på projekt", "filter_all": "Alle projekter", "no_project": "Uden projekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Oprettet", "expires": "Udløber", "download": "Download", "status_active": "✅ Aktiv", "status_pending": "⏳ Venter på betaling", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Ukendt"},
+        "🇫🇮 Suomi": {"my_account": "OMA TILI", "hi": "Hei", "dashboard_desc": f"Täältä löydät yleiskatsauksen tilauksestasi, tilitiedoistasi ja kaikista luomistasi raporteista. Raportit säilytetään {REPORT_RETENTION_DAYS} päivää ja ne voidaan ladata milloin tahansa tänä aikana. Siirry <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">etusivulle</a> luodaksesi uusia projekteja ja raportteja.", "view_plans": "Katso suunnitelmat ja hinnoittelu →", "pending_title": "Tili odottaa maksuvahvistusta.", "pending_desc": "Lasku on lähetetty — tili aktivoidaan, kun maksu on rekisteröity (1–3 arkipäivää). Ota yhteyttä post@builtly.ai kysymyksissä.", "inactive_title": "Ei aktiivista tilausta.", "inactive_desc": "Valitse tilaus saadaksesi pääsyn Builtlyn moduuleihin.", "acct_info": "TILITIEDOT", "name": "Nimi", "company": "Yritys", "email_label": "Sähköposti", "countries": "Maat", "not_selected": "Ei valittu", "payment": "Maksu", "card": "Kortti (Stripe)", "invoice": "Lasku", "not_set": "Ei asetettu", "your_sub": "TILAUKSESI", "no_plan": "Ei aktiivista tilausta.", "choose_plan": "Valitse tilaus", "my_reports": "Omat raportit", "reports_stored": f"Raportit säilytetään {REPORT_RETENTION_DAYS} päivää.", "no_reports": "Ei raportteja vielä. Luo ensimmäinen projektisi aloittaaksesi.", "sort_label": "Lajittele", "sort_proj_az": "Projekti (A–Ö)", "sort_proj_za": "Projekti (Ö–A)", "sort_newest": "Uusin ensin", "sort_oldest": "Vanhin ensin", "sort_module": "Moduuli", "filter_label": "Suodata projektin mukaan", "filter_all": "Kaikki projektit", "no_project": "Ilman projektia", "report_s": "raportti", "reports_p": "raporttia", "created": "Luotu", "expires": "Vanhenee", "download": "Lataa", "status_active": "✅ Aktiivinen", "status_pending": "⏳ Odottaa maksua", "status_inactive": "⚠️ Ei aktiivinen", "status_unknown": "Tuntematon"},
+        "🇩🇪 Deutsch": {"my_account": "MEIN KONTO", "hi": "Hallo", "dashboard_desc": f"Hier finden Sie eine Übersicht über Ihr Abonnement, Kontoinformationen und alle generierten Berichte. Berichte werden {REPORT_RETENTION_DAYS} Tage gespeichert und können jederzeit heruntergeladen werden. Gehen Sie zur <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">Startseite</a>, um neue Projekte zu erstellen und Berichte zu generieren.", "view_plans": "Pläne und Preise ansehen →", "pending_title": "Konto wartet auf Zahlungsbestätigung.", "pending_desc": "Rechnung wurde gesendet — Konto wird aktiviert, sobald Zahlung registriert ist (1–3 Werktage). Kontaktieren Sie post@builtly.ai bei Fragen.", "inactive_title": "Kein aktiver Plan.", "inactive_desc": "Wählen Sie ein Abonnement, um Zugang zu Builtly-Modulen zu erhalten.", "acct_info": "KONTOINFORMATIONEN", "name": "Name", "company": "Unternehmen", "email_label": "E-Mail", "countries": "Länder", "not_selected": "Nicht ausgewählt", "payment": "Zahlung", "card": "Karte (Stripe)", "invoice": "Rechnung", "not_set": "Nicht eingerichtet", "your_sub": "IHR ABONNEMENT", "no_plan": "Kein aktiver Plan.", "choose_plan": "Plan wählen", "my_reports": "Meine Berichte", "reports_stored": f"Berichte werden {REPORT_RETENTION_DAYS} Tage gespeichert.", "no_reports": "Noch keine Berichte. Erstellen Sie Ihr erstes Projekt, um loszulegen.", "sort_label": "Sortieren nach", "sort_proj_az": "Projekt (A–Z)", "sort_proj_za": "Projekt (Z–A)", "sort_newest": "Neueste zuerst", "sort_oldest": "Älteste zuerst", "sort_module": "Modul", "filter_label": "Nach Projekt filtern", "filter_all": "Alle Projekte", "no_project": "Ohne Projekt", "report_s": "Bericht", "reports_p": "Berichte", "created": "Erstellt", "expires": "Läuft ab", "download": "Herunterladen", "status_active": "✅ Aktiv", "status_pending": "⏳ Warte auf Zahlung", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Unbekannt"},
     }
-    status_text, status_color = status_labels.get(user_status, ("Ukjent", "#c8d3df"))
+    _DASH["🇬🇧 English (UK)"] = {"my_account": "MY ACCOUNT", "hi": "Hi", "dashboard_desc": f"Here you find an overview of your subscription, account information and all reports you have generated. Reports are stored for {REPORT_RETENTION_DAYS} days and can be downloaded at any time during this period. Go to the <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">front page</a> to create new projects and generate reports.", "view_plans": "View plans and pricing →", "pending_title": "Account awaiting payment confirmation.", "pending_desc": f"Invoice has been sent — account will be activated when payment is registered (1–3 business days). Contact post@builtly.ai with questions.", "inactive_title": "No active plan.", "inactive_desc": "Choose a subscription to access Builtly modules.", "acct_info": "ACCOUNT INFORMATION", "name": "Name", "company": "Company", "email_label": "Email", "countries": "Countries", "not_selected": "Not selected", "payment": "Payment", "card": "Card (Stripe)", "invoice": "Invoice", "not_set": "Not set up", "your_sub": "YOUR SUBSCRIPTION", "no_plan": "No active plan.", "choose_plan": "Choose plan", "my_reports": "My reports", "reports_stored": f"Reports are stored for {REPORT_RETENTION_DAYS} days.", "no_reports": "No reports yet. Create your first project to get started.", "sort_label": "Sort by", "sort_proj_az": "Project (A–Z)", "sort_proj_za": "Project (Z–A)", "sort_newest": "Newest first", "sort_oldest": "Oldest first", "sort_module": "Module", "filter_label": "Filter by project", "filter_all": "All projects", "no_project": "No project", "report_s": "report", "reports_p": "reports", "created": "Created", "expires": "Expires", "download": "Download", "status_active": "✅ Active", "status_pending": "⏳ Awaiting payment", "status_inactive": "⚠️ Inactive", "status_unknown": "Unknown"}
+    _DASH["🇺🇸 English (US)"] = _DASH["🇬🇧 English (UK)"]
+    dt = _DASH.get(lang_key, _DASH["🇬🇧 English (UK)"])
+
+    status_labels = {
+        "active": (dt["status_active"], "#22c55e"),
+        "pending_invoice": (dt["status_pending"], "#f59e0b"),
+        "inactive": (dt["status_inactive"], "#ef4444"),
+    }
+    status_text, status_color = status_labels.get(user_status, (dt["status_unknown"], "#c8d3df"))
 
     country_names = []
     for code in user_countries:
@@ -3197,60 +3576,50 @@ def render_user_dashboard(lang_key: str) -> None:
                 country_names.append(c_label.split(" (")[0])
                 break
 
-    _is_en = "English" in lang_key
-
     render_html(f"""
         <div class="access-gate-head">
-            <div class="assistant-kicker">{'MY ACCOUNT' if _is_en else 'MIN KONTO'}</div>
-            <div class="access-gate-title">{'Hi' if _is_en else 'Hei'}, {html.escape(user_name)}</div>
+            <div class="assistant-kicker">{dt['my_account']}</div>
+            <div class="access-gate-title">{dt['hi']}, {html.escape(user_name)}</div>
             <div style="color:var(--soft,#c8d3df);font-size:0.95rem;line-height:1.6;max-width:700px;margin-top:0.5rem;">
-                {('Here you find an overview of your subscription, account information and all reports '
-                  f'you have generated. Reports are stored for {REPORT_RETENTION_DAYS} days and can be downloaded '
-                  'at any time during this period. Go to the <a href="/" target="_self" style="color:#38bdf8;">front page</a> '
-                  'to create new projects and generate reports.')
-                 if _is_en else
-                 (f'Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter '
-                  f'du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned '
-                  'når som helst i denne perioden. Gå til <a href="/" target="_self" style="color:#38bdf8;">forsiden</a> '
-                  'for å opprette nye prosjekter og generere rapporter.')}
-                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{'View plans and pricing →' if _is_en else 'Se kontoplaner og priser →'}</a>
+                {dt['dashboard_desc']}
+                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{dt['view_plans']}</a>
             </div>
         </div>
     """)
 
     # -- Account status banner --
     if user_status == "pending_invoice":
-        render_html("""
+        render_html(f"""
             <div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);
                         border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
                         color:#f59e0b;font-size:0.9rem;">
-                ⏳ <strong>Kontoen venter på betalingsbekreftelse.</strong>
-                Faktura er sendt — kontoen aktiveres når betaling er registrert (1–3 virkedager).
-                Kontakt post@builtly.ai ved spørsmål.
+                ⏳ <strong>{dt['pending_title']}</strong>
+                {dt['pending_desc']}
             </div>
         """)
     elif user_status == "inactive":
-        render_html("""
+        render_html(f"""
             <div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);
                         border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
                         color:#ef4444;font-size:0.9rem;">
-                ⚠️ <strong>Ingen aktiv plan.</strong>
-                Velg et abonnement for å få tilgang til Builtly sine moduler.
+                ⚠️ <strong>{dt['inactive_title']}</strong>
+                {dt['inactive_desc']}
             </div>
         """)
 
     # -- Account info --
     info_col, plan_col = st.columns([1, 1], gap="large")
     with info_col:
+        _payment_label = dt["card"] if user_payment == "card" else dt["invoice"] if user_payment == "invoice" else dt["not_set"]
         render_html(f"""
             <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
                         padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{'ACCOUNT INFORMATION' if _is_en else 'KONTOINFORMASJON'}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Name' if _is_en else 'Navn'}:</strong> {html.escape(user_name)}</div>
-                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>' + ('Company' if _is_en else 'Selskap') + ':</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Email' if _is_en else 'E-post'}:</strong> {html.escape(user_email)}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Countries' if _is_en else 'Land'}:</strong> {html.escape(', '.join(country_names)) if country_names else ('Not selected' if _is_en else 'Ikke valgt')}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{'Payment' if _is_en else 'Betaling'}:</strong> {'Card (Stripe)' if _is_en and user_payment == 'card' else 'Kort (Stripe)' if user_payment == 'card' else 'Invoice' if _is_en and user_payment == 'invoice' else 'Faktura' if user_payment == 'invoice' else ('Not set up' if _is_en else 'Ikke satt opp')}</div>
+                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{dt['acct_info']}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['name']}:</strong> {html.escape(user_name)}</div>
+                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>' + dt['company'] + ':</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['email_label']}:</strong> {html.escape(user_email)}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['countries']}:</strong> {html.escape(', '.join(country_names)) if country_names else dt['not_selected']}</div>
+                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['payment']}:</strong> {_payment_label}</div>
                 <div style="margin-top:0.5rem;"><strong style="color:{status_color};">{status_text}</strong></div>
             </div>
         """)
@@ -3260,16 +3629,16 @@ def render_user_dashboard(lang_key: str) -> None:
             render_html(f"""
                 <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
                             padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{'YOUR SUBSCRIPTION' if _is_en else 'DITT ABONNEMENT'}</div>
+                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{dt['your_sub']}</div>
                     <div style="color:#22d3ee;font-size:1.2rem;font-weight:700;">{plan_info['name']} — {plan_info['price_label']}</div>
                     <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-top:0.3rem;">{plan_info['price_detail']}</div>
                 </div>
             """)
         else:
             render_html('<div style="border:1px solid rgba(56,189,248,0.10);border-radius:1rem;padding:1.5rem;background:rgba(6,17,26,0.55);">')
-            render_html(f'<div style="color:var(--soft,#c8d3df);">{"No active plan." if _is_en else "Ingen aktiv plan."}</div>')
+            render_html(f'<div style="color:var(--soft,#c8d3df);">{dt["no_plan"]}</div>')
             render_html('</div>')
-            if st.button("Choose plan" if _is_en else "Velg abonnement", use_container_width=True):
+            if st.button(dt["choose_plan"], use_container_width=True):
                 try:
                     st.query_params["auth"] = "plans"
                 except Exception:
@@ -3280,10 +3649,10 @@ def render_user_dashboard(lang_key: str) -> None:
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
     render_html(f"""
         <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;">
-            {'My reports' if _is_en else 'Mine rapporter'}
+            {dt['my_reports']}
         </div>
         <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:1rem;">
-            {'Reports are stored for' if _is_en else 'Rapporter lagres i'} {REPORT_RETENTION_DAYS} {'days.' if _is_en else 'dager.'} {REVISION_NOTICE}
+            {dt['reports_stored']} {REVISION_NOTICE}
         </div>
     """)
 
@@ -3292,61 +3661,63 @@ def render_user_dashboard(lang_key: str) -> None:
             <div style="border:1px dashed rgba(56,189,248,0.20);border-radius:1rem;padding:3rem;
                         text-align:center;color:var(--soft,#c8d3df);">
                 <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
-                <div>{'No reports yet. Create your first project to get started.' if _is_en else 'Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.'}</div>
+                <div>{dt['no_reports']}</div>
             </div>
         """)
     else:
         # Sort options
         sort_col, filter_col = st.columns([1, 1])
         with sort_col:
+            _sort_options = [dt["sort_proj_az"], dt["sort_proj_za"], dt["sort_newest"], dt["sort_oldest"], dt["sort_module"]]
             sort_by = st.selectbox(
-                "Sorter etter",
-                ["Prosjekt (A–Å)", "Prosjekt (Å–A)", "Nyeste først", "Eldste først", "Modul"],
+                dt["sort_label"],
+                _sort_options,
                 index=0,
                 key="report_sort",
             )
         with filter_col:
             # Collect unique project names
-            all_projects = sorted(set(r.get("project", "Uten prosjekt") for r in reports))
+            all_projects = sorted(set(r.get("project", dt["no_project"]) for r in reports))
             filter_project = st.selectbox(
-                "Filtrer på prosjekt",
-                ["Alle prosjekter"] + all_projects,
+                dt["filter_label"],
+                [dt["filter_all"]] + all_projects,
                 index=0,
                 key="report_filter_project",
             )
 
         # Filter
         filtered = reports
-        if filter_project != "Alle prosjekter":
-            filtered = [r for r in reports if r.get("project", "Uten prosjekt") == filter_project]
+        if filter_project != dt["filter_all"]:
+            filtered = [r for r in reports if r.get("project", dt["no_project"]) == filter_project]
 
         # Sort
-        if sort_by == "Prosjekt (A–Å)":
-            filtered = sorted(filtered, key=lambda r: (r.get("project", "Uten prosjekt").lower(), r.get("created", "")))
-        elif sort_by == "Prosjekt (Å–A)":
-            filtered = sorted(filtered, key=lambda r: r.get("project", "Uten prosjekt").lower(), reverse=True)
-        elif sort_by == "Nyeste først":
+        if sort_by == dt["sort_proj_az"]:
+            filtered = sorted(filtered, key=lambda r: (r.get("project", dt["no_project"]).lower(), r.get("created", "")))
+        elif sort_by == dt["sort_proj_za"]:
+            filtered = sorted(filtered, key=lambda r: r.get("project", dt["no_project"]).lower(), reverse=True)
+        elif sort_by == dt["sort_newest"]:
             filtered = sorted(filtered, key=lambda r: r.get("created", ""), reverse=True)
-        elif sort_by == "Eldste først":
+        elif sort_by == dt["sort_oldest"]:
             filtered = sorted(filtered, key=lambda r: r.get("created", ""))
-        elif sort_by == "Modul":
+        elif sort_by == dt["sort_module"]:
             filtered = sorted(filtered, key=lambda r: (r.get("module", ""), r.get("created", "")))
 
         # Group by project
         from collections import OrderedDict
         grouped: dict = OrderedDict()
         for r in filtered:
-            proj = r.get("project", "Uten prosjekt")
+            proj = r.get("project", dt["no_project"])
             grouped.setdefault(proj, []).append(r)
 
         for proj_name, proj_reports in grouped.items():
+            _rcount = len(proj_reports)
             render_html(f"""
                 <div style="color:#38bdf8;font-weight:700;font-size:0.95rem;margin-top:1.2rem;
                             margin-bottom:0.4rem;padding-bottom:0.3rem;
                             border-bottom:1px solid rgba(56,189,248,0.15);">
                     📁 {html.escape(proj_name)}
                     <span style="color:var(--soft,#c8d3df);font-weight:400;font-size:0.8rem;margin-left:0.5rem;">
-                        {len(proj_reports)} rapport{'er' if len(proj_reports) != 1 else ''}
+                        {_rcount} {dt['report_s'] if _rcount == 1 else dt['reports_p']}
                     </span>
                 </div>
             """)
@@ -3360,18 +3731,20 @@ def render_user_dashboard(lang_key: str) -> None:
                         <div>
                             <div style="color:var(--bright,#f1f5f9);font-weight:600;">{html.escape(report.get('name', 'Rapport'))}</div>
                             <div style="color:var(--soft,#c8d3df);font-size:0.8rem;">
-                                {html.escape(report.get('module', ''))} · Opprettet: {html.escape(report.get('created', '—'))} · Utløper: {html.escape(exp_text)}
+                                {html.escape(report.get('module', ''))} · {dt['created']}: {html.escape(report.get('created', '—'))} · {dt['expires']}: {html.escape(exp_text)}
                             </div>
                         </div>
-                        <div style="color:#38bdf8;font-size:0.85rem;cursor:pointer;">Last ned ↓</div>
+                        <div style="color:#38bdf8;font-size:0.85rem;cursor:pointer;">{dt['download']} ↓</div>
                     </div>
                 """)
 
     # -- Actions --
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
+    _at_menu = get_auth_text(lang_key)
     act_col1, act_col2, act_col3 = st.columns(3)
     with act_col1:
-        if st.button("← Back to front page" if _is_en else "← Tilbake til forsiden", use_container_width=True):
+        _back_labels = {"🇳🇴 Norsk": "← Tilbake til forsiden", "🇸🇪 Svenska": "← Tillbaka till startsidan", "🇩🇰 Dansk": "← Tilbage til forsiden", "🇫🇮 Suomi": "← Takaisin etusivulle", "🇩🇪 Deutsch": "← Zurück zur Startseite"}
+        if st.button(_back_labels.get(lang_key, "← Back to front page"), use_container_width=True):
             try:
                 params = get_query_params_dict()
                 params.pop("auth", None)
@@ -3380,14 +3753,15 @@ def render_user_dashboard(lang_key: str) -> None:
                 pass
             st.rerun()
     with act_col2:
-        if st.button("Change plan" if _is_en else "Endre abonnement", use_container_width=True):
+        _plan_labels = {"🇳🇴 Norsk": "Endre abonnement", "🇸🇪 Svenska": "Ändra prenumeration", "🇩🇰 Dansk": "Ændr abonnement", "🇫🇮 Suomi": "Vaihda tilausta", "🇩🇪 Deutsch": "Plan ändern"}
+        if st.button(_plan_labels.get(lang_key, "Change plan"), use_container_width=True):
             try:
                 st.query_params["auth"] = "plans"
             except Exception:
                 pass
             st.rerun()
     with act_col3:
-        if st.button("Log out" if _is_en else "Logg ut", use_container_width=True):
+        if st.button(_at_menu.get("acct_logout", "Log out"), use_container_width=True):
             if _HAS_AUTH:
                 builtly_auth.logout()
             else:
@@ -5721,19 +6095,20 @@ with top_r_wrap:
     st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
     ctrl_acct, ctrl_lang = st.columns(2, gap="small")
     with ctrl_acct:
-        _is_en = "English" in st.session_state.app_lang
+        _at_menu = get_auth_text(st.session_state.app_lang)
         if _is_user_logged_in():
-            _acct_options = (["👤 Account", "My page", "Log out"] if _is_en
-                             else ["👤 Konto", "Min side", "Logg ut"])
+            _acct_options = [_at_menu.get("acct_label", "👤 Account"),
+                             _at_menu.get("acct_my_page", "My page"),
+                             _at_menu.get("acct_logout", "Log out")]
             _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-            if _acct_choice in ("Min side", "My page") and _get_auth_page() != "dashboard":
+            if _acct_choice == _at_menu.get("acct_my_page", "My page") and _get_auth_page() != "dashboard":
                 del st.session_state["acct_menu"]
                 try:
                     st.query_params["auth"] = "dashboard"
                 except Exception:
                     pass
                 st.rerun()
-            elif _acct_choice in ("Logg ut", "Log out"):
+            elif _acct_choice == _at_menu.get("acct_logout", "Log out"):
                 if _HAS_AUTH:
                     builtly_auth.logout()
                 else:
@@ -5750,17 +6125,18 @@ with top_r_wrap:
                     pass
                 st.rerun()
         else:
-            _acct_options = (["👤 Account", "Log in", "Plans / Sign up"] if _is_en
-                             else ["👤 Konto", "Logg inn", "Se planer / Opprett konto"])
+            _acct_options = [_at_menu.get("acct_label", "👤 Account"),
+                             _at_menu.get("acct_login", "Log in"),
+                             _at_menu.get("acct_plans", "Plans / Sign up")]
             _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-            if _acct_choice in ("Logg inn", "Log in") and _get_auth_page() != "login":
+            if _acct_choice == _at_menu.get("acct_login", "Log in") and _get_auth_page() != "login":
                 del st.session_state["acct_menu"]
                 try:
                     st.query_params["auth"] = "login"
                 except Exception:
                     pass
                 st.rerun()
-            elif _acct_choice in ("Se planer / Opprett konto", "Plans / Sign up") and _get_auth_page() != "register":
+            elif _acct_choice == _at_menu.get("acct_plans", "Plans / Sign up") and _get_auth_page() != "register":
                 del st.session_state["acct_menu"]
                 try:
                     st.query_params["auth"] = "register"
