@@ -1784,15 +1784,18 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
                 st.session_state.generated_geo_filename = f"Builtly_GEO_{pd_state['p_name'].replace(' ', '_')}.pdf"
 
                 # Save report to user account (Supabase)
-                if _HAS_AUTH and st.session_state.get("user_authenticated"):
+                _save_debug = f"_HAS_AUTH={_HAS_AUTH}, authenticated={st.session_state.get('user_authenticated')}, user_id={bool(st.session_state.get('user_id'))}"
+                if _HAS_AUTH:
                     try:
                         builtly_auth.save_report(
                             project_name=pd_state.get("p_name", ""),
                             report_name=st.session_state.generated_geo_filename,
                             module="RIG-M (Geo & Miljø)",
                         )
-                    except Exception:
-                        pass
+                        _save_debug += f" | {st.session_state.get('_report_save_debug', 'no debug')}"
+                    except Exception as e:
+                        _save_debug += f" | EXCEPTION: {e}"
+                st.session_state["_report_save_debug"] = _save_debug
 
                 st.rerun()
 
