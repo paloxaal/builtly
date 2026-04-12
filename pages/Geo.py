@@ -52,9 +52,12 @@ if _HAS_AUTH:
 
 # Norge i Bilder via Geodata Online proxy (uses same token as Geodata Online — no GeoID needed!)
 # Discovered at services.geodataonline.no/arcgis/rest/services/Wms
-NIB_PROSJEKTER_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-prosjekter/WMSServer"
-NIB_MOSAIKK_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-mosaikk/WMSServer"
-NIB_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB/WMSServer"
+# SecureWms endpoint format — try WmsServer (ArcGIS standard for SecureWms type)
+NIB_PROSJEKTER_GDO_URLS = [
+    "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-prosjekter/WmsServer",
+    "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-prosjekter/WMSServer",
+    "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-prosjekter/SecureWmsServer",
+]
 
 def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
                  width: int = 800, height: int = 800,
@@ -278,26 +281,32 @@ def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
 
     token_params = {"token": token}
     
-    # Step 1: Discover available layers via GetCapabilities
-    try:
-        caps_params = {
-            "service": "WMS",
-            "request": "GetCapabilities",
-            "version": "1.1.1",
-            "token": token,
-        }
-        caps_resp = requests.get(NIB_PROSJEKTER_GDO, params=caps_params, timeout=30)
-        
-        if caps_resp.status_code == 401 or caps_resp.status_code == 403:
-            return None, f"NIB prosjekter: ingen tilgang ({caps_resp.status_code}) — kontakt Geodata", None
-        if caps_resp.status_code != 200:
-            return None, f"NIB prosjekter: GetCapabilities feilet ({caps_resp.status_code})", None
-        if len(caps_resp.content) < 500:
-            return None, "NIB prosjekter: tomt svar fra GetCapabilities", None
-    except requests.exceptions.Timeout:
-        return None, "NIB prosjekter: GetCapabilities timeout (30s)", None
-    except Exception as e:
-        return None, f"NIB prosjekter: {str(e)[:80]}", None
+    # Step 1: Discover available layers via GetCapabilities (try multiple URL variants)
+    caps_resp = None
+    working_url = None
+    caps_params = {
+        "service": "WMS",
+        "request": "GetCapabilities",
+        "version": "1.1.1",
+        "token": token,
+    }
+    
+    for url_candidate in NIB_PROSJEKTER_GDO_URLS:
+        try:
+            resp = requests.get(url_candidate, params=caps_params, timeout=30)
+            if resp.status_code == 200 and len(resp.content) > 500:
+                caps_resp = resp
+                working_url = url_candidate
+                break
+            elif resp.status_code in (401, 403):
+                return None, f"NIB prosjekter: ingen tilgang ({resp.status_code}) — kontakt Geodata for å aktivere NiB-prosjekter", None
+        except requests.exceptions.Timeout:
+            continue
+        except Exception:
+            continue
+
+    if caps_resp is None:
+        return None, f"NIB prosjekter: GetCapabilities feilet på alle URL-varianter (prøvde {len(NIB_PROSJEKTER_GDO_URLS)})", None
 
     # Step 2: Quick-parse layer names from XML
     # Full XML parsing is too slow for massive capabilities doc — use regex
@@ -324,7 +333,7 @@ def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
     
     # Step 3: Try the oldest layers first (up to 8 attempts)
     for year, layer_name in layer_candidates[:8]:
-        img = _wms_get_map(NIB_PROSJEKTER_GDO, layer_name, bbox,
+        img = _wms_get_map(working_url, layer_name, bbox,
                            width=800, height=800, extra_params=token_params, timeout=15)
         if img:
             return img.convert("RGB"), f"Norge i Bilder ({layer_name})", str(year)
