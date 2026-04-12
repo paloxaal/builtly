@@ -37,13 +37,13 @@ except ImportError:
 import streamlit.components.v1 as components
 
 
-# ── Geodata Online støykart API ──────────────────────────────────────
-STOYKART_SERVICES = {
-    "vei": "https://services.geodataonline.no/arcgis/rest/services/Geonorge/Stoykart_veg/MapServer",
-    "bane": "https://services.geodataonline.no/arcgis/rest/services/Geonorge/Stoykart_jernbane/MapServer",
-    "fly": "https://services.geodataonline.no/arcgis/rest/services/Geonorge/Stoykart_fly/MapServer",
-    "industri": "https://services.geodataonline.no/arcgis/rest/services/Geonorge/Stoykart_industri/MapServer",
-}
+# ── Støykart — åpne WMS-tjenester (Geonorge) + Geodata Online fallback ──
+
+# Correct WMS endpoints for Norwegian noise maps:
+# - Vei: Statens vegvesen T-1442 støyvarselkart via Geonorge WMS
+# - Bane: Bane NOR støysoner via Geonorge WMS
+# - Fly: Avinor støysoner lufthavn via Geonorge WMS
+# - Geodata Online DOK Forurensning MapServer (contains noise sublayers, requires token)
 
 STOY_DB_RANGES = {
     "Lden 55-60 dB": {"min": 55, "max": 60, "color": "#22c55e"},
@@ -54,89 +54,163 @@ STOY_DB_RANGES = {
 }
 
 
-def fetch_stoykart_image(lat: float, lon: float, kilde: str = "vei", width: int = 800, height: int = 600, buffer_m: int = 300):
-    """Hent støykart-bilde fra Geodata Online ArcGIS REST API."""
-    if not HAS_REQUESTS:
-        return None, "requests-biblioteket mangler"
-    
-    service_url = STOYKART_SERVICES.get(kilde.lower())
-    if not service_url:
-        return None, f"Ukjent støykilde: {kilde}"
-    
-    # Konverter lat/lon (WGS84) til UTM33N (EPSG:25833) for norske kart
-    try:
-        import math
-        # Forenklet UTM-konvertering for Norge
-        k0 = 0.9996
-        a = 6378137.0
-        e = 0.0818192
-        lon0 = 15.0  # UTM sone 33
-        
-        lat_rad = math.radians(lat)
-        lon_rad = math.radians(lon)
-        lon0_rad = math.radians(lon0)
-        
-        N = a / math.sqrt(1 - e**2 * math.sin(lat_rad)**2)
-        T = math.tan(lat_rad)**2
-        C = (e**2 / (1 - e**2)) * math.cos(lat_rad)**2
-        A_val = (lon_rad - lon0_rad) * math.cos(lat_rad)
-        
-        M = a * ((1 - e**2/4 - 3*e**4/64) * lat_rad
-                - (3*e**2/8 + 3*e**4/32) * math.sin(2*lat_rad)
-                + (15*e**4/256) * math.sin(4*lat_rad))
-        
-        easting = k0 * N * (A_val + (1-T+C) * A_val**3/6) + 500000
-        northing = k0 * (M + N * math.tan(lat_rad) * (A_val**2/2))
-        
-        xmin = easting - buffer_m
-        ymin = northing - buffer_m
-        xmax = easting + buffer_m
-        ymax = northing + buffer_m
-    except Exception:
-        return None, "Koordinatkonvertering feilet"
-    
+def _latlon_to_utm33(lat: float, lon: float) -> tuple:
+    """Convert lat/lon (WGS84) to UTM33N (EPSG:25833) for Norwegian maps."""
+    import math
+    k0, a, e, lon0 = 0.9996, 6378137.0, 0.0818192, 15.0
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    lon0_rad = math.radians(lon0)
+    N = a / math.sqrt(1 - e**2 * math.sin(lat_rad)**2)
+    T = math.tan(lat_rad)**2
+    C = (e**2 / (1 - e**2)) * math.cos(lat_rad)**2
+    A_val = (lon_rad - lon0_rad) * math.cos(lat_rad)
+    M = a * ((1 - e**2/4 - 3*e**4/64) * lat_rad
+            - (3*e**2/8 + 3*e**4/32) * math.sin(2*lat_rad)
+            + (15*e**4/256) * math.sin(4*lat_rad))
+    easting = k0 * N * (A_val + (1-T+C) * A_val**3/6) + 500000
+    northing = k0 * (M + N * math.tan(lat_rad) * (A_val**2/2))
+    return easting, northing
+
+
+def _fetch_wms_image(base_url: str, layers_to_try: list, bbox_25833: tuple,
+                     width: int = 800, height: int = 600, auth=None, extra_params=None):
+    """Try WMS GetMap with multiple layer name candidates."""
+    xmin, ymin, xmax, ymax = bbox_25833
+    for layer in layers_to_try:
+        params = {
+            "service": "WMS", "request": "GetMap", "version": "1.1.1",
+            "layers": layer, "styles": "",
+            "srs": "EPSG:25833",
+            "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+            "width": str(width), "height": str(height),
+            "format": "image/png", "transparent": "true",
+        }
+        if extra_params:
+            params.update(extra_params)
+        try:
+            resp = requests.get(base_url, params=params, timeout=15, auth=auth)
+            if resp.status_code == 200 and len(resp.content) > 2000:
+                if b"ServiceException" not in resp.content[:1000]:
+                    return Image.open(io.BytesIO(resp.content)).convert("RGBA"), layer
+        except Exception:
+            continue
+    return None, None
+
+
+def _fetch_arcgis_image(service_url: str, bbox_25833: tuple,
+                        width: int = 800, height: int = 600, token: str = None):
+    """Fetch image from ArcGIS REST MapServer export."""
+    xmin, ymin, xmax, ymax = bbox_25833
     params = {
         "bbox": f"{xmin},{ymin},{xmax},{ymax}",
-        "bboxSR": "25833",
-        "imageSR": "25833",
+        "bboxSR": "25833", "imageSR": "25833",
         "size": f"{width},{height}",
-        "format": "png",
-        "transparent": "true",
-        "f": "image",
+        "format": "png", "transparent": "true", "f": "image",
     }
-    
+    if token:
+        params["token"] = token
     try:
         resp = requests.get(f"{service_url}/export", params=params, timeout=15)
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
-            img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            ctype = resp.headers.get("content-type", "")
+            if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
+                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+def fetch_stoykart_image(lat: float, lon: float, kilde: str = "vei",
+                         width: int = 800, height: int = 600, buffer_m: int = 300):
+    """Hent støykart-bilde fra åpne WMS-tjenester og Geodata Online.
+    
+    Prøver kilder i rekkefølge:
+    1. Geonorge WMS (åpen, T-1442 støyvarselkart)
+    2. Geodata Online DOK Forurensning MapServer (token-autentisert)
+    """
+    if not HAS_REQUESTS:
+        return None, "requests-biblioteket mangler"
+
+    try:
+        easting, northing = _latlon_to_utm33(lat, lon)
+        bbox = (easting - buffer_m, northing - buffer_m,
+                easting + buffer_m, northing + buffer_m)
+    except Exception:
+        return None, "Koordinatkonvertering feilet"
+
+    errors = []
+
+    # --- Source 1: Geonorge WMS (åpne tjenester, ingen auth) ---
+    wms_sources = {
+        "vei": [
+            ("https://wms.geonorge.no/skwms1/wms.stoykartleggingveg",
+             ["Støyvarselkart_Lden", "stoyvarselkart_lden", "Støyvarselkart", "0", "1"]),
+        ],
+        "bane": [
+            ("https://wms.geonorge.no/skwms1/wms.stoysonerjernbanenett",
+             ["Støysoner", "stoysoner", "0", "1"]),
+        ],
+        "fly": [
+            ("https://wms.geonorge.no/skwms1/wms.stoysonerlufthavn",
+             ["Støysoner", "stoysoner", "0", "1"]),
+        ],
+        "industri": [
+            ("https://wms.geonorge.no/skwms1/wms.stoykartleggingveg",
+             ["Støyvarselkart_Lden", "0"]),
+        ],
+    }
+
+    for wms_url, layer_candidates in wms_sources.get(kilde.lower(), []):
+        img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height)
+        if img:
             return img, None
-        return None, f"API returnerte {resp.status_code}"
-    except Exception as exc:
-        return None, str(exc)
+        errors.append(f"WMS {wms_url.split('/')[-1]}: ingen treff")
+
+    # --- Source 2: Geodata Online DOK Forurensning (token-autentisert) ---
+    try:
+        from geodata_client import GeodataOnlineClient
+        gdo = GeodataOnlineClient()
+        if gdo.is_available():
+            try:
+                token = gdo.get_token()
+                dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+                img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token)
+                if img:
+                    return img, None
+                errors.append("Geodata Online DOK Forurensning: ingen data")
+            except Exception as e:
+                errors.append(f"Geodata Online: {str(e)[:60]}")
+    except ImportError:
+        pass
+
+    return None, f"Kunne ikke hente støykart: {'; '.join(errors) if errors else 'Ingen kilder tilgjengelig'}. Last opp manuelt under."
 
 
 def fetch_stoykart_contours(lat: float, lon: float, kilde: str = "vei", buffer_m: int = 300):
-    """Hent støykontur-data (feature query) fra Geodata Online."""
+    """Hent støykontur-data (feature query) fra Geodata Online DOK Forurensning."""
     if not HAS_REQUESTS:
         return []
-    
-    service_url = STOYKART_SERVICES.get(kilde.lower())
-    if not service_url:
-        return []
-    
+
     try:
-        import math
-        k0 = 0.9996; a = 6378137.0; e = 0.0818192; lon0 = 15.0
-        lat_rad = math.radians(lat); lon_rad = math.radians(lon); lon0_rad = math.radians(lon0)
-        N = a / math.sqrt(1 - e**2 * math.sin(lat_rad)**2)
-        T = math.tan(lat_rad)**2; C = (e**2/(1-e**2))*math.cos(lat_rad)**2
-        A_val = (lon_rad - lon0_rad)*math.cos(lat_rad)
-        M = a*((1-e**2/4-3*e**4/64)*lat_rad-(3*e**2/8+3*e**4/32)*math.sin(2*lat_rad)+(15*e**4/256)*math.sin(4*lat_rad))
-        easting = k0*N*(A_val+(1-T+C)*A_val**3/6)+500000
-        northing = k0*(M+N*math.tan(lat_rad)*(A_val**2/2))
+        easting, northing = _latlon_to_utm33(lat, lon)
     except Exception:
         return []
-    
+
+    # Get Geodata Online token if available
+    gdo_token = None
+    try:
+        from geodata_client import GeodataOnlineClient
+        _gdo_client = GeodataOnlineClient()
+        if _gdo_client.is_available():
+            gdo_token = _gdo_client.get_token()
+    except Exception:
+        pass
+
+    if not gdo_token:
+        return []
+
+    service_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
     params = {
         "geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
         "geometryType": "esriGeometryEnvelope",
@@ -146,10 +220,11 @@ def fetch_stoykart_contours(lat: float, lon: float, kilde: str = "vei", buffer_m
         "outFields": "*",
         "returnGeometry": "false",
         "f": "json",
+        "token": gdo_token,
     }
-    
+
     contours = []
-    for layer_id in [0, 1, 2, 3]:
+    for layer_id in [0, 1, 2, 3, 4, 5]:
         try:
             resp = requests.get(f"{service_url}/{layer_id}/query", params=params, timeout=10)
             if resp.status_code == 200:
@@ -166,7 +241,7 @@ def fetch_stoykart_contours(lat: float, lon: float, kilde: str = "vei", buffer_m
                         })
         except Exception:
             continue
-    
+
     return contours
 
 
