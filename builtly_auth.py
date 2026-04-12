@@ -20,6 +20,155 @@ import streamlit.components.v1 as components
 
 REPORT_RETENTION_DAYS = 30
 
+# ── I18N — user-facing messages ──────────────────────────────────────────────
+
+_MSG = {
+    "🇳🇴 Norsk": {
+        "sb_not_configured": "Supabase er ikke konfigurert. Kontakt post@builtly.ai.",
+        "account_created": "✅ Konto opprettet! Sjekk e-posten din og klikk bekreftelseslenken for å aktivere kontoen. Sjekk spam/søppelpost.",
+        "account_create_fail": "Kunne ikke opprette konto.",
+        "email_exists": "E-postadressen er allerede registrert. Prøv å logge inn.",
+        "register_error": "Registreringsfeil: {e}",
+        "wrong_credentials": "Feil e-post eller passord.",
+        "email_not_confirmed": "E-posten er ikke bekreftet ennå. Sjekk innboksen din.",
+        "login_error": "Innloggingsfeil: {e}",
+        "verification_sent": "Ny bekreftelseslenke sendt!",
+        "error_generic": "Feil: {e}",
+        "stripe_not_configured": "Stripe er ikke konfigurert.",
+        "price_missing": "Pris-ID for '{plan}' mangler i Render env vars.",
+        "stripe_error": "Stripe-feil: {e}",
+        "payment_ok": "✅ Betaling godkjent! Kontoen din er nå aktiv.",
+        "payment_incomplete": "Betaling ikke fullført.",
+        "verify_error": "Verifiseringsfeil: {e}",
+        "invoice_ok": "📄 Bestilling mottatt! Faktura sendes til din e-post. Kontoen aktiveres når betaling er registrert (1–3 virkedager).",
+        "admin_not_configured": "Admin ikke konfigurert.",
+        "user_activated": "Bruker aktivert.",
+    },
+    "🇬🇧 English (UK)": {
+        "sb_not_configured": "Supabase is not configured. Contact post@builtly.ai.",
+        "account_created": "✅ Account created! Check your email and click the verification link to activate your account. Check spam/junk.",
+        "account_create_fail": "Could not create account.",
+        "email_exists": "This email is already registered. Try logging in.",
+        "register_error": "Registration error: {e}",
+        "wrong_credentials": "Wrong email or password.",
+        "email_not_confirmed": "Email not yet confirmed. Check your inbox.",
+        "login_error": "Login error: {e}",
+        "verification_sent": "New verification link sent!",
+        "error_generic": "Error: {e}",
+        "stripe_not_configured": "Stripe is not configured.",
+        "price_missing": "Price ID for '{plan}' is missing in Render env vars.",
+        "stripe_error": "Stripe error: {e}",
+        "payment_ok": "✅ Payment approved! Your account is now active.",
+        "payment_incomplete": "Payment not completed.",
+        "verify_error": "Verification error: {e}",
+        "invoice_ok": "📄 Order received! Invoice will be sent to your email. Account activates when payment is registered (1–3 business days).",
+        "admin_not_configured": "Admin not configured.",
+        "user_activated": "User activated.",
+    },
+    "🇺🇸 English (US)": {},  # falls back to UK English
+    "🇸🇪 Svenska": {
+        "sb_not_configured": "Supabase är inte konfigurerat. Kontakta post@builtly.ai.",
+        "account_created": "✅ Konto skapad! Kontrollera din e-post och klicka på verifieringslänken för att aktivera kontot. Kontrollera skräppost.",
+        "account_create_fail": "Kunde inte skapa konto.",
+        "email_exists": "E-postadressen är redan registrerad. Försök logga in.",
+        "register_error": "Registreringsfel: {e}",
+        "wrong_credentials": "Fel e-post eller lösenord.",
+        "email_not_confirmed": "E-posten är inte bekräftad ännu. Kontrollera din inkorg.",
+        "login_error": "Inloggningsfel: {e}",
+        "verification_sent": "Ny verifieringslänk skickad!",
+        "error_generic": "Fel: {e}",
+        "stripe_not_configured": "Stripe är inte konfigurerat.",
+        "price_missing": "Pris-ID för '{plan}' saknas i Render env vars.",
+        "stripe_error": "Stripe-fel: {e}",
+        "payment_ok": "✅ Betalning godkänd! Ditt konto är nu aktivt.",
+        "payment_incomplete": "Betalning ej slutförd.",
+        "verify_error": "Verifieringsfel: {e}",
+        "invoice_ok": "📄 Beställning mottagen! Faktura skickas till din e-post. Kontot aktiveras när betalning registrerats (1–3 arbetsdagar).",
+        "admin_not_configured": "Admin inte konfigurerad.",
+        "user_activated": "Användare aktiverad.",
+    },
+    "🇩🇰 Dansk": {
+        "sb_not_configured": "Supabase er ikke konfigureret. Kontakt post@builtly.ai.",
+        "account_created": "✅ Konto oprettet! Tjek din e-mail og klik på bekræftelseslinket for at aktivere kontoen. Tjek spam/uønsket post.",
+        "account_create_fail": "Kunne ikke oprette konto.",
+        "email_exists": "E-mailadressen er allerede registreret. Prøv at logge ind.",
+        "register_error": "Registreringsfejl: {e}",
+        "wrong_credentials": "Forkert e-mail eller adgangskode.",
+        "email_not_confirmed": "E-mailen er ikke bekræftet endnu. Tjek din indbakke.",
+        "login_error": "Loginfejl: {e}",
+        "verification_sent": "Nyt bekræftelseslink sendt!",
+        "error_generic": "Fejl: {e}",
+        "stripe_not_configured": "Stripe er ikke konfigureret.",
+        "price_missing": "Pris-ID for '{plan}' mangler i Render env vars.",
+        "stripe_error": "Stripe-fejl: {e}",
+        "payment_ok": "✅ Betaling godkendt! Din konto er nu aktiv.",
+        "payment_incomplete": "Betaling ikke gennemført.",
+        "verify_error": "Bekræftelsesfejl: {e}",
+        "invoice_ok": "📄 Bestilling modtaget! Faktura sendes til din e-mail. Kontoen aktiveres, når betaling er registreret (1–3 hverdage).",
+        "admin_not_configured": "Admin ikke konfigureret.",
+        "user_activated": "Bruger aktiveret.",
+    },
+    "🇫🇮 Suomi": {
+        "sb_not_configured": "Supabasea ei ole määritetty. Ota yhteyttä post@builtly.ai.",
+        "account_created": "✅ Tili luotu! Tarkista sähköpostisi ja napsauta vahvistuslinkkiä aktivoidaksesi tilisi. Tarkista roskaposti.",
+        "account_create_fail": "Tilin luonti epäonnistui.",
+        "email_exists": "Sähköpostiosoite on jo rekisteröity. Yritä kirjautua sisään.",
+        "register_error": "Rekisteröintivirhe: {e}",
+        "wrong_credentials": "Väärä sähköposti tai salasana.",
+        "email_not_confirmed": "Sähköpostia ei ole vielä vahvistettu. Tarkista saapuneet-kansiosi.",
+        "login_error": "Kirjautumisvirhe: {e}",
+        "verification_sent": "Uusi vahvistuslinkki lähetetty!",
+        "error_generic": "Virhe: {e}",
+        "stripe_not_configured": "Stripeä ei ole määritetty.",
+        "price_missing": "Hinta-ID puuttuu '{plan}' — aseta Render env vars.",
+        "stripe_error": "Stripe-virhe: {e}",
+        "payment_ok": "✅ Maksu hyväksytty! Tilisi on nyt aktiivinen.",
+        "payment_incomplete": "Maksua ei suoritettu loppuun.",
+        "verify_error": "Vahvistusvirhe: {e}",
+        "invoice_ok": "📄 Tilaus vastaanotettu! Lasku lähetetään sähköpostiisi. Tili aktivoidaan, kun maksu on rekisteröity (1–3 arkipäivää).",
+        "admin_not_configured": "Adminia ei ole määritetty.",
+        "user_activated": "Käyttäjä aktivoitu.",
+    },
+    "🇩🇪 Deutsch": {
+        "sb_not_configured": "Supabase ist nicht konfiguriert. Kontaktieren Sie post@builtly.ai.",
+        "account_created": "✅ Konto erstellt! Überprüfen Sie Ihre E-Mail und klicken Sie auf den Bestätigungslink, um Ihr Konto zu aktivieren. Prüfen Sie auch den Spam-Ordner.",
+        "account_create_fail": "Konto konnte nicht erstellt werden.",
+        "email_exists": "Diese E-Mail-Adresse ist bereits registriert. Versuchen Sie sich anzumelden.",
+        "register_error": "Registrierungsfehler: {e}",
+        "wrong_credentials": "Falsche E-Mail oder Passwort.",
+        "email_not_confirmed": "E-Mail noch nicht bestätigt. Überprüfen Sie Ihren Posteingang.",
+        "login_error": "Anmeldefehler: {e}",
+        "verification_sent": "Neuer Bestätigungslink gesendet!",
+        "error_generic": "Fehler: {e}",
+        "stripe_not_configured": "Stripe ist nicht konfiguriert.",
+        "price_missing": "Preis-ID für '{plan}' fehlt in Render env vars.",
+        "stripe_error": "Stripe-Fehler: {e}",
+        "payment_ok": "✅ Zahlung bestätigt! Ihr Konto ist jetzt aktiv.",
+        "payment_incomplete": "Zahlung nicht abgeschlossen.",
+        "verify_error": "Bestätigungsfehler: {e}",
+        "invoice_ok": "📄 Bestellung eingegangen! Rechnung wird an Ihre E-Mail gesendet. Konto wird aktiviert, sobald die Zahlung registriert ist (1–3 Werktage).",
+        "admin_not_configured": "Admin nicht konfiguriert.",
+        "user_activated": "Benutzer aktiviert.",
+    },
+}
+
+# UK English is the full fallback
+_MSG_FALLBACK = _MSG["🇬🇧 English (UK)"]
+# US English inherits from UK
+_MSG["🇺🇸 English (US)"] = {**_MSG_FALLBACK}
+
+
+def _m(key: str, lang: str = "", **kwargs) -> str:
+    """Retrieve a translated message. Falls back to English if key missing."""
+    if not lang:
+        lang = st.session_state.get("app_lang", "🇬🇧 English (UK)")
+    bundle = _MSG.get(lang, _MSG_FALLBACK)
+    template = bundle.get(key) or _MSG_FALLBACK.get(key, key)
+    try:
+        return template.format(**kwargs) if kwargs else template
+    except (KeyError, IndexError):
+        return template
+
 def _env(name: str) -> str:
     return (os.environ.get(name) or "").strip()
 
@@ -56,10 +205,11 @@ def services_ok() -> Dict[str, bool]:
 # ── AUTH ─────────────────────────────────────────────────────────────────────
 
 def register(email: str, password: str, name: str, company: str,
-             org_nr: str, phone: str, countries: list) -> Tuple[bool, str]:
+             org_nr: str, phone: str, countries: list,
+             lang: str = "") -> Tuple[bool, str]:
     sb = _sb()
     if not sb:
-        return False, "Supabase er ikke konfigurert. Kontakt post@builtly.ai."
+        return False, _m("sb_not_configured", lang)
     try:
         res = sb.auth.sign_up({
             "email": email, "password": password,
@@ -80,26 +230,23 @@ def register(email: str, password: str, name: str, company: str,
                 }).execute()
             except Exception:
                 pass
-            return True, (
-                "✅ Konto opprettet! Sjekk e-posten din og klikk bekreftelseslenken "
-                "for å aktivere kontoen. Sjekk spam/søppelpost."
-            )
-        return False, "Kunne ikke opprette konto."
+            return True, _m("account_created", lang)
+        return False, _m("account_create_fail", lang)
     except Exception as e:
         msg = str(e).lower()
         if "already registered" in msg or "already exists" in msg:
-            return False, "E-postadressen er allerede registrert. Prøv å logge inn."
-        return False, f"Registreringsfeil: {e}"
+            return False, _m("email_exists", lang)
+        return False, _m("register_error", lang, e=e)
 
 
-def login(email: str, password: str) -> Tuple[bool, str]:
+def login(email: str, password: str, lang: str = "") -> Tuple[bool, str]:
     sb = _sb()
     if not sb:
-        return False, "Supabase er ikke konfigurert."
+        return False, _m("sb_not_configured", lang)
     try:
         res = sb.auth.sign_in_with_password({"email": email, "password": password})
         if not res.user:
-            return False, "Feil e-post eller passord."
+            return False, _m("wrong_credentials", lang)
         meta = res.user.user_metadata or {}
         profile = {}
         try:
@@ -135,10 +282,10 @@ def login(email: str, password: str) -> Tuple[bool, str]:
     except Exception as e:
         msg = str(e).lower()
         if "not confirmed" in msg or "email" in msg:
-            return False, "E-posten er ikke bekreftet ennå. Sjekk innboksen din."
+            return False, _m("email_not_confirmed", lang)
         if "invalid" in msg or "credentials" in msg:
-            return False, "Feil e-post eller passord."
-        return False, f"Innloggingsfeil: {e}"
+            return False, _m("wrong_credentials", lang)
+        return False, _m("login_error", lang, e=e)
 
 
 def logout():
@@ -157,15 +304,15 @@ def logout():
             else: st.session_state[key] = ""
 
 
-def resend_verification(email: str) -> Tuple[bool, str]:
+def resend_verification(email: str, lang: str = "") -> Tuple[bool, str]:
     sb = _sb()
     if not sb:
-        return False, "Supabase er ikke konfigurert."
+        return False, _m("sb_not_configured", lang)
     try:
         sb.auth.resend({"type": "signup", "email": email})
-        return True, "Ny bekreftelseslenke sendt!"
+        return True, _m("verification_sent", lang)
     except Exception as e:
-        return False, f"Feil: {e}"
+        return False, _m("error_generic", lang, e=e)
 
 
 def restore_session() -> bool:
@@ -398,13 +545,14 @@ PLAN_PRICE_ENVS = {
     "enterprise": "STRIPE_PRICE_ENTERPRISE",
 }
 
-def create_checkout(plan_key: str, n_countries: int = 1) -> Tuple[Optional[str], str]:
+def create_checkout(plan_key: str, n_countries: int = 1,
+                    lang: str = "") -> Tuple[Optional[str], str]:
     if not _init_stripe():
-        return None, "Stripe er ikke konfigurert."
+        return None, _m("stripe_not_configured", lang)
     import stripe
     price_id = _env(PLAN_PRICE_ENVS.get(plan_key, ""))
     if not price_id:
-        return None, f"Pris-ID for '{plan_key}' mangler i Render env vars."
+        return None, _m("price_missing", lang, plan=plan_key)
     base = _env("BUILTLY_BASE_URL") or "https://builtly.ai"
     uid = st.session_state.get("user_id", "")
     try:
@@ -419,12 +567,12 @@ def create_checkout(plan_key: str, n_countries: int = 1) -> Tuple[Optional[str],
         )
         return sess.url, ""
     except Exception as e:
-        return None, f"Stripe-feil: {e}"
+        return None, _m("stripe_error", lang, e=e)
 
 
-def verify_checkout(session_id: str) -> Tuple[bool, str]:
+def verify_checkout(session_id: str, lang: str = "") -> Tuple[bool, str]:
     if not _init_stripe():
-        return False, "Stripe ikke konfigurert."
+        return False, _m("stripe_not_configured", lang)
     import stripe
     try:
         sess = stripe.checkout.Session.retrieve(session_id)
@@ -446,13 +594,14 @@ def verify_checkout(session_id: str) -> Tuple[bool, str]:
                 "user_plan": plan, "user_payment_method": "card",
                 "user_account_status": "active",
             })
-            return True, "✅ Betaling godkjent! Kontoen din er nå aktiv."
-        return False, "Betaling ikke fullført."
+            return True, _m("payment_ok", lang)
+        return False, _m("payment_incomplete", lang)
     except Exception as e:
-        return False, f"Verifiseringsfeil: {e}"
+        return False, _m("verify_error", lang, e=e)
 
 
-def request_invoice(plan_key: str, n_countries: int = 1) -> Tuple[bool, str]:
+def request_invoice(plan_key: str, n_countries: int = 1,
+                    lang: str = "") -> Tuple[bool, str]:
     sb = _sb()
     uid = st.session_state.get("user_id", "")
     if sb and uid:
@@ -468,23 +617,20 @@ def request_invoice(plan_key: str, n_countries: int = 1) -> Tuple[bool, str]:
         "user_plan": plan_key, "user_payment_method": "invoice",
         "user_account_status": "pending_invoice",
     })
-    return True, (
-        "📄 Bestilling mottatt! Faktura sendes til din e-post. "
-        "Kontoen aktiveres når betaling er registrert (1–3 virkedager)."
-    )
+    return True, _m("invoice_ok", lang)
 
 
-def activate_invoice_user(user_id: str) -> Tuple[bool, str]:
+def activate_invoice_user(user_id: str, lang: str = "") -> Tuple[bool, str]:
     sb = _sb_admin()
-    if not sb: return False, "Admin ikke konfigurert."
+    if not sb: return False, _m("admin_not_configured", lang)
     try:
         sb.table("profiles").update({
             "account_status": "active",
             "activated_at": datetime.utcnow().isoformat(),
         }).eq("id", user_id).execute()
-        return True, "Bruker aktivert."
+        return True, _m("user_activated", lang)
     except Exception as e:
-        return False, f"Feil: {e}"
+        return False, _m("error_generic", lang, e=e)
 
 # ── REPORTS ──────────────────────────────────────────────────────────────────
 
