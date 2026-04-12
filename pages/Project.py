@@ -573,7 +573,7 @@ with input_col:
         accept_multiple_files=True,
         type=['dwg', 'dxf', 'ifc', 'xlsx', 'xls', 'docx', 'csv', 'zip'],
         key="project_extra_files",
-        help="Disse filene lagres i prosjektmappen og er tilgjengelig for alle fagmoduler (TDD, Anbudskontroll, Mengde & Scope, Yield osv).",
+        help=T["upload_other_help"],
     )
     current_file_names = [f.name for f in uploaded_drawings] if uploaded_drawings else []
     
@@ -582,7 +582,7 @@ with input_col:
             if not google_key:
                 st.error(T["ai_missing_key"])
             else:
-                with st.spinner("AI studerer tegningene. Større filer komprimeres automatisk for å forhindre minnekrasj..."):
+                with st.spinner(T["ai_spinner"]):
                     images_for_qa = []
                     try:
                         for f in uploaded_drawings: 
@@ -757,110 +757,157 @@ def render_module_card(col, icon, badge, badge_class, title, desc, input_txt, ou
         else:
             st.button("In development", key=f"btn_{page_target}_dev", type="secondary", disabled=True, use_container_width=True)
 
-if True:  # Moduler alltid synlige i utviklingsfasen – fjern denne linjen for å aktivere kompletthetskravet (completeness > 30)
+if True:  # Moduler alltid synlige i utviklingsfasen
     st.markdown("<hr style='border-color: rgba(120,145,170,0.2); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
     
-    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>🛠️ Prosjektering & Fagmoduler</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3 style='margin-bottom: 1.5rem; font-weight:750;'>{T['mod_title']}</h3>", unsafe_allow_html=True)
     
     r1c1, r1c2, r1c3 = st.columns(3)
     render_module_card(r1c1, "🌍", "Phase 1 - Priority", "badge-priority", "GEO / ENV - Ground Conditions", 
-                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans.", 
-                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs", "Åpne Geo & Miljø", "Geo")
-    render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound", 
-                       "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies.", 
-                       "Noise map + floor plan", "Acoustics report, facade eval.", "Åpne Akustikk", "Akustikk")
-    render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy", 
-                       "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy.", 
-                       "Architectural drawings + class", "Fire strategy concept, deviations", "Åpne Brannkonsept", "Brannkonsept")
+                       "Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts environmental action plans." if _en else
+                       "Analyserer lab-filer og graveceller. Klassifiserer masser og utarbeider tiltaksplaner.", 
+                       "XLSX / CSV / PDF + plans", "Environmental action plan, logs" if _en else "Tiltaksplan, logg",
+                       "Open Geo & Env" if _en else "Åpne Geo & Miljø", "Geo")
+    render_module_card(r1c2, "🔊", "Phase 2", "badge-phase2", "ACOUSTICS - Noise & Sound" if _en else "AKUSTIKK - Støy & Lyd", 
+                       "Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation strategies." if _en else
+                       "Leser støykart og plantegninger. Genererer krav til fasade, vinduer og skjerming.", 
+                       "Noise map + floor plan" if _en else "Støykart + Plan",
+                       "Acoustics report, facade eval." if _en else "Akustikkrapport",
+                       "Open Acoustics" if _en else "Åpne Akustikk", "Akustikk")
+    render_module_card(r1c3, "🔥", "Phase 2", "badge-phase2", "FIRE - Safety Strategy" if _en else "BRANN - Sikkerhetskonsept", 
+                       "Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, and fire strategy." if _en else
+                       "Vurderer arkitektur mot forskrifter. Definerer rømning og brannceller.", 
+                       "Architectural drawings + class" if _en else "Tegninger + Klasse",
+                       "Fire strategy concept, deviations" if _en else "Brannkonsept (RIBr)",
+                       "Open Fire Strategy" if _en else "Åpne Brannkonsept", "Brannkonsept")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     r2c1, r2c2, r2c3 = st.columns(3)
-    render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study", 
-                       "Site screening, volume analysis, and early-phase decision support before full engineering design.", 
-                       "Site data, zoning plans", "Feasibility report, utilization metrics", "Åpne Mulighetsstudie", "Mulighetsstudie")
-    render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept", 
-                       "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.", 
-                       "Models, load parameters", "Concept memo, grid layouts", "Åpne Konstruksjon", "Konstruksjon")
-    render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility", 
-                       "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases.", 
-                       "Site plans, local norms", "Traffic memo, mobility plan", "Åpne Trafikk & Mobilitet", "Trafikk")
+    render_module_card(r2c1, "📐", "Early phase", "badge-early", "ARK - Feasibility Study" if _en else "ARK - Mulighetsstudie", 
+                       "Site screening, volume analysis, and early-phase decision support before full engineering design." if _en else
+                       "Tomtescreening, volumanalyse og tidligfase-beslutningsstøtte.", 
+                       "Site data, zoning plans" if _en else "Tomtedata, reguleringsplaner",
+                       "Feasibility report, utilization metrics" if _en else "Mulighetsstudie, utnyttelsestall",
+                       "Open Feasibility" if _en else "Åpne Mulighetsstudie", "Mulighetsstudie")
+    render_module_card(r2c2, "🏢", "Roadmap", "badge-roadmap", "STRUC - Structural Concept" if _en else "RIB - Konstruksjonskonsept", 
+                       "Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations." if _en else
+                       "Konseptuelle konstruksjonssjekker, prinsippdimensjonering og karbonfotavtrykksvurdering.", 
+                       "Models, load parameters" if _en else "Modeller, lastparametre",
+                       "Concept memo, grid layouts" if _en else "Konseptnotat, aksesystem",
+                       "Open Structural" if _en else "Åpne Konstruksjon", "Konstruksjon")
+    render_module_card(r2c3, "🚦", "Roadmap", "badge-roadmap", "TRAFFIC - Mobility" if _en else "TRAFIKK - Mobilitet", 
+                       "Traffic generation, parking requirements, access logic, and soft-mobility planning for early project phases." if _en else
+                       "Trafikkgenerering, parkeringskrav, adkomstlogikk og myke mobilitetstiltak.", 
+                       "Site plans, local norms" if _en else "Situasjonsplan, lokale normer",
+                       "Traffic memo, mobility plan" if _en else "Trafikknotat, mobilitetsplan",
+                       "Open Traffic & Mobility" if _en else "Åpne Trafikk & Mobilitet", "Trafikk")
 
-    # --- NY SEKSJON: LEDELSE & BÆREKRAFT ---
+    # --- Sustainability & Management ---
     st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("<h3 style='margin-bottom: 1.5rem; font-weight:750;'>Bærekraft & Prosjektstyring (Tilleggsmoduler)</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3 style='margin-bottom: 1.5rem; font-weight:750;'>{'Sustainability & Project Management (Add-on modules)' if _en else 'Bærekraft & Prosjektstyring (Tilleggsmoduler)'}</h3>", unsafe_allow_html=True)
     
     r3c1, r3c2, r3c3 = st.columns(3)
-    render_module_card(r3c1, "🦺", "Management", "badge-priority", "SHA-Plan", 
+    render_module_card(r3c1, "🦺", "Management", "badge-priority", "SHA - Safety & Health Plan" if _en else "SHA-Plan", 
+                       "Safety, health, and working environment. Generates routines for site logistics and high-risk operations." if _en else
                        "Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner basert på tomten.", 
-                       "Prosjektdata + risikomoment", "Komplett SHA-plan", "Åpne SHA-modul", "SHA")
+                       "Project data + risk factors" if _en else "Prosjektdata + risikomoment",
+                       "Complete SHA plan" if _en else "Komplett SHA-plan",
+                       "Open SHA Module" if _en else "Åpne SHA-modul", "SHA")
     render_module_card(r3c2, "🌿", "Sustainability", "badge-phase2", "BREEAM Assistant", 
+                       "Early-phase assessment of BREEAM potential, credit targets and material strategy." if _en else
                        "Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi for prosjektet.", 
-                       "Byggdata + Ambisjonsnivå", "BREEAM Pre-assessment", "Åpne BREEAM", "BREEAM")
-    render_module_card(r3c3, "♻️", "Environment", "badge-roadmap", "Miljøoppfølging (MOP)", 
+                       "Building data + ambition level" if _en else "Byggdata + Ambisjonsnivå",
+                       "BREEAM Pre-assessment",
+                       "Open BREEAM" if _en else "Åpne BREEAM", "BREEAM")
+    render_module_card(r3c3, "♻️", "Environment", "badge-roadmap", "Environmental Follow-up (EFP)" if _en else "Miljøoppfølging (MOP)", 
+                       "Environmental follow-up plan for construction sites. Waste management, reuse, emissions and nature preservation." if _en else
                        "Miljøoppfølgingsplan for byggeplass. Vurderer avfallshåndtering, ombruk, utslipp og bevaring av natur.", 
-                       "Prosjektdata + miljømål", "MOP Dokument", "Åpne MOP", "MOP")
+                       "Project data + env. targets" if _en else "Prosjektdata + miljømål",
+                       "EFP Document" if _en else "MOP Dokument",
+                       "Open EFP" if _en else "Åpne MOP", "MOP")
 
-    # --- SEKSJON: ANBUD & ENTREPRISE ---
+    # --- Tender & Contracting ---
     st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("""
-        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ Anbud & Entreprise</h3>
+    st.markdown(f"""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ {'Tender & Contracting' if _en else 'Anbud & Entreprise'}</h3>
         <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
-            Analyser anbudsdokumenter, mengdebeskrivelser og kontrakter automatisk.
-            Reduser risiko og tidsbruk i tilbudsarbeid.
+            {'Analyze tender documents, quantity descriptions and contracts automatically. Reduce risk and time spent on bid preparation.' if _en else
+             'Analyser anbudsdokumenter, mengdebeskrivelser og kontrakter automatisk. Reduser risiko og tidsbruk i tilbudsarbeid.'}
         </p>
     """, unsafe_allow_html=True)
 
     r4c1, r4c2, r4c3 = st.columns(3)
-    render_module_card(r4c1, "📑", "Commercial", "badge-priority", "ANBUDSKONTROLL – Tilbudsgrunnlag & QA",
+    render_module_card(r4c1, "📑", "Commercial", "badge-priority",
+                       "TENDER CONTROL – Bid Review & QA" if _en else "ANBUDSKONTROLL – Tilbudsgrunnlag & QA",
+                       "Compares tender documents, drawings and bid input. Generates deviation matrix, deficiency log, ambiguity log and proposed RFIs." if _en else
                        "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
-                       "Anbudsgrunnlag + tegninger + IFC/PDF", "Avviksmatrise, scope-logg, RFIs",
-                       "Åpne Tender Control", "TenderControl")
-    render_module_card(r4c2, "📏", "Core engine", "badge-phase2", "MENGDE & SCOPE – Revisjon og sporbarhet",
+                       "Tender docs + drawings + IFC/PDF" if _en else "Anbudsgrunnlag + tegninger + IFC/PDF",
+                       "Deviation matrix, scope log, RFIs" if _en else "Avviksmatrise, scope-logg, RFIs",
+                       "Open Tender Control" if _en else "Åpne Tender Control", "TenderControl")
+    render_module_card(r4c2, "📏", "Core engine", "badge-phase2",
+                       "QUANTITY & SCOPE – Revision & Traceability" if _en else "MENGDE & SCOPE – Revisjon og sporbarhet",
+                       "Captures quantities, areas, revision changes and traceability between model, drawing and specification." if _en else
                        "Fanger mengder, arealer, revisjonsendringer og sporbarhet mellom modell, tegning og beskrivelse.",
-                       "IFC / PDF / BOQ / romdata", "Mengdeliste, areallogg, deltarapport",
-                       "Åpne Mengde & Scope", "QuantityScope")
-    render_module_card(r4c3, "🏙️", "Developer-first", "badge-early", "AREAL & YIELD – Utvikleroptimalisering",
+                       "IFC / PDF / BOQ / room data" if _en else "IFC / PDF / BOQ / romdata",
+                       "Quantity list, area log, delta report" if _en else "Mengdeliste, areallogg, deltarapport",
+                       "Open Quantity & Scope" if _en else "Åpne Mengde & Scope", "QuantityScope")
+    render_module_card(r4c3, "🏙️", "Developer-first", "badge-early",
+                       "AREA & YIELD – Developer Optimization" if _en else "AREAL & YIELD – Utvikleroptimalisering",
+                       "Analyzes gross/net, sellable and lettable area, core ratio, technical spaces and value optimization scenarios." if _en else
                        "Analyserer brutto/netto, salgbart og utleibart areal, kjerneandel, tekniske rom og scenarioer for mer verdiskaping.",
-                       "Plangrunnlag + arealprogram", "Yield-notat, scenarioer, verdiøkning",
-                       "Åpne Yield Optimizer", "YieldOptimizer")
+                       "Plan data + area program" if _en else "Plangrunnlag + arealprogram",
+                       "Yield memo, scenarios, value uplift" if _en else "Yield-notat, scenarioer, verdiøkning",
+                       "Open Yield Optimizer" if _en else "Åpne Yield Optimizer", "YieldOptimizer")
 
-    # --- SEKSJON: KLIMA, PORTEFØLJE & FINANS ---
+    # --- Climate, Portfolio & Finance ---
     st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("""
-        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏦 Klima, Portefølje & Finans</h3>
+    st.markdown(f"""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏦 {'Climate, Portfolio & Finance' if _en else 'Klima, Portefølje & Finans'}</h3>
         <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
-            Porteføljescreening, klimarisiko og teknisk due diligence for banker,
-            forsikringsselskaper og eiendomsinvestorer. Nivå 1 (auto) – ingen fagperson-review påkrevd.
+            {'Portfolio screening, climate risk and technical due diligence for banks and real estate investors. Level 1 (Auto) – no professional review required.' if _en else
+             'Porteføljescreening, klimarisiko og teknisk due diligence for banker og eiendomsinvestorer. Nivå 1 (auto) – ingen fagperson-review påkrevd.'}
         </p>
     """, unsafe_allow_html=True)
 
     r5c1, r5c2 = st.columns(2)
-    render_module_card(r5c1, "🌊", "Portfolio", "badge-phase2", "KLIMARISIKO – Eiendom & portefølje",
+    render_module_card(r5c1, "🌊", "Portfolio", "badge-phase2",
+                       "CLIMATE RISK – Property & Portfolio" if _en else "KLIMARISIKO – Eiendom & portefølje",
+                       "Scores flood, landslide, sea level and heat stress per property and maps output to EU Taxonomy, SFDR and bank reporting." if _en else
                        "Skårer flom, skred, havnivå og varmestress per eiendom og mapper output mot EU Taxonomy, SFDR og bankrapportering.",
-                       "Adresse / koordinater + eksponering", "Klimarisikoscore, taxonomy-mapping",
-                       "Åpne Klimarisiko", "ClimateRisk")
-    render_module_card(r5c2, "🏦", "Finance", "badge-phase2", "TEKNISK DUE DILIGENCE (TDD)",
+                       "Address / coordinates + exposure" if _en else "Adresse / koordinater + eksponering",
+                       "Climate risk score, taxonomy mapping" if _en else "Klimarisikoscore, taxonomy-mapping",
+                       "Open Climate Risk" if _en else "Åpne Klimarisiko", "ClimateRisk")
+    render_module_card(r5c2, "🏦", "Finance", "badge-phase2",
+                       "TECHNICAL DUE DILIGENCE (TDD)" if _en else "TEKNISK DUE DILIGENCE (TDD)",
+                       "Automated TDD report for property transactions. Aggregates condition, deviations, remaining lifespan and risk profile." if _en else
                        "Automatisert TDD-rapport for eiendomstransaksjoner. Aggregerer tilstand, avvik mot TEK17, restlevetid og risikoprofil.",
-                       "Tegninger + ferdigattest + FDV + tilstandsrapport", "TDD-rapport, risikomatrise, tiltaksliste",
-                       "Åpne TDD", "TDD")
+                       "Drawings + completion cert. + O&M + condition report" if _en else "Tegninger + ferdigattest + FDV + tilstandsrapport",
+                       "TDD report, risk matrix, action list" if _en else "TDD-rapport, risikomatrise, tiltaksliste",
+                       "Open TDD" if _en else "Åpne TDD", "TDD")
 
-    # --- SEKSJON: BANK & FINANSIERING ---
+    # --- Bank & Financing ---
     st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: 3rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
-    st.markdown("""
-        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ Bank & Finansiering</h3>
+    st.markdown(f"""
+        <h3 style='margin-bottom: 0.4rem; font-weight:750;'>🏗️ {'Bank & Financing' if _en else 'Bank & Finansiering'}</h3>
         <p style='color:#9fb0c3; font-size:0.95rem; margin-bottom:1.5rem; line-height:1.6;'>
-            Byggelånskontroll, kredittgrunnlag og beslutningsstøtte for banker og kredittgivere.
-            Automatisert datainnhenting og strukturert rapportering.
+            {'Construction loan control, credit assessment and decision support for banks and lenders. Automated data collection and structured reporting.' if _en else
+             'Byggelånskontroll, kredittgrunnlag og beslutningsstøtte for banker og kredittgivere. Automatisert datainnhenting og strukturert rapportering.'}
         </p>
     """, unsafe_allow_html=True)
 
     r6c1, r6c2 = st.columns(2)
-    render_module_card(r6c1, "🏗️", "Byggelån", "badge-phase2", "BYGGELÅNSKONTROLL – Utbetalingskontroll & verifisering",
+    render_module_card(r6c1, "🏗️", "Construction loan" if _en else "Byggelån", "badge-phase2",
+                       "LOAN CONTROL – Draw verification & approval" if _en else "BYGGELÅNSKONTROLL – Utbetalingskontroll & verifisering",
+                       "Verifies draw requests against construction budget, progress plan and contract basis. Generates bank control report with deviations and approval basis." if _en else
                        "Verifiserer trekkforespørsler mot byggebudsjett, fremdriftsplan og kontraktsgrunnlag. Genererer bankens kontrollrapport med avvik og godkjenningsgrunnlag.",
-                       "Trekkforespørsel + budsjett + fremdriftsplan", "Kontrollrapport, avvikslogg, godkjenningsgrunnlag",
-                       "Åpne Byggelånskontroll", "Byggelanskontroll")
-    render_module_card(r6c2, "📋", "Kreditt", "badge-phase2", "KREDITTGRUNNLAG – Beslutningsstøtte for kredittkomité",
+                       "Draw request + budget + progress plan" if _en else "Trekkforespørsel + budsjett + fremdriftsplan",
+                       "Control report, deviation log, approval basis" if _en else "Kontrollrapport, avvikslogg, godkjenningsgrunnlag",
+                       "Open Loan Control" if _en else "Åpne Byggelånskontroll", "Byggelanskontroll")
+    render_module_card(r6c2, "📋", "Credit" if _en else "Kreditt", "badge-phase2",
+                       "CREDIT ASSESSMENT – Decision support for credit committee" if _en else "KREDITTGRUNNLAG – Beslutningsstøtte for kredittkomité",
+                       "Compiles technical, regulatory and financial data into a structured credit basis for land loans, construction loans and rental loans." if _en else
                        "Sammenstiller tekniske, regulatoriske og finansielle data til et strukturert kredittgrunnlag for tomtelån, byggelån og utleielån.",
-                       "Prosjektdata + eiendomsinfo + finansstruktur", "Kredittmemo, risikomatrise, beslutningsgrunnlag",
-                       "Åpne Kredittgrunnlag", "Kredittgrunnlag")
+                       "Project data + property info + financial structure" if _en else "Prosjektdata + eiendomsinfo + finansstruktur",
+                       "Credit memo, risk matrix, decision basis" if _en else "Kredittmemo, risikomatrise, beslutningsgrunnlag",
+                       "Open Credit Assessment" if _en else "Åpne Kredittgrunnlag", "Kredittgrunnlag")
