@@ -64,7 +64,209 @@ try:
     from builtly_rib_editor_bridge import render_rib_editor
     HAS_RIB_EDITOR_V2 = True
 except ImportError:
-    HAS_RIB_EDITOR_V2 = False
+    # Inline fallback: embed RIB editor directly
+    HAS_RIB_EDITOR_V2 = True
+
+    _RIB_EDITOR_V2_CACHE: Dict[str, Any] = {}
+
+    def _ensure_rib_editor_v2_html() -> Optional[Path]:
+        if components is None:
+            return None
+        comp_dir = Path("qa_database") / "_inline_components" / "rib_editor_v2"
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        index_path = comp_dir / "index.html"
+        marker = "Builtly RIB Editor v2.2 zoom"
+        if index_path.exists() and marker in index_path.read_text("utf-8", errors="ignore"):
+            return comp_dir
+        html = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#06111a;overflow:hidden;font-family:system-ui}</style><!-- ' + marker + ' --></head><body><div id="R"></div><script>'
+        html += r"""
+(function(){
+const R=document.getElementById("R");let A={},els=[],sel=null,tool="bearing_wall",mat="concrete",drw=null,bgImg=null,bgOp=0.45,CW=960,CH=640,G=14;
+let zoom=1,panX=0,panY=0,isPanning=false,panStart=null;
+const snap=v=>Math.round(v/G)*G, uid=()=>Math.random().toString(36).slice(2,8);
+const dist=(a,b,c,d)=>Math.sqrt((c-a)**2+(d-b)**2);
+function sm(t,d){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:t},d||{}),"*")}
+function sr(){sm("streamlit:componentReady",{apiVersion:1})}
+function sh(h){sm("streamlit:setFrameHeight",{height:h})}
+function sv(v){sm("streamlit:setComponentValue",{value:v})}
+const MC={concrete:["#94a3b8","#64748b"],steel:["#38bdf8","#0ea5e9"],timber:["#d4a574","#b8834a"],masonry:["#e8a87c","#c47f58"]};
+const TOOLS=[["select","Velg","V"],["bearing_wall","B\u00e6revegg","B"],["wall","Lett vegg","W"],["column","S\u00f8yle","S"],["beam","Bjelke","J"],["core","Kjerne","K"],["span_arrow","Dekkespenn","D"]];
+
+function applyArgs(a){
+  A=a||{};CW=+(a.natural_width||960);CH=+(a.natural_height||640);
+  if(a.image_data)bgImg=a.image_data;
+  if(a.initial_elements&&Array.isArray(a.initial_elements)&&els.length===0){
+    els=a.initial_elements.map(e=>{
+      let o={...e,id:uid()};
+      if(e.type==="column"||e.type==="load"){o.cx=(e.x||0)*CW;o.cy=(e.y||0)*CH}
+      else if(e.type==="core"){o.cx=(e.x||0)*CW;o.cy=(e.y||0)*CH;o.cw=(e.w||0.1)*CW;o.ch=(e.h||0.1)*CH}
+      else if(e.type==="grid"){if(e.orientation==="vertical"){o.cx1=(e.x||0)*CW;o.cy1=0;o.cx2=o.cx1;o.cy2=CH}else{o.cy1=(e.y||0)*CH;o.cx1=0;o.cx2=CW;o.cy2=o.cy1}}
+      else{o.cx1=(e.x1||0)*CW;o.cy1=(e.y1||0)*CH;o.cx2=(e.x2||0)*CW;o.cy2=(e.y2||0)*CH}
+      return o;
+    });
+  }
+  render();
+}
+function exportEls(){
+  return els.map(e=>{
+    if(e.type==="column")return{type:"column",x:e.cx/CW,y:e.cy/CH,label:e.label||"C",material:e.material};
+    if(e.type==="core")return{type:"core",x:e.cx/CW,y:e.cy/CH,w:e.cw/CW,h:e.ch/CH,label:e.label||"Kjerne"};
+    if(e.type==="grid"){if(e.orientation==="vertical")return{type:"grid",orientation:"vertical",x:e.cx1/CW,label:e.label};return{type:"grid",orientation:"horizontal",y:e.cy1/CH,label:e.label}}
+    return{type:e.type,x1:e.cx1/CW,y1:e.cy1/CH,x2:e.cx2/CW,y2:e.cy2/CH,label:e.label||"",bearing:e.bearing,material:e.material};
+  });
+}
+function commit(){sv({elements:exportEls(),updated_at:new Date().toISOString(),element_count:els.length})}
+
+function render(){
+  let tb='<div style="display:flex;gap:3px;padding:6px 8px;background:#0a1929;border-bottom:1px solid #1a2a3a;flex-wrap:wrap;align-items:center">';
+  TOOLS.forEach(t=>{let a=tool===t[0];tb+=`<button onclick="ST('${t[0]}')" style="padding:4px 10px;border-radius:4px;border:none;font-size:11px;font-weight:${a?700:500};cursor:pointer;background:${a?'#38bdf8':'#1a2a3a'};color:${a?'#06111a':'#94a3b8'}">${t[1]}</button>`});
+  tb+=`<span style="width:1px;height:16px;background:#1a2a3a;margin:0 3px"></span>`;
+  tb+=`<button onclick="ZM(1)" style="padding:3px 7px;border-radius:4px;border:none;font-size:13px;cursor:pointer;background:#1a2a3a;color:#94a3b8;font-weight:700">+</button>`;
+  tb+=`<span style="font-size:10px;color:#64748b;font-family:monospace;min-width:38px;text-align:center">${Math.round(zoom*100)}%</span>`;
+  tb+=`<button onclick="ZM(-1)" style="padding:3px 7px;border-radius:4px;border:none;font-size:13px;cursor:pointer;background:#1a2a3a;color:#94a3b8;font-weight:700">-</button>`;
+  tb+=`<button onclick="ZR()" style="padding:3px 7px;border-radius:4px;border:none;font-size:10px;cursor:pointer;background:#1a2a3a;color:#475569">1:1</button>`;
+  tb+=`<span style="flex:1"></span><span style="font-size:10px;color:#475569;font-family:monospace">${els.length} elem</span>`;
+  tb+=`<button onclick="commit()" style="padding:4px 14px;border-radius:4px;border:none;background:#38bdf8;color:#06111a;font-weight:700;font-size:11px;cursor:pointer;margin-left:6px">Lagre</button></div>`;
+  let s=`<svg viewBox="0 0 ${CW} ${CH}" style="width:100%;cursor:${isPanning?'grabbing':tool==='select'?'default':'crosshair'};display:block;background:#0d1b2a" id="ES">`;
+  s+=`<defs><pattern id="gg" width="${G}" height="${G}" patternUnits="userSpaceOnUse"><path d="M ${G} 0 L 0 0 0 ${G}" fill="none" stroke="#162231" stroke-width="0.4"/></pattern></defs>`;
+  s+=`<g transform="translate(${panX},${panY}) scale(${zoom})">`;
+  if(bgImg)s+=`<image href="${bgImg}" x="0" y="0" width="${CW}" height="${CH}" opacity="${bgOp}" preserveAspectRatio="xMidYMid meet"/>`;
+  s+=`<rect width="${CW}" height="${CH}" fill="url(#gg)"/>`;
+  els.forEach(e=>{
+    let h=e.id===sel?"#fbbf24":null,mc=MC[e.material]||MC.concrete,sw=1/zoom;
+    if(e.type==="column"){
+      s+=`<circle cx="${e.cx}" cy="${e.cy}" r="${12*sw}" fill="${mc[0]}" stroke="${h||mc[1]}" stroke-width="${(e.id===sel?3:2)*sw}"/>`;
+      s+=`<circle cx="${e.cx}" cy="${e.cy}" r="${4*sw}" fill="${mc[1]}"/>`;
+      s+=`<text x="${e.cx}" y="${e.cy-16*sw}" text-anchor="middle" fill="${mc[1]}" font-size="${9*sw}" font-family="monospace" font-weight="700">${e.label||'C'}</text>`;
+    }else if(e.type==="wall"){
+      let w=e.bearing?10:4,c=e.bearing?(h||mc[1]):(h||"#475569");
+      if(e.bearing)s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="${h||mc[1]}" stroke-width="${(w+4)*sw}" stroke-linecap="round" opacity="0.3"/>`;
+      s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="${c}" stroke-width="${w*sw}" stroke-linecap="round"/>`;
+      if(!e.bearing)s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="#334155" stroke-width="${2*sw}" stroke-dasharray="${6*sw} ${4*sw}"/>`;
+    }else if(e.type==="beam"){
+      let l=dist(e.cx1,e.cy1,e.cx2,e.cy2),mx=(e.cx1+e.cx2)/2,my=(e.cy1+e.cy2)/2;
+      s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="${h||'#f59e0b'}" stroke-width="${4*sw}" stroke-linecap="round"/>`;
+      s+=`<rect x="${mx-28*sw}" y="${my-18*sw}" width="${56*sw}" height="${14*sw}" rx="${3*sw}" fill="#0a1929ee" stroke="#f59e0b" stroke-width="${0.5*sw}"/>`;
+      s+=`<text x="${mx}" y="${my-8*sw}" text-anchor="middle" fill="#f59e0b" font-size="${9*sw}" font-family="monospace" font-weight="700">${(l*0.025).toFixed(1)}m</text>`;
+    }else if(e.type==="core"){
+      s+=`<rect x="${e.cx}" y="${e.cy}" width="${e.cw}" height="${e.ch}" fill="rgba(100,116,139,0.2)" stroke="${h||'#64748b'}" stroke-width="${(e.id===sel?3:2)*sw}" stroke-dasharray="${6*sw} ${3*sw}"/>`;
+      s+=`<text x="${e.cx+e.cw/2}" y="${e.cy+e.ch/2+4*sw}" text-anchor="middle" fill="#94a3b8" font-size="${9*sw}" font-weight="600">KJERNE</text>`;
+    }else if(e.type==="span_arrow"){
+      s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="${h||'#22c55e'}" stroke-width="${2*sw}" stroke-dasharray="${10*sw} ${4*sw}"/>`;
+      let mx=(e.cx1+e.cx2)/2,my=(e.cy1+e.cy2)/2;
+      s+=`<text x="${mx}" y="${my-6*sw}" text-anchor="middle" fill="#22c55e" font-size="${9*sw}" font-family="monospace">DEKKE</text>`;
+    }else if(e.type==="grid"){
+      s+=`<line x1="${e.cx1}" y1="${e.cy1}" x2="${e.cx2}" y2="${e.cy2}" stroke="rgba(56,189,248,0.2)" stroke-width="${1*sw}" stroke-dasharray="${8*sw} ${6*sw}"/>`;
+    }
+  });
+  if(drw){
+    let sw=1/zoom;
+    if(tool==="core"){let x=Math.min(drw.sx,drw.cx),y=Math.min(drw.sy,drw.cy),w=Math.abs(drw.cx-drw.sx),hh=Math.abs(drw.cy-drw.sy);s+=`<rect x="${x}" y="${y}" width="${w}" height="${hh}" fill="rgba(100,116,139,0.1)" stroke="#64748b" stroke-width="${1.5*sw}" stroke-dasharray="${6*sw} ${3*sw}"/>`}
+    else{let c=tool==="bearing_wall"?"#94a3b8":tool==="beam"?"#f59e0b":tool==="span_arrow"?"#22c55e":"#475569";s+=`<line x1="${drw.sx}" y1="${drw.sy}" x2="${drw.cx}" y2="${drw.cy}" stroke="${c}" stroke-width="${(tool==='bearing_wall'?8:3)*sw}" stroke-dasharray="${8*sw} ${4*sw}" opacity="0.6"/>`}
+  }
+  s+=`</g></svg>`;
+  let info=`<div style="padding:3px 8px;font-size:10px;color:#475569;font-family:monospace;background:#0a1929;border-top:1px solid #1a2a3a">Scroll=zoom | Shift+drag=pan | +/-=zoom | 0=reset | Del=slett</div>`;
+  R.innerHTML=tb+s+info;
+  sh(Math.ceil(R.getBoundingClientRect().height+4));
+  let svg=document.getElementById("ES");
+  if(svg){svg.onmousedown=hD;svg.onmousemove=hM;svg.onmouseup=hU;svg.onwheel=hW;svg.ontouchstart=function(e){e.preventDefault();hD(e.touches[0])};svg.ontouchend=hU;svg.oncontextmenu=function(e){e.preventDefault()}}
+}
+window.ST=function(id){tool=id;render()};window.commit=commit;
+window.ZM=function(dir){let svg=document.getElementById("ES");if(!svg)return;let r=svg.getBoundingClientRect(),cx=CW/2,cy=CH/2,f=dir>0?1.3:0.77,nz=Math.max(0.5,Math.min(8,zoom*f));panX=cx-(cx-panX)*(nz/zoom);panY=cy-(cy-panY)*(nz/zoom);zoom=nz;render()};
+window.ZR=function(){zoom=1;panX=0;panY=0;render()};
+function getSvgPos(e){let svg=document.getElementById("ES"),r=svg.getBoundingClientRect(),sx=CW/r.width,sy=CH/r.height,mx=(e.clientX-r.left)*sx,my=(e.clientY-r.top)*sy;return{x:snap((mx-panX)/zoom),y:snap((my-panY)/zoom),mx:mx,my:my}}
+function hW(e){e.preventDefault();let svg=document.getElementById("ES"),r=svg.getBoundingClientRect(),sx=CW/r.width,sy=CH/r.height,mx=(e.clientX-r.left)*sx,my=(e.clientY-r.top)*sy,f=e.deltaY<0?1.15:0.87,nz=Math.max(0.5,Math.min(8,zoom*f));panX=mx-(mx-panX)*(nz/zoom);panY=my-(my-panY)*(nz/zoom);zoom=nz;render()}
+function hitTest(p){for(let i=els.length-1;i>=0;i--){let e=els[i];if(e.type==="column"&&dist(p.x,p.y,e.cx,e.cy)<18/zoom)return e;if(e.type==="core"&&p.x>=e.cx&&p.x<=e.cx+e.cw&&p.y>=e.cy&&p.y<=e.cy+e.ch)return e;if(e.cx1!==undefined){let dx=e.cx2-e.cx1,dy=e.cy2-e.cy1,l2=dx*dx+dy*dy,t=l2===0?0:((p.x-e.cx1)*dx+(p.y-e.cy1)*dy)/l2;t=Math.max(0,Math.min(1,t));if(dist(p.x,p.y,e.cx1+t*dx,e.cy1+t*dy)<14/zoom)return e}}return null}
+function hD(e){
+  if(e.shiftKey||e.button===1||e.button===2){isPanning=true;let svg=document.getElementById("ES"),r=svg.getBoundingClientRect();panStart={x:e.clientX,y:e.clientY,px:panX,py:panY};render();return}
+  let p=getSvgPos(e);
+  if(tool==="select"){let h=hitTest(p);sel=h?h.id:null;render();return}
+  if(tool==="column"){let n=els.filter(x=>x.type==="column").length+1;els.push({id:uid(),type:"column",cx:p.x,cy:p.y,label:"C"+n,material:mat});render();return}
+  drw={sx:p.x,sy:p.y,cx:p.x,cy:p.y};
+}
+function hM(e){
+  if(isPanning&&panStart){let svg=document.getElementById("ES"),r=svg.getBoundingClientRect(),sx=CW/r.width,sy=CH/r.height;panX=panStart.px+(e.clientX-panStart.x)*sx;panY=panStart.py+(e.clientY-panStart.y)*sy;render();return}
+  if(drw){let p=getSvgPos(e);drw.cx=p.x;drw.cy=p.y;render()}
+}
+function hU(){
+  if(isPanning){isPanning=false;panStart=null;render();return}
+  if(!drw)return;let d=drw,l=dist(d.sx,d.sy,d.cx,d.cy),w=Math.abs(d.cx-d.sx),h=Math.abs(d.cy-d.sy);
+  if(tool==="core"&&w>G&&h>G){els.push({id:uid(),type:"core",cx:Math.min(d.sx,d.cx),cy:Math.min(d.sy,d.cy),cw:w,ch:h,material:"concrete",label:"Kjerne"})}
+  else if(l>10&&["bearing_wall","wall","beam","span_arrow"].includes(tool)){let tp=tool==="bearing_wall"?"wall":tool;els.push({id:uid(),type:tp,cx1:d.sx,cy1:d.sy,cx2:d.cx,cy2:d.cy,material:mat,bearing:tool==="bearing_wall",label:""})}
+  drw=null;render();
+}
+document.addEventListener("keydown",function(e){if(e.target.tagName==="INPUT")return;let t=TOOLS.find(x=>x[2]===e.key.toUpperCase());if(t){tool=t[0];render()}if((e.key==="Delete"||e.key==="Backspace")&&sel){els=els.filter(x=>x.id!==sel);sel=null;render()}if(e.key==="+"||e.key==="=")ZM(1);if(e.key==="-")ZM(-1);if(e.key==="0"){zoom=1;panX=0;panY=0;render()}});
+window.addEventListener("message",function(e){if(e.data&&e.data.type==="streamlit:render")applyArgs(e.data.args||{})});
+sr();render();
+})();
+
+"""
+        html += '</script></body></html>'
+        index_path.write_text(html, encoding="utf-8")
+        return comp_dir
+
+    def render_rib_editor(
+        drawing_record: Dict[str, Any],
+        sketch: Dict[str, Any],
+        editor_key: str = "rib_editor",
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Inline RIB editor — no external file needed."""
+        if components is None:
+            return None
+        comp_dir = _ensure_rib_editor_v2_html()
+        if comp_dir is None:
+            return None
+
+        cache_key = "builtly_rib_editor_v2_inline"
+        if cache_key not in _RIB_EDITOR_V2_CACHE:
+            try:
+                _RIB_EDITOR_V2_CACHE[cache_key] = components.declare_component(
+                    "rib_editor_v2", path=str(comp_dir.resolve())
+                )
+            except Exception as exc:
+                st.caption(f"RIB-editor feil: {exc}")
+                return None
+
+        component_fn = _RIB_EDITOR_V2_CACHE[cache_key]
+        image = drawing_record.get("image")
+        if image is None:
+            return None
+
+        # Build image data URI
+        _buf = io.BytesIO()
+        _img = image.copy()
+        if max(_img.size) > 1600:
+            _ratio = 1600 / max(_img.size)
+            _img = _img.resize((int(_img.width * _ratio), int(_img.height * _ratio)), Image.LANCZOS)
+        _img.save(_buf, format="PNG", optimize=True)
+        _b64 = base64.b64encode(_buf.getvalue()).decode("ascii")
+        image_data = f"data:image/png;base64,{_b64}"
+
+        iw, ih = image.size
+        initial_elements = sketch.get("elements", [])
+        aspect = ih / max(iw, 1)
+        editor_height = int(min(800, max(400, 920 * aspect))) + 50
+
+        try:
+            value = component_fn(
+                image_data=image_data,
+                natural_width=iw,
+                natural_height=ih,
+                initial_elements=initial_elements,
+                version_marker=st.session_state.get("rib_draft_updated_at", ""),
+                key=f"{editor_key}_v2",
+                default=None,
+                height=editor_height,
+            )
+        except Exception as exc:
+            st.caption(f"Editor-feil: {exc}")
+            return None
+
+        if isinstance(value, dict) and "elements" in value:
+            elements = value["elements"]
+            if isinstance(elements, list) and len(elements) > 0:
+                return elements
+        return None
 
 try:
     from builtly_ifc_analyzer import analyze_ifc, ifc_to_rib_sketch
@@ -2870,18 +3072,6 @@ def persist_generation_to_session(
     st.session_state.generated_rib_analysis = analysis_result
     st.session_state.generated_rib_report_text = report_text
     st.session_state.generated_rib_candidate_df = candidate_df
-
-    # Save report to user dashboard
-    try:
-        from builtly_auth import save_report
-        save_report(
-            project_name=st.session_state.get("project_data", {}).get("p_name", ""),
-            report_name=f"RIB Konstruksjon — {filename}",
-            module="Konstruksjon",
-            file_path=filename,
-        )
-    except ImportError:
-        pass
     st.session_state.generated_rib_overlay_package = [
         {
             "page_index": item["page_index"],
