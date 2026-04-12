@@ -136,6 +136,15 @@ st.markdown("""
 
 
 # --- 4. LANGUAGE & TRANSLATIONS ---
+# Read language from query param (passed by frontpage navigation links)
+_LANG_FROM_QUERY = {
+    "no": "🇳🇴 Norsk", "en-us": "🇺🇸 English (US)", "en-gb": "🇬🇧 English (UK)",
+    "sv": "🇸🇪 Svenska", "da": "🇩🇰 Dansk", "fi": "🇫🇮 Suomi", "de": "🇩🇪 Deutsch",
+}
+_lang_param = str(st.query_params.get("lang", "")).strip().lower()
+if _lang_param in _LANG_FROM_QUERY:
+    st.session_state.app_lang = _LANG_FROM_QUERY[_lang_param]
+
 _lang = st.session_state.get("app_lang", "🇺🇸 English (US)")
 _en = "English" in _lang
 
@@ -170,7 +179,7 @@ T = {
     "project_name": "Project name" if _en else "Prosjektnavn",
     "client": "Client / Owner" if _en else "Tiltakshaver / Oppdragsgiver",
     "description": "Project description / Narrative" if _en else "Prosjektbeskrivelse / Narrativ",
-    "sec_location": "🌍 02 Location & API" if _en else "🌍 " + T['sec_location'] + "",
+    "sec_location": "🌍 02 Location & API" if _en else "🌍 02 Lokasjon & API",
     "api_hint_no": ("💡 **Kartverket API:** Enter address *or* parcel number (Gnr/Bnr) and click the button to auto-fill." if _en else
                     "💡 **Kartverket API:** Skriv inn adresse *eller* Gnr/Bnr og trykk på knappen for å autoutfylle resten."),
     "api_hint_en": "💡 **Property lookup:** Enter address or parcel ID and click the button to auto-fill." if _en else
