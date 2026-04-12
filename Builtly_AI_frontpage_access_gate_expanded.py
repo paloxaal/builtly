@@ -5185,10 +5185,11 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Inner value wrapper — fixed size to prevent collapse on iOS */
+        /* Inner value wrapper — explicit size for reliable centering */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 32px !important;
-            max-width: 32px !important;
+            width: 40px !important;
+            max-width: 40px !important;
+            height: 40px !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -5199,19 +5200,20 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Emoji — show only the leading emoji, clip trailing text */
+        /* Emoji — vertically + horizontally centered in pill */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 17px !important;
-            line-height: 1 !important;
-            display: block !important;
-            width: 26px !important;
-            max-width: 26px !important;
-            height: 26px !important;
+            font-size: 18px !important;
+            line-height: 24px !important;
+            display: inline-block !important;
+            width: 24px !important;
+            max-width: 24px !important;
+            height: 24px !important;
             overflow: hidden !important;
             white-space: nowrap !important;
             text-align: left !important;
+            vertical-align: middle !important;
             padding: 0 !important;
-            margin: 0 auto !important;
+            margin: 0 !important;
         }
 
         .mini-stat-grid,
