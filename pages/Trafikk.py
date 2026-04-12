@@ -240,7 +240,7 @@ def render_traffic_editor(images_with_markers, bridge_label: str, component_key:
         setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.tt').forEach(b=>b.classList.remove('active'));const btn=document.getElementById('tt_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
         del:function(){{if(sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}},
         updLbl:function(v){{if(sel>=0&&els[sel]){{els[sel].label=v;render()}}}},
-        save:function(){{ex.value=JSON.stringify(els,null,2);try{{const ta=window.parent.document.querySelector('textarea[aria-label="'+'{bridge_label}'+'"]');if(!ta)throw 0;const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));sts.textContent='Lagret!'}}catch(e){{sts.textContent='Kopier JSON manuelt.';ex.style.display='block'}}}}
+        save:function(){{ex.value=JSON.stringify(els,null,2);try{{var pd=window.parent.document;var ta=pd.querySelector('textarea[aria-label="{bridge_label}"]');if(!ta){{var all=pd.querySelectorAll('textarea');for(var i=0;i<all.length;i++){{var lbl=all[i].closest('[data-testid="stTextArea"]');if(lbl&&lbl.textContent.indexOf('MARKER_BRIDGE')>=0){{ta=all[i];break}}}}}}if(!ta)throw 0;var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));sts.textContent='Lagret! Klikk Bruk endringer.'}}catch(e){{sts.textContent='Kopier JSON manuelt.';ex.style.display='block'}}}}
       }};
       img.onload=resize;window.addEventListener('resize',resize);
     }})();
@@ -795,7 +795,8 @@ if "generated_ritra_pdf" in st.session_state:
             if marker_buffer_key not in st.session_state:
                 st.session_state[marker_buffer_key] = json.dumps(st.session_state.get("traffic_markers", []), ensure_ascii=False, indent=2)
             
-            st.text_area("Markør-data", key=marker_buffer_key, height=80, label_visibility="collapsed")
+            st.text_area("TRAFFIC_MARKER_BRIDGE", key=marker_buffer_key, height=60, label_visibility="visible",
+                         help="Teknisk buffer — editoren skriver markørdata hit.")
             
             ec = st.columns(2)
             if ec[0].button("Bruk endringer", key="traffic_apply", use_container_width=True):
