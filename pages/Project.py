@@ -210,9 +210,9 @@ T = {
                      ("Last opp tegninger her for å la AI-en vurdere kvaliteten på underlaget *før* det sendes til fagmodulene. "
                       "AI-en vil sjekke om plan, snitt, fasade og situasjonsplan er komplett."),
     "upload_drawings": "Upload Elevation, Plan, Section and Site Plan (PDF/Images)" if _en else
-                       T["upload_drawings"],
+                       "Last opp Fasade, Plan, Snitt og Situasjonsplan (PDF/Bilder)",
     "upload_other": "Upload other project documents (DWG, IFC, DXF, XLSX, DOCX)" if _en else
-                    T["upload_other"],
+                    "Last opp andre prosjektdokumenter (DWG, IFC, DXF, XLSX, DOCX)",
     "upload_other_help": ("These files are stored in the project folder and available to all engineering modules.") if _en else
                          ("Disse filene lagres i prosjektmappen og er tilgjengelig for alle fagmoduler (TDD, Anbudskontroll, Mengde & Scope, Yield osv)."),
     "ai_analyze": "🤖 Analyze & QA Drawings with AI" if _en else "🤖 Analyser & Kvalitetssikre Tegninger med AI",
@@ -226,7 +226,7 @@ T = {
                "✅ Data er lagret trygt på serveren! Prosjektet '{name}' er nå tilgjengelig for alle moduler.",
     "snapshot_title": "Project Summary" if _en else "Prosjektsammendrag",
     "snapshot_sub": ("A quick overview of the SSOT data as it currently exists in the database.") if _en else
-                    (T["snapshot_sub"]),
+                    ("En rask oversikt over SSOT-data slik de nå er lagret i databasen."),
     "snap_rules": "Regulations" if _en else "Regelverk",
     "snap_project": "Project" if _en else "Prosjekt",
     "snap_client": "Client" if _en else "Oppdragsgiver",
@@ -236,12 +236,12 @@ T = {
     "snap_type": "Type",
     "snap_volume": "Volume/Site" if _en else "Volum/Tomt",
     "snap_drawings": "Drawings stored" if _en else "Tegninger lagret",
-    "snap_drawings_val": "{n} pages ready" if _en else "{n} pages ready" if _en else "{saved_image_count} sider klare",
+    "snap_drawings_val": "{n} pages ready" if _en else "{n} sider klare",
     "snap_files": "Project files" if _en else "Prosjektfiler",
-    "snap_files_val": "{n} files stored" if _en else "{n} files stored" if _en else "{saved_files_count} filer lagret",
+    "snap_files_val": "{n} files stored" if _en else "{n} filer lagret",
     "mod_title": "🛠️ Engineering & Modules" if _en else "🛠️ Prosjektering & Fagmoduler",
     "use_types": (["Residential (Apartment/Townhouse)", "Commercial / Office", "Retail", "Public / School", "Industrial / Warehouse"] if _en else
-                  T["use_types"]),
+                  ["Bolig (Leilighet/Rekkehus)", "Næring / Kontor", "Handel", "Offentlig / Skole", "Industri / Lager"]),
 }
 
 # --- 5. SESSION STATE LOGIKK (MED SELVHELBRENDENDE SIKKERHETSNETT) ---
