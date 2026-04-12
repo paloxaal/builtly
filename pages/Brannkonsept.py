@@ -29,6 +29,20 @@ try:
 except Exception:
     fitz = None
 
+# --- Auth integration (for saving reports to user account) ---
+try:
+    import builtly_auth
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
+if _HAS_AUTH:
+    if not st.session_state.get("user_authenticated"):
+        builtly_auth.try_restore_from_browser()
+    elif st.session_state.get("_sb_access_token"):
+        builtly_auth.restore_session()
+
+
 
 # -----------------------------------------------------------------------------
 # 1. APP OPPSETT
@@ -3088,16 +3102,21 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                     st.success("Brannkonsept og vedlagte branntegninger er generert.")
 
                     # Lagre til Supabase dashboard
-                    try:
-                        from builtly_auth import save_report
-                        save_report(
+                    if _HAS_AUTH:
+
+                        try:
+
+                            builtly_auth.save_report(
                             project_name=pd_state.get("p_name", ""),
                             report_name=f"Brannkonsept — Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
                             module="RIBr (Brannkonsept)",
                             file_path=f"Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
-                        )
-                    except Exception:
-                        pass
+
+                            )
+
+                        except Exception:
+
+                            pass
 
                     # Lagre til disk for Dashboard
                     try:
