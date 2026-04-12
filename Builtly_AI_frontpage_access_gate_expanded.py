@@ -3178,6 +3178,11 @@ def render_user_dashboard(lang_key: str) -> None:
     user_payment = st.session_state.get("user_payment_method", "")
     reports = st.session_state.get("user_reports", [])
 
+    # Reload from Supabase if list is empty (may have been lost during navigation)
+    if not reports and _HAS_AUTH and st.session_state.get("user_id"):
+        builtly_auth.reload_user_reports()
+        reports = st.session_state.get("user_reports", [])
+
     status_labels = {
         "active": ("✅ Aktiv", "#22c55e"),
         "pending_invoice": ("⏳ Venter på betaling", "#f59e0b"),
