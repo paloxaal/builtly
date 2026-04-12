@@ -37,14 +37,14 @@ except ImportError:
 
 def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
                  width: int = 800, height: int = 800,
-                 srs: str = "EPSG:25833", version: str = "1.3.0",
+                 srs: str = "EPSG:25833", version: str = "1.1.1",
                  extra_params: dict = None) -> Optional[Image.Image]:
     """Generic WMS GetMap helper. Returns PIL Image or None."""
     minx, miny, maxx, maxy = bbox_25833
     params = {
         "service": "WMS", "request": "GetMap", "version": version,
         "layers": layers, "styles": "",
-        "crs" if version >= "1.3" else "srs": srs,
+        "srs" if version < "1.3" else "crs": srs,
         "bbox": f"{minx},{miny},{maxx},{maxy}",
         "width": str(width), "height": str(height),
         "format": "image/png", "transparent": "true",
@@ -53,8 +53,25 @@ def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
         params.update(extra_params)
     try:
         resp = requests.get(base_url, params=params, timeout=12)
-        if resp.status_code == 200 and len(resp.content) > 2000 and b"ServiceException" not in resp.content[:500]:
+        if resp.status_code == 200 and len(resp.content) > 2000:
+            if b"ServiceException" in resp.content[:1000] or b"<html" in resp.content[:200].lower():
+                return None
             return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+def _geodata_online_map(service: str, bbox: tuple, width: int = 800, height: int = 800) -> Optional[Image.Image]:
+    """Fetch a map image from Geodata Online MapServer (requires credentials)."""
+    if not _HAS_GDO:
+        return None
+    try:
+        minx, miny, maxx, maxy = bbox
+        img_bytes = _gdo._image_export(service, f"{minx},{miny},{maxx},{maxy}",
+                                        width=width, height=height)
+        if img_bytes:
+            return Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception:
         pass
     return None
@@ -94,84 +111,68 @@ def _bbox_from_center(x: float, y: float, radius_m: float = 250.0) -> tuple:
 
 def fetch_ngu_losmasser(bbox: tuple) -> Optional[Image.Image]:
     """NGU løsmassekart — kvartærgeologisk kart."""
-    return _wms_get_map(
-        "https://geo.ngu.no/mapserver/LosijordsmasserWMS",
-        "Losmasse_flate", bbox, version="1.1.1",
-    )
+    for layers in ["Losmasse_flate", "0", "losmasser"]:
+        img = _wms_get_map("https://geo.ngu.no/mapserver/LosijordsmasserWMS", layers, bbox)
+        if img:
+            return img
+    return None
 
 def fetch_ngu_berggrunn(bbox: tuple) -> Optional[Image.Image]:
     """NGU bergrunnskart."""
-    return _wms_get_map(
-        "https://geo.ngu.no/mapserver/BerggrunnWMS",
-        "Berggrunn_flate", bbox, version="1.1.1",
-    )
+    for layers in ["Berggrunn_flate", "0", "berggrunn"]:
+        img = _wms_get_map("https://geo.ngu.no/mapserver/BerggrunnWMS", layers, bbox)
+        if img:
+            return img
+    return None
 
 def fetch_ngu_radon(bbox: tuple) -> Optional[Image.Image]:
     """NGU radonkart — aktsomhetskart for radon."""
-    return _wms_get_map(
-        "https://geo.ngu.no/mapserver/RadonWMS",
-        "Radonaktsomhet", bbox, version="1.1.1",
-    )
+    for layers in ["Radonaktsomhet", "0", "radon"]:
+        img = _wms_get_map("https://geo.ngu.no/mapserver/RadonWMS", layers, bbox)
+        if img:
+            return img
+    return None
 
 def fetch_nve_flom(bbox: tuple) -> Optional[Image.Image]:
     """NVE flomsonekart."""
-    return _wms_get_map(
-        "https://gis3.nve.no/map/services/Flomsoner1/MapServer/WMSServer",
-        "Flomsone", bbox,
-    )
+    for layers in ["Flomsone", "0", "0,1,2"]:
+        img = _wms_get_map("https://gis3.nve.no/map/services/Flomsoner1/MapServer/WMSServer", layers, bbox)
+        if img:
+            return img
+    return None
 
 def fetch_nve_kvikkleire(bbox: tuple) -> Optional[Image.Image]:
     """NVE kvikkleirekart."""
-    return _wms_get_map(
-        "https://gis3.nve.no/map/services/Kvikkleire2/MapServer/WMSServer",
-        "0", bbox,
-    )
+    img = _wms_get_map("https://gis3.nve.no/map/services/Kvikkleire2/MapServer/WMSServer", "0", bbox)
+    return img
 
 def fetch_nve_skred(bbox: tuple) -> Optional[Image.Image]:
     """NVE skredkart (alle typer)."""
-    return _wms_get_map(
-        "https://gis3.nve.no/map/services/SkredAktsomhet/MapServer/WMSServer",
-        "0,1,2,3", bbox,
-    )
+    img = _wms_get_map("https://gis3.nve.no/map/services/SkredAktsomhet/MapServer/WMSServer", "0,1,2,3", bbox)
+    return img
 
 def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
     """Kartverket ortofoto (Norge i Bilder)."""
-    img = _wms_get_map(
-        "https://wms.geonorge.no/skwms1/wms.nib",
-        "ortofoto", bbox, version="1.1.1",
-    )
+    img = _wms_get_map("https://wms.geonorge.no/skwms1/wms.nib", "ortofoto", bbox)
     if img:
         return img.convert("RGB")
     return None
 
 def fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
-    """Miljødirektoratet — kjente forurensinglokaliteter i nærheten.
-    Returns list of dicts with name, status, distance, url."""
-    # Convert UTM33 to lat/lon for the API
+    """Miljødirektoratet — kjente forurensinglokaliteter i nærheten."""
     try:
         from pyproj import Transformer
         tr = Transformer.from_crs(25833, 4326, always_xy=True)
         lon, lat = tr.transform(x, y)
     except ImportError:
-        # Approximate conversion if pyproj not available
-        lat = y / 111320.0 + 63.0  # rough estimate
-        lon = x / (111320.0 * 0.45) + 10.0
-        return []  # skip if no proper projection
+        return []
 
     try:
-        url = "https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentLokaliteter"
-        resp = requests.post(url, json={
-            "nord": lat + radius_m / 111320.0,
-            "sor": lat - radius_m / 111320.0,
-            "ost": lon + radius_m / (111320.0 * 0.45),
-            "vest": lon - radius_m / (111320.0 * 0.45),
-        }, timeout=8)
-        if resp.status_code != 200:
-            # Try alternative endpoint
-            resp = requests.get(
-                f"https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter?latitude={lat}&longitude={lon}&radius={int(radius_m)}",
-                timeout=8,
-            )
+        resp = requests.get(
+            f"https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter",
+            params={"latitude": lat, "longitude": lon, "radius": int(radius_m)},
+            timeout=8,
+        )
         if resp.status_code == 200:
             data = resp.json()
             sites = data if isinstance(data, list) else data.get("lokaliteter", data.get("features", []))
@@ -197,59 +198,109 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         "ortofoto": None, "ortofoto_source": "",
         "losmasser": None, "berggrunn": None, "radon": None,
         "flom": None, "kvikkleire": None, "skred": None,
+        "geologi_gdo": None,
         "grunnforurensning": [],
         "geology_context": None,
         "coords": None, "bbox": None,
-        "errors": [],
+        "errors": [], "log": [],
     }
 
+    # Step 1: Geocode address
     coords = _coords_from_address(adresse, kommune, gnr, bnr)
+
+    # Fallback: try Geodata Online geocoder
+    if not coords and _HAS_GDO:
+        try:
+            hits = _gdo.address_search(adresse or "", kommune or "")
+            if hits:
+                result["log"].append(f"Geokoding via Geodata Online: {hits[0].get('label', '')}")
+                coords = (hits[0]["x"], hits[0]["y"])
+        except Exception:
+            pass
+
     if not coords:
-        result["errors"].append("Kunne ikke geokode adressen")
+        result["errors"].append("Kunne ikke geokode adressen. Sjekk adresse/kommune i Project Setup.")
         return result
 
     x, y = coords
     result["coords"] = (x, y)
+    result["log"].append(f"Koordinater: Ø={x:.0f}, N={y:.0f} (EPSG:25833)")
     bbox = _bbox_from_center(x, y, radius_m)
     result["bbox"] = bbox
 
-    # 1. Ortofoto — try Geodata Online first (higher quality), fallback to Kartverket
+    # Step 2: Ortofoto — Geodata Online first, then Kartverket
     if _HAS_GDO:
         try:
             img, src = _gdo.fetch_ortofoto(bbox, buffer_m=0)
             if img:
                 result["ortofoto"] = img
                 result["ortofoto_source"] = src
+                result["log"].append(f"✅ Ortofoto: {src}")
         except Exception as e:
-            result["errors"].append(f"Geodata Online ortofoto: {str(e)[:60]}")
+            result["log"].append(f"⚠️ Geodata Online ortofoto feilet: {str(e)[:60]}")
 
     if result["ortofoto"] is None:
         img = fetch_kartverket_ortofoto(bbox)
         if img:
             result["ortofoto"] = img
             result["ortofoto_source"] = "Kartverket (Norge i Bilder)"
+            result["log"].append("✅ Ortofoto: Kartverket WMS")
+        else:
+            result["log"].append("❌ Ortofoto: Ingen kilde tilgjengelig")
 
-    # 2. NGU — løsmasser, berggrunn, radon
-    result["losmasser"] = fetch_ngu_losmasser(bbox)
-    result["berggrunn"] = fetch_ngu_berggrunn(bbox)
-    result["radon"] = fetch_ngu_radon(bbox)
+    # Step 3: Geodata Online — geologi temakart (MapServer export)
+    if _HAS_GDO:
+        try:
+            from geodata_client import GEOMAP_DOKGEOLOGI_MS
+            img = _geodata_online_map(GEOMAP_DOKGEOLOGI_MS, bbox)
+            if img:
+                result["geologi_gdo"] = img
+                result["log"].append("✅ Geologi temakart: Geodata Online DOK Geologi")
+        except Exception as e:
+            result["log"].append(f"⚠️ Geodata Online geologi kart: {str(e)[:60]}")
 
-    # 3. NVE — flom, kvikkleire, skred
-    result["flom"] = fetch_nve_flom(bbox)
-    result["kvikkleire"] = fetch_nve_kvikkleire(bbox)
-    result["skred"] = fetch_nve_skred(bbox)
+    # Step 4: NGU — løsmasser, berggrunn, radon (open WMS)
+    for key, func, label in [
+        ("losmasser", fetch_ngu_losmasser, "NGU Løsmasser"),
+        ("berggrunn", fetch_ngu_berggrunn, "NGU Berggrunn"),
+        ("radon", fetch_ngu_radon, "NGU Radon"),
+    ]:
+        img = func(bbox)
+        if img:
+            result[key] = img
+            result["log"].append(f"✅ {label}")
+        else:
+            result["log"].append(f"⚠️ {label}: Ingen data (kan være utenfor kartlagt område)")
 
-    # 4. Miljødirektoratet — kjente forurensinglokaliteter
+    # Step 5: NVE — flom, kvikkleire, skred (open WMS)
+    for key, func, label in [
+        ("flom", fetch_nve_flom, "NVE Flom"),
+        ("kvikkleire", fetch_nve_kvikkleire, "NVE Kvikkleire"),
+        ("skred", fetch_nve_skred, "NVE Skred"),
+    ]:
+        img = func(bbox)
+        if img:
+            result[key] = img
+            result["log"].append(f"✅ {label}")
+        else:
+            result["log"].append(f"⚠️ {label}: Ingen data")
+
+    # Step 6: Miljødirektoratet — grunnforurensning
     result["grunnforurensning"] = fetch_miljodir_grunnforurensning(x, y, radius_m=500.0)
+    result["log"].append(f"✅ Miljødirektoratet: {len(result['grunnforurensning'])} lokaliteter")
 
-    # 5. Geodata Online geology context (attributes, not just map)
+    # Step 7: Geodata Online geology context (attribute data)
     if _HAS_GDO:
         try:
             from shapely.geometry import box
             site_poly = box(*bbox)
             result["geology_context"] = _gdo.fetch_geology_context(site_poly, buffer_m=100.0)
+            n_feat = len((result["geology_context"] or {}).get("features", []))
+            result["log"].append(f"✅ Geodata Online geologi kontekst: {n_feat} objekter")
         except Exception as e:
-            result["errors"].append(f"Geodata Online geologi: {str(e)[:60]}")
+            result["log"].append(f"⚠️ Geodata Online geologi kontekst: {str(e)[:60]}")
+
+    return result
 
     return result
 
@@ -268,6 +319,7 @@ def geodata_summary_text(gd: dict) -> str:
         "flom": "NVE Flomsonekart",
         "kvikkleire": "NVE Kvikkleirekart",
         "skred": "NVE Skredaktsomhetskart",
+        "geologi_gdo": "Geodata Online DOK Geologi temakart",
     }
     fetched = [label for key, label in map_names.items() if gd.get(key) is not None]
     missing = [label for key, label in map_names.items() if gd.get(key) is None]
@@ -1166,8 +1218,9 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                 pdf._geodata_maps_rendered = True
                 geo_map_pairs = []
                 for key, label in [("losmasser", "Løsmassekart (NGU)"), ("berggrunn", "Bergrunnskart (NGU)"),
-                                   ("radon", "Radon aktsomhet (NGU)"), ("flom", "Flomsoner (NVE)"),
-                                   ("kvikkleire", "Kvikkleire (NVE)"), ("skred", "Skredfare (NVE)")]:
+                                   ("radon", "Radon aktsomhet (NGU)"), ("geologi_gdo", "Geologi (Geodata Online)"),
+                                   ("flom", "Flomsoner (NVE)"), ("kvikkleire", "Kvikkleire (NVE)"),
+                                   ("skred", "Skredfare (NVE)")]:
                     img = gd.get(key)
                     if img is not None:
                         pil_img = img.convert("RGB") if isinstance(img, Image.Image) else img
@@ -1409,14 +1462,29 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
     gd = st.session_state.geodata_result
     if gd:
         with col_status:
-            n_maps = sum(1 for k in ["ortofoto", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred"] if gd.get(k) is not None)
+            n_maps = sum(1 for k in ["ortofoto", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"] if gd.get(k) is not None)
             n_contam = len(gd.get("grunnforurensning", []))
             st.success(f"✅ {n_maps} kartlag hentet | {n_contam} forurensinglokaliteter funnet")
+
+        # --- Diagnostikk-logg ---
+        if gd.get("log"):
+            with st.popover("📋 Hentingslogg"):
+                for line in gd["log"]:
+                    st.text(line)
+
+        if gd.get("errors"):
+            for err in gd["errors"]:
+                st.warning(f"⚠️ {err}")
 
         # --- Ortofoto ---
         if gd.get("ortofoto"):
             st.markdown(f"##### 📸 Ortofoto — {gd.get('ortofoto_source', '')}")
             st.image(gd["ortofoto"], use_container_width=True)
+
+        # --- Geodata Online geologi ---
+        if gd.get("geologi_gdo"):
+            st.markdown("##### 🗺️ Geologi temakart (Geodata Online)")
+            st.image(gd["geologi_gdo"], caption="DOK Geologi — Geodata Online", use_container_width=True)
 
         # --- NGU Temakart ---
         ngu_maps = []
@@ -1499,7 +1567,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         # Add all geodata thematic maps as images for AI analysis
         geodata_text = ""
         if gd:
-            for key in ["losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred"]:
+            for key in ["losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"]:
                 img = gd.get(key)
                 if img is not None:
                     images_for_geo.append(img if isinstance(img, Image.Image) else img.convert("RGB"))
