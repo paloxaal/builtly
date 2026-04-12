@@ -74,6 +74,14 @@ GEOMAP_SAMFERDSEL_MS = "Geomap_UTM33_EUREF89/GeomapDOKSamferdsel/MapServer"  # N
 GEOMAP_DOKGEOLOGI_MS = "Geomap_UTM33_EUREF89/GeomapDOKGeologi/MapServer"
 GEOMAP_DTM_IS = "Geocache_UTM33_EUREF89/GeocacheTerreng/ImageServer"  # NB: GeomapDTM finnes IKKE - bruk GeocacheTerreng
 
+# New DOK thematic services (VERIFIED in service catalog 2026-04-12)
+GEOMAP_DOKFORURENSNING_MS = "Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+GEOMAP_DOKSAMFUNNSSIKKERHET_MS = "Geomap_UTM33_EUREF89/GeomapDOKSamfunnssikkerhet/MapServer"
+GEOMAP_DOKKULTUREMINNER_MS = "Geomap_UTM33_EUREF89/GeomapDOKKulturminner/MapServer"
+GEOMAP_DOKNATUR_MS = "Geomap_UTM33_EUREF89/GeomapDOKNatur/MapServer"
+GEOMAP_DOKENERGI_MS = "Geomap_UTM33_EUREF89/GeomapDOKEnergi/MapServer"
+GEOMAP_DOKLANDBRUK_MS = "Geomap_UTM33_EUREF89/GeomapDOKLandbruk/MapServer"
+
 ADDRESS_GEOCODER = f"{PROXY_BASE}/Adresse/GeocodeServer"
 DEFAULT_FLOOR_HEIGHT = 3.0
 DEFAULT_SRID = 25833
