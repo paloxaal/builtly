@@ -50,11 +50,25 @@ if _HAS_AUTH:
 
 # ── OPEN NORWEGIAN GEODATA APIs (no auth required) ─────────────────────────
 
+# GeoID credentials for Norge i Bilder WMS prosjekter (historiske flybilder)
+# Set GEOID_USER / GEOID_PASS in Render environment variables
+# Falls back to Geodata Online credentials if GeoID not set
+_GEOID_USER = os.environ.get("GEOID_USER") or os.environ.get("GEODATA_ONLINE_USER", "")
+_GEOID_PASS = os.environ.get("GEOID_PASS") or os.environ.get("GEODATA_ONLINE_PASS", "")
+_GEOID_AUTH = (_GEOID_USER, _GEOID_PASS) if _GEOID_USER and _GEOID_PASS else None
+
+NIB_PROSJEKTER_WMS = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+
 def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
                  width: int = 800, height: int = 800,
                  srs: str = "EPSG:25833", version: str = "1.1.1",
-                 extra_params: dict = None) -> Optional[Image.Image]:
-    """Generic WMS GetMap helper. Returns PIL Image or None."""
+                 extra_params: dict = None,
+                 auth: tuple = None, timeout: int = 12) -> Optional[Image.Image]:
+    """Generic WMS GetMap helper. Returns PIL Image or None.
+    
+    Args:
+        auth: Optional (username, password) tuple for HTTP Basic Auth
+    """
     minx, miny, maxx, maxy = bbox_25833
     params = {
         "service": "WMS", "request": "GetMap", "version": version,
@@ -67,7 +81,7 @@ def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
     if extra_params:
         params.update(extra_params)
     try:
-        resp = requests.get(base_url, params=params, timeout=12)
+        resp = requests.get(base_url, params=params, timeout=timeout, auth=auth)
         if resp.status_code == 200 and len(resp.content) > 2000:
             if b"ServiceException" in resp.content[:1000] or b"<html" in resp.content[:200].lower():
                 return None
@@ -244,34 +258,79 @@ def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
 # ── HISTORISKE FLYBILDER ─────────────────────────────────────────────────────
 
 def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
-    """Try to fetch historical orthophotos from Norge i Bilder WMS.
+    """Fetch historical orthophotos from Norge i Bilder prosjekter WMS.
     
-    Tries multiple Kartverket WMS services that may contain older imagery.
-    Returns (PIL.Image, source_label, year) or (None, error_msg, None).
+    Uses GeoID/Geodata Online credentials for authenticated access to
+    individual orthophoto project layers (going back to 1940s).
+    
+    Strategy:
+    1. GetCapabilities with auth to discover available layers
+    2. Parse for layers with year in name, pick oldest covering area
+    3. Fetch GetMap for that layer
+    
+    Returns (PIL.Image, source_label, year_str) or (None, error_msg, None).
     """
-    # Approach 1: Norge i Bilder prosjekter — try direct GetMap with 'ortofoto' layer
-    # (this sometimes returns older imagery depending on the area)
-    base_nib_proj = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+    auth = _GEOID_AUTH
+    
+    # Step 1: Discover available layers via GetCapabilities
     try:
-        # Try a general 'Ortofoto' layer from nib-prosjekter
-        for layer_name in ["ortofoto", "Ortofoto"]:
-            img = _wms_get_map(base_nib_proj, layer_name, bbox, width=800, height=800)
-            if img:
-                return img.convert("RGB"), f"Norge i Bilder prosjekter ({layer_name})", None
+        caps_resp = requests.get(NIB_PROSJEKTER_WMS, params={
+            "service": "WMS",
+            "request": "GetCapabilities",
+            "version": "1.1.1",
+        }, timeout=30, auth=auth)
+        
+        if caps_resp.status_code == 401:
+            return None, "NIB prosjekter: autentisering feilet (401) — sjekk GEOID_USER/GEOID_PASS", None
+        if caps_resp.status_code != 200:
+            return None, f"NIB prosjekter: GetCapabilities feilet ({caps_resp.status_code})", None
+        if len(caps_resp.content) < 500:
+            return None, "NIB prosjekter: tomt svar fra GetCapabilities", None
+    except requests.exceptions.Timeout:
+        return None, "NIB prosjekter: GetCapabilities timeout (30s)", None
+    except Exception as e:
+        return None, f"NIB prosjekter: {str(e)[:80]}", None
+
+    # Step 2: Quick-parse layer names from XML
+    # Full XML parsing is too slow for massive capabilities doc — use regex
+    layer_candidates = []
+    try:
+        # WMS Name tags (with optional namespace prefix like <wms:Name>)
+        name_pattern = re.compile(r'<(?:\w+:)?Name>\s*([^<]*(?:19|20)\d{2}[^<]*?)\s*</(?:\w+:)?Name>')
+        for match in name_pattern.finditer(caps_resp.text):
+            layer_name = match.group(1).strip()
+            year_match = re.search(r'((?:19|20)\d{2})', layer_name)
+            if year_match:
+                year = int(year_match.group(1))
+                if 1940 <= year <= 2010:
+                    layer_candidates.append((year, layer_name))
     except Exception:
         pass
 
-    # Approach 2: Kartverket historiske kart (amtskart from 1800s — georeferenced)
-    hist_kart_url = "https://wms.geonorge.no/skwms1/wms.historiskekart"
-    for layers in ["historiskekart", "amt_kart", "0", "1", "2"]:
-        try:
-            img = _wms_get_map(hist_kart_url, layers, bbox, width=800, height=800)
-            if img:
-                return img.convert("RGB"), f"Kartverket Historiske Kart ({layers})", "1800-tallet"
-        except Exception:
-            continue
+    if not layer_candidates:
+        return None, "NIB prosjekter: ingen historiske lag funnet i GetCapabilities", None
 
-    return None, "Kartverket historiske tjenester: ingen data for området", None
+    # Sort by year (oldest first)
+    layer_candidates.sort(key=lambda x: x[0])
+    
+    # Step 3: Try the oldest layers first (up to 5 attempts)
+    for year, layer_name in layer_candidates[:5]:
+        img = _wms_get_map(NIB_PROSJEKTER_WMS, layer_name, bbox,
+                           width=800, height=800, auth=auth, timeout=15)
+        if img:
+            return img.convert("RGB"), f"Norge i Bilder ({layer_name})", str(year)
+
+    # If oldest layers didn't work, try the oldest 5 with URL-encoded names
+    for year, layer_name in layer_candidates[:5]:
+        encoded_name = urllib.parse.quote(layer_name)
+        if encoded_name != layer_name:
+            img = _wms_get_map(NIB_PROSJEKTER_WMS, encoded_name, bbox,
+                               width=800, height=800, auth=auth, timeout=15)
+            if img:
+                return img.convert("RGB"), f"Norge i Bilder ({layer_name})", str(year)
+
+    tried = ", ".join(f"{name} ({yr})" for yr, name in layer_candidates[:3])
+    return None, f"NIB prosjekter: {len(layer_candidates)} lag funnet men ingen ga bilde (prøvde: {tried})", None
 
 
 def fetch_historical_ortofoto(bbox: tuple) -> dict:
@@ -395,6 +454,7 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         "losmasser": None, "berggrunn": None, "radon": None,
         "flom": None, "kvikkleire": None, "skred": None,
         "geologi_gdo": None,
+        "forurensning_gdo": None, "kulturminner_gdo": None, "samfunnssikkerhet_gdo": None,
         "grunnforurensning": [],
         "geology_context": None,
         "coords": None, "bbox": None,
@@ -482,6 +542,27 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         except Exception as e:
             result["log"].append(f"⚠️ Geodata Online geologi kart: {str(e)[:60]}")
 
+    # Step 3b: Geodata Online — forurensning, kulturminner, samfunnssikkerhet temakart
+    if _GDO_TOKEN_OK:
+        try:
+            from geodata_client import (GEOMAP_DOKFORURENSNING_MS,
+                                         GEOMAP_DOKKULTUREMINNER_MS,
+                                         GEOMAP_DOKSAMFUNNSSIKKERHET_MS)
+            for key, service, label in [
+                ("forurensning_gdo", GEOMAP_DOKFORURENSNING_MS, "DOK Forurensning"),
+                ("kulturminner_gdo", GEOMAP_DOKKULTUREMINNER_MS, "DOK Kulturminner"),
+                ("samfunnssikkerhet_gdo", GEOMAP_DOKSAMFUNNSSIKKERHET_MS, "DOK Samfunnssikkerhet"),
+            ]:
+                try:
+                    img = _geodata_online_map(service, bbox)
+                    if img:
+                        result[key] = img
+                        result["log"].append(f"✅ {label}: Geodata Online")
+                except Exception as e:
+                    result["log"].append(f"⚠️ {label}: {str(e)[:60]}")
+        except ImportError:
+            result["log"].append("⚠️ DOK-temakart: importfeil i geodata_client")
+
     # Step 4: NGU — løsmasser, berggrunn, radon (open WMS)
     for key, func, label in [
         ("losmasser", fetch_ngu_losmasser, "NGU Løsmasser"),
@@ -553,6 +634,9 @@ def geodata_summary_text(gd: dict) -> str:
         "kvikkleire": "NVE Kvikkleirekart",
         "skred": "NVE Skredaktsomhetskart",
         "geologi_gdo": "Geodata Online DOK Geologi temakart",
+        "forurensning_gdo": "DOK Forurensningskart (Geodata Online) — viser kartlagte forurensingssoner, deponier og registrerte forurensingslokaliteter",
+        "kulturminner_gdo": "DOK Kulturminnekart (Geodata Online) — viser fredede og verneverdige kulturminner/kulturmiljøer",
+        "samfunnssikkerhet_gdo": "DOK Samfunnssikkerhetskart (Geodata Online) — viser risiko- og sårbarhetsdata",
     }
     fetched = [label for key, label in map_names.items() if gd.get(key) is not None]
     missing = [label for key, label in map_names.items() if gd.get(key) is None]
@@ -1697,7 +1781,7 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
     gd = st.session_state.geodata_result
     if gd:
         with col_status:
-            n_maps = sum(1 for k in ["ortofoto", "historisk", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"] if gd.get(k) is not None)
+            n_maps = sum(1 for k in ["ortofoto", "historisk", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo", "forurensning_gdo", "kulturminner_gdo", "samfunnssikkerhet_gdo"] if gd.get(k) is not None)
             n_contam = len(gd.get("grunnforurensning", []))
             hist_label = ""
             if gd.get("historisk"):
@@ -1774,6 +1858,22 @@ with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
                 with cols[idx]:
                     st.image(img, caption=caption, use_container_width=True)
 
+        # --- Geodata Online DOK Temakart (forurensning, kulturminner, samfunnssikkerhet) ---
+        dok_maps = []
+        if gd.get("forurensning_gdo"):
+            dok_maps.append(("Forurensning (DOK)", gd["forurensning_gdo"]))
+        if gd.get("kulturminner_gdo"):
+            dok_maps.append(("Kulturminner (DOK)", gd["kulturminner_gdo"]))
+        if gd.get("samfunnssikkerhet_gdo"):
+            dok_maps.append(("Samfunnssikkerhet (DOK)", gd["samfunnssikkerhet_gdo"]))
+
+        if dok_maps:
+            st.markdown("##### 🏛️ DOK — Forurensning, Kulturminner & Samfunnssikkerhet (Geodata Online)")
+            cols = st.columns(len(dok_maps))
+            for idx, (caption, img) in enumerate(dok_maps):
+                with cols[idx]:
+                    st.image(img, caption=caption, use_container_width=True)
+
         # --- Miljødirektoratet ---
         contam = gd.get("grunnforurensning", [])
         if contam:
@@ -1825,7 +1925,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         # Add all geodata thematic maps as images for AI analysis
         geodata_text = ""
         if gd:
-            for key in ["losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo"]:
+            for key in ["losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred", "geologi_gdo", "forurensning_gdo", "kulturminner_gdo", "samfunnssikkerhet_gdo"]:
                 img = gd.get(key)
                 if img is not None:
                     images_for_geo.append(img if isinstance(img, Image.Image) else img.convert("RGB"))
@@ -1884,6 +1984,9 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         - NVE Flomsonekart: Viser om eiendommen ligger i flomsone
         - NVE Kvikkleirekart: Viser om det er kartlagte kvikkleiresoner i nærheten
         - NVE Skredkart: Viser skredfaresoner
+        - DOK Forurensningskart (hvis tilgjengelig): Viser kartlagte forurensingssoner, deponier og registrerte forurensningslokaliteter fra nasjonale datasett
+        - DOK Kulturminnekart (hvis tilgjengelig): Viser fredede og verneverdige kulturminner og kulturmiljøer — relevant for graverestriksjoner
+        - DOK Samfunnssikkerhetskart (hvis tilgjengelig): Viser risiko- og sårbarhetsdata relevant for naturfare og samfunnssikkerhet
         Du MÅ analysere hvert vedlagte bilde og referere til dem eksplisitt i rapporten.
 
         KRITISKE INSTRUKSER FOR FORM:
