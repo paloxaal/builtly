@@ -141,11 +141,16 @@ def fetch_stoykart_image(lat: float, lon: float, kilde: str = "vei",
 
     errors = []
 
-    # --- Source 1: Geonorge WMS (åpne tjenester, ingen auth) ---
+    # Get Geodata Online credentials for authenticated WMS access
+    gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
+    gdo_pass = os.environ.get("GEODATA_ONLINE_PASS", "")
+    gdo_auth = (gdo_user, gdo_pass) if gdo_user and gdo_pass else None
+
+    # --- Source 1: Geonorge WMS with Geodata Online auth (skwms1 = secure WMS) ---
     wms_sources = {
         "vei": [
             ("https://wms.geonorge.no/skwms1/wms.stoykartleggingveg",
-             ["Støyvarselkart_Lden", "stoyvarselkart_lden", "Støyvarselkart", "0", "1"]),
+             ["Støyvarselkart_Lden", "stoyvarselkart_lden", "Støyvarselkart", "0", "1", "2"]),
         ],
         "bane": [
             ("https://wms.geonorge.no/skwms1/wms.stoysonerjernbanenett",
@@ -161,13 +166,19 @@ def fetch_stoykart_image(lat: float, lon: float, kilde: str = "vei",
         ],
     }
 
+    # Try with Geodata Online HTTP Basic Auth (skwms1 requires Norge digitalt credentials)
     for wms_url, layer_candidates in wms_sources.get(kilde.lower(), []):
-        img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height)
+        img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height, auth=gdo_auth)
         if img:
             return img, None
+        # Also try without auth (some WMS services may be open)
+        if gdo_auth:
+            img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height)
+            if img:
+                return img, None
         errors.append(f"WMS {wms_url.split('/')[-1]}: ingen treff")
 
-    # --- Source 2: Geodata Online DOK Forurensning (token-autentisert) ---
+    # --- Source 2: Geodata Online DOK Forurensning MapServer (token-autentisert) ---
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
@@ -178,7 +189,7 @@ def fetch_stoykart_image(lat: float, lon: float, kilde: str = "vei",
                 img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token)
                 if img:
                     return img, None
-                errors.append("Geodata Online DOK Forurensning: ingen data")
+                errors.append("Geodata Online DOK Forurensning: ingen støydata i dette området")
             except Exception as e:
                 errors.append(f"Geodata Online: {str(e)[:60]}")
     except ImportError:
