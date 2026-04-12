@@ -5053,7 +5053,10 @@ st.markdown(
 
     /* Desktop: ensure gap between top bar dropdowns */
     [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
-        gap: 0.75rem !important;
+        gap: 1rem !important;
+    }
+    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
+        margin-right: 0.5rem !important;
     }
 
     @media (max-width: 760px) {
@@ -5110,21 +5113,23 @@ st.markdown(
             gap: 8px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 38px !important;
-            width: 38px !important;
-            max-width: 38px !important;
+            flex: 0 0 44px !important;
+            width: 44px !important;
+            max-width: 44px !important;
         }
         /* Each selectbox: icon-only pill */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             padding: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(120,160,200,0.12) !important;
-            border: 1px solid rgba(120,160,200,0.18) !important;
-            border-radius: 10px !important;
-            min-height: 36px !important;
-            width: 38px !important;
-            max-width: 38px !important;
+            background: rgba(120,160,200,0.14) !important;
+            border: 1px solid rgba(120,160,200,0.22) !important;
+            border-radius: 12px !important;
+            height: 40px !important;
+            min-height: 40px !important;
+            max-height: 40px !important;
+            width: 42px !important;
+            max-width: 42px !important;
             padding: 0 !important;
             display: flex !important;
             align-items: center !important;
@@ -5132,20 +5137,31 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
+        /* Constrain the inner value wrapper too */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
+            width: 22px !important;
+            max-width: 22px !important;
+            overflow: hidden !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
         /* Show ONLY emoji: clip after first grapheme */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 1.05rem !important;
+            font-size: 18px !important;
             line-height: 1 !important;
             display: block !important;
-            width: 1.2em !important;
-            max-width: 1.2em !important;
+            width: 22px !important;
+            max-width: 22px !important;
+            height: 22px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
-            text-align: center !important;
+            text-align: left !important;
+            padding: 0 !important;
+            margin: 0 auto !important;
         }
 
         .mini-stat-grid,
