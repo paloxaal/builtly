@@ -5073,61 +5073,60 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 4px !important;
+            justify-content: space-between !important;
+            gap: 6px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) {
-            flex: 0 0 42px !important;
-            max-width: 42px !important;
-            width: 42px !important;
-            min-width: 42px !important;
-        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 42px !important;
-            max-width: 42px !important;
-            width: 42px !important;
-            min-width: 42px !important;
+            flex: 0 0 36px !important;
+            max-width: 36px !important;
+            width: 36px !important;
+            min-width: 36px !important;
         }
-        /* NUCLEAR: strip every wrapper */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) *,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) * {
+        /* Strip all wrappers */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) [data-testid="stSelectbox"] > div {
+            background: transparent !important;
             border: none !important;
             box-shadow: none !important;
-            outline: none !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
-            background: transparent !important;
             padding: 0 !important;
             margin: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
             background: transparent !important;
+            border: none !important;
             min-height: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(255,255,255,0.06) !important;
+            background: rgba(255,255,255,0.08) !important;
+            border: none !important;
+            box-shadow: none !important;
             border-radius: 8px !important;
-            padding: 4px 6px !important;
-            min-height: 28px !important;
-            max-width: 42px !important;
-            overflow: hidden !important;
+            padding: 4px !important;
+            min-height: 32px !important;
+            max-width: 36px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Show only first 2 chars (emoji) by truncating */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.8rem !important;
+            font-size: 1.1rem !important;
             display: block !important;
-            max-width: 24px !important;
+            width: 22px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
-            line-height: 1.2 !important;
+            line-height: 1 !important;
+            text-align: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
             margin-top: 0.2rem !important;
