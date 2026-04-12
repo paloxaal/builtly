@@ -3087,17 +3087,42 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                     st.session_state.brann_manual_edits_dirty = False
                     st.success("Brannkonsept og vedlagte branntegninger er generert.")
 
-                    # Save report to user dashboard
+                    # Lagre til Supabase dashboard
                     try:
                         from builtly_auth import save_report
-                        _fire_fname = f"Builtly_Brannkonsept_{pd_state.get('p_name', '')}.pdf"
                         save_report(
                             project_name=pd_state.get("p_name", ""),
-                            report_name=f"Brannkonsept — {pd_state.get('p_name', '')}",
-                            module="Brannkonsept",
-                            file_path=_fire_fname,
+                            report_name=f"Brannkonsept — Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
+                            module="RIBr (Brannkonsept)",
+                            file_path=f"Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
                         )
-                    except ImportError:
+                    except Exception:
+                        pass
+
+                    # Lagre til disk for Dashboard
+                    try:
+                        report_dir = DB_DIR / "reports"
+                        report_dir.mkdir(exist_ok=True)
+                        p_name = pd_state.get("p_name", "prosjekt")
+                        pdf_path = report_dir / f"Builtly_RIBr_{p_name}.pdf"
+                        pdf_path.write_bytes(report_pdf)
+                        if fire_pdf:
+                            (report_dir / f"Builtly_Branntegninger_{p_name}.pdf").write_bytes(fire_pdf)
+                        
+                        reviews_file = DB_DIR / "pending_reviews.json"
+                        existing = {}
+                        if reviews_file.exists():
+                            try: existing = json.loads(reviews_file.read_text(encoding="utf-8"))
+                            except Exception: existing = {}
+                        doc_id = f"PRJ-{datetime.now().strftime('%y')}-RIBR{len(existing)+1:03d}"
+                        existing[doc_id] = {
+                            "title": p_name, "module": "RIBr (Brannkonsept)",
+                            "drafter": "Builtly AI", "reviewer": "Senior Brannrådgiver",
+                            "status": "Pending Senior Review", "class": "badge-pending",
+                            "pdf_file": str(pdf_path), "timestamp": datetime.now().isoformat(),
+                        }
+                        reviews_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+                    except Exception:
                         pass
                 except Exception as exc:
                     st.session_state.generated_pdf = None
