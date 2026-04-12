@@ -5073,73 +5073,52 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 6px !important;
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"] {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-            padding: 0 !important;
+            gap: 4px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) {
+            flex: 0 0 52px !important;
+            width: 52px !important;
+            max-width: 52px !important;
+        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 40px !important;
-            max-width: 40px !important;
-            width: 40px !important;
+            flex: 0 0 52px !important;
+            width: 52px !important;
+            max-width: 52px !important;
         }
-        /* Strip all wrappers */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div,
+        /* Hide the margin-top spacer divs */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) > div > div:first-child,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) > div > div:first-child {
+            margin-top: 0 !important;
+        }
+        /* Strip selectbox chrome */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] label {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-            padding: 0 !important;
-            margin: 0 !important;
+            display: none !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] {
-            background: transparent !important;
-            border: none !important;
-            min-height: 0 !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
+            padding-top: 0 !important;
         }
+        /* Style the select element */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(120,145,170,0.12) !important;
-            border: 1px solid rgba(120,145,170,0.20) !important;
-            box-shadow: none !important;
+            background: rgba(200,210,220,0.08) !important;
+            border: 1px solid rgba(200,210,220,0.12) !important;
             border-radius: 10px !important;
-            padding: 0 !important;
             min-height: 34px !important;
-            width: 38px !important;
-            max-width: 38px !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            overflow: hidden !important;
+            padding: 4px 6px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Show ONLY the emoji by clipping after ~1 character */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 1.15rem !important;
-            line-height: 1 !important;
-            display: inline-block !important;
-            width: 1.3em !important;
-            max-width: 1.3em !important;
-            overflow: hidden !important;
-            text-overflow: clip !important;
+            font-size: 0.65rem !important;
             white-space: nowrap !important;
-            text-align: center !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
-            margin-top: 0.15rem !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            max-width: 36px !important;
+            display: block !important;
         }
 
         .mini-stat-grid,
