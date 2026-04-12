@@ -2682,10 +2682,11 @@ def render_analysis_editor(item: Dict[str, Any]) -> None:
         st.session_state[bridge_key] = json.dumps(analysis.get("elements", []), ensure_ascii=False, indent=2)
     render_mouse_canvas_editor(page, analysis.get("elements", []), bridge_label=bridge_label, component_key=f"{key_root}_mouse_component")
     st.text_area(
-        "Museeditor-data (teknisk buffer / fallback)",
+        bridge_label,
         key=bridge_key,
         height=120,
-        help="Denne brukes av museeditoren. Du kan også lime inn JSON manuelt her hvis automatisk overføring i nettleseren din er blokkert.",
+        label_visibility="collapsed",
+        help="Denne brukes av museeditoren. Du kan også lime inn JSON manuelt her.",
     )
     mcols = st.columns(3)
     if mcols[0].button("Bruk museendringer", key=f"{key_root}_apply_mouse", use_container_width=True):
