@@ -7077,46 +7077,11 @@ def render_rib_draft_editor_ui() -> None:
         st.warning("Fant ikke tegningen som hører til skissen.")
         return
 
-    tool_options = [
-        ("none", "Ingen endring"),
-        ("add_column", "Legg til søyle"),
-        ("move_column", "Flytt søyle"),
-        ("delete_column", "Slett søyle"),
-        ("add_wall", "Legg til bærende vegg"),
-        ("delete_wall", "Slett bærende vegg"),
-        ("add_beam", "Legg til bjelke"),
-        ("delete_beam", "Slett bjelke"),
-        ("move_core", "Flytt kjerne"),
-        ("resize_core", "Endre kjerne (to klikk)"),
-        ("add_span", "Sett spennpil"),
-        ("delete_span", "Slett spennpil"),
-    ]
-
     info_left, info_mid, info_right = st.columns([1.5, 1.0, 1.0])
     with info_left:
-        tool = st.selectbox(
-            "Musepeker-verktøy",
-            options=tool_options,
-            format_func=lambda item: item[1],
-            key="rib_editor_tool_choice_v3",
-        )[0]
-        current_state = get_pointer_state(selected_sketch_uid)
-        if current_state.get("tool") and current_state.get("tool") != tool:
-            clear_pointer_state(selected_sketch_uid)
-            current_state = {}
-        pending_msg = ""
-        if current_state.get("anchor"):
-            pending_msg = "Ventende handling: andre klikk mangler."
-        elif "target_idx" in current_state:
-            pending_msg = "Ventende handling: klikk ny plassering."
-        if pending_msg:
-            st.warning(pending_msg)
-        else:
-            st.caption(
-                "Søyler/kjerner snappes til geometri. Vegger, bjelker og spennpiler opprettes med to klikk og låses ortogonalt."
-            )
-    with info_mid:
         counts = count_elements_by_type(selected_sketch)
+        st.caption(f"Bruk verktøylinjen i editoren under. Scroll for zoom, Shift+drag for pan.")
+    with info_mid:
         st.metric("Søyler / vegger", f"{counts['column']} / {counts['wall']}")
     with info_right:
         st.metric("Bjelker / kjerne", f"{counts['beam']} / {counts['core']}")
@@ -7124,40 +7089,28 @@ def render_rib_draft_editor_ui() -> None:
     left_col, right_col = st.columns([1.6, 1.0])
     with left_col:
         st.markdown("##### Bæresystem-editor")
-        if HAS_RIB_EDITOR_V2:
-            updated_elements = render_rib_editor(
-                drawing_record,
-                selected_sketch,
-                editor_key=f"rib_editor_v2_b_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
-            )
-            if updated_elements is not None:
-                push_draft_history()
-                draft_sketches[sketch_idx]["elements"] = updated_elements
-                st.session_state.rib_draft_sketches = draft_sketches
-                mark_draft_changed()
-                st.success(f"Bæresystem oppdatert — {len(updated_elements)} elementer.")
-                st.rerun()
-        else:
-            click = render_plotly_sketch_editor(
-                drawing_record,
-                selected_sketch,
-                editor_key=f"rib_plotly_editor_v3_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
-            )
-        action_row = st.columns([1, 1, 1])
+        updated_elements = render_rib_editor(
+            drawing_record,
+            selected_sketch,
+            editor_key=f"rib_editor_v2_b_{selected_sketch_uid}_{st.session_state.get('rib_draft_updated_at', '')}",
+        )
+        if updated_elements is not None:
+            push_draft_history()
+            draft_sketches[sketch_idx]["elements"] = updated_elements
+            st.session_state.rib_draft_sketches = draft_sketches
+            mark_draft_changed()
+            st.success(f"Bæresystem oppdatert — {len(updated_elements)} elementer.")
+            st.rerun()
+
+        action_row = st.columns([1, 1])
         with action_row[0]:
             if st.button("↩ Angre siste endring", use_container_width=True, key=f"rib_undo_{selected_sketch_uid}"):
                 if undo_draft_history():
-                    clear_pointer_state(selected_sketch_uid)
                     st.success("Siste skisseendring er angret.")
                     st.rerun()
                 else:
                     st.info("Det finnes ingen endring å angre.")
         with action_row[1]:
-            if st.button("Avbryt ventende verktøy", use_container_width=True, key=f"rib_cancel_pending_{selected_sketch_uid}"):
-                clear_pointer_state(selected_sketch_uid)
-                st.info("Ventende klikksekvens er nullstilt.")
-                st.rerun()
-        with action_row[2]:
             if st.button("Nullstill valgt skisse", use_container_width=True, key=f"rib_reset_one_v3_{selected_sketch_uid}"):
                 original_sketches = st.session_state.get("rib_draft_original_sketches", [])
                 for original in original_sketches:
@@ -7165,32 +7118,10 @@ def render_rib_draft_editor_ui() -> None:
                         push_draft_history()
                         draft_sketches[sketch_idx] = deep_copy_jsonable(original)
                         st.session_state.rib_draft_sketches = draft_sketches
-                        clear_pointer_state(selected_sketch_uid)
                         mark_draft_changed()
                         st.success("Valgt skisse er nullstilt til auto-generert versjon.")
                         st.rerun()
                         break
-
-        if not HAS_RIB_EDITOR_V2 and click and tool != "none":
-            click_sig = click_event_signature(selected_sketch_uid, tool, click)
-            if st.session_state.get("rib_draft_last_click_sig") != click_sig:
-                changed, message, updated_sketch = apply_pointer_click_to_sketch(
-                    selected_sketch,
-                    drawing_record,
-                    tool,
-                    click["x"],
-                    click["y"],
-                )
-                st.session_state.rib_draft_last_click_sig = click_sig
-                if changed:
-                    push_draft_history()
-                    draft_sketches[sketch_idx] = updated_sketch
-                    st.session_state.rib_draft_sketches = draft_sketches
-                    mark_draft_changed()
-                    st.success(message)
-                    st.rerun()
-                else:
-                    st.info(message)
 
     with right_col:
         st.markdown("##### Helside-preview")
