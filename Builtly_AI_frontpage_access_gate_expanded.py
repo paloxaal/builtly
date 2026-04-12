@@ -5055,8 +5055,8 @@ st.markdown(
     [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
         gap: 1rem !important;
     }
-    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
-        margin-right: 0.5rem !important;
+    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+        padding: 0 0.4rem !important;
     }
 
     @media (max-width: 760px) {
@@ -5087,11 +5087,11 @@ st.markdown(
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        /* Controls wrapper: shrink to fit */
+        /* Controls wrapper */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
-            flex: 0 0 auto !important;
-            width: auto !important;
-            max-width: 100px !important;
+            flex: 0 0 90px !important;
+            width: 90px !important;
+            max-width: 90px !important;
         }
         /* Kill ALL backgrounds on wrapper divs so pills don't merge */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2),
@@ -5106,30 +5106,31 @@ st.markdown(
             padding: 0 !important;
             margin: 0 !important;
         }
-        /* Sub-columns: horizontal, icon-sized */
+        /* Sub-columns: horizontal, right-aligned */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 8px !important;
+            gap: 6px !important;
+            justify-content: flex-end !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 44px !important;
-            width: 44px !important;
-            max-width: 44px !important;
+            flex: 0 0 38px !important;
+            width: 38px !important;
+            max-width: 38px !important;
         }
-        /* Each selectbox: icon-only pill */
+        /* Each selectbox: compact pill */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             padding: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(120,160,200,0.14) !important;
-            border: 1px solid rgba(120,160,200,0.22) !important;
-            border-radius: 12px !important;
-            height: 40px !important;
-            min-height: 40px !important;
-            max-height: 40px !important;
-            width: 42px !important;
-            max-width: 42px !important;
+            background: rgba(150,180,210,0.10) !important;
+            border: 1px solid rgba(150,180,210,0.16) !important;
+            border-radius: 10px !important;
+            height: 36px !important;
+            min-height: 36px !important;
+            max-height: 36px !important;
+            width: 36px !important;
+            max-width: 36px !important;
             padding: 0 !important;
             display: flex !important;
             align-items: center !important;
@@ -5137,7 +5138,7 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Constrain the inner value wrapper too */
+        /* Constrain inner value div */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
             width: 22px !important;
             max-width: 22px !important;
@@ -5148,14 +5149,14 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Show ONLY emoji: clip after first grapheme */
+        /* Show ONLY emoji */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 18px !important;
+            font-size: 16px !important;
             line-height: 1 !important;
             display: block !important;
-            width: 22px !important;
-            max-width: 22px !important;
-            height: 22px !important;
+            width: 20px !important;
+            max-width: 20px !important;
+            height: 20px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
