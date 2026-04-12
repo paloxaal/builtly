@@ -263,12 +263,10 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
     if not images_with_markers:
         return
     
-    # Bruk første bilde
     img_data = images_with_markers[0]
     image = img_data["image"]
     markers = img_data.get("markers", [])
     
-    # Konverter bilde til data URI
     buf = io.BytesIO()
     thumb = image.copy()
     if max(thumb.size) > 1400:
@@ -278,7 +276,10 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
     b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     img_uri = f"data:image/png;base64,{b64}"
     
-    payload = json.dumps({"image": img_uri, "markers": markers}, ensure_ascii=False)
+    # Escape bridge_label into JS
+    bl_escaped = bridge_label.replace("'", "\\'")
+    
+    marker_json = json.dumps(markers, ensure_ascii=False)
     
     html = f"""
     <div style="font-family:system-ui;color:#e2e8f0">
@@ -307,79 +308,150 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
     <style>.at{{background:rgba(30,41,59,0.8);color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:3px 8px;font-size:11px;cursor:pointer;font-weight:500}}.at:hover{{background:rgba(56,189,248,0.1);color:#e2e8f0}}.at.active{{background:var(--tc,#38bdf8);color:#fff;font-weight:700;border-color:var(--tc)}}</style>
     <script>
     window.AE=(function(){{
-      const P={payload};
-      const cv=document.getElementById('AC'),ctx=cv.getContext('2d'),st=document.getElementById('AE_status'),db=document.getElementById('AE_db'),ex=document.getElementById('AE_export');
-      const img=new Image();img.src=P.image;
-      let els=P.markers.map((m,i)=>{{return{{...m,id:'m'+i}}}});
-      let tool='select',sel=-1,drag=null,sp=null,IW=0,IH=0;
-      const TMAP={{db_red:['circle','#ef4444','70'],db_yellow:['circle','#f59e0b','60'],db_green:['circle','#22c55e','50'],zone:['rect','rgba(168,85,247,0.3)','Støysone'],barrier:['line','#94a3b8','Støyskjerm'],facade:['line','#f59e0b','Utsatt fasade']}};
+      var BRIDGE_LABEL='{bl_escaped}';
+      var cv=document.getElementById('AC'),ctx=cv.getContext('2d'),sts=document.getElementById('AE_status'),dbIn=document.getElementById('AE_db'),ex=document.getElementById('AE_export');
+      var img=new Image();
+      var els={marker_json};
+      els=els.map(function(m,i){{m.id='m'+i;return m}});
+      var tool='select',sel=-1,drag=null,sp=null,IW=0,IH=0;
+      var TMAP={{db_red:['circle','#ef4444','70'],db_yellow:['circle','#f59e0b','60'],db_green:['circle','#22c55e','50'],zone:['rect','rgba(168,85,247,0.3)','Stoysone'],barrier:['line','#94a3b8','Stoyskjerm'],facade:['line','#f59e0b','Utsatt fasade']}};
       function uid(){{return Math.random().toString(36).slice(2,10)}}
+      function dist(a,b,c,d){{return Math.sqrt((c-a)*(c-a)+(d-b)*(d-b))}}
+
       function render(){{
-        if(!img.complete)return;ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,IW,IH);
-        els.forEach((e,i)=>{{
-          const isSel=i===sel;
-          const x=(e.x_pct/100)*IW,y=(e.y_pct/100)*IH;
+        if(!img.complete||IW<1)return;
+        ctx.clearRect(0,0,cv.width,cv.height);
+        ctx.drawImage(img,0,0,IW,IH);
+        for(var i=0;i<els.length;i++){{
+          var e=els[i],isSel=i===sel;
+          var x=(e.x_pct/100)*IW,y=(e.y_pct/100)*IH;
+          var c=e.color||'#ef4444';
+          ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=c;
           if(e.type==='circle'||!e.type){{
-            const r=IW*0.04;
-            const c=e.color||'#ef4444';
-            ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=c;ctx.lineWidth=isSel?4:3;ctx.stroke();
+            var r=IW*0.04;
+            ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
             if(isSel){{ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fill()}}
-            const txt=(e.db||'??')+' dB';ctx.font='bold '+Math.max(11,IW*0.018)+'px system-ui';
-            const tw=ctx.measureText(txt).width;
-            ctx.fillStyle=c;ctx.fillRect(x-tw/2-4,y-8,tw+8,16);ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+5);
+            var txt=(e.db||'??')+' dB';
+            ctx.font='bold '+Math.max(11,IW*0.018)+'px system-ui';
+            var tw=ctx.measureText(txt).width;
+            ctx.fillStyle=c;ctx.fillRect(x-tw/2-4,y-8,tw+8,16);
+            ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+5);
+            if(e.label){{ctx.font='10px system-ui';ctx.fillStyle=c;ctx.fillText(e.label,x-tw/2,y+20)}}
           }}else if(e.type==='rect'){{
-            const w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;
-            ctx.fillStyle=e.color||'rgba(168,85,247,0.2)';ctx.fillRect(x,y,w,h);
+            var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;
+            ctx.fillStyle=c;ctx.fillRect(x,y,w,h);
             ctx.strokeStyle='#a78bfa';ctx.lineWidth=isSel?3:1.5;ctx.strokeRect(x,y,w,h);
             ctx.font='bold 11px system-ui';ctx.fillStyle='#a78bfa';ctx.fillText(e.label||'Sone',x+4,y+14);
+            if(isSel){{ctx.fillStyle='#fff';ctx.strokeStyle='#a78bfa';ctx.lineWidth=2;ctx.beginPath();ctx.rect(x+w-5,y+h-5,10,10);ctx.fill();ctx.stroke()}}
           }}else if(e.type==='line'){{
-            const x2=(e.x2_pct||e.x_pct+10)/100*IW,y2=(e.y2_pct||e.y_pct)/100*IH;
-            ctx.strokeStyle=e.color||'#94a3b8';ctx.lineWidth=isSel?5:3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();
-            ctx.font='bold 10px system-ui';ctx.fillStyle=e.color||'#94a3b8';ctx.fillText(e.label||'',((x+x2)/2),((y+y2)/2)-6);
+            var x2=(e.x2_pct||e.x_pct+10)/100*IW,y2=(e.y2_pct||e.y_pct)/100*IH;
+            ctx.strokeStyle=c;ctx.lineWidth=isSel?5:3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();
+            ctx.font='bold 10px system-ui';ctx.fillStyle=c;ctx.fillText(e.label||'',((x+x2)/2),((y+y2)/2)-6);
+            if(isSel){{[{{x:x,y:y}},{{x:x2,y:y2}}].forEach(function(pt){{ctx.beginPath();ctx.arc(pt.x,pt.y,5,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.stroke()}})}}
           }}
-        }});
-        st.textContent=els.length+' markører | '+(tool==='select'?'Velg/flytt':tool);
+        }}
+        sts.textContent=els.length+' markorer | '+(tool==='select'?'Velg/flytt':tool);
+        ex.value=JSON.stringify(els,null,2);
       }}
-      function resize(){{const mw=cv.parentElement.clientWidth||900,r=Math.min(1,mw/img.width);IW=Math.max(1,Math.round(img.width*r));IH=Math.max(1,Math.round(img.height*r));cv.width=IW;cv.height=IH;render()}}
-      function gP(e){{const r=cv.getBoundingClientRect();return{{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)}}}}
-      function dist(a,b,c,d){{return Math.sqrt((c-a)**2+(d-b)**2)}}
-      function hitTest(x,y){{for(let i=els.length-1;i>=0;i--){{const e=els[i],ex=(e.x_pct/100)*IW,ey=(e.y_pct/100)*IH;if(dist(x,y,ex,ey)<IW*0.05)return i}}return -1}}
-      cv.addEventListener('mousedown',function(e){{
-        const p=gP(e);sp=p;
-        if(tool==='select'){{sel=hitTest(p.x,p.y);if(sel>=0){{drag='move';db.value=els[sel].db||''}}else{{db.value=''}}}}
-        else{{
-          const tm=TMAP[tool];if(!tm)return;
-          const xp=p.x/IW*100,yp=p.y/IH*100;
-          if(tm[0]==='circle'){{els.push({{id:uid(),type:'circle',x_pct:xp,y_pct:yp,db:db.value||tm[2],color:tm[1]}})}}
-          else if(tm[0]==='rect'){{els.push({{id:uid(),type:'rect',x_pct:xp,y_pct:yp,w_pct:10,h_pct:8,color:tm[1],label:tm[2]}});drag='drawRect'}}
-          else if(tm[0]==='line'){{els.push({{id:uid(),type:'line',x_pct:xp,y_pct:yp,x2_pct:xp,y2_pct:yp,color:tm[1],label:tm[2]}});drag='drawLine'}}
+
+      function resize(){{
+        var mw=cv.parentElement?cv.parentElement.clientWidth:900;
+        if(mw<100)mw=900;
+        var r=Math.min(1,mw/Math.max(img.naturalWidth||img.width||900,1));
+        IW=Math.max(100,Math.round((img.naturalWidth||img.width||900)*r));
+        IH=Math.max(100,Math.round((img.naturalHeight||img.height||600)*r));
+        cv.width=IW;cv.height=IH;
+        render();
+      }}
+
+      function gP(e){{var r=cv.getBoundingClientRect();return{{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)}}}}
+
+      function hitTest(x,y){{
+        for(var i=els.length-1;i>=0;i--){{
+          var e=els[i],ex=(e.x_pct/100)*IW,ey=(e.y_pct/100)*IH;
+          if(dist(x,y,ex,ey)<IW*0.05)return i;
+          if(e.type==='rect'){{var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;if(x>=ex&&x<=ex+w&&y>=ey&&y<=ey+h)return i}}
+        }}
+        return -1;
+      }}
+
+      cv.addEventListener('mousedown',function(ev){{
+        var p=gP(ev);sp=p;
+        if(tool==='select'){{
+          sel=hitTest(p.x,p.y);
+          if(sel>=0){{drag='move';dbIn.value=els[sel].db||els[sel].label||''}}
+          else{{dbIn.value=''}}
+        }}else{{
+          var tm=TMAP[tool];if(!tm)return;
+          var xp=p.x/IW*100,yp=p.y/IH*100;
+          if(tm[0]==='circle'){{
+            els.push({{id:uid(),type:'circle',x_pct:xp,y_pct:yp,db:dbIn.value||tm[2],color:tm[1],label:''}});
+          }}else if(tm[0]==='rect'){{
+            els.push({{id:uid(),type:'rect',x_pct:xp,y_pct:yp,w_pct:10,h_pct:8,color:tm[1],label:tm[2]}});drag='drawRect';
+          }}else if(tm[0]==='line'){{
+            els.push({{id:uid(),type:'line',x_pct:xp,y_pct:yp,x2_pct:xp,y2_pct:yp,color:tm[1],label:tm[2]}});drag='drawLine';
+          }}
           sel=els.length-1;
         }}
         render();
       }});
-      cv.addEventListener('mousemove',function(e){{
-        if(sel<0||!drag||!sp)return;const p=gP(e),el=els[sel];
-        if(drag==='move'){{const dx=(p.x-sp.x)/IW*100,dy=(p.y-sp.y)/IH*100;el.x_pct=Math.max(0,Math.min(100,el.x_pct+dx));el.y_pct=Math.max(0,Math.min(100,el.y_pct+dy));sp=p}}
-        else if(drag==='drawRect'){{el.w_pct=(p.x/IW*100)-el.x_pct;el.h_pct=(p.y/IH*100)-el.y_pct}}
-        else if(drag==='drawLine'){{el.x2_pct=p.x/IW*100;el.y2_pct=p.y/IH*100}}
+
+      cv.addEventListener('mousemove',function(ev){{
+        if(sel<0||!drag||!sp)return;
+        var p=gP(ev),el=els[sel];
+        if(drag==='move'){{
+          var dx=(p.x-sp.x)/IW*100,dy=(p.y-sp.y)/IH*100;
+          el.x_pct=Math.max(0,Math.min(100,(el.x_pct||0)+dx));
+          el.y_pct=Math.max(0,Math.min(100,(el.y_pct||0)+dy));
+          sp=p;
+        }}else if(drag==='drawRect'&&el.type==='rect'){{
+          el.w_pct=(p.x/IW*100)-(el.x_pct||0);
+          el.h_pct=(p.y/IH*100)-(el.y_pct||0);
+        }}else if(drag==='drawLine'&&el.type==='line'){{
+          el.x2_pct=p.x/IW*100;el.y2_pct=p.y/IH*100;
+        }}
         render();
       }});
+
       window.addEventListener('mouseup',function(){{drag=null;render()}});
-      document.addEventListener('keydown',function(e){{if(e.target.tagName==='INPUT')return;if((e.key==='Delete'||e.key==='Backspace')&&sel>=0){{els.splice(sel,1);sel=-1;render()}}}});
-      return{{
-        setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.at').forEach(b=>b.classList.remove('active'));const btn=document.getElementById('at_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
+
+      document.addEventListener('keydown',function(ev){{
+        if(ev.target.tagName==='INPUT'||ev.target.tagName==='TEXTAREA')return;
+        if((ev.key==='Delete'||ev.key==='Backspace')&&sel>=0){{els.splice(sel,1);sel=-1;render()}}
+      }});
+
+      // Init: load image THEN resize
+      img.onload=function(){{resize()}};
+      img.src='{img_uri}';
+      window.addEventListener('resize',function(){{resize()}});
+      // Fallback timer in case onload already fired
+      setTimeout(function(){{if(img.complete&&IW<1)resize()}},200);
+
+      return {{
+        setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.at').forEach(function(b){{b.classList.remove('active')}});var btn=document.getElementById('at_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
         deleteSelected:function(){{if(sel>=0){{els.splice(sel,1);sel=-1;render()}}}},
         updateDb:function(v){{if(sel>=0&&els[sel]){{els[sel].db=v;render()}}}},
         save:function(){{
           ex.value=JSON.stringify(els,null,2);
-          try{{const ta=window.parent.document.querySelector('textarea[aria-label="'+'{bridge_label}'+'"]');if(!ta)throw 0;const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));st.textContent='Lagret! Klikk Bruk endringer under.'}}catch(e){{st.textContent='Kopier JSON manuelt.';ex.style.display='block'}}
+          try{{
+            var ta=window.parent.document.querySelector('textarea[aria-label="'+BRIDGE_LABEL+'"]');
+            if(!ta)throw new Error('bridge not found');
+            var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;
+            setter.call(ta,ex.value);
+            ta.dispatchEvent(new Event('input',{{bubbles:true}}));
+            ta.dispatchEvent(new Event('change',{{bubbles:true}}));
+            sts.textContent='Lagret! Klikk Bruk endringer under.';
+          }}catch(err){{
+            sts.textContent='Kopier JSON fra feltet under manuelt.';
+            ex.style.display='block';
+          }}
         }}
       }};
-      img.onload=resize;window.addEventListener('resize',resize);
     }})();
     </script>
     """
     components.html(f"<!-- {component_key} -->\n" + html, height=750, scrolling=False)
+
 
 def render_html(html_string: str):
     st.markdown(html_string.replace('\n', ' '), unsafe_allow_html=True)
