@@ -107,6 +107,11 @@ if "user_plan" not in st.session_state:
 # Keep access granted if user is already authenticated
 if st.session_state.get("user_authenticated") and st.session_state.get("user_email"):
     st.session_state.site_access_granted = True
+    # Restore Supabase session from stored tokens (survives page reload)
+    if _HAS_AUTH and st.session_state.get("_sb_access_token"):
+        if not builtly_auth.restore_session():
+            # Tokens expired beyond refresh — user must log in again
+            st.session_state.site_access_granted = False
 if "user_company" not in st.session_state:
     st.session_state.user_company = ""
 if "user_countries" not in st.session_state:
@@ -4121,8 +4126,8 @@ st.markdown(
 
     [data-testid="stSelectbox"] {
         margin-bottom: 0 !important;
-        width: 170px;
-        float: right;
+        width: 100%;
+        max-width: 200px;
     }
 
     [data-testid="stSelectbox"] label {
@@ -5052,11 +5057,31 @@ st.markdown(
     }
 
     /* Desktop: ensure gap between top bar dropdowns */
+    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
+        display: flex !important;
+        justify-content: flex-end !important;
+    }
     [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
-        gap: 1rem !important;
+        gap: 0.75rem !important;
+        justify-content: flex-end !important;
+        flex-wrap: nowrap !important;
     }
     [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-        padding: 0 0.4rem !important;
+        padding: 0 !important;
+        flex: 0 0 auto !important;
+        width: auto !important;
+    }
+    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] {
+        width: 170px;
+        max-width: 170px;
+    }
+
+    /* Tablet: slightly narrower controls */
+    @media (max-width: 1180px) and (min-width: 761px) {
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] {
+            width: 150px;
+            max-width: 150px;
+        }
     }
 
     @media (max-width: 760px) {
@@ -5081,17 +5106,17 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 4px !important;
+            gap: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        /* Controls wrapper */
+        /* Controls wrapper - auto width, right-aligned */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
-            flex: 0 0 90px !important;
-            width: 90px !important;
-            max-width: 90px !important;
+            flex: 0 0 auto !important;
+            width: auto !important;
+            max-width: none !important;
         }
         /* Kill ALL backgrounds on wrapper divs so pills don't merge */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2),
@@ -5110,27 +5135,31 @@ st.markdown(
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 6px !important;
+            gap: 8px !important;
             justify-content: flex-end !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 38px !important;
-            width: 38px !important;
-            max-width: 38px !important;
+            flex: 0 0 42px !important;
+            width: 42px !important;
+            max-width: 42px !important;
         }
         /* Each selectbox: compact pill */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] {
+            width: 42px !important;
+            max-width: 42px !important;
+        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             padding: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
             background: rgba(150,180,210,0.10) !important;
-            border: 1px solid rgba(150,180,210,0.16) !important;
-            border-radius: 10px !important;
-            height: 36px !important;
-            min-height: 36px !important;
-            max-height: 36px !important;
-            width: 36px !important;
-            max-width: 36px !important;
+            border: 1px solid rgba(150,180,210,0.20) !important;
+            border-radius: 12px !important;
+            height: 40px !important;
+            min-height: 40px !important;
+            max-height: 40px !important;
+            width: 40px !important;
+            max-width: 40px !important;
             padding: 0 !important;
             display: flex !important;
             align-items: center !important;
@@ -5140,27 +5169,30 @@ st.markdown(
         }
         /* Constrain inner value div */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 22px !important;
-            max-width: 22px !important;
+            width: 24px !important;
+            max-width: 24px !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
         /* Show ONLY emoji */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 16px !important;
+            font-size: 18px !important;
             line-height: 1 !important;
             display: block !important;
-            width: 20px !important;
-            max-width: 20px !important;
-            height: 20px !important;
+            width: 22px !important;
+            max-width: 22px !important;
+            height: 22px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
-            text-align: left !important;
+            text-align: center !important;
             padding: 0 !important;
             margin: 0 auto !important;
         }
@@ -5636,7 +5668,7 @@ st.markdown(
 # -------------------------------------------------
 apply_language_from_query()
 
-top_l, top_r_wrap = st.columns([5, 1.5], gap="small")
+top_l, top_r_wrap = st.columns([5, 2], gap="small")
 
 with top_l:
     logo_uri = logo_data_uri()
@@ -5645,7 +5677,7 @@ with top_l:
 
 with top_r_wrap:
     st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
-    ctrl_acct, ctrl_lang = st.columns(2, gap="medium")
+    ctrl_acct, ctrl_lang = st.columns(2, gap="small")
     with ctrl_acct:
         _is_en = "English" in st.session_state.app_lang
         if _is_user_logged_in():
