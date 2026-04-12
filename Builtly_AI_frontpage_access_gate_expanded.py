@@ -3576,12 +3576,15 @@ def render_user_dashboard(lang_key: str) -> None:
                 country_names.append(c_label.split(" (")[0])
                 break
 
+    _front_href = f"/?lang={language_slug(lang_key)}"
+    _dash_desc = dt['dashboard_desc'].replace('href="/"', f'href="{_front_href}"')
+
     render_html(f"""
         <div class="access-gate-head">
             <div class="assistant-kicker">{dt['my_account']}</div>
             <div class="access-gate-title">{dt['hi']}, {html.escape(user_name)}</div>
             <div style="color:var(--soft,#c8d3df);font-size:0.95rem;line-height:1.6;max-width:700px;margin-top:0.5rem;">
-                {dt['dashboard_desc']}
+                {_dash_desc}
                 <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{dt['view_plans']}</a>
             </div>
         </div>
@@ -3812,8 +3815,11 @@ def handle_auth_routing(lang_key: str) -> bool:
                 ok, msg = builtly_auth.verify_checkout(session_id)
                 if ok:
                     st.success(msg)
+                    _go_labels = {"🇳🇴 Norsk": "Gå til Builtly", "🇸🇪 Svenska": "Gå till Builtly", "🇩🇰 Dansk": "Gå til Builtly", "🇫🇮 Suomi": "Siirry Builtlyyn", "🇩🇪 Deutsch": "Weiter zu Builtly"}
+                    _go_text = _go_labels.get(lang_key, "Go to Builtly")
+                    _go_href = f"/?lang={language_slug(lang_key)}"
                     render_html('<div style="text-align:center;margin-top:2rem;">')
-                    render_html('<a href="/" target="_self" class="hero-action primary">Gå til Builtly</a>')
+                    render_html(f'<a href="{_go_href}" target="_self" class="hero-action primary">{_go_text}</a>')
                     render_html('</div>')
                 else:
                     st.error(msg)
@@ -6089,7 +6095,8 @@ top_l, top_r_wrap = st.columns([5, 2], gap="small")
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
-    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="/" target="_self" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
+    _logo_href = f"/?lang={language_slug(st.session_state.app_lang)}"
+    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="{_logo_href}" target="_self" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
 
 with top_r_wrap:
     st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
@@ -6183,6 +6190,11 @@ if _gate_dest and not st.session_state.get("site_access_granted"):
 
 # Auth page routing (login, register, plans, dashboard, demo)
 if handle_auth_routing(st.session_state.app_lang):
+    # Persist language to localStorage before stopping — auth pages call st.stop()
+    # which prevents the normal persist at the bottom of the script from running
+    st.components.v1.html(f"""<script>
+    try {{ localStorage.setItem('builtly_lang', '{language_slug(st.session_state.app_lang)}'); }} catch(e) {{}}
+    </script>""", height=0)
     st.stop()
 
 # -------------------------------------------------
