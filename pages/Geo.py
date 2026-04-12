@@ -40,6 +40,13 @@ try:
 except ImportError:
     _HAS_AUTH = False
 
+# Restore auth session on module pages (session_state may be lost during navigation)
+if _HAS_AUTH:
+    if not st.session_state.get("user_authenticated"):
+        builtly_auth.try_restore_from_browser()
+    elif st.session_state.get("_sb_access_token"):
+        builtly_auth.restore_session()
+
 
 # ── OPEN NORWEGIAN GEODATA APIs (no auth required) ─────────────────────────
 
@@ -1745,7 +1752,36 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         # 6. UTFØRTE GRUNNUNDERSØKELSER (hvis lab-data er lastet opp)
         # 7. RESULTATER: GRUNNFORHOLD OG FORURENSNING
         # 8. GEOTEKNISKE VURDERINGER
-        # 9. TILTAKSPLAN OG MASSEHÅNDTERING (KONKRET og operativ plan, IKKE skriv at 'en plan må utarbeides')
+        # 9. TILTAKSPLAN OG MASSEHÅNDTERING
+        #    Dette kapittelet skal være det MEST OPERATIVE i hele rapporten.
+        #    Du skal SKRIVE planen, IKKE skrive at "en plan må utarbeides".
+        #    Strukturer kapittelet med følgende underoverskrifter:
+        #
+        #    ## 9.1 Masseoversikt og volumanslag
+        #    Lag en oversiktlig opplisting per tilstandsklasse med:
+        #    - Antall prøvepunkter per TK
+        #    - Estimert volum (m³) basert på gravdybde og antatt utbredelse
+        #    - Styrende parameter og konsentrasjon per TK-gruppe
+        #
+        #    ## 9.2 Segregering og klassifisering på byggeplass
+        #    Konkret plan for soneinndeling, merking, mellomlagring.
+        #
+        #    ## 9.3 Disponering per tilstandsklasse
+        #    For HVER tilstandsklasse (TK1 til TK5): hva gjøres med massene?
+        #    - TK1: Gjenbruk på tomt / mottak for rene masser
+        #    - TK2: Godkjent deponi klasse I, evt. gjenbruk under tette flater med risikovurdering
+        #    - TK3: Godkjent deponi klasse II
+        #    - TK4: Godkjent deponi klasse II med særskilte krav
+        #    - TK5: Farlig avfall — deklarering, godkjent mottak, ADR-transport
+        #
+        #    ## 9.4 Transport og dokumentasjon
+        #    Krav til transportdokumentasjon, deklarering, veiesedler.
+        #
+        #    ## 9.5 HMS og vernetiltak
+        #    Konkrete vernetiltak for arbeidere som håndterer forurensede masser.
+        #
+        #    ## 9.6 Sluttkontroll og rapportering
+        #    Krav til kontrollprøver i bunn/vegger, sluttrapport til kommune.
         """
 
         try:
