@@ -50,14 +50,11 @@ if _HAS_AUTH:
 
 # ── OPEN NORWEGIAN GEODATA APIs (no auth required) ─────────────────────────
 
-# GeoID credentials for Norge i Bilder WMS prosjekter (historiske flybilder)
-# Set GEOID_USER / GEOID_PASS in Render environment variables
-# Falls back to Geodata Online credentials if GeoID not set
-_GEOID_USER = os.environ.get("GEOID_USER") or os.environ.get("GEODATA_ONLINE_USER", "")
-_GEOID_PASS = os.environ.get("GEOID_PASS") or os.environ.get("GEODATA_ONLINE_PASS", "")
-_GEOID_AUTH = (_GEOID_USER, _GEOID_PASS) if _GEOID_USER and _GEOID_PASS else None
-
-NIB_PROSJEKTER_WMS = "https://wms.geonorge.no/skwms1/wms.nib-prosjekter"
+# Norge i Bilder via Geodata Online proxy (uses same token as Geodata Online — no GeoID needed!)
+# Discovered at services.geodataonline.no/arcgis/rest/services/Wms
+NIB_PROSJEKTER_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-prosjekter/WMSServer"
+NIB_MOSAIKK_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB-mosaikk/WMSServer"
+NIB_GDO = "https://services.geodataonline.no/arcgis/services/Wms/Geonorge_NiB/WMSServer"
 
 def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
                  width: int = 800, height: int = 800,
@@ -260,28 +257,39 @@ def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
 def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
     """Fetch historical orthophotos from Norge i Bilder prosjekter WMS.
     
-    Uses GeoID/Geodata Online credentials for authenticated access to
-    individual orthophoto project layers (going back to 1940s).
+    Uses Geodata Online WMS proxy (services.geodataonline.no) which authenticates
+    with the same Geodata Online token — no separate GeoID credentials needed.
     
     Strategy:
-    1. GetCapabilities with auth to discover available layers
+    1. GetCapabilities via Geodata Online proxy to discover available layers
     2. Parse for layers with year in name, pick oldest covering area
     3. Fetch GetMap for that layer
     
     Returns (PIL.Image, source_label, year_str) or (None, error_msg, None).
     """
-    auth = _GEOID_AUTH
+    if not _GDO_TOKEN_OK:
+        return None, "NIB prosjekter: Geodata Online ikke tilkoblet", None
+
+    # Get Geodata Online token for SecureWms access
+    try:
+        token = _gdo.get_token()
+    except Exception as e:
+        return None, f"NIB prosjekter: token-feil — {str(e)[:60]}", None
+
+    token_params = {"token": token}
     
     # Step 1: Discover available layers via GetCapabilities
     try:
-        caps_resp = requests.get(NIB_PROSJEKTER_WMS, params={
+        caps_params = {
             "service": "WMS",
             "request": "GetCapabilities",
             "version": "1.1.1",
-        }, timeout=30, auth=auth)
+            "token": token,
+        }
+        caps_resp = requests.get(NIB_PROSJEKTER_GDO, params=caps_params, timeout=30)
         
-        if caps_resp.status_code == 401:
-            return None, "NIB prosjekter: autentisering feilet (401) — sjekk GEOID_USER/GEOID_PASS", None
+        if caps_resp.status_code == 401 or caps_resp.status_code == 403:
+            return None, f"NIB prosjekter: ingen tilgang ({caps_resp.status_code}) — kontakt Geodata", None
         if caps_resp.status_code != 200:
             return None, f"NIB prosjekter: GetCapabilities feilet ({caps_resp.status_code})", None
         if len(caps_resp.content) < 500:
@@ -308,26 +316,18 @@ def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
         pass
 
     if not layer_candidates:
-        return None, "NIB prosjekter: ingen historiske lag funnet i GetCapabilities", None
+        return None, f"NIB prosjekter: ingen historiske lag funnet (GetCapabilities {len(caps_resp.content)} bytes)", None
 
-    # Sort by year (oldest first)
+    # Sort by year (oldest first), deduplicate
+    layer_candidates = list(dict.fromkeys(layer_candidates))
     layer_candidates.sort(key=lambda x: x[0])
     
-    # Step 3: Try the oldest layers first (up to 5 attempts)
-    for year, layer_name in layer_candidates[:5]:
-        img = _wms_get_map(NIB_PROSJEKTER_WMS, layer_name, bbox,
-                           width=800, height=800, auth=auth, timeout=15)
+    # Step 3: Try the oldest layers first (up to 8 attempts)
+    for year, layer_name in layer_candidates[:8]:
+        img = _wms_get_map(NIB_PROSJEKTER_GDO, layer_name, bbox,
+                           width=800, height=800, extra_params=token_params, timeout=15)
         if img:
             return img.convert("RGB"), f"Norge i Bilder ({layer_name})", str(year)
-
-    # If oldest layers didn't work, try the oldest 5 with URL-encoded names
-    for year, layer_name in layer_candidates[:5]:
-        encoded_name = urllib.parse.quote(layer_name)
-        if encoded_name != layer_name:
-            img = _wms_get_map(NIB_PROSJEKTER_WMS, encoded_name, bbox,
-                               width=800, height=800, auth=auth, timeout=15)
-            if img:
-                return img.convert("RGB"), f"Norge i Bilder ({layer_name})", str(year)
 
     tried = ", ".join(f"{name} ({yr})" for yr, name in layer_candidates[:3])
     return None, f"NIB prosjekter: {len(layer_candidates)} lag funnet men ingen ga bilde (prøvde: {tried})", None
