@@ -115,6 +115,10 @@ def login(email: str, password: str) -> Tuple[bool, str]:
             "user_account_status": profile.get("account_status", "active"),
             "site_access_granted": True,
         })
+        # Persist auth tokens for session restoration on page reload
+        if res.session:
+            st.session_state["_sb_access_token"] = res.session.access_token
+            st.session_state["_sb_refresh_token"] = res.session.refresh_token
         # Load reports
         try:
             reps = sb.table("reports").select("*").eq("user_id", res.user.id)\
@@ -139,7 +143,8 @@ def logout():
         except Exception: pass
     for key in ["user_authenticated","user_email","user_name","user_company",
                 "user_countries","user_plan","user_payment_method",
-                "user_account_status","user_id","user_reports"]:
+                "user_account_status","user_id","user_reports",
+                "_sb_access_token","_sb_refresh_token"]:
         if key in st.session_state:
             if isinstance(st.session_state[key], bool): st.session_state[key] = False
             elif isinstance(st.session_state[key], list): st.session_state[key] = []
@@ -155,6 +160,69 @@ def resend_verification(email: str) -> Tuple[bool, str]:
         return True, "Ny bekreftelseslenke sendt!"
     except Exception as e:
         return False, f"Feil: {e}"
+
+
+def restore_session() -> bool:
+    """Restore Supabase auth session from stored tokens on page reload.
+
+    Call this early in the Streamlit script. If session_state has valid tokens
+    and the user is flagged as authenticated, the Supabase session is
+    re-established (refreshed if expired). Returns True if the session
+    was successfully restored, False otherwise.
+    """
+    # Nothing to restore
+    if not st.session_state.get("user_authenticated"):
+        return False
+    access = st.session_state.get("_sb_access_token", "")
+    refresh = st.session_state.get("_sb_refresh_token", "")
+    if not access or not refresh:
+        return False
+
+    sb = _sb()
+    if not sb:
+        return False
+
+    try:
+        # set_session restores and auto-refreshes if the access token is expired
+        res = sb.auth.set_session(access, refresh)
+        if res and res.session:
+            # Update tokens in case they were refreshed
+            st.session_state["_sb_access_token"] = res.session.access_token
+            st.session_state["_sb_refresh_token"] = res.session.refresh_token
+            return True
+        # Token fully expired — clear auth state
+        _clear_auth_state()
+        return False
+    except Exception:
+        # Refresh failed — try once more with refresh_session
+        try:
+            res = sb.auth.refresh_session(refresh)
+            if res and res.session:
+                st.session_state["_sb_access_token"] = res.session.access_token
+                st.session_state["_sb_refresh_token"] = res.session.refresh_token
+                return True
+        except Exception:
+            pass
+        _clear_auth_state()
+        return False
+
+
+def _clear_auth_state():
+    """Reset all auth-related session state to logged-out defaults."""
+    st.session_state.update({
+        "user_authenticated": False,
+        "user_email": "",
+        "user_name": "",
+        "user_company": "",
+        "user_countries": [],
+        "user_plan": "",
+        "user_payment_method": "",
+        "user_account_status": "",
+        "user_id": "",
+        "user_reports": [],
+        "_sb_access_token": "",
+        "_sb_refresh_token": "",
+    })
 
 # ── STRIPE ───────────────────────────────────────────────────────────────────
 
