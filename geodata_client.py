@@ -57,6 +57,15 @@ GEOCACHE_TERRENGSKYGGE_MS = "Geocache_UTM33_EUREF89/GeocacheTerrengskygge/MapSer
 GEOCACHE_TERRENG_IS = "Geocache_UTM33_EUREF89/GeocacheTerreng/ImageServer"
 GEOMAP_BILDER_NYESTE_IS = "Geomap_UTM33_EUREF89/GeomapBilderNyeste/ImageServer"
 
+# Historical imagery services — discovered via REST catalog login redirects
+# These may or may not be available depending on the account subscription
+GEOMAP_BILDER_HISTORICAL_CANDIDATES = [
+    ("Geomap_UTM33_EUREF89/GeomapBilder/ImageServer", "Geodata Online GeomapBilder (alle årganger)"),
+    ("Geomap_UTM33_EUREF89/GeomapBilder2/ImageServer", "Geodata Online GeomapBilder2"),
+    ("Geomap_UTM33_EUREF89/GeomapBilder3/ImageServer", "Geodata Online GeomapBilder3"),
+    ("Geomap_UTM33_EUREF89/GeomapBilder/MapServer", "Geodata Online GeomapBilder MapServer"),
+]
+
 # Thematic / analysis services (VERIFIED against bolignorge2 account 2026-01-24)
 GEOMAP_DOKPLAN_MS = "Geomap_UTM33_EUREF89/GeomapDOKPlan/MapServer"
 GEOMAP_REGULERINGSPLAN_MS = "Geomap_UTM33_EUREF89/GeomapDOKPlan/MapServer"  # NB: GeomapReguleringsplan finnes IKKE - bruk DOKPlan
@@ -590,6 +599,54 @@ class GeodataOnlineClient:
             except Exception:
                 continue
         return None, "Geodata Online: ortofoto/bakgrunnskart utilgjengelig"
+
+    def fetch_historical_ortofoto(
+        self,
+        bbox: Tuple[float, float, float, float],
+        *,
+        buffer_m: float = 80.0,
+        width: int = 1200,
+        height: int = 1200,
+    ) -> Tuple[Optional[Image.Image], str]:
+        """Try to fetch historical aerial imagery from Geodata Online.
+
+        Attempts multiple GeomapBilder service variants that may contain
+        older imagery vintages. Returns (image, source_label) or (None, error).
+        """
+        bounds = _expanded_bbox(bbox, float(buffer_m))
+        for service, label in GEOMAP_BILDER_HISTORICAL_CANDIDATES:
+            try:
+                content = self._image_export(service, bounds, width=width, height=height)
+                if content and len(content) > 2000:
+                    img = Image.open(io.BytesIO(content)).convert("RGB")
+                    return img, label
+            except Exception:
+                continue
+        return None, "Geodata Online: historisk ortofoto utilgjengelig"
+
+    def discover_historical_imagery_services(self) -> List[Dict[str, str]]:
+        """Discover all available historical imagery services in the account.
+
+        Scans the Geomap_UTM33_EUREF89 folder for services with 'Bilder'
+        in the name (excluding the already-known GeomapBilderNyeste).
+        """
+        found: List[Dict[str, str]] = []
+        try:
+            data = self.discover_services("Geomap_UTM33_EUREF89")
+            for svc in data.get("services", []):
+                svc_name = str(svc.get("name", ""))
+                svc_type = str(svc.get("type", ""))
+                name_lower = svc_name.lower()
+                if "bilder" in name_lower and "nyeste" not in name_lower:
+                    service_path = f"{svc_name}/{svc_type}"
+                    found.append({
+                        "service": service_path,
+                        "name": svc_name.split("/")[-1] if "/" in svc_name else svc_name,
+                        "type": svc_type,
+                    })
+        except Exception:
+            pass
+        return found
 
     def fetch_plan_context(self, site_polygon: Any, buffer_m: float = 300.0) -> Dict[str, Any]:
         primary = self.fetch_context_from_service(
