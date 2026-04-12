@@ -5073,7 +5073,16 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 4px !important;
+            gap: 6px !important;
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"] {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
@@ -5081,13 +5090,14 @@ st.markdown(
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 72px !important;
-            max-width: 72px !important;
-            width: 72px !important;
+            flex: 0 0 40px !important;
+            max-width: 40px !important;
+            width: 40px !important;
         }
-        /* Strip wrappers */
+        /* Strip all wrappers */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] label {
             background: transparent !important;
             border: none !important;
             box-shadow: none !important;
@@ -5100,22 +5110,33 @@ st.markdown(
             min-height: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(255,255,255,0.07) !important;
-            border: 1px solid rgba(255,255,255,0.10) !important;
+            background: rgba(120,145,170,0.12) !important;
+            border: 1px solid rgba(120,145,170,0.20) !important;
             box-shadow: none !important;
-            border-radius: 8px !important;
-            padding: 3px 6px !important;
-            min-height: 28px !important;
+            border-radius: 10px !important;
+            padding: 0 !important;
+            min-height: 34px !important;
+            width: 38px !important;
+            max-width: 38px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            overflow: hidden !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
+        /* Show ONLY the emoji by clipping after ~1 character */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.6rem !important;
+            font-size: 1.15rem !important;
+            line-height: 1 !important;
+            display: inline-block !important;
+            width: 1.3em !important;
+            max-width: 1.3em !important;
             overflow: hidden !important;
-            text-overflow: ellipsis !important;
+            text-overflow: clip !important;
             white-space: nowrap !important;
-            color: #c8d3df !important;
+            text-align: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
             margin-top: 0.15rem !important;
