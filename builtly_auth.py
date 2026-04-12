@@ -10,9 +10,13 @@ Render env vars:
     BUILTLY_BASE_URL  (e.g. https://builtly.ai)
 """
 import os
+import html as _html
+import json
+import base64
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, List
 import streamlit as st
+import streamlit.components.v1 as components
 
 REPORT_RETENTION_DAYS = 30
 
@@ -119,6 +123,7 @@ def login(email: str, password: str) -> Tuple[bool, str]:
         if res.session:
             st.session_state["_sb_access_token"] = res.session.access_token
             st.session_state["_sb_refresh_token"] = res.session.refresh_token
+            _persist_tokens_to_browser(res.session.refresh_token)
         # Load reports
         try:
             reps = sb.table("reports").select("*").eq("user_id", res.user.id)\
@@ -141,6 +146,7 @@ def logout():
     if sb:
         try: sb.auth.sign_out()
         except Exception: pass
+    _clear_browser_tokens()
     for key in ["user_authenticated","user_email","user_name","user_company",
                 "user_countries","user_plan","user_payment_method",
                 "user_account_status","user_id","user_reports",
@@ -169,6 +175,10 @@ def restore_session() -> bool:
     and the user is flagged as authenticated, the Supabase session is
     re-established (refreshed if expired). Returns True if the session
     was successfully restored, False otherwise.
+
+    NOTE: Does NOT clear auth state on failure — the caller decides whether
+    to log the user out. This prevents aggressive logouts on transient
+    Supabase API errors.
     """
     # Nothing to restore
     if not st.session_state.get("user_authenticated"):
@@ -189,9 +199,8 @@ def restore_session() -> bool:
             # Update tokens in case they were refreshed
             st.session_state["_sb_access_token"] = res.session.access_token
             st.session_state["_sb_refresh_token"] = res.session.refresh_token
+            _persist_tokens_to_browser(res.session.refresh_token)
             return True
-        # Token fully expired — clear auth state
-        _clear_auth_state()
         return False
     except Exception:
         # Refresh failed — try once more with refresh_session
@@ -200,15 +209,171 @@ def restore_session() -> bool:
             if res and res.session:
                 st.session_state["_sb_access_token"] = res.session.access_token
                 st.session_state["_sb_refresh_token"] = res.session.refresh_token
+                _persist_tokens_to_browser(res.session.refresh_token)
                 return True
         except Exception:
             pass
-        _clear_auth_state()
         return False
+
+
+def try_restore_from_browser() -> bool:
+    """Restore session from browser cookie (or fallback _brt query param).
+
+    Reads the 'builtly_rt' cookie from the HTTP request headers. The cookie
+    is set by _persist_tokens_to_browser() after login. Because cookies are
+    sent automatically with every HTTP request, no JS redirect is needed.
+
+    Returns True if session was restored, False otherwise.
+    """
+    # Primary: read refresh token from HTTP cookie header
+    rt = _read_cookie("builtly_rt")
+
+    # Fallback: check _brt query param (legacy localStorage redirect flow)
+    if not rt:
+        try:
+            rt = st.query_params.get("_brt", "")
+        except Exception:
+            rt = ""
+
+    if not rt:
+        return False
+
+    sb = _sb()
+    if not sb:
+        _remove_brt_param()
+        return False
+
+    try:
+        res = sb.auth.refresh_session(rt)
+        if res and res.session and res.user:
+            meta = res.user.user_metadata or {}
+            profile = {}
+            try:
+                row = sb.table("profiles").select("*").eq("id", res.user.id).single().execute()
+                profile = row.data or {}
+            except Exception:
+                pass
+
+            st.session_state.update({
+                "user_authenticated": True,
+                "user_email": res.user.email,
+                "user_id": res.user.id,
+                "user_name": profile.get("full_name") or meta.get("full_name", ""),
+                "user_company": profile.get("company", ""),
+                "user_countries": profile.get("countries", []),
+                "user_plan": profile.get("plan", "") or "",
+                "user_payment_method": profile.get("payment_method", "") or "",
+                "user_account_status": profile.get("account_status", "active"),
+                "site_access_granted": True,
+                "_sb_access_token": res.session.access_token,
+                "_sb_refresh_token": res.session.refresh_token,
+            })
+
+            # Load reports
+            try:
+                reps = sb.table("reports").select("*").eq("user_id", res.user.id)\
+                    .order("created_at", desc=True).execute()
+                st.session_state.user_reports = reps.data or []
+            except Exception:
+                st.session_state.user_reports = []
+
+            # Update browser cookie with fresh tokens
+            _persist_tokens_to_browser(res.session.refresh_token)
+            _remove_brt_param()
+            return True
+    except Exception:
+        pass
+
+    # Failed — clear browser tokens and query param
+    _clear_browser_tokens()
+    _remove_brt_param()
+    return False
+
+
+def _read_cookie(name: str) -> str:
+    """Read a cookie value from the HTTP request headers."""
+    cookie_str = ""
+    # Streamlit >= 1.37: st.context.headers
+    try:
+        cookie_str = st.context.headers.get("Cookie", "")
+    except (AttributeError, Exception):
+        pass
+    # Fallback: internal Streamlit API
+    if not cookie_str:
+        try:
+            from streamlit.web.server.websocket_headers import _get_websocket_headers
+            headers = _get_websocket_headers()
+            cookie_str = (headers or {}).get("Cookie", "")
+        except Exception:
+            pass
+    if not cookie_str:
+        return ""
+    for part in cookie_str.split(";"):
+        part = part.strip()
+        if part.startswith(f"{name}="):
+            return part[len(name) + 1:]
+    return ""
+
+
+def inject_browser_token_reader():
+    """No-op kept for backward compatibility.
+
+    With the cookie-based approach, tokens are read directly from HTTP
+    headers via try_restore_from_browser() — no JS redirect needed.
+    """
+    pass
+
+
+def _persist_tokens_to_browser(refresh_token: str):
+    """Write refresh token to browser cookie AND localStorage (belt & suspenders)."""
+    safe_rt = _html.escape(refresh_token, quote=True)
+    max_age = 60 * 60 * 24 * 7  # 7 days
+    components.html(f"""<script>
+    (function() {{
+        try {{
+            // Set cookie on parent document (readable by Streamlit server)
+            var cookieStr = 'builtly_rt={safe_rt}; path=/; max-age={max_age}; SameSite=Lax';
+            try {{ window.parent.document.cookie = cookieStr; }} catch(e) {{
+                document.cookie = cookieStr;
+            }}
+            // Also keep localStorage as fallback
+            localStorage.setItem('builtly_rt', '{safe_rt}');
+        }} catch(e) {{}}
+    }})();
+    </script>""", height=0)
+
+
+def _clear_browser_tokens():
+    """Remove auth tokens from browser cookie and localStorage."""
+    components.html("""<script>
+    (function() {
+        try {
+            // Expire cookie
+            var cookieStr = 'builtly_rt=; path=/; max-age=0; SameSite=Lax';
+            try { window.parent.document.cookie = cookieStr; } catch(e) {
+                document.cookie = cookieStr;
+            }
+            localStorage.removeItem('builtly_rt');
+        } catch(e) {}
+    })();
+    </script>""", height=0)
+
+
+def _remove_brt_param():
+    """Remove the _brt query parameter after processing."""
+    try:
+        params = dict(st.query_params)
+        params.pop("_brt", None)
+        st.query_params.update(params)
+        if "_brt" in st.query_params:
+            del st.query_params["_brt"]
+    except Exception:
+        pass
 
 
 def _clear_auth_state():
     """Reset all auth-related session state to logged-out defaults."""
+    _clear_browser_tokens()
     st.session_state.update({
         "user_authenticated": False,
         "user_email": "",
