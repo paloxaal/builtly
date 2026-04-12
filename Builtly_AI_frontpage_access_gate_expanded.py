@@ -5167,10 +5167,10 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Inner value wrapper — left-align content for emoji visibility */
+        /* Inner value wrapper — fixed size to prevent collapse on iOS */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 100% !important;
-            max-width: 100% !important;
+            width: 32px !important;
+            max-width: 32px !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -5184,11 +5184,11 @@ st.markdown(
         /* Emoji — show only the leading emoji, clip trailing text */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
             font-size: 17px !important;
-            line-height: 40px !important;
+            line-height: 1 !important;
             display: block !important;
             width: 26px !important;
             max-width: 26px !important;
-            height: 40px !important;
+            height: 26px !important;
             overflow: hidden !important;
             white-space: nowrap !important;
             text-align: left !important;
