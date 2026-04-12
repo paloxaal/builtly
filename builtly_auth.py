@@ -504,11 +504,29 @@ def save_report(project_name: str, report_name: str, module: str,
     if sb and uid:
         try:
             sb.table("reports").insert({**entry, "user_id": uid}).execute()
-        except Exception: pass
+        except Exception as e:
+            st.warning(f"Rapport kunne ikke lagres til konto: {e}")
+    elif not uid:
+        st.warning("Rapport ble ikke lagret — bruker-ID mangler. Prøv å logge inn på nytt.")
     if "user_reports" not in st.session_state:
         st.session_state.user_reports = []
     st.session_state.user_reports.append(entry)
     return True
+
+
+def reload_user_reports():
+    """Reload reports from Supabase for the current user."""
+    sb = _sb()
+    uid = st.session_state.get("user_id", "")
+    if sb and uid:
+        try:
+            reps = sb.table("reports").select("*").eq("user_id", uid)\
+                .order("created_at", desc=True).execute()
+            st.session_state.user_reports = reps.data or []
+            return True
+        except Exception:
+            pass
+    return False
 
 def delete_expired_reports():
     sb = _sb()
