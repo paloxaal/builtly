@@ -293,19 +293,10 @@ def try_restore_from_browser() -> bool:
 def _read_cookie(name: str) -> str:
     """Read a cookie value from the HTTP request headers."""
     cookie_str = ""
-    # Streamlit >= 1.37: st.context.headers
     try:
         cookie_str = st.context.headers.get("Cookie", "")
     except (AttributeError, Exception):
         pass
-    # Fallback: internal Streamlit API
-    if not cookie_str:
-        try:
-            from streamlit.web.server.websocket_headers import _get_websocket_headers
-            headers = _get_websocket_headers()
-            cookie_str = (headers or {}).get("Cookie", "")
-        except Exception:
-            pass
     if not cookie_str:
         return ""
     for part in cookie_str.split(";"):
