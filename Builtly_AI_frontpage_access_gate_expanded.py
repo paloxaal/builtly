@@ -5051,6 +5051,11 @@ st.markdown(
         min-width: 0 !important;
     }
 
+    /* Desktop: ensure gap between top bar dropdowns */
+    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
+        gap: 0.75rem !important;
+    }
+
     @media (max-width: 760px) {
         .block-container {
             padding-left: 0.75rem !important;
@@ -5079,40 +5084,68 @@ st.markdown(
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
+        /* Controls wrapper: shrink to fit */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
             flex: 0 0 auto !important;
             width: auto !important;
-            max-width: 160px !important;
+            max-width: 100px !important;
         }
-        /* Inner sub-columns: always horizontal, compact */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] {
+        /* Kill ALL backgrounds on wrapper divs so pills don't merge */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2),
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div > div,
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > div {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        /* Sub-columns: horizontal, icon-sized */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
             flex-direction: row !important;
             flex-wrap: nowrap !important;
-            gap: 4px !important;
+            gap: 8px !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 auto !important;
-            width: auto !important;
-            max-width: 76px !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            flex: 0 0 38px !important;
+            width: 38px !important;
+            max-width: 38px !important;
         }
-        /* Compact selectboxes */
+        /* Each selectbox: icon-only pill */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
+            padding: 0 !important;
+        }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(200,215,230,0.10) !important;
-            border: 1px solid rgba(200,215,230,0.15) !important;
+            background: rgba(120,160,200,0.12) !important;
+            border: 1px solid rgba(120,160,200,0.18) !important;
             border-radius: 10px !important;
-            min-height: 32px !important;
-            padding: 2px 6px !important;
+            min-height: 36px !important;
+            width: 38px !important;
+            max-width: 38px !important;
+            padding: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            overflow: hidden !important;
+            cursor: pointer !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
+        /* Show ONLY emoji: clip after first grapheme */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.62rem !important;
-            white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            max-width: 56px !important;
+            font-size: 1.05rem !important;
+            line-height: 1 !important;
             display: block !important;
+            width: 1.2em !important;
+            max-width: 1.2em !important;
+            overflow: hidden !important;
+            text-overflow: clip !important;
+            white-space: nowrap !important;
+            text-align: center !important;
         }
 
         .mini-stat-grid,
@@ -5595,7 +5628,7 @@ with top_l:
 
 with top_r_wrap:
     st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
-    ctrl_acct, ctrl_lang = st.columns(2, gap="small")
+    ctrl_acct, ctrl_lang = st.columns(2, gap="medium")
     with ctrl_acct:
         _is_en = "English" in st.session_state.app_lang
         if _is_user_logged_in():
