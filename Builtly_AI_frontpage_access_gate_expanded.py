@@ -1838,7 +1838,9 @@ def href_or_none(page_key: str) -> Optional[str]:
     # If user is not logged in, redirect to login page
     if not st.session_state.get("site_access_granted"):
         return "?auth=login"
-    return route
+    # Pass current language so target page can pick it up
+    slug = language_slug(st.session_state.get("app_lang", "🇺🇸 English (US)"))
+    return f"{route}?lang={slug}"
 
 
 def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
