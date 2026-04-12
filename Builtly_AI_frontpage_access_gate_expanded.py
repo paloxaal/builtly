@@ -5185,35 +5185,31 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Inner value wrapper — explicit size for reliable centering */
+        /* Inner value wrapper — keep original structure, just wider */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 40px !important;
-            max-width: 40px !important;
-            height: 40px !important;
+            width: 28px !important;
+            max-width: 28px !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Emoji — vertically + horizontally centered in pill */
+        /* Emoji — original approach, slightly larger to prevent clipping */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 18px !important;
-            line-height: 24px !important;
-            display: inline-block !important;
+            font-size: 17px !important;
+            line-height: 1 !important;
+            display: block !important;
             width: 24px !important;
             max-width: 24px !important;
             height: 24px !important;
             overflow: hidden !important;
+            text-overflow: clip !important;
             white-space: nowrap !important;
             text-align: left !important;
-            vertical-align: middle !important;
             padding: 0 !important;
-            margin: 0 !important;
+            margin: 0 auto !important;
         }
 
         .mini-stat-grid,
