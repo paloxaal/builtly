@@ -15,6 +15,278 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
+# --- Geodata Online client (if credentials configured) ---
+try:
+    from geodata_client import GeodataOnlineClient
+    _gdo = GeodataOnlineClient()
+    _HAS_GDO = _gdo.is_available()
+except Exception:
+    _gdo = None
+    _HAS_GDO = False
+
+
+# ── OPEN NORWEGIAN GEODATA APIs (no auth required) ─────────────────────────
+
+def _wms_get_map(base_url: str, layers: str, bbox_25833: tuple,
+                 width: int = 800, height: int = 800,
+                 srs: str = "EPSG:25833", version: str = "1.3.0",
+                 extra_params: dict = None) -> Optional[Image.Image]:
+    """Generic WMS GetMap helper. Returns PIL Image or None."""
+    minx, miny, maxx, maxy = bbox_25833
+    params = {
+        "service": "WMS", "request": "GetMap", "version": version,
+        "layers": layers, "styles": "",
+        "crs" if version >= "1.3" else "srs": srs,
+        "bbox": f"{minx},{miny},{maxx},{maxy}",
+        "width": str(width), "height": str(height),
+        "format": "image/png", "transparent": "true",
+    }
+    if extra_params:
+        params.update(extra_params)
+    try:
+        resp = requests.get(base_url, params=params, timeout=12)
+        if resp.status_code == 200 and len(resp.content) > 2000 and b"ServiceException" not in resp.content[:500]:
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+def _coords_from_address(adresse: str, kommune: str, gnr: str, bnr: str) -> Optional[tuple]:
+    """Resolve address/gnr-bnr to UTM33 coordinates via Geonorge."""
+    queries = []
+    adr = (adresse or "").replace(",", "").strip()
+    kom = (kommune or "").replace(",", "").strip()
+    if adr and kom:
+        queries.append(f"{adr} {kom}")
+    if adr:
+        queries.append(adr)
+    if gnr and bnr and kom:
+        queries.append(f"{kom} {gnr}/{bnr}")
+
+    for q in queries:
+        try:
+            url = f"https://ws.geonorge.no/adresser/v1/sok?sok={urllib.parse.quote(q)}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                hits = resp.json().get("adresser", [])
+                if hits:
+                    rp = hits[0].get("representasjonspunkt", {})
+                    nord, ost = rp.get("nord"), rp.get("øst")
+                    if nord and ost:
+                        return (float(ost), float(nord))
+        except Exception:
+            pass
+    return None
+
+
+def _bbox_from_center(x: float, y: float, radius_m: float = 250.0) -> tuple:
+    return (x - radius_m, y - radius_m, x + radius_m, y + radius_m)
+
+
+def fetch_ngu_losmasser(bbox: tuple) -> Optional[Image.Image]:
+    """NGU løsmassekart — kvartærgeologisk kart."""
+    return _wms_get_map(
+        "https://geo.ngu.no/mapserver/LosijordsmasserWMS",
+        "Losmasse_flate", bbox, version="1.1.1",
+    )
+
+def fetch_ngu_berggrunn(bbox: tuple) -> Optional[Image.Image]:
+    """NGU bergrunnskart."""
+    return _wms_get_map(
+        "https://geo.ngu.no/mapserver/BerggrunnWMS",
+        "Berggrunn_flate", bbox, version="1.1.1",
+    )
+
+def fetch_ngu_radon(bbox: tuple) -> Optional[Image.Image]:
+    """NGU radonkart — aktsomhetskart for radon."""
+    return _wms_get_map(
+        "https://geo.ngu.no/mapserver/RadonWMS",
+        "Radonaktsomhet", bbox, version="1.1.1",
+    )
+
+def fetch_nve_flom(bbox: tuple) -> Optional[Image.Image]:
+    """NVE flomsonekart."""
+    return _wms_get_map(
+        "https://gis3.nve.no/map/services/Flomsoner1/MapServer/WMSServer",
+        "Flomsone", bbox,
+    )
+
+def fetch_nve_kvikkleire(bbox: tuple) -> Optional[Image.Image]:
+    """NVE kvikkleirekart."""
+    return _wms_get_map(
+        "https://gis3.nve.no/map/services/Kvikkleire2/MapServer/WMSServer",
+        "0", bbox,
+    )
+
+def fetch_nve_skred(bbox: tuple) -> Optional[Image.Image]:
+    """NVE skredkart (alle typer)."""
+    return _wms_get_map(
+        "https://gis3.nve.no/map/services/SkredAktsomhet/MapServer/WMSServer",
+        "0,1,2,3", bbox,
+    )
+
+def fetch_kartverket_ortofoto(bbox: tuple) -> Optional[Image.Image]:
+    """Kartverket ortofoto (Norge i Bilder)."""
+    img = _wms_get_map(
+        "https://wms.geonorge.no/skwms1/wms.nib",
+        "ortofoto", bbox, version="1.1.1",
+    )
+    if img:
+        return img.convert("RGB")
+    return None
+
+def fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
+    """Miljødirektoratet — kjente forurensinglokaliteter i nærheten.
+    Returns list of dicts with name, status, distance, url."""
+    # Convert UTM33 to lat/lon for the API
+    try:
+        from pyproj import Transformer
+        tr = Transformer.from_crs(25833, 4326, always_xy=True)
+        lon, lat = tr.transform(x, y)
+    except ImportError:
+        # Approximate conversion if pyproj not available
+        lat = y / 111320.0 + 63.0  # rough estimate
+        lon = x / (111320.0 * 0.45) + 10.0
+        return []  # skip if no proper projection
+
+    try:
+        url = "https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentLokaliteter"
+        resp = requests.post(url, json={
+            "nord": lat + radius_m / 111320.0,
+            "sor": lat - radius_m / 111320.0,
+            "ost": lon + radius_m / (111320.0 * 0.45),
+            "vest": lon - radius_m / (111320.0 * 0.45),
+        }, timeout=8)
+        if resp.status_code != 200:
+            # Try alternative endpoint
+            resp = requests.get(
+                f"https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter?latitude={lat}&longitude={lon}&radius={int(radius_m)}",
+                timeout=8,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            sites = data if isinstance(data, list) else data.get("lokaliteter", data.get("features", []))
+            result = []
+            for site in sites[:20]:
+                props = site.get("properties", site) if isinstance(site, dict) else {}
+                result.append({
+                    "navn": props.get("navn") or props.get("lokalitetsnavn") or "Ukjent",
+                    "status": props.get("status") or props.get("aktivitetsstatus") or "",
+                    "type": props.get("type") or props.get("forurensningstype") or "",
+                    "id": props.get("id") or props.get("lokalitetsId") or "",
+                })
+            return result
+    except Exception:
+        pass
+    return []
+
+
+def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
+                      radius_m: float = 300.0) -> dict:
+    """Fetch all available geodata for a location. Returns dict with maps and data."""
+    result = {
+        "ortofoto": None, "ortofoto_source": "",
+        "losmasser": None, "berggrunn": None, "radon": None,
+        "flom": None, "kvikkleire": None, "skred": None,
+        "grunnforurensning": [],
+        "geology_context": None,
+        "coords": None, "bbox": None,
+        "errors": [],
+    }
+
+    coords = _coords_from_address(adresse, kommune, gnr, bnr)
+    if not coords:
+        result["errors"].append("Kunne ikke geokode adressen")
+        return result
+
+    x, y = coords
+    result["coords"] = (x, y)
+    bbox = _bbox_from_center(x, y, radius_m)
+    result["bbox"] = bbox
+
+    # 1. Ortofoto — try Geodata Online first (higher quality), fallback to Kartverket
+    if _HAS_GDO:
+        try:
+            img, src = _gdo.fetch_ortofoto(bbox, buffer_m=0)
+            if img:
+                result["ortofoto"] = img
+                result["ortofoto_source"] = src
+        except Exception as e:
+            result["errors"].append(f"Geodata Online ortofoto: {str(e)[:60]}")
+
+    if result["ortofoto"] is None:
+        img = fetch_kartverket_ortofoto(bbox)
+        if img:
+            result["ortofoto"] = img
+            result["ortofoto_source"] = "Kartverket (Norge i Bilder)"
+
+    # 2. NGU — løsmasser, berggrunn, radon
+    result["losmasser"] = fetch_ngu_losmasser(bbox)
+    result["berggrunn"] = fetch_ngu_berggrunn(bbox)
+    result["radon"] = fetch_ngu_radon(bbox)
+
+    # 3. NVE — flom, kvikkleire, skred
+    result["flom"] = fetch_nve_flom(bbox)
+    result["kvikkleire"] = fetch_nve_kvikkleire(bbox)
+    result["skred"] = fetch_nve_skred(bbox)
+
+    # 4. Miljødirektoratet — kjente forurensinglokaliteter
+    result["grunnforurensning"] = fetch_miljodir_grunnforurensning(x, y, radius_m=500.0)
+
+    # 5. Geodata Online geology context (attributes, not just map)
+    if _HAS_GDO:
+        try:
+            from shapely.geometry import box
+            site_poly = box(*bbox)
+            result["geology_context"] = _gdo.fetch_geology_context(site_poly, buffer_m=100.0)
+        except Exception as e:
+            result["errors"].append(f"Geodata Online geologi: {str(e)[:60]}")
+
+    return result
+
+
+def geodata_summary_text(gd: dict) -> str:
+    """Build a text summary of geodata findings for the AI prompt."""
+    lines = []
+
+    if gd.get("ortofoto"):
+        lines.append(f"Ortofoto hentet fra {gd.get('ortofoto_source', 'ukjent kilde')}.")
+
+    map_names = {
+        "losmasser": "NGU Løsmassekart (kvartærgeologi)",
+        "berggrunn": "NGU Bergrunnskart",
+        "radon": "NGU Radonaktsomhetskart",
+        "flom": "NVE Flomsonekart",
+        "kvikkleire": "NVE Kvikkleirekart",
+        "skred": "NVE Skredaktsomhetskart",
+    }
+    fetched = [label for key, label in map_names.items() if gd.get(key) is not None]
+    missing = [label for key, label in map_names.items() if gd.get(key) is None]
+    if fetched:
+        lines.append(f"Følgende temakart er hentet og vedlagt som bilder for visuell analyse: {', '.join(fetched)}.")
+    if missing:
+        lines.append(f"Følgende temakart ga ingen data (trolig utenfor kartleggingsområde): {', '.join(missing)}.")
+
+    contamination = gd.get("grunnforurensning", [])
+    if contamination:
+        lines.append(f"Miljødirektoratets database viser {len(contamination)} kjente forurensinglokaliteter innenfor 500 m:")
+        for site in contamination[:8]:
+            lines.append(f"  - {site.get('navn', 'Ukjent')}: {site.get('status', '')} ({site.get('type', '')})")
+    else:
+        lines.append("Miljødirektoratets grunnforurensningsdatabase: Ingen kjente forurensinglokaliteter funnet innenfor 500 m radius.")
+
+    geo_ctx = gd.get("geology_context")
+    if geo_ctx and geo_ctx.get("features"):
+        lines.append(f"Geodata Online DOK Geologi: {len(geo_ctx['features'])} objekter funnet i nærheten.")
+        for feat in geo_ctx["features"][:5]:
+            attrs = feat.get("attributes", {})
+            desc = " | ".join(f"{k}: {v}" for k, v in list(attrs.items())[:4] if v)
+            if desc:
+                lines.append(f"  - {desc}")
+
+    return "\n".join(lines)
+
 # --- 1. TEKNISK OPPSETT & GLOBALE STIER ---
 st.set_page_config(page_title="Geo & Miljø (RIG-M) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
@@ -739,7 +1011,7 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
 def build_toc_page(pdf, include_appendices=False):
     pdf.add_page()
     pdf.section_title("INNHOLDSFORTEGNELSE")
-    items = ["1. Sammendrag og konklusjon", "2. Innledning og prosjektbeskrivelse", "3. Kartverket og historisk lokasjon", "4. Utførte grunnundersøkelser", "5. Resultater: grunnforhold og forurensning", "6. Geotekniske vurderinger", "7. Tiltaksplan og massehåndtering"]
+    items = ["1. Sammendrag og konklusjon", "2. Innledning og prosjektbeskrivelse", "3. Grunnforhold og geologi", "4. Naturfare og risiko", "5. Miljøteknisk historikk og forurensningsstatus", "6. Utførte grunnundersøkelser", "7. Resultater: grunnforhold og forurensning", "8. Geotekniske vurderinger", "9. Tiltaksplan og massehåndtering"]
     if include_appendices: items.extend(["Vedlegg A. Sammenstilling av analyseresultater", "Vedlegg B. Tilstandsklassegrenser (utdrag)"])
     pdf.set_font("Helvetica", "", 10.5)
     pdf.set_text_color(45, 49, 55)
@@ -879,6 +1151,39 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
 
         if title.startswith("3."): render_maps(pdf, recent_img, hist_img, source_text)
 
+        # Geodata temakart for kapittel 3 eller 4
+        if title.startswith("3.") or title.startswith("4."):
+            gd = st.session_state.geodata_result
+            if gd and not getattr(pdf, '_geodata_maps_rendered', False):
+                pdf._geodata_maps_rendered = True
+                geo_map_pairs = []
+                for key, label in [("losmasser", "Løsmassekart (NGU)"), ("berggrunn", "Bergrunnskart (NGU)"),
+                                   ("radon", "Radon aktsomhet (NGU)"), ("flom", "Flomsoner (NVE)"),
+                                   ("kvikkleire", "Kvikkleire (NVE)"), ("skred", "Skredfare (NVE)")]:
+                    img = gd.get(key)
+                    if img is not None:
+                        pil_img = img.convert("RGB") if isinstance(img, Image.Image) else img
+                        geo_map_pairs.append((pil_img, label))
+
+                if geo_map_pairs:
+                    pdf.ensure_space(30)
+                    pdf.set_font("Helvetica", "B", 10)
+                    pdf.set_text_color(35, 39, 43)
+                    pdf.cell(0, 7, clean_pdf_text("Temakart fra offentlige geodatakilder"), 0, 1)
+                    pdf.ln(2)
+
+                    for i in range(0, len(geo_map_pairs), 2):
+                        pair = geo_map_pairs[i:i + 2]
+                        fig_num = 3 + i
+                        pdf.ensure_space(90)
+                        start_y = pdf.get_y()
+                        for j, (img, caption) in enumerate(pair):
+                            x = 20 + j * 88
+                            path = save_temp_image(img, ".jpg")
+                            pdf.set_xy(x, start_y)
+                            pdf.figure_image(path, width=82, caption=f"Figur {fig_num + j}. {caption}")
+                        pdf.set_y(start_y + 82 * (img.height / max(img.width, 1)) + 14)
+
         if title.startswith("4.") and not lab_package.get("source_overview_df", pd.DataFrame()).empty:
             # Låser overskrift til tabellbilde
             pdf.ensure_space(60)
@@ -979,6 +1284,8 @@ if "project_data" not in st.session_state:
 
 if "geo_maps" not in st.session_state:
     st.session_state.geo_maps = {"recent": None, "historical": None, "source": "Ikke hentet"}
+if "geodata_result" not in st.session_state:
+    st.session_state.geodata_result = None
 
 if st.session_state.project_data.get("p_name") == "":
     if SSOT_FILE.exists():
@@ -1074,40 +1381,87 @@ with st.expander("1. Prosjekt & Lokasjon (SSOT)", expanded=False):
     st.text_input("Prosjektnavn", value=pd_state["p_name"], disabled=True)
     st.text_input("Gnr/Bnr", value=f"{pd_state['gnr']} / {pd_state['bnr']}", disabled=True)
 
-with st.expander("2. Kartgrunnlag & Ortofoto (Påkrevd)", expanded=True):
-    st.markdown("For å vurdere potensialet for forurenset grunn, krever veilederen en visuell bedømming av nyere og historiske flyfoto. AI-en integrerer disse i rapporten.")
+with st.expander("2. Geodata & Kartgrunnlag (Auto-henting)", expanded=True):
+    st.markdown("Henter automatisk ortofoto, geologiske kart, naturfare og forurensningsdata fra åpne norske geodatakilder (NGU, NVE, Kartverket, Miljødirektoratet).")
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("🌐 Hent kart automatisk", type="secondary"):
-            with st.spinner("Søker i Matrikkel og Kartkatalog..."):
-                img, source = fetch_kartverket_og_google(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"], google_key)
-                if img:
-                    st.session_state.geo_maps["recent"] = img
-                    st.session_state.geo_maps["source"] = source
-                    st.success(f"✅ Hentet fra {source}!")
-                else:
-                    st.error("Fant ikke kart. Vennligst last opp manuelt.")
+    col_btn, col_status = st.columns([1, 2])
+    with col_btn:
+        if st.button("🌐 Hent alle geodata automatisk", type="primary", use_container_width=True):
+            with st.spinner("Henter geodata fra NGU, NVE, Kartverket, Miljødirektoratet..."):
+                gd = fetch_all_geodata(pd_state["adresse"], pd_state["kommune"], pd_state["gnr"], pd_state["bnr"])
+                st.session_state.geodata_result = gd
+                if gd.get("ortofoto"):
+                    st.session_state.geo_maps["recent"] = gd["ortofoto"]
+                    st.session_state.geo_maps["source"] = gd.get("ortofoto_source", "Geodata")
+                if gd.get("errors"):
+                    for err in gd["errors"]:
+                        st.warning(f"⚠️ {err}")
+                st.rerun()
 
-        if st.session_state.geo_maps["recent"] and st.session_state.geo_maps["source"] != "Manuelt opplastet":
-            st.image(st.session_state.geo_maps["recent"], caption=f"Valgt: {st.session_state.geo_maps['source']}", use_container_width=True)
+    gd = st.session_state.geodata_result
+    if gd:
+        with col_status:
+            n_maps = sum(1 for k in ["ortofoto", "losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred"] if gd.get(k) is not None)
+            n_contam = len(gd.get("grunnforurensning", []))
+            st.success(f"✅ {n_maps} kartlag hentet | {n_contam} forurensinglokaliteter funnet")
 
-    with col_b:
-        st.markdown("##### ⚠️ Manuell opplasting (Fallback)")
-        man_recent = st.file_uploader("Last opp nyere Ortofoto (Valgfritt)", type=["png", "jpg", "jpeg"])
+        # --- Ortofoto ---
+        if gd.get("ortofoto"):
+            st.markdown(f"##### 📸 Ortofoto — {gd.get('ortofoto_source', '')}")
+            st.image(gd["ortofoto"], use_container_width=True)
+
+        # --- NGU Temakart ---
+        ngu_maps = []
+        if gd.get("losmasser"):
+            ngu_maps.append(("Løsmassekart (NGU)", gd["losmasser"]))
+        if gd.get("berggrunn"):
+            ngu_maps.append(("Bergrunnskart (NGU)", gd["berggrunn"]))
+        if gd.get("radon"):
+            ngu_maps.append(("Radon aktsomhet (NGU)", gd["radon"]))
+
+        if ngu_maps:
+            st.markdown("##### 🪨 NGU — Geologi & Radon")
+            cols = st.columns(len(ngu_maps))
+            for idx, (caption, img) in enumerate(ngu_maps):
+                with cols[idx]:
+                    st.image(img, caption=caption, use_container_width=True)
+
+        # --- NVE Temakart ---
+        nve_maps = []
+        if gd.get("flom"):
+            nve_maps.append(("Flomsoner (NVE)", gd["flom"]))
+        if gd.get("kvikkleire"):
+            nve_maps.append(("Kvikkleire (NVE)", gd["kvikkleire"]))
+        if gd.get("skred"):
+            nve_maps.append(("Skredfare (NVE)", gd["skred"]))
+
+        if nve_maps:
+            st.markdown("##### 🌊 NVE — Naturfare")
+            cols = st.columns(len(nve_maps))
+            for idx, (caption, img) in enumerate(nve_maps):
+                with cols[idx]:
+                    st.image(img, caption=caption, use_container_width=True)
+
+        # --- Miljødirektoratet ---
+        contam = gd.get("grunnforurensning", [])
+        if contam:
+            st.markdown("##### ☣️ Miljødirektoratet — Kjente forurensinglokaliteter (500 m radius)")
+            for site in contam:
+                status_icon = "🔴" if "aktiv" in (site.get("status", "")).lower() else "🟡"
+                st.markdown(f"{status_icon} **{site.get('navn', 'Ukjent')}** — {site.get('status', '')} ({site.get('type', '')})")
+        elif gd.get("coords"):
+            st.info("✅ Ingen kjente forurensinglokaliteter funnet i Miljødirektoratets database (500 m radius).")
+
+    # --- Fallback: manuell opplasting ---
+    with st.popover("📎 Manuell opplasting (valgfritt)"):
+        man_recent = st.file_uploader("Last opp nyere ortofoto", type=["png", "jpg", "jpeg"], key="man_ortofoto")
         if man_recent:
             st.session_state.geo_maps["recent"] = Image.open(man_recent).convert("RGB")
             st.session_state.geo_maps["source"] = "Manuelt opplastet"
 
-        if st.session_state.geo_maps["recent"] and st.session_state.geo_maps["source"] == "Manuelt opplastet":
-            st.image(st.session_state.geo_maps["recent"], caption="Nyere ortofoto (Manuelt opplastet)", use_container_width=True)
-
-        man_hist = st.file_uploader("Last opp historisk flyfoto (F.eks. fra 1950 for å sjekke tidl. industri)", type=["png", "jpg", "jpeg"])
+        man_hist = st.file_uploader("Last opp historisk flyfoto (f.eks. 1950-tallet)", type=["png", "jpg", "jpeg"], key="man_hist")
         if man_hist:
             st.session_state.geo_maps["historical"] = Image.open(man_hist).convert("RGB")
-
-        if st.session_state.geo_maps["historical"]:
-            st.image(st.session_state.geo_maps["historical"], caption="Historisk flyfoto (Manuelt opplastet)", use_container_width=True)
 
 with st.expander("3. Laboratoriedata & Plantegninger", expanded=True):
     st.info("Slipp Excel/CSV-filer med prøvesvar her. AI-en leser verdiene og tilstandsklassifiserer massene.")
@@ -1119,19 +1473,30 @@ with st.expander("3. Laboratoriedata & Plantegninger", expanded=True):
 
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", use_container_width=True):
-    if not st.session_state.geo_maps["recent"] and not st.session_state.geo_maps["historical"]:
-        st.error("🛑 **Stopp:** Du må enten hente kart automatisk eller laste opp manuelt i Steg 2.")
+    gd = st.session_state.geodata_result
+    if not st.session_state.geo_maps["recent"] and not st.session_state.geo_maps["historical"] and not gd:
+        st.error("🛑 **Stopp:** Du må hente geodata (Steg 2) eller laste opp kart manuelt før du kan generere rapport.")
         st.stop()
 
-    with st.spinner("📊 Tolker lab-data, kart og arkitekttegninger..."):
+    with st.spinner("📊 Tolker lab-data, geodata, temakart og arkitekttegninger..."):
         lab_package = extract_drill_data(files) if files else extract_drill_data([])
-        extracted_data = lab_package["prompt_text"] if files else "Ingen opplastet lab-data. Vurderingen baseres på visuell befaring og historikk."
+        extracted_data = lab_package["prompt_text"] if files else "Ingen opplastet lab-data. Vurderingen baseres på visuell befaring, geodata og historikk."
 
         images_for_geo = []
         if st.session_state.geo_maps["recent"]:
             images_for_geo.append(st.session_state.geo_maps["recent"])
         if st.session_state.geo_maps["historical"]:
             images_for_geo.append(st.session_state.geo_maps["historical"])
+
+        # Add all geodata thematic maps as images for AI analysis
+        geodata_text = ""
+        if gd:
+            for key in ["losmasser", "berggrunn", "radon", "flom", "kvikkleire", "skred"]:
+                img = gd.get(key)
+                if img is not None:
+                    images_for_geo.append(img if isinstance(img, Image.Image) else img.convert("RGB"))
+            geodata_text = geodata_summary_text(gd)
+
         if "project_images" in st.session_state and isinstance(st.session_state.project_images, list):
             images_for_geo.extend(st.session_state.project_images)
 
@@ -1147,7 +1512,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
             st.stop()
 
         model = genai.GenerativeModel(valgt_modell)
-        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse."
+        hist_tekst = "Et historisk flyfoto er lagt ved." if st.session_state.geo_maps["historical"] else "Historisk flyfoto mangler, gjør en kvalifisert antakelse basert på tilgjengelige data."
 
         prompt = f"""
         Du er Builtly RIG-M AI, en presis senior miljørådgiver og geotekniker.
@@ -1160,33 +1525,53 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
         KUNDENS PROSJEKTNARRATIV: "{pd_state['p_desc']}"
         KARTSTATUS: {hist_tekst}
 
+        GEODATA FRA OFFENTLIGE KILDER:
+        {geodata_text if geodata_text else "Ingen geodata hentet. Vurder basert på generell kunnskap om området."}
+
         STRUKTURERT LAB-DATA OG DOKUMENTGRUNNLAG:
         {extracted_data}
+
+        VIKTIG OM VEDLAGTE BILDER:
+        Du har fått tilsendt flere bilder. Disse inkluderer:
+        - Ortofoto (flyfoto) av eiendommen
+        - NGU Løsmassekart: Viser kvartærgeologiske avsetninger (marin leire, morene, bart fjell, etc.)
+        - NGU Bergrunnskart: Viser bergartstyper under løsmassene
+        - NGU Radonkart: Viser aktsomhetsnivå for radon (lav/moderat/høy)
+        - NVE Flomsonekart: Viser om eiendommen ligger i flomsone
+        - NVE Kvikkleirekart: Viser om det er kartlagte kvikkleiresoner i nærheten
+        - NVE Skredkart: Viser skredfaresoner
+        Du MÅ analysere hvert vedlagte bilde og referere til dem eksplisitt i rapporten.
 
         KRITISKE INSTRUKSER FOR FORM:
         - Skriv med kortere avsnitt og tydelig faghierarki.
         - Bruk punktlister når du beskriver funn, risiko, usikkerhet og tiltak.
         - Ikke bruk markdown-tabeller.
-        - Bruk underoverskrifter der det er naturlig, gjerne på formatet "## Datagrunnlag", "## Vurdering", "## Konsekvens" eller "## Anbefalte tiltak".
+        - Bruk underoverskrifter der det er naturlig.
         - Vær konkret med analyttnavn, prøvepunkt, dybde og verdi når du omtaler laboratoriedata.
-        - IKKE kritiser datagrunnlaget. Du skal anta at alle opplastede filer og tabeller gjelder 100 % for dette prosjektet. Ikke nevn noe om manglende stedsnavn eller diskrepans i arkivreferanser.
+        - IKKE kritiser datagrunnlaget.
 
         KRITISKE INSTRUKSER FOR BEVIS:
-        Jeg har lagt ved kart og potensielt arkitekttegninger.
-        Du MÅ aktivt bevise i teksten at du har sett på bildene og analysert tallene fra tabellgrunnlaget.
+        Du MÅ aktivt bevise i teksten at du har analysert bildene og dataene.
         Skriv blant annet setninger som:
-        - "Ut fra vedlagte kart/flyfoto observeres det at ..."
+        - "Ut fra NGU løsmassekart observeres det at grunnen i hovedsak består av ..."
+        - "Bergrunnskartet viser at underliggende bergart er ..."
+        - "Radonaktsomhetskartet viser [lav/moderat/høy] aktsomhet for radon i området."
+        - "NVE flomsonekart indikerer [ingen flomsone / 200-års flom / etc.] for eiendommen."
+        - "Kvikkleirekartet viser [ingen kartlagte soner / risikoklasse X] i nærområdet."
+        - "Miljødirektoratets database viser [X forurensinglokaliteter / ingen kjente lokaliteter] innenfor 500 m."
         - "Basert på opplastet analysetabell fremgår det at ..."
         - "Prøvepunkt SK.. i dybde ... viser ..."
 
         STRUKTUR (bruk kun disse overskriftene, START DIREKTE PÅ KAPITTEL 1, ALDRI skriv en hilsen før dette!):
         # 1. SAMMENDRAG OG KONKLUSJON
         # 2. INNLEDNING OG PROSJEKTBESKRIVELSE
-        # 3. KARTVERKET OG HISTORISK LOKASJON
-        # 4. UTFØRTE GRUNNUNDERSØKELSER
-        # 5. RESULTATER: GRUNNFORHOLD OG FORURENSNING
-        # 6. GEOTEKNISKE VURDERINGER
-        # 7. TILTAKSPLAN OG MASSEHÅNDTERING (Skriv en KONKRET og operativ plan for graving, sortering etter tilstandsklasser, transport, deponering og HMS. IKKE skriv at "en plan må utarbeides", du skal SKRIVE planen her.)
+        # 3. GRUNNFORHOLD OG GEOLOGI (basert på NGU løsmassekart, bergrunnskart og lokalkunnskap)
+        # 4. NATURFARE OG RISIKO (flom, kvikkleire, skred, radon — basert på NVE og NGU data)
+        # 5. MILJØTEKNISK HISTORIKK OG FORURENSNINGSSTATUS (Miljødirektoratets database, historiske kart)
+        # 6. UTFØRTE GRUNNUNDERSØKELSER (hvis lab-data er lastet opp)
+        # 7. RESULTATER: GRUNNFORHOLD OG FORURENSNING
+        # 8. GEOTEKNISKE VURDERINGER
+        # 9. TILTAKSPLAN OG MASSEHÅNDTERING (KONKRET og operativ plan, IKKE skriv at 'en plan må utarbeides')
         """
 
         try:
