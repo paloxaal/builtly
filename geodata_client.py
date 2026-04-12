@@ -595,8 +595,8 @@ class GeodataOnlineClient:
     ) -> Tuple[Optional[Image.Image], str]:
         bounds = _expanded_bbox(bbox, float(buffer_m))
         candidates = [
-            (GEOMAP_BILDER_NYESTE_IS, "Geodata Online GeomapBilderNyeste"),
-            (GEOCACHE_BILDER_MS, "Geodata Online GeocacheBilder"),
+            (GEOCACHE_BILDER_MS, "Geodata Online GeocacheBilder"),      # Anbefalt: ferdig cachet, rask, god kvalitet
+            (GEOMAP_BILDER_NYESTE_IS, "Geodata Online GeomapBilderNyeste"),  # Fallback: dynamisk, nyeste men tregere
             (GEOCACHE_LANDSKAP_MS, "Geodata Online GeocacheLandskap"),
         ]
         for service, label in candidates:
