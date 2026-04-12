@@ -5073,8 +5073,7 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            justify-content: space-between !important;
-            gap: 6px !important;
+            gap: 4px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
@@ -5082,16 +5081,13 @@ st.markdown(
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 36px !important;
-            max-width: 36px !important;
-            width: 36px !important;
-            min-width: 36px !important;
+            flex: 0 0 72px !important;
+            max-width: 72px !important;
+            width: 72px !important;
         }
-        /* Strip all wrappers */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) [data-testid="stSelectbox"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) [data-testid="stSelectbox"] > div {
+        /* Strip wrappers */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"],
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             background: transparent !important;
             border: none !important;
             box-shadow: none !important;
@@ -5104,32 +5100,25 @@ st.markdown(
             min-height: 0 !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(255,255,255,0.08) !important;
-            border: none !important;
+            background: rgba(255,255,255,0.07) !important;
+            border: 1px solid rgba(255,255,255,0.10) !important;
             box-shadow: none !important;
             border-radius: 8px !important;
-            padding: 4px !important;
-            min-height: 32px !important;
-            max-width: 36px !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
+            padding: 3px 6px !important;
+            min-height: 28px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 1.1rem !important;
-            display: block !important;
-            width: 22px !important;
+            font-size: 0.6rem !important;
             overflow: hidden !important;
-            text-overflow: clip !important;
+            text-overflow: ellipsis !important;
             white-space: nowrap !important;
-            line-height: 1 !important;
-            text-align: center !important;
+            color: #c8d3df !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) div[style*="margin-top"] {
-            margin-top: 0.2rem !important;
+            margin-top: 0.15rem !important;
         }
 
         .mini-stat-grid,
