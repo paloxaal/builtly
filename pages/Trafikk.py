@@ -709,21 +709,42 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
                     "pdf_bytes": pdf_data
                 }
 
+                # Lagre til disk for Dashboard
+                try:
+                    report_dir = DB_DIR / "reports"
+                    report_dir.mkdir(exist_ok=True)
+                    pdf_path = report_dir / f"Builtly_RITra_{p_name}.pdf"
+                    pdf_path.write_bytes(pdf_data)
+                    
+                    reviews_file = DB_DIR / "pending_reviews.json"
+                    existing = {}
+                    if reviews_file.exists():
+                        try: existing = json.loads(reviews_file.read_text(encoding="utf-8"))
+                        except Exception: existing = {}
+                    existing[doc_id] = {
+                        "title": pd_state.get('p_name', ''), "module": "Trafikk & Mobilitet",
+                        "drafter": "Builtly AI", "reviewer": "Senior RITra",
+                        "status": "Pending Engineering Review", "class": "badge-roadmap",
+                        "pdf_file": str(pdf_path), "timestamp": datetime.now().isoformat(),
+                    }
+                    reviews_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+
             st.session_state.generated_ritra_pdf = pdf_data
             st.session_state.generated_ritra_filename = f"Builtly_RITra_{p_name}.pdf"
 
-            # Save report to user dashboard
+            # Lagre til Supabase dashboard
             try:
                 from builtly_auth import save_report
                 save_report(
-                    project_name=p_name,
-                    report_name=f"Trafikk & Mobilitet — {p_name}",
-                    module="Trafikk",
+                    project_name=pd_state.get("p_name", p_name),
+                    report_name=f"Trafikk — Builtly_RITra_{p_name}.pdf",
+                    module="RITra (Trafikk)",
                     file_path=f"Builtly_RITra_{p_name}.pdf",
                 )
-            except ImportError:
+            except Exception:
                 pass
-
             st.rerun() 
                 
         except Exception as e: 
