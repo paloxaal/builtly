@@ -5073,52 +5073,42 @@ st.markdown(
             flex-direction: row !important;
             flex-wrap: nowrap !important;
             align-items: center !important;
-            gap: 4px !important;
+            gap: 8px !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:first-child {
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:first-child {
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) {
-            flex: 0 0 52px !important;
-            width: 52px !important;
-            max-width: 52px !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            max-width: none !important;
         }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) {
-            flex: 0 0 52px !important;
-            width: 52px !important;
-            max-width: 52px !important;
+        /* Inner sub-columns: always horizontal */
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] {
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            gap: 6px !important;
         }
-        /* Hide the margin-top spacer divs */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(2) > div > div:first-child,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stColumn"]:nth-child(3) > div > div:first-child {
-            margin-top: 0 !important;
+        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            max-width: none !important;
         }
-        /* Strip selectbox chrome */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] label {
-            display: none !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
-            padding-top: 0 !important;
-        }
-        /* Style the select element */
+        /* Compact selectboxes */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(200,210,220,0.08) !important;
-            border: 1px solid rgba(200,210,220,0.12) !important;
+            background: rgba(200,215,230,0.10) !important;
+            border: 1px solid rgba(200,215,230,0.15) !important;
             border-radius: 10px !important;
             min-height: 34px !important;
-            padding: 4px 6px !important;
+            padding: 4px 8px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 0.65rem !important;
+            font-size: 0.7rem !important;
             white-space: nowrap !important;
-            overflow: hidden !important;
-            text-overflow: ellipsis !important;
-            max-width: 36px !important;
-            display: block !important;
         }
 
         .mini-stat-grid,
@@ -5592,76 +5582,78 @@ st.markdown(
 # -------------------------------------------------
 apply_language_from_query()
 
-top_l, top_m, top_r = st.columns([4, 1, 1], gap="small")
+top_l, top_r_wrap = st.columns([3, 1], gap="small")
 
 with top_l:
     logo_uri = logo_data_uri()
     logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
     render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="/" target="_self" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
 
-with top_m:
-    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
-    _is_en = "English" in st.session_state.app_lang
-    if _is_user_logged_in():
-        _acct_options = (["👤 Account", "My page", "Log out"] if _is_en
-                         else ["👤 Konto", "Min side", "Logg ut"])
-        _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice in ("Min side", "My page") and _get_auth_page() != "dashboard":
-            del st.session_state["acct_menu"]
-            try:
-                st.query_params["auth"] = "dashboard"
-            except Exception:
-                pass
-            st.rerun()
-        elif _acct_choice in ("Logg ut", "Log out"):
-            if _HAS_AUTH:
-                builtly_auth.logout()
-            else:
-                st.session_state.user_authenticated = False
-                st.session_state.user_email = ""
-                st.session_state.user_name = ""
-                st.session_state.user_plan = ""
-                st.session_state.user_reports = []
-            try:
-                params = get_query_params_dict()
-                params.pop("auth", None)
-                set_query_params_dict(params)
-            except Exception:
-                pass
-            st.rerun()
-    else:
-        _acct_options = (["👤 Account", "Log in", "Plans / Sign up"] if _is_en
-                         else ["👤 Konto", "Logg inn", "Se planer / Opprett konto"])
-        _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-        if _acct_choice in ("Logg inn", "Log in") and _get_auth_page() != "login":
-            del st.session_state["acct_menu"]
-            try:
-                st.query_params["auth"] = "login"
-            except Exception:
-                pass
-            st.rerun()
-        elif _acct_choice in ("Se planer / Opprett konto", "Plans / Sign up") and _get_auth_page() != "register":
-            del st.session_state["acct_menu"]
-            try:
-                st.query_params["auth"] = "register"
-            except Exception:
-                pass
-            st.rerun()
+with top_r_wrap:
+    st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
+    ctrl_acct, ctrl_lang = st.columns(2, gap="small")
+    with ctrl_acct:
+        _is_en = "English" in st.session_state.app_lang
+        if _is_user_logged_in():
+            _acct_options = (["👤 Account", "My page", "Log out"] if _is_en
+                             else ["👤 Konto", "Min side", "Logg ut"])
+            _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
+            if _acct_choice in ("Min side", "My page") and _get_auth_page() != "dashboard":
+                del st.session_state["acct_menu"]
+                try:
+                    st.query_params["auth"] = "dashboard"
+                except Exception:
+                    pass
+                st.rerun()
+            elif _acct_choice in ("Logg ut", "Log out"):
+                if _HAS_AUTH:
+                    builtly_auth.logout()
+                else:
+                    st.session_state.user_authenticated = False
+                    st.session_state.user_email = ""
+                    st.session_state.user_name = ""
+                    st.session_state.user_plan = ""
+                    st.session_state.user_reports = []
+                try:
+                    params = get_query_params_dict()
+                    params.pop("auth", None)
+                    set_query_params_dict(params)
+                except Exception:
+                    pass
+                st.rerun()
+        else:
+            _acct_options = (["👤 Account", "Log in", "Plans / Sign up"] if _is_en
+                             else ["👤 Konto", "Logg inn", "Se planer / Opprett konto"])
+            _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
+            if _acct_choice in ("Logg inn", "Log in") and _get_auth_page() != "login":
+                del st.session_state["acct_menu"]
+                try:
+                    st.query_params["auth"] = "login"
+                except Exception:
+                    pass
+                st.rerun()
+            elif _acct_choice in ("Se planer / Opprett konto", "Plans / Sign up") and _get_auth_page() != "register":
+                del st.session_state["acct_menu"]
+                try:
+                    st.query_params["auth"] = "register"
+                except Exception:
+                    pass
+                st.rerun()
 
-with top_r:
-    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
-    chosen_language = st.selectbox(
-        "Språk",
-        list(TEXTS.keys()),
-        index=list(TEXTS.keys()).index(st.session_state.app_lang) if st.session_state.app_lang in TEXTS else 0,
-    )
-    if chosen_language != st.session_state.app_lang:
-        st.session_state.app_lang = chosen_language
-        st.session_state.project_data["land"] = get_locale_profile(chosen_language)["project_land_label"]
-        reset_assistant_conversation()
-        st.session_state.assistant_discipline_codes = list(DEFAULT_DISCIPLINES)
-        sync_language_query_param(chosen_language)
-        st.rerun()
+    with ctrl_lang:
+        chosen_language = st.selectbox(
+            "Språk",
+            list(TEXTS.keys()),
+            index=list(TEXTS.keys()).index(st.session_state.app_lang) if st.session_state.app_lang in TEXTS else 0,
+            label_visibility="collapsed",
+        )
+        if chosen_language != st.session_state.app_lang:
+            st.session_state.app_lang = chosen_language
+            st.session_state.project_data["land"] = get_locale_profile(chosen_language)["project_land_label"]
+            reset_assistant_conversation()
+            st.session_state.assistant_discipline_codes = list(DEFAULT_DISCIPLINES)
+            sync_language_query_param(chosen_language)
+            st.rerun()
 
 lang = get_text_bundle(st.session_state.app_lang)
 locale_profile = get_locale_profile(st.session_state.app_lang)
