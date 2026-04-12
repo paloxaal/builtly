@@ -95,6 +95,12 @@ if "site_access_input_nonce" not in st.session_state:
     st.session_state.site_access_input_nonce = 0
 
 # -- User auth & subscription state --
+# Step 1: Try to restore session from browser localStorage (via _brt query param)
+_session_restored_from_browser = False
+if _HAS_AUTH and not st.session_state.get("user_authenticated"):
+    _session_restored_from_browser = builtly_auth.try_restore_from_browser()
+
+# Step 2: Set defaults for any keys not already populated
 if "user_authenticated" not in st.session_state:
     st.session_state.user_authenticated = False
 if "user_email" not in st.session_state:
@@ -104,14 +110,26 @@ if "user_name" not in st.session_state:
 if "user_plan" not in st.session_state:
     st.session_state.user_plan = ""  # "modul", "team", "enterprise"
 
-# Keep access granted if user is already authenticated
+# Step 3: Keep access granted if user is authenticated
 if st.session_state.get("user_authenticated") and st.session_state.get("user_email"):
     st.session_state.site_access_granted = True
-    # Restore Supabase session from stored tokens (survives page reload)
-    if _HAS_AUTH and st.session_state.get("_sb_access_token"):
-        if not builtly_auth.restore_session():
-            # Tokens expired beyond refresh — user must log in again
-            st.session_state.site_access_granted = False
+    # Try to restore Supabase API session (best-effort, don't kick user out on failure)
+    if _HAS_AUTH and st.session_state.get("_sb_access_token") and not _session_restored_from_browser:
+        builtly_auth.restore_session()  # updates tokens if successful
+    # Always ensure refresh token is persisted to browser localStorage
+    # (handles case where login's st.rerun() prevented the first JS persist)
+    if _HAS_AUTH and st.session_state.get("_sb_refresh_token"):
+        builtly_auth._persist_tokens_to_browser(st.session_state["_sb_refresh_token"])
+
+# Step 4: If not authenticated and no _brt in URL, inject localStorage reader
+# (will redirect with ?_brt=<token> if localStorage has a stored token)
+if _HAS_AUTH and not st.session_state.get("user_authenticated"):
+    try:
+        _has_brt = "_brt" in st.query_params
+    except Exception:
+        _has_brt = False
+    if not _has_brt:
+        builtly_auth.inject_browser_token_reader()
 if "user_company" not in st.session_state:
     st.session_state.user_company = ""
 if "user_countries" not in st.session_state:
