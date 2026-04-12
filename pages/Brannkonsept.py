@@ -2597,6 +2597,12 @@ def render_mouse_canvas_editor(page: SourcePage, elements: List[Dict[str, Any]],
       cv.addEventListener('mousemove',function(e){{if(sel<0||!drag||!sp)return;const p=gP(e),el=els[sel];if(drag==='move'&&el.rect){{const dx=(p.x-sp.x)/IW,dy=(p.y-sp.y)/IH;el.rect=[el.rect[0]+dx,el.rect[1]+dy,el.rect[2]+dx,el.rect[3]+dy].map(v=>Math.max(0,Math.min(1,v)));sp=p}}else if((drag==='resize'||drag==='draw')&&el.rect){{el.rect[2]=p2n(p.x,IW);el.rect[3]=p2n(p.y,IH)}}else if(drag==='move'&&el.points){{const dx=(p.x-sp.x)/IW,dy=(p.y-sp.y)/IH;el.points=el.points.map(pt=>[Math.max(0,Math.min(1,pt[0]+dx)),Math.max(0,Math.min(1,pt[1]+dy))]);sp=p}}else if(drag==='pt0'&&el.points){{el.points[0]=[p2n(p.x,IW),p2n(p.y,IH)]}}else if((drag==='pt1'||drag==='drawArrow')&&el.points){{el.points[el.points.length-1]=[p2n(p.x,IW),p2n(p.y,IH)]}}render()}});
       window.addEventListener('mouseup',function(){{if(sel>=0&&els[sel]&&els[sel].rect){{const r=els[sel].rect;els[sel].rect=[Math.min(r[0],r[2]),Math.min(r[1],r[3]),Math.max(r[0],r[2]),Math.max(r[1],r[3])]}}drag=null;render()}});
       document.addEventListener('keydown',function(e){{if(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')return;if((e.key==='Delete'||e.key==='Backspace')&&sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}});
+      // Init image
+      img.onload=function(){{resize()}};
+      img.src=P.image;
+      window.addEventListener('resize',function(){{resize()}});
+      setTimeout(function(){{if(img.complete&&IW<1)resize()}},200);
+
       return{{
         setTool:function(t){{tool=t;sel=-1;document.querySelectorAll('.ft').forEach(b=>b.classList.remove('active'));const btn=document.getElementById('t_'+t);if(btn)btn.classList.add('active');cv.style.cursor=t==='select'?'default':'crosshair'}},
         deleteSelected:function(){{if(sel>=0){{els.splice(sel,1);sel=-1;lb.value='';render()}}}},
@@ -2606,7 +2612,6 @@ def render_mouse_canvas_editor(page: SourcePage, elements: List[Dict[str, Any]],
           try{{const ta=window.parent.document.querySelector('textarea[aria-label="'+P.bridgeLabel+'"]');if(!ta)throw 0;const setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value').set;setter.call(ta,ex.value);ta.dispatchEvent(new Event('input',{{bubbles:true}}));ta.dispatchEvent(new Event('change',{{bubbles:true}}));st.textContent='Lagret! Klikk Bruk museendringer under.'}}catch(e){{st.textContent='Kopier JSON manuelt.';ex.style.display='block'}}
         }}
       }};
-      img.onload=resize;window.addEventListener('resize',resize);
     }})();
     </script>
     """
