@@ -615,22 +615,110 @@ class GeodataOnlineClient:
         buffer_m: float = 80.0,
         width: int = 1200,
         height: int = 1200,
-    ) -> Tuple[Optional[Image.Image], str]:
-        """Try to fetch historical aerial imagery from Geodata Online.
+    ) -> Tuple[Optional[Image.Image], str, Optional[str]]:
+        """Fetch the OLDEST available aerial photo from GeomapBilder3 ImageServer.
 
-        Attempts multiple GeomapBilder service variants that may contain
-        older imagery vintages. Returns (image, source_label) or (None, error).
+        GeomapBilder3 is a mosaic dataset containing all Norge i Bilder projects.
+        By default exportImage returns the newest. We query the mosaic catalog to
+        find the oldest raster covering our bbox, then lock onto it via mosaicRule.
+
+        Returns (image, source_label, year_str) or (None, error, None).
         """
         bounds = _expanded_bbox(bbox, float(buffer_m))
-        for service, label in GEOMAP_BILDER_HISTORICAL_CANDIDATES:
+        service = "Geomap_UTM33_EUREF89/GeomapBilder3/ImageServer"
+
+        # Step 1: Query the mosaic catalog for rasters intersecting our bbox
+        try:
+            query_url = self._service_url(service, "query")
+            import re as _re
+            data = self._arcgis_json(
+                query_url,
+                params={
+                    "geometry": _bbox_string(bounds),
+                    "geometryType": "esriGeometryEnvelope",
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "outFields": "OBJECTID,Name,MinPS,MaxPS,Category,LowPS,HighPS,GroupName,Tag,ProductName,AcquisitionDate",
+                    "returnGeometry": "false",
+                    "orderByFields": "AcquisitionDate ASC",
+                    "resultRecordCount": "50",
+                },
+                timeout=20,
+            )
+        except Exception as exc:
+            return None, f"GeomapBilder3 query feilet: {str(exc)[:80]}", None
+
+        features = data.get("features", [])
+        if not features:
+            return None, "GeomapBilder3: ingen flybildeprosjekter funnet for området", None
+
+        # Step 2: Extract year from each raster and sort oldest first
+        rasters = []
+        for feat in features:
+            attrs = feat.get("attributes", {})
+            oid = attrs.get("OBJECTID")
+            name = str(attrs.get("Name") or attrs.get("ProductName") or attrs.get("GroupName") or attrs.get("Tag") or "")
+            
+            # Try to extract year from name (e.g. "Trondheim 1991", "Heimdal-Tiller 1991")
+            import re as _re
+            year_match = _re.search(r'((?:19|20)\d{2})', name)
+            year = int(year_match.group(1)) if year_match else 9999
+            
+            # Also check AcquisitionDate (epoch ms)
+            acq_date = attrs.get("AcquisitionDate")
+            if acq_date and isinstance(acq_date, (int, float)) and acq_date > 0:
+                import datetime
+                try:
+                    dt = datetime.datetime.fromtimestamp(acq_date / 1000.0)
+                    if year == 9999:
+                        year = dt.year
+                except Exception:
+                    pass
+
+            if oid is not None:
+                rasters.append({"oid": oid, "name": name, "year": year})
+
+        if not rasters:
+            return None, "GeomapBilder3: ingen raster-ID-er funnet", None
+
+        # Sort oldest first
+        rasters.sort(key=lambda r: r["year"])
+
+        # Step 3: Try the oldest rasters — use mosaicRule to lock onto specific raster
+        for raster in rasters[:8]:
             try:
-                content = self._image_export(service, bounds, width=width, height=height)
-                if content and len(content) > 2000:
-                    img = Image.open(io.BytesIO(content)).convert("RGB")
-                    return img, label
+                import json as _json
+                mosaic_rule = _json.dumps({
+                    "mosaicMethod": "esriMosaicLockRaster",
+                    "lockRasterIds": [raster["oid"]],
+                    "ascending": True,
+                })
+                endpoint = self._service_url(service, "exportImage")
+                resp = self.session.get(
+                    endpoint,
+                    params={
+                        "bbox": _bbox_string(bounds),
+                        "bboxSR": str(DEFAULT_SRID),
+                        "imageSR": str(DEFAULT_SRID),
+                        "size": f"{int(width)},{int(height)}",
+                        "format": "png",
+                        "f": "image",
+                        "mosaicRule": mosaic_rule,
+                        "token": self.get_token(),
+                    },
+                    timeout=20,
+                )
+                if resp.status_code == 200 and len(resp.content) > 2000:
+                    ctype = resp.headers.get("Content-Type", "")
+                    if resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
+                        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                        year_str = str(raster["year"]) if raster["year"] < 9999 else None
+                        label = f"Norge i Bilder ({raster['name']})" if raster["name"] else "GeomapBilder3"
+                        return img, label, year_str
             except Exception:
                 continue
-        return None, "Geodata Online: historisk ortofoto utilgjengelig"
+
+        tried = ", ".join(f"{r['name']} ({r['year']})" for r in rasters[:3])
+        return None, f"GeomapBilder3: {len(rasters)} prosjekter funnet men ingen ga bilde (prøvde: {tried})", None
 
     def discover_historical_imagery_services(self) -> List[Dict[str, str]]:
         """Discover all available historical imagery services in the account.
