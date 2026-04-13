@@ -998,11 +998,12 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
     stoy_kilde_map = {"Veitrafikk": "vei", "Bane/Tog": "bane", "Flystøy": "fly", "Industri/Næring": "industri"}
     stoy_api_kilde = stoy_kilde_map.get(stoykilde, "vei")
     
-    if st.button("Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True):
+    btn_col1, btn_col2 = st.columns([3, 1])
+    
+    if btn_col1.button("📡 Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True):
         with st.spinner(f"Henter støykart ({stoy_api_kilde})..."):
             stoy_img, stoy_err = fetch_stoykart_image(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
             if stoy_img:
-                # Composite transparent PNG onto white background for visibility
                 if stoy_img.mode == "RGBA":
                     bg = Image.new("RGB", stoy_img.size, (255, 255, 255))
                     bg.paste(stoy_img, mask=stoy_img.split()[3])
@@ -1016,6 +1017,110 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
             contours = fetch_stoykart_contours(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
             if contours:
                 st.session_state["stoykart_contours"] = contours
+    
+    if btn_col2.button("🔍 Diagnostikk", key="diag_gdo", use_container_width=True):
+        st.markdown("---")
+        st.markdown("**Geodata Online diagnostikk:**")
+        
+        # Steg 1: Env vars
+        gdo_u = os.environ.get("GEODATA_ONLINE_USER", "")
+        gdo_p = os.environ.get("GEODATA_ONLINE_PASS", "")
+        if gdo_u:
+            st.caption(f"✅ GEODATA_ONLINE_USER = '{gdo_u[:3]}***' ({len(gdo_u)} tegn)")
+        else:
+            st.error("❌ GEODATA_ONLINE_USER er IKKE satt i miljøvariabler")
+        if gdo_p:
+            st.caption(f"✅ GEODATA_ONLINE_PASS = satt ({len(gdo_p)} tegn)")
+        else:
+            st.error("❌ GEODATA_ONLINE_PASS er IKKE satt")
+        
+        # Steg 2: Token
+        st.caption("Prøver å hente token...")
+        token = _get_geodata_token()
+        if token:
+            st.caption(f"✅ Token hentet OK (lengde: {len(token)} tegn, starter med: {token[:10]}...)")
+        else:
+            st.error("❌ Token-generering feilet!")
+            # Debug: prøv manuelt og vis feilmelding
+            try:
+                debug_resp = requests.post(
+                    "https://services.geodataonline.no/arcgis/tokens/generateToken",
+                    data={"username": gdo_u, "password": gdo_p, "client": "requestip", "f": "json"},
+                    timeout=10
+                )
+                st.caption(f"   HTTP status: {debug_resp.status_code}")
+                st.caption(f"   Respons: {debug_resp.text[:300]}")
+            except Exception as e:
+                st.caption(f"   Feil: {e}")
+        
+        if token:
+            # Steg 3: Liste lag i DOK Forurensning
+            st.caption("Henter lag-liste fra DOK Forurensning...")
+            try:
+                layers_resp = requests.get(f"{DOK_FORURENSNING_URL}?f=json&token={token}", timeout=10)
+                st.caption(f"   HTTP status: {layers_resp.status_code}")
+                if layers_resp.status_code == 200:
+                    svc = layers_resp.json()
+                    layers = svc.get("layers", [])
+                    st.caption(f"✅ Fant {len(layers)} lag i tjenesten:")
+                    for lyr in layers[:30]:
+                        name = lyr.get("name", "?")
+                        lid = lyr.get("id", "?")
+                        vis = "👁️" if lyr.get("defaultVisibility", False) else "  "
+                        is_noise = any(w in name.lower() for w in ["støy", "stoy", "noise", "lden", "vei", "bane"])
+                        prefix = "🔊" if is_noise else "  "
+                        st.caption(f"   {vis} {prefix} Lag {lid}: {name}")
+                else:
+                    st.caption(f"   Respons: {layers_resp.text[:300]}")
+            except Exception as e:
+                st.error(f"   Feil: {e}")
+            
+            # Steg 4: Prøv MapServer export
+            st.caption("Prøver MapServer export...")
+            try:
+                easting, northing = _latlon_to_utm33(stoy_lat, stoy_lon)
+                bbox = (easting - stoy_buffer, northing - stoy_buffer, 
+                        easting + stoy_buffer, northing + stoy_buffer)
+                st.caption(f"   UTM33 bbox: {bbox[0]:.0f}, {bbox[1]:.0f} → {bbox[2]:.0f}, {bbox[3]:.0f}")
+                
+                xmin, ymin, xmax, ymax = bbox
+                export_params = {
+                    "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+                    "bboxSR": "25833", "imageSR": "25833",
+                    "size": "800,600", "format": "png32", 
+                    "transparent": "true", "f": "image",
+                    "token": token,
+                }
+                export_resp = requests.get(f"{DOK_FORURENSNING_URL}/export", 
+                                           params=export_params, timeout=20)
+                st.caption(f"   HTTP status: {export_resp.status_code}")
+                st.caption(f"   Content-Type: {export_resp.headers.get('content-type', 'ukjent')}")
+                st.caption(f"   Størrelse: {len(export_resp.content)} bytes")
+                
+                if export_resp.content[:1] == b'{':
+                    st.error(f"   ❌ JSON-feilrespons: {export_resp.text[:300]}")
+                elif len(export_resp.content) > 500:
+                    test_img = Image.open(io.BytesIO(export_resp.content)).convert("RGBA")
+                    st.caption(f"   Bildestørrelse: {test_img.size}")
+                    alpha = np.array(test_img.split()[3])
+                    non_transp = np.count_nonzero(alpha > 10)
+                    total = alpha.size
+                    st.caption(f"   Ikke-transparente piksler: {non_transp} av {total} ({100*non_transp/total:.1f}%)")
+                    if non_transp > 50:
+                        st.success(f"✅ Bildet har innhold!")
+                        bg = Image.new("RGBA", test_img.size, (245, 245, 240, 255))
+                        result = Image.alpha_composite(bg, test_img)
+                        st.image(result.convert("RGB"), caption="Test-bilde fra DOK Forurensning", use_container_width=True)
+                    else:
+                        st.warning("⚠️ Bildet er nesten helt transparent — ingen støydata synlig i dette området")
+                        # Vis uansett
+                        bg = Image.new("RGBA", test_img.size, (245, 245, 240, 255))
+                        result = Image.alpha_composite(bg, test_img)
+                        st.image(result.convert("RGB"), caption="Test-bilde (nesten tomt)", use_container_width=True)
+                else:
+                    st.warning(f"   ⚠️ For lite data: {len(export_resp.content)} bytes")
+            except Exception as e:
+                st.error(f"   Export feilet: {e}")
     
     if "stoykart_image" in st.session_state:
         st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online", use_container_width=True)
