@@ -343,11 +343,11 @@ def fetch_nib_historisk_ortofoto(bbox: tuple) -> tuple:
 
 
 def fetch_historical_ortofoto(bbox: tuple) -> dict:
-    """Fetch historical aerial imagery from all available sources.
+    """Fetch historical aerial imagery from GeomapBilder3 mosaic dataset.
     
-    Priority:
-    1. Norge i Bilder prosjekter WMS (ekte historiske flybilder, 1947+)
-    2. Geodata Online GeomapBilder variants (fallback — nyere årganger)
+    GeomapBilder3 is an ImageServer containing ALL Norge i Bilder projects.
+    We query the mosaic catalog to find the oldest raster covering our bbox,
+    then lock onto it via mosaicRule to get the actual historical image.
     
     Returns dict with keys: image, source, year, log
     """
@@ -355,10 +355,26 @@ def fetch_historical_ortofoto(bbox: tuple) -> dict:
 
     # Expand bbox for historical imagery (parcel bounds might be too tight)
     minx, miny, maxx, maxy = bbox
-    buf = 100.0  # 100m buffer
+    buf = 100.0
     expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
 
-    # Source 1: Norge i Bilder prosjekter — ekte historiske flybilder
+    # Source 1: GeomapBilder3 mosaic query — oldest available project
+    if _GDO_TOKEN_OK:
+        try:
+            img, src, year = _gdo.fetch_historical_ortofoto(
+                bbox=expanded_bbox, buffer_m=0, width=1200, height=1200)
+            if img:
+                result["image"] = img
+                result["source"] = src
+                result["year"] = year
+                result["log"].append(f"✅ Historisk ortofoto: {src} (år {year})")
+                return result
+            else:
+                result["log"].append(f"⚠️ {src}")
+        except Exception as e:
+            result["log"].append(f"⚠️ GeomapBilder3 feilet: {str(e)[:80]}")
+
+    # Source 2: Norge i Bilder prosjekter WMS (fallback if GeomapBilder3 fails)
     try:
         img, src, year = fetch_nib_historisk_ortofoto(expanded_bbox)
         if img:
@@ -371,25 +387,6 @@ def fetch_historical_ortofoto(bbox: tuple) -> dict:
             result["log"].append(f"⚠️ {src}")
     except Exception as e:
         result["log"].append(f"⚠️ Norge i Bilder feilet: {str(e)[:80]}")
-
-    # Source 2: Geodata Online GeomapBilder variants (not truly historical, but different vintage)
-    if _GDO_TOKEN_OK:
-        try:
-            from geodata_client import GEOMAP_BILDER_HISTORICAL_CANDIDATES
-            for service, label in GEOMAP_BILDER_HISTORICAL_CANDIDATES:
-                try:
-                    img_bytes = _gdo._image_export(service, expanded_bbox, width=1200, height=1200)
-                    if img_bytes and len(img_bytes) > 2000:
-                        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                        result["image"] = img
-                        result["source"] = label
-                        result["log"].append(f"✅ Historisk ortofoto (fallback): {label}")
-                        return result
-                except Exception:
-                    continue
-            result["log"].append("⚠️ Geodata Online historisk: kandidattjenester ga ingen data")
-        except ImportError:
-            pass
 
     result["log"].append("❌ Historisk flyfoto: Ingen kilde tilgjengelig — bruk manuell opplasting")
     return result
