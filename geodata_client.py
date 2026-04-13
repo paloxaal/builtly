@@ -634,17 +634,17 @@ class GeodataOnlineClient:
             data = self._arcgis_json(
                 query_url,
                 params={
-                    "where": "Category=1 AND aar >= 1935",
+                    "where": "Category=1 AND aar>=1935",
                     "geometry": _bbox_string(bounds),
                     "geometryType": "esriGeometryEnvelope",
                     "inSR": str(DEFAULT_SRID),
                     "spatialRel": "esriSpatialRelIntersects",
-                    "outFields": "OBJECTID,Name,aar,src_prosjektnavn,geomap_prosjektnavn,src_foto_date",
+                    "outFields": "OBJECTID,aar,src_prosjektnavn",
                     "returnGeometry": "false",
                     "orderByFields": "aar ASC",
-                    "resultRecordCount": "50",
+                    "resultRecordCount": "20",
                 },
-                timeout=20,
+                timeout=45,
             )
         except Exception as exc:
             return None, f"GeomapBilder3 query feilet: {str(exc)[:80]}", None
@@ -659,7 +659,7 @@ class GeodataOnlineClient:
         for feat in features:
             attrs = feat.get("attributes", {})
             oid = attrs.get("OBJECTID")
-            name = str(attrs.get("src_prosjektnavn") or attrs.get("geomap_prosjektnavn") or attrs.get("Name") or "")
+            name = str(attrs.get("src_prosjektnavn") or "")
             year = _safe_int(attrs.get("aar"), 9999)
             
             # Skip satellite imagery — we want actual aerial photos
@@ -697,7 +697,7 @@ class GeodataOnlineClient:
                         "mosaicRule": mosaic_rule,
                         "token": self.get_token(),
                     },
-                    timeout=20,
+                    timeout=30,
                 )
                 if resp.status_code == 200 and len(resp.content) > 2000:
                     ctype = resp.headers.get("Content-Type", "")
