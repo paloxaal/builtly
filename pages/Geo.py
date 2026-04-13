@@ -1130,6 +1130,13 @@ class BuiltlyCorporatePDF(FPDF):
         if self.get_y() + needed_height > 272:
             self.add_page()
 
+    def fill_or_break(self, min_useful_mm: float = 50):
+        """If remaining page space is too small for useful content, break to next page.
+        Prevents ugly whitespace gaps when next element will trigger a page break anyway."""
+        remaining = 272 - self.get_y()
+        if 5 < remaining < min_useful_mm:
+            self.add_page()
+
     def body_paragraph(self, text, first=False):
         text = ironclad_text_formatter(text)
         if not text: return
@@ -1181,7 +1188,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.ln(0.4)
 
     def section_title(self, title: str):
-        self.ensure_space(50) # Sikrer plass til overskrift + minst noen linjer innhold (unngår ensomme overskrifter)
+        self.ensure_space(65) # Sikrer plass til overskrift + minst 3-4 linjer innhold
         self.ln(2)
         title = ironclad_text_formatter(title)
         num_match = re.match(r"^(\d+\.?\d*)\s*(.*)$", title)
@@ -1315,6 +1322,7 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_text_color(104, 109, 116)
             self.multi_cell(width, 4, clean_pdf_text(caption), 0, "L")
         self.ln(6)
+        self.fill_or_break(45)
 
 
 def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_text):
@@ -1612,6 +1620,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                             pdf.set_xy(x, start_y)
                             pdf.figure_image(path, width=82, caption=f"Figur {fig_num + j}. {caption}")
                         pdf.set_y(start_y + 82 * (img.height / max(img.width, 1)) + 14)
+                        pdf.fill_or_break(50)
 
         if title.startswith("4.") and not lab_package.get("source_overview_df", pd.DataFrame()).empty:
             # Låser overskrift til tabellbilde
@@ -1631,7 +1640,7 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                 pdf.table_image(save_temp_image(top_table), width=170, caption="Tabell 2. Sammendrag av styrende funn i opplastet laboratoriedata.")
 
             if not (excerpt_df := lab_package.get("excerpt_df", pd.DataFrame())).empty:
-                pdf.ensure_space(80)
+                pdf.fill_or_break(60)
                 preview = excerpt_df.head(12).copy()
                 preview_img = render_table_image(preview, title="Analyseresultater og massebeskrivelser (utdrag)", subtitle="Fremstilt som rapporttabell i stedet for rå tekstutskrift", row_class_column="Høyeste klasse" if "Høyeste klasse" in preview.columns else None, cell_fill_lookup={(ridx, col): fill for (ridx, col), fill in lab_package.get("cell_fill_lookup", {}).items() if ridx < len(preview)}, note="Celler med farge markerer klassifiserte analyseresultater for de mest styrende parameterne.")
                 pdf.table_image(save_temp_image(preview_img), width=170, caption="Tabell 3. Laboratoriedata presentert i vedleggsformat med klassifiserte nøkkelparametere.")
@@ -2010,6 +2019,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
 
         prompt = f"""
         Du er Builtly RIG-M AI, en presis senior miljørådgiver og geotekniker.
+        VIKTIG FORMATERING: Bruk hierarkiske kulepunkter. Hovedpunkter starter med "- " (bindestrek mellomrom). Underpunkter starter med "  - " (to mellomrom, bindestrek, mellomrom). Skriv ALDRI en overskrift som kulepunkt (f.eks. IKKE "- Flom og skred:" etterfulgt av underpunkter). Bruk heller "## Flom og skred" som underoverskrift på egen linje, så kulepunktene under.
         Skriv en formell, stram og troverdig "Miljøteknisk grunnundersøkelse og tiltaksplan for forurenset grunn" for:
 
         PROSJEKT: {pd_state['p_name']} ({pd_state['b_type']}, {pd_state['bta']} m2)
