@@ -399,14 +399,21 @@ def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600,
     return None, None
 
 
-def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=None):
+def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=None, layers=None):
+    """Fetch image from ArcGIS MapServer export.
+    
+    Args:
+        layers: Optional string like "show:0,1,2" to control which sublayers are visible.
+                If None, shows all layers.
+    """
     xmin, ymin, xmax, ymax = bbox_25833
     params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
               "size": f"{width},{height}", "format": "png", "transparent": "true", "f": "image"}
     if token: params["token"] = token
+    if layers: params["layers"] = layers
     try:
         resp = requests.get(f"{service_url}/export", params=params, timeout=15)
-        if resp.status_code == 200 and len(resp.content) > 1000:
+        if resp.status_code == 200 and len(resp.content) > 500:
             ctype = resp.headers.get("content-type", "")
             if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
                 return Image.open(io.BytesIO(resp.content)).convert("RGBA")
@@ -424,6 +431,36 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
         return None, "Koordinatkonvertering feilet"
 
     errors = []
+
+    # --- Source 1: Geodata Online DOK Forurensning (har støykartlag som sublayers) ---
+    try:
+        from geodata_client import GeodataOnlineClient
+        gdo = GeodataOnlineClient()
+        if gdo.is_available():
+            token = gdo.get_token()
+            dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+
+            # Try showing ALL layers first (some noise layers may not be default visible)
+            img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token, layers="show")
+            if img:
+                return img, None
+
+            # Try specific layer ranges (noise sublayers vary by service config)
+            for layer_spec in [
+                "show:0,1,2,3,4,5,6,7,8,9,10",  # First 10 layers
+                "show:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20",  # First 20
+            ]:
+                img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token, layers=layer_spec)
+                if img:
+                    return img, None
+
+            errors.append("DOK Forurensning: ingen støydata synlig i dette området")
+    except ImportError:
+        errors.append("geodata_client mangler")
+    except Exception as e:
+        errors.append(f"DOK Forurensning: {str(e)[:60]}")
+
+    # --- Source 2: Geonorge WMS (krever Norge digitalt-tilgang via Geodata Online) ---
     gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
     gdo_pass = os.environ.get("GEODATA_ONLINE_PASS", "")
     gdo_auth = (gdo_user, gdo_pass) if gdo_user and gdo_pass else None
@@ -442,22 +479,7 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
     for wms_url, layer_candidates in wms_sources.get(kilde.lower(), []):
         img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height, auth=gdo_auth)
         if img: return img, None
-        if gdo_auth:
-            img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height)
-            if img: return img, None
         errors.append(f"WMS {wms_url.split('/')[-1]}: ingen treff")
-
-    try:
-        from geodata_client import GeodataOnlineClient
-        gdo = GeodataOnlineClient()
-        if gdo.is_available():
-            token = gdo.get_token()
-            dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-            img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token)
-            if img: return img, None
-            errors.append("Geodata Online DOK: ingen data")
-    except (ImportError, Exception) as e:
-        if str(e): errors.append(f"Geodata: {str(e)[:60]}")
 
     return None, f"Kunne ikke hente støykart: {'; '.join(errors)}"
 
