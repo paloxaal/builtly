@@ -399,29 +399,49 @@ def _utm33_to_latlon(easting: float, northing: float) -> tuple:
 
 
 def _geocode_project_address(adresse: str, kommune: str) -> dict:
-    """Geokod prosjektadresse til UTM33 easting/northing via Geodata Online.
-    Returnerer dict med easting, northing, label, ok."""
+    """Geokod prosjektadresse til UTM33. Prøver Geodata Online først, deretter Nominatim."""
+    
+    # Forsøk 1: Geodata Online GeocodeServer
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
-        if not gdo.is_available():
-            return {"ok": False, "error": "Geodata Online ikke tilgjengelig"}
-        results = gdo.address_search(adresse, kommune, limit=1)
-        if not results:
-            return {"ok": False, "error": f"Fant ingen treff for '{adresse}, {kommune}'"}
-        hit = results[0]
-        x, y = hit.get("x"), hit.get("y")
-        if x and y:
-            return {
-                "ok": True, 
-                "easting": float(x), 
-                "northing": float(y),
-                "label": hit.get("label", f"{adresse}, {kommune}"),
-                "score": hit.get("score", 0),
-            }
-        return {"ok": False, "error": "Geokoding ga ingen koordinater"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:80]}
+        if gdo.is_available():
+            results = gdo.address_search(adresse, kommune, limit=1)
+            if results:
+                hit = results[0]
+                x, y = hit.get("x"), hit.get("y")
+                if x and y:
+                    return {
+                        "ok": True, "easting": float(x), "northing": float(y),
+                        "label": hit.get("label", f"{adresse}, {kommune}"),
+                    }
+    except Exception:
+        pass  # Geodata geocoder feilet (403 etc.) — prøv Nominatim
+    
+    # Forsøk 2: OpenStreetMap Nominatim (gratis, ingen auth)
+    try:
+        query = f"{adresse}, {kommune}, Norway"
+        nom_resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "json", "limit": "1", "countrycodes": "no"},
+            headers={"User-Agent": "Builtly/1.0"},
+            timeout=10,
+        )
+        if nom_resp.status_code == 200:
+            results = nom_resp.json()
+            if results:
+                lat = float(results[0]["lat"])
+                lon = float(results[0]["lon"])
+                # Konverter til UTM33
+                easting, northing = _latlon_to_utm33(lat, lon)
+                return {
+                    "ok": True, "easting": easting, "northing": northing,
+                    "label": results[0].get("display_name", query),
+                }
+    except Exception:
+        pass
+    
+    return {"ok": False, "error": f"Kunne ikke geokode '{adresse}, {kommune}'"}
 
 
 def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600, auth=None, extra_params=None):
@@ -1026,8 +1046,8 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
     
     st.markdown("##### Automatisk støykart fra Geodata Online")
     
-    # Auto-geokod prosjektadressen til UTM33 (skjer kun én gang)
-    if "stoy_utm" not in st.session_state:
+    # Auto-geokod prosjektadressen til UTM33 (skjer kun én gang ved suksess)
+    if "stoy_utm" not in st.session_state or not st.session_state["stoy_utm"].get("ok"):
         proj_adresse = pd_state.get("adresse", "")
         proj_kommune = pd_state.get("kommune", "")
         if proj_adresse:
