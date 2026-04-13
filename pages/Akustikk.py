@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    _HAS_GENAI = True
+except ImportError:
+    _HAS_GENAI = False
+    genai = None
 from fpdf import FPDF
 import os
 import base64
@@ -17,12 +22,81 @@ from pathlib import Path
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk (RIAku) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
-google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key:
+# --- AI Model: Prefer Anthropic Claude, fallback to Google Gemini ---
+anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+google_key = os.environ.get("GOOGLE_API_KEY", "")
+
+_USE_CLAUDE = False
+_anthropic_client = None
+
+if anthropic_key:
+    try:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
+        _USE_CLAUDE = True
+    except ImportError:
+        pass
+
+if not _USE_CLAUDE and google_key and _HAS_GENAI:
     genai.configure(api_key=google_key)
-else:
-    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
+elif not _USE_CLAUDE and not google_key:
+    st.error("Kritisk feil: Fant ingen ANTHROPIC_API_KEY eller GOOGLE_API_KEY! Sjekk Render miljøvariabler.")
     st.stop()
+
+
+def _pil_to_base64(img: Image.Image, max_size: int = 1200) -> str:
+    """Konverter PIL Image til base64 JPEG for Anthropic API."""
+    img = img.copy()
+    img.thumbnail((max_size, max_size))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def ai_generate(prompt: str, images: list = None, max_tokens: int = 8000) -> str:
+    """Unified AI call — Claude (primary) or Gemini (fallback).
+    
+    Args:
+        prompt: Text prompt
+        images: List of PIL Image objects
+        max_tokens: Max response tokens
+    
+    Returns:
+        Response text string
+    """
+    if _USE_CLAUDE:
+        content = []
+        if images:
+            for img in images:
+                b64 = _pil_to_base64(img)
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+                })
+        content.append({"type": "text", "text": prompt})
+        
+        # Velg modell: bruk env var eller default
+        claude_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+        
+        response = _anthropic_client.messages.create(
+            model=claude_model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": content}]
+        )
+        return response.content[0].text
+    else:
+        # Gemini fallback
+        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        valgt = valid_models[0]
+        for fav in ['models/gemini-2.5-flash-preview-04-17', 'models/gemini-2.5-pro-preview-03-25', 
+                    'models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+            if fav in valid_models: valgt = fav; break
+        model = genai.GenerativeModel(valgt)
+        parts = [prompt] + (images or [])
+        res = model.generate_content(parts)
+        return res.text
 
 try:
     import fitz  
@@ -402,21 +476,32 @@ def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600,
 def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=None, layers=None):
     """Fetch image from ArcGIS MapServer export.
     
-    Args:
-        layers: Optional string like "show:0,1,2" to control which sublayers are visible.
-                If None, shows all layers.
+    Returns RGB image composited on light gray background (not transparent).
+    Returns None if image has no visible content.
     """
     xmin, ymin, xmax, ymax = bbox_25833
     params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
-              "size": f"{width},{height}", "format": "png", "transparent": "true", "f": "image"}
+              "size": f"{width},{height}", "format": "png32", "transparent": "true", "f": "image"}
     if token: params["token"] = token
     if layers: params["layers"] = layers
     try:
-        resp = requests.get(f"{service_url}/export", params=params, timeout=15)
+        resp = requests.get(f"{service_url}/export", params=params, timeout=20)
         if resp.status_code == 200 and len(resp.content) > 500:
             ctype = resp.headers.get("content-type", "")
             if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
-                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+                overlay = Image.open(io.BytesIO(resp.content)).convert("RGBA")
+                
+                # Sjekk om bildet har synlig innhold (ikke bare transparent)
+                alpha = np.array(overlay.split()[3])  # Alpha-kanal
+                non_transparent_pixels = np.count_nonzero(alpha > 10)
+                
+                if non_transparent_pixels < 50:
+                    return None  # Bildet er helt tomt/transparent
+                
+                # Composit på lys grå bakgrunn for synlighet
+                bg = Image.new("RGBA", overlay.size, (245, 245, 240, 255))
+                result = Image.alpha_composite(bg, overlay)
+                return result.convert("RGB")
     except Exception:
         pass
     return None
@@ -432,35 +517,70 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
 
     errors = []
 
-    # --- Source 1: Geodata Online DOK Forurensning (har støykartlag som sublayers) ---
+    # --- Source 1: Geodata Online DOK Forurensning ---
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
         if gdo.is_available():
             token = gdo.get_token()
             dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-
-            # Try showing ALL layers first (some noise layers may not be default visible)
-            img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token, layers="show")
-            if img:
-                return img, None
-
-            # Try specific layer ranges (noise sublayers vary by service config)
-            for layer_spec in [
-                "show:0,1,2,3,4,5,6,7,8,9,10",  # First 10 layers
-                "show:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20",  # First 20
-            ]:
-                img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token, layers=layer_spec)
-                if img:
-                    return img, None
-
-            errors.append("DOK Forurensning: ingen støydata synlig i dette området")
+            
+            # Strategi: Prøv ulike layer-kombinasjoner
+            # ArcGIS REST layers-parameter format: "show:0,1,2,3"
+            layer_strategies = [
+                None,                    # Default synlige lag
+                "show:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20",
+            ]
+            
+            noise_overlay = None
+            for layer_spec in layer_strategies:
+                noise_overlay = _fetch_arcgis_image(dok_url, bbox, width, height, 
+                                                      token=token, layers=layer_spec)
+                if noise_overlay is not None:
+                    break
+            
+            if noise_overlay is not None:
+                # Prøv å hente bakgrunnskart for å compositte under støykartet
+                basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
+                try:
+                    xmin, ymin, xmax, ymax = bbox
+                    bg_params = {
+                        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+                        "bboxSR": "25833", "imageSR": "25833",
+                        "size": f"{width},{height}",
+                        "format": "png", "f": "image",
+                        "token": token,
+                    }
+                    bg_resp = requests.get(f"{basemap_url}/export", params=bg_params, timeout=15)
+                    if bg_resp.status_code == 200 and len(bg_resp.content) > 1000:
+                        basemap = Image.open(io.BytesIO(bg_resp.content)).convert("RGB")
+                        # Composit støykart over bakgrunnskart
+                        # Re-fetch noise as RGBA for overlay
+                        noise_params = {
+                            "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+                            "bboxSR": "25833", "imageSR": "25833",
+                            "size": f"{width},{height}",
+                            "format": "png32", "transparent": "true", "f": "image",
+                            "token": token,
+                        }
+                        noise_resp = requests.get(f"{dok_url}/export", params=noise_params, timeout=15)
+                        if noise_resp.status_code == 200:
+                            noise_rgba = Image.open(io.BytesIO(noise_resp.content)).convert("RGBA")
+                            basemap_rgba = basemap.convert("RGBA")
+                            result = Image.alpha_composite(basemap_rgba, noise_rgba)
+                            return result.convert("RGB"), None
+                except Exception:
+                    pass  # Bakgrunnskart feilet, bruk noise_overlay direkte
+                
+                return noise_overlay, None
+            else:
+                errors.append("DOK Forurensning: ingen støydata synlig i dette området")
     except ImportError:
-        errors.append("geodata_client mangler")
+        errors.append("geodata_client mangler — sett opp GEODATA_ONLINE_USER/PASS")
     except Exception as e:
-        errors.append(f"DOK Forurensning: {str(e)[:60]}")
+        errors.append(f"DOK Forurensning: {str(e)[:80]}")
 
-    # --- Source 2: Geonorge WMS (krever Norge digitalt-tilgang via Geodata Online) ---
+    # --- Source 2: Geonorge WMS ---
     gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
     gdo_pass = os.environ.get("GEODATA_ONLINE_PASS", "")
     gdo_auth = (gdo_user, gdo_pass) if gdo_user and gdo_pass else None
@@ -478,7 +598,11 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
 
     for wms_url, layer_candidates in wms_sources.get(kilde.lower(), []):
         img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height, auth=gdo_auth)
-        if img: return img, None
+        if img: 
+            # WMS returnerer også ofte transparent — composit på bakgrunn
+            bg = Image.new("RGBA", img.size, (245, 245, 240, 255))
+            result = Image.alpha_composite(bg, img)
+            return result.convert("RGB"), None
         errors.append(f"WMS {wms_url.split('/')[-1]}: ingen treff")
 
     return None, f"Kunne ikke hente støykart: {'; '.join(errors)}"
@@ -1015,17 +1139,9 @@ if st.button("Kjør Akustisk Analyse (RIAku)", type="primary", use_container_wid
     reg_summary = "; ".join(reg_text) if reg_text else "Ingen spesifikke reguleringsbestemmelser angitt"
     
     with st.spinner("PASS 1: AI leser støykart og ekstraherer dB-verdier per fasade..."):
-        try:
-            valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        except:
-            st.error("Kunne ikke koble til Google AI.")
-            st.stop()
-
-        valgt_modell = valid_models[0]
-        for fav in ['models/gemini-2.5-flash-preview-04-17', 'models/gemini-2.5-pro-preview-03-25', 'models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if fav in valid_models: valgt_modell = fav; break
         
-        model = genai.GenerativeModel(valgt_modell)
+        ai_engine_label = "Claude (Anthropic)" if _USE_CLAUDE else "Gemini (Google)"
+        st.caption(f"Bruker: {ai_engine_label}")
 
         # ═══════════════════════════════════════════════════════════
         # PASS 1: STRUKTURERT DATAEKSTRAKSJON
@@ -1074,8 +1190,7 @@ Svar KUN med JSON i dette formatet:
         pass1_parts = [pass1_prompt] + images_for_ai
         
         try:
-            pass1_res = model.generate_content(pass1_parts)
-            pass1_raw = pass1_res.text
+            pass1_raw = ai_generate(pass1_prompt, images_for_ai)
             
             # Parse JSON fra pass 1
             json_match = re.search(r'```json\s*(.*?)\s*```', pass1_raw, re.DOTALL)
@@ -1266,8 +1381,7 @@ Regler for JSON:
         pass3_parts = [pass3_prompt] + images_for_ai
 
         try:
-            res = model.generate_content(pass3_parts)
-            ai_raw_text = res.text
+            ai_raw_text = ai_generate(pass3_prompt, images_for_ai)
             
             # --- Tegne markører ---
             clean_text = ai_raw_text
