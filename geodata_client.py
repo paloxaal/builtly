@@ -630,16 +630,17 @@ class GeodataOnlineClient:
         # Step 1: Query the mosaic catalog for rasters intersecting our bbox
         try:
             query_url = self._service_url(service, "query")
-            import re as _re
             data = self._arcgis_json(
                 query_url,
                 params={
+                    "where": "Category=1",
                     "geometry": _bbox_string(bounds),
                     "geometryType": "esriGeometryEnvelope",
+                    "inSR": str(DEFAULT_SRID),
                     "spatialRel": "esriSpatialRelIntersects",
-                    "outFields": "OBJECTID,Name,MinPS,MaxPS,Category,LowPS,HighPS,GroupName,Tag,ProductName,AcquisitionDate",
+                    "outFields": "OBJECTID,Name,aar,src_prosjektnavn,geomap_prosjektnavn,src_foto_date",
                     "returnGeometry": "false",
-                    "orderByFields": "AcquisitionDate ASC",
+                    "orderByFields": "aar ASC",
                     "resultRecordCount": "50",
                 },
                 timeout=20,
@@ -651,30 +652,14 @@ class GeodataOnlineClient:
         if not features:
             return None, "GeomapBilder3: ingen flybildeprosjekter funnet for området", None
 
-        # Step 2: Extract year from each raster and sort oldest first
+        # Step 2: Extract year and sort oldest first
         rasters = []
         for feat in features:
             attrs = feat.get("attributes", {})
             oid = attrs.get("OBJECTID")
-            name = str(attrs.get("Name") or attrs.get("ProductName") or attrs.get("GroupName") or attrs.get("Tag") or "")
-            
-            # Try to extract year from name (e.g. "Trondheim 1991", "Heimdal-Tiller 1991")
-            import re as _re
-            year_match = _re.search(r'((?:19|20)\d{2})', name)
-            year = int(year_match.group(1)) if year_match else 9999
-            
-            # Also check AcquisitionDate (epoch ms)
-            acq_date = attrs.get("AcquisitionDate")
-            if acq_date and isinstance(acq_date, (int, float)) and acq_date > 0:
-                import datetime
-                try:
-                    dt = datetime.datetime.fromtimestamp(acq_date / 1000.0)
-                    if year == 9999:
-                        year = dt.year
-                except Exception:
-                    pass
-
-            if oid is not None:
+            name = str(attrs.get("src_prosjektnavn") or attrs.get("geomap_prosjektnavn") or attrs.get("Name") or "")
+            year = _safe_int(attrs.get("aar"), 9999)
+            if oid is not None and year < 9999:
                 rasters.append({"oid": oid, "name": name, "year": year})
 
         if not rasters:
