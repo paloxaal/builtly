@@ -1199,7 +1199,8 @@ if st.button("Kjør Akustisk Analyse (RIAku)", type="primary", use_container_wid
     saved_images_clean = [img.copy() for img in images_for_ai]
 
     # --- Støykildetype for beregninger ---
-    kilde_type = stoy_api_kilde if stoy_api_kilde != "industri" else "vei"
+    stoy_kilde_map = {"Veitrafikk": "vei", "Bane/Tog": "bane", "Flystøy": "fly", "Industri/Næring": "industri", "Lite støy (Stille område)": "vei"}
+    kilde_type = stoy_kilde_map.get(stoykilde, "vei")
 
     # --- Reguleringsbestemmelser-sammendrag ---
     reg_text = []
