@@ -432,29 +432,46 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
 
     errors = []
 
-    # --- Source 1: Geodata Online DOK Forurensning (har støykartlag som sublayers) ---
+    # --- Source 1: Geodata Online DOK Forurensning ---
+    # Bruker NØYAKTIG SAMME tilnærming som geodata_client._image_export() som fungerer i Geo-modulen
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
         if gdo.is_available():
             token = gdo.get_token()
             dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-
-            # Try showing ALL layers first (some noise layers may not be default visible)
-            # Støy-lag har ID-er i 200-serien (211=veg T-1442, 212=VegFlate, etc.)
-            STOEY_LAYERS = "show:211,212,203,204,205,206,213,214,207,208"
-            img = _fetch_arcgis_image(dok_url, bbox, width, height, token=token, layers=STOEY_LAYERS)
-            if img:
-                # Composit på hvit bakgrunn for synlighet (støykartet er transparent)
-                bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-                result = Image.alpha_composite(bg, img)
-                return result.convert("RGB"), None
-
-            errors.append("DOK Forurensning: ingen støydata synlig i dette området")
+            
+            STOEY_LAYERS = "show:201,202,211,212,203,204,205,206,213,214,207,208"
+            xmin, ymin, xmax, ymax = bbox
+            
+            # Matcher _image_export: format=png, transparent=false, bruker gdo.session
+            resp = gdo.session.get(
+                f"{dok_url}/export",
+                params={
+                    "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+                    "bboxSR": "25833",
+                    "imageSR": "25833",
+                    "size": f"{width},{height}",
+                    "format": "png",
+                    "transparent": "false",
+                    "layers": STOEY_LAYERS,
+                    "f": "image",
+                    "token": token,
+                },
+                timeout=20,
+            )
+            
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                ctype = resp.headers.get("Content-Type", "")
+                if resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
+                    img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+                    return img, None
+            
+            errors.append("DOK Forurensning: ingen støydata i dette området")
     except ImportError:
         errors.append("geodata_client mangler")
     except Exception as e:
-        errors.append(f"DOK Forurensning: {str(e)[:60]}")
+        errors.append(f"DOK Forurensning: {str(e)[:80]}")
 
     # --- Source 2: Geonorge WMS (krever Norge digitalt-tilgang via Geodata Online) ---
     gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
@@ -927,13 +944,7 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
         with st.spinner(f"Henter støykart ({stoy_api_kilde})..."):
             stoy_img, stoy_err = fetch_stoykart_image(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
             if stoy_img:
-                # Composite transparent PNG onto white background for visibility
-                if stoy_img.mode == "RGBA":
-                    bg = Image.new("RGB", stoy_img.size, (255, 255, 255))
-                    bg.paste(stoy_img, mask=stoy_img.split()[3])
-                    stoy_img = bg
-                else:
-                    stoy_img = stoy_img.convert("RGB")
+                stoy_img = stoy_img.convert("RGB")
                 st.session_state["stoykart_image"] = stoy_img
                 st.success("Støykart hentet!")
             else:
