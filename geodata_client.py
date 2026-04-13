@@ -628,12 +628,13 @@ class GeodataOnlineClient:
         service = "Geomap_UTM33_EUREF89/GeomapBilder3/ImageServer"
 
         # Step 1: Query the mosaic catalog for rasters intersecting our bbox
+        # Filter: Category=1 (Primary), aar >= 1935 (real aerial photos only)
         try:
             query_url = self._service_url(service, "query")
             data = self._arcgis_json(
                 query_url,
                 params={
-                    "where": "Category=1",
+                    "where": "Category=1 AND aar >= 1935",
                     "geometry": _bbox_string(bounds),
                     "geometryType": "esriGeometryEnvelope",
                     "inSR": str(DEFAULT_SRID),
@@ -652,14 +653,20 @@ class GeodataOnlineClient:
         if not features:
             return None, "GeomapBilder3: ingen flybildeprosjekter funnet for området", None
 
-        # Step 2: Extract year and sort oldest first
+        # Step 2: Extract year and sort oldest first, exclude satellite imagery
+        _satellite_keywords = ("sentinel", "landsat", "satellit", "satellite", "skyfri mosaikk")
         rasters = []
         for feat in features:
             attrs = feat.get("attributes", {})
             oid = attrs.get("OBJECTID")
             name = str(attrs.get("src_prosjektnavn") or attrs.get("geomap_prosjektnavn") or attrs.get("Name") or "")
             year = _safe_int(attrs.get("aar"), 9999)
-            if oid is not None and year < 9999:
+            
+            # Skip satellite imagery — we want actual aerial photos
+            if any(kw in name.lower() for kw in _satellite_keywords):
+                continue
+            
+            if oid is not None and 1935 <= year < 9999:
                 rasters.append({"oid": oid, "name": name, "year": year})
 
         if not rasters:
