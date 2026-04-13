@@ -130,30 +130,42 @@ def find_page(base_name: str) -> str:
     return ""
 
 
+def _find_dejavu_font(style: str = "") -> Optional[str]:
+    """Finn DejaVuSans TTF-font på systemet."""
+    suffix_map = {"": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf", "I": "DejaVuSans-Oblique.ttf", "BI": "DejaVuSans-BoldOblique.ttf"}
+    filename = suffix_map.get(style, "DejaVuSans.ttf")
+    search_dirs = [
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/dejavu",
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.expanduser("~/.fonts"),
+    ]
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+HAS_DEJAVU = _find_dejavu_font("") is not None
+
+
 def clean_pdf_text(text: Any) -> str:
     if text is None:
         return ""
     text = str(text)
-    rep = {
-        "–": "-",
-        "—": "-",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "…": "...",
-        "•": "*",
-        "²": "2",
-        "³": "3",
-        "ø": "o",
-        "Ø": "O",
-        "å": "a",
-        "Å": "A",
-        "æ": "ae",
-        "Æ": "AE",
-    }
-    for old, new in rep.items():
-        text = text.replace(old, new)
+    # Universelle typografi-erstatninger
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+    text = text.replace("\u2026", "...").replace("\u2022", "*")
+    if HAS_DEJAVU:
+        return text
+    # Fallback: latin-1 for Helvetica (mangler TTF-font)
+    text = text.replace("\u00b2", "2").replace("\u00b3", "3")
+    text = text.replace("\u00f8", "o").replace("\u00d8", "O")
+    text = text.replace("\u00e5", "a").replace("\u00c5", "A")
+    text = text.replace("\u00e6", "ae").replace("\u00c6", "AE")
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
@@ -3002,11 +3014,27 @@ def build_deterministic_report(
 
 
 # --- 5. PDF ---
+PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
+
+
+def _register_fonts(pdf: FPDF) -> None:
+    """Registrer DejaVuSans for UTF-8-støtte (æøå, ², ³) når tilgjengelig."""
+    if not HAS_DEJAVU:
+        return
+    for style in ["", "B", "I"]:
+        path = _find_dejavu_font(style)
+        if path:
+            try:
+                pdf.add_font("DejaVu", style, path, uni=True)
+            except Exception:
+                pass
+
+
 class BuiltlyProPDF(FPDF):
     def header(self) -> None:
         if self.page_no() > 1:
             self.set_y(15)
-            self.set_font("Helvetica", "B", 10)
+            self.set_font(PDF_FONT, "B", 10)
             self.set_text_color(26, 43, 72)
             self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: ARK-002"), 0, 1, "R")
             self.set_draw_color(200, 200, 200)
@@ -3015,9 +3043,9 @@ class BuiltlyProPDF(FPDF):
 
     def footer(self) -> None:
         self.set_y(-15)
-        self.set_font("Helvetica", "I", 8)
+        self.set_font(PDF_FONT, "I", 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 10, clean_pdf_text(f"UTKAST - KREVER FAGLIG KONTROLL | Side {self.page_no()}"), 0, 0, "C")
+        self.cell(0, 10, clean_pdf_text(f"UTKAST — KREVER FAGLIG KONTROLL | Side {self.page_no()}"), 0, 0, "C")
 
     def check_space(self, height: float) -> None:
         if self.get_y() + height > 270:
@@ -3027,13 +3055,13 @@ class BuiltlyProPDF(FPDF):
 
 
 def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]], widths: List[float]) -> None:
-    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_font(PDF_FONT, "B", 9)
     pdf.set_fill_color(232, 239, 247)
     for idx, header in enumerate(headers):
         pdf.cell(widths[idx], 8, clean_pdf_text(header), 1, 0, "C", fill=True)
     pdf.ln()
 
-    pdf.set_font("Helvetica", "", 8)
+    pdf.set_font(PDF_FONT, "", 8)
     for row in rows:
         pdf.check_space(8)
         for idx, value in enumerate(row):
@@ -3052,6 +3080,7 @@ def create_full_report_pdf(
     visual_attachments: List[Image.Image],
 ) -> bytes:
     pdf = BuiltlyProPDF()
+    _register_fonts(pdf)
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 25)
     pdf.set_auto_page_break(True, 25)
@@ -3061,11 +3090,11 @@ def create_full_report_pdf(
         pdf.image("logo.png", x=25, y=20, w=50)
 
     pdf.set_y(95)
-    pdf.set_font("Helvetica", "B", 22)
+    pdf.set_font(PDF_FONT, "B", 22)
     pdf.set_text_color(26, 43, 72)
     pdf.multi_cell(0, 12, clean_pdf_text("MULIGHETSSTUDIE OG TOMTEANALYSE (ARK)"), 0, "L")
     pdf.ln(2)
-    pdf.set_font("Helvetica", "", 16)
+    pdf.set_font(PDF_FONT, "", 16)
     pdf.set_text_color(0, 0, 0)
     pdf.multi_cell(0, 10, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
     pdf.ln(25)
@@ -3077,16 +3106,16 @@ def create_full_report_pdf(
         ("REGELVERK:", land),
     ]:
         pdf.set_x(25)
-        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_font(PDF_FONT, "B", 10)
         pdf.cell(50, 8, clean_pdf_text(label), 0, 0)
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(PDF_FONT, "", 10)
         pdf.cell(0, 8, clean_pdf_text(value), 0, 1)
 
     if options:
         pdf.add_page()
-        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_font(PDF_FONT, "B", 16)
         pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("NOKKELTALL FRA MOTOR"), 0, 1)
+        pdf.cell(0, 12, clean_pdf_text("NØKKELTALL FRA MOTOR"), 0, 1)
         pdf.ln(2)
         rows = []
         for option in options:
@@ -3109,7 +3138,7 @@ def create_full_report_pdf(
         )
 
     if option_images:
-        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_font(PDF_FONT, "B", 16)
         pdf.set_text_color(26, 43, 72)
         pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER"), 0, 1)
         pdf.ln(2)
@@ -3131,30 +3160,30 @@ def create_full_report_pdf(
             pdf.check_space(30)
             pdf.ln(6)
             pdf.set_x(25)
-            pdf.set_font("Helvetica", "B", 14)
+            pdf.set_font(PDF_FONT, "B", 14)
             pdf.set_text_color(26, 43, 72)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace("#", "").strip()))
             pdf.ln(1)
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(0, 0, 0)
         elif line.startswith("##"):
             pdf.check_space(20)
             pdf.ln(4)
             pdf.set_x(25)
-            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_font(PDF_FONT, "B", 12)
             pdf.set_text_color(50, 50, 50)
             pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace("#", "").strip()))
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(0, 0, 0)
         else:
             pdf.set_x(25)
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(PDF_FONT, "", 10)
             pdf.multi_cell(150, 5, ironclad_text_formatter(line))
 
     if visual_attachments:
         pdf.add_page()
         pdf.set_x(25)
-        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_font(PDF_FONT, "B", 16)
         pdf.set_text_color(26, 43, 72)
         pdf.cell(0, 12, clean_pdf_text("VEDLEGG: KART OG REFERANSER"), 0, 1)
         pdf.ln(2)
@@ -3172,7 +3201,7 @@ def create_full_report_pdf(
                     pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.set_y(pdf.get_y() + ratio_h + 4)
                 pdf.set_x(25)
-                pdf.set_font("Helvetica", "I", 9)
+                pdf.set_font(PDF_FONT, "I", 9)
                 pdf.set_text_color(100, 100, 100)
                 pdf.cell(0, 8, clean_pdf_text(f"Figur V-{idx}: visuelt grunnlag brukt i analysen."), 0, 1)
 
@@ -4094,6 +4123,228 @@ if "analysis_results" in st.session_state:
     )
     st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
+    # --- INTERAKTIV RADARDIAGRAM ---
+    st.markdown("<div class='section-header'>Visuell sammenligning</div>", unsafe_allow_html=True)
+    radar_data = json.dumps([
+        {
+            "name": opt.name.replace("Alt ", ""),
+            "typology": opt.typology,
+            "score": round(opt.score, 1),
+            "solar": round(opt.solar_score, 1),
+            "bta_pct": round(100.0 * opt.gross_bta_m2 / max(best.gross_bta_m2, 1.0), 1),
+            "open_space": round(opt.open_space_ratio * 100, 1),
+            "efficiency": round(opt.efficiency_ratio * 100, 1),
+            "target_fit": round(min(100.0, opt.target_fit_pct), 1),
+        }
+        for opt in options
+    ], ensure_ascii=False)
+    radar_html = f"""
+<div id="radar-chart" style="width:100%;height:420px;position:relative;overflow:hidden;">
+<canvas id="radarCanvas" style="width:100%;height:100%;"></canvas>
+</div>
+<script>
+(function() {{
+  const D = {radar_data};
+  const canvas = document.getElementById('radarCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth;
+  const H = 420;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  const axes = ['Score', 'Sol', 'BTA-treff', 'Frirom', 'Effektivitet', 'Måloppnåelse'];
+  const keys = ['score', 'solar', 'bta_pct', 'open_space', 'efficiency', 'target_fit'];
+  const colors = ['#38bdf8','#34d399','#f59e0b','#ef4444','#a78bfa','#ec4899','#06b6d4'];
+  const cx = W * 0.42, cy = H * 0.50, R = Math.min(W * 0.30, H * 0.40);
+  const n = axes.length;
+
+  function angle(i) {{ return (Math.PI * 2 * i / n) - Math.PI / 2; }}
+
+  // Grid
+  for (let r = 0.2; r <= 1.0; r += 0.2) {{
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {{
+      const a = angle(i % n);
+      const x = cx + Math.cos(a) * R * r, y = cy + Math.sin(a) * R * r;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }}
+    ctx.strokeStyle = 'rgba(120,145,170,0.15)'; ctx.stroke();
+  }}
+  // Axes + labels
+  ctx.font = '11px Inter, sans-serif'; ctx.fillStyle = '#9fb0c3';
+  for (let i = 0; i < n; i++) {{
+    const a = angle(i);
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    ctx.strokeStyle = 'rgba(120,145,170,0.2)'; ctx.stroke();
+    const lx = cx + Math.cos(a) * (R + 18), ly = cy + Math.sin(a) * (R + 18);
+    ctx.textAlign = Math.cos(a) > 0.1 ? 'left' : Math.cos(a) < -0.1 ? 'right' : 'center';
+    ctx.textBaseline = Math.sin(a) > 0.1 ? 'top' : Math.sin(a) < -0.1 ? 'bottom' : 'middle';
+    ctx.fillText(axes[i], lx, ly);
+  }}
+  // Data polygons
+  D.forEach((d, di) => {{
+    ctx.beginPath();
+    keys.forEach((k, i) => {{
+      const v = (d[k] || 0) / 100.0;
+      const a = angle(i);
+      const x = cx + Math.cos(a) * R * v, y = cy + Math.sin(a) * R * v;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }});
+    ctx.closePath();
+    const c = colors[di % colors.length];
+    ctx.fillStyle = c + '18'; ctx.fill();
+    ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.stroke();
+  }});
+  // Legend
+  const lgX = W * 0.78, lgY = 20;
+  ctx.font = 'bold 10px Inter, sans-serif';
+  D.forEach((d, i) => {{
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(lgX, lgY + i * 20, 12, 12);
+    ctx.fillStyle = '#c8d3df';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(d.name + ' (' + d.typology + ')', lgX + 18, lgY + i * 20 + 6);
+  }});
+}})();
+</script>
+"""
+    components.html(radar_html, height=440, scrolling=False)
+
+    # --- SIDE-BY-SIDE SAMMENLIGNING ---
+    st.markdown("<div class='section-header'>Sammenlign to alternativer</div>", unsafe_allow_html=True)
+    cmp_col1, cmp_col2 = st.columns(2)
+    opt_names = [opt.name for opt in options]
+    with cmp_col1:
+        cmp_a_name = st.selectbox("Alternativ A", opt_names, index=0, key="cmp_a")
+    with cmp_col2:
+        cmp_b_name = st.selectbox("Alternativ B", opt_names, index=min(1, len(opt_names)-1), key="cmp_b")
+    cmp_a = next((o for o in options if o.name == cmp_a_name), options[0])
+    cmp_b = next((o for o in options if o.name == cmp_b_name), options[-1])
+
+    def _delta_html(label: str, val_a: float, val_b: float, fmt: str = ".0f", unit: str = "", higher_better: bool = True) -> str:
+        diff = val_b - val_a
+        arrow = ""
+        if abs(diff) > 0.1:
+            is_better = (diff > 0) == higher_better
+            color = "#34d399" if is_better else "#f87171"
+            arrow = f"<span style='color:{color};font-size:0.8rem;margin-left:6px;'>{'▲' if diff > 0 else '▼'} {abs(diff):{fmt}}{unit}</span>"
+        return (
+            f"<div style='display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(120,145,170,0.1);'>"
+            f"<span style='color:#9fb0c3;font-size:0.9rem;'>{label}</span>"
+            f"<span style='color:#f5f7fb;font-weight:600;'>{val_a:{fmt}}{unit} vs {val_b:{fmt}}{unit}{arrow}</span>"
+            f"</div>"
+        )
+
+    cmp_html = (
+        f"<div style='background:rgba(255,255,255,0.02);border:1px solid rgba(120,145,170,0.15);border-radius:12px;padding:16px 20px;'>"
+        f"<div style='display:flex;justify-content:space-between;margin-bottom:12px;'>"
+        f"<span style='color:#38bdf8;font-weight:700;font-size:1.1rem;'>{cmp_a.name} ({cmp_a.typology})</span>"
+        f"<span style='color:#34d399;font-weight:700;font-size:1.1rem;'>{cmp_b.name} ({cmp_b.typology})</span>"
+        f"</div>"
+        + _delta_html("Score", cmp_a.score, cmp_b.score, ".1f", "/100")
+        + _delta_html("BTA", cmp_a.gross_bta_m2, cmp_b.gross_bta_m2, ",.0f", " m²")
+        + _delta_html("Salgbart areal", cmp_a.saleable_area_m2, cmp_b.saleable_area_m2, ",.0f", " m²")
+        + _delta_html("Boliger", cmp_a.unit_count, cmp_b.unit_count, ".0f")
+        + _delta_html("Solscore", cmp_a.solar_score, cmp_b.solar_score, ".0f", "/100")
+        + _delta_html("Sol uteareal", cmp_a.sunlit_open_space_pct, cmp_b.sunlit_open_space_pct, ".0f", "%")
+        + _delta_html("Etasjer", cmp_a.floors, cmp_b.floors, ".0f", "", False)
+        + _delta_html("Fotavtrykk", cmp_a.footprint_area_m2, cmp_b.footprint_area_m2, ",.0f", " m²", False)
+        + _delta_html("Parkering", cmp_a.parking_spaces, cmp_b.parking_spaces, ".0f")
+        + _delta_html("Vinterskygge kl.12", cmp_a.winter_noon_shadow_m, cmp_b.winter_noon_shadow_m, ".1f", " m", False)
+        + "</div>"
+    )
+    st.markdown(cmp_html, unsafe_allow_html=True)
+
+    # --- INTERAKTIV SOL/SKYGGE-KLOKKE ---
+    st.markdown("<div class='section-header'>Sol og skygge gjennom dagen</div>", unsafe_allow_html=True)
+    shadow_opt_name = st.selectbox("Velg alternativ for solanalyse", opt_names, index=0, key="shadow_opt")
+    shadow_opt = next((o for o in options if o.name == shadow_opt_name), options[0])
+    shadow_season = st.radio("Sesong", ["Vår/høst (mars)", "Vinter (desember)", "Sommer (juni)"], horizontal=True, key="shadow_season")
+    season_doy = {"Vår/høst (mars)": 80, "Vinter (desember)": 355, "Sommer (juni)": 172}.get(shadow_season, 80)
+
+    shadow_hours = list(range(7, 21))
+    shadow_fracs = []
+    for h in shadow_hours:
+        alt_deg = solar_altitude_deg(site_result.get("latitude_deg", 59.91), season_doy, float(h))
+        if alt_deg <= 0.5:
+            shadow_fracs.append(0.0)
+        else:
+            shadow_fracs.append(round(alt_deg, 1))
+
+    shadow_chart_data = json.dumps({"hours": shadow_hours, "altitudes": shadow_fracs, "typology": shadow_opt.typology, "height_m": shadow_opt.building_height_m, "lat": site_result.get("latitude_deg", 59.91), "season": shadow_season})
+    shadow_html = f"""
+<div style="width:100%;height:280px;position:relative;">
+<canvas id="shadowCanvas" style="width:100%;height:100%;"></canvas>
+</div>
+<script>
+(function() {{
+  const D = {shadow_chart_data};
+  const canvas = document.getElementById('shadowCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth, H = 280;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  const pad = {{l:55, r:20, t:30, b:45}};
+  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+  const hours = D.hours, alts = D.altitudes;
+  const maxAlt = Math.max(...alts, 1);
+
+  // Background gradient (day/night)
+  const grad = ctx.createLinearGradient(pad.l, 0, pad.l + cw, 0);
+  hours.forEach((h, i) => {{
+    const t = i / (hours.length - 1);
+    const a = alts[i];
+    grad.addColorStop(t, a > 0 ? 'rgba(56,189,248,0.06)' : 'rgba(15,23,42,0.15)');
+  }});
+  ctx.fillStyle = grad;
+  ctx.fillRect(pad.l, pad.t, cw, ch);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(120,145,170,0.1)'; ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {{
+    const y = pad.t + ch - (g / 4) * ch;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y); ctx.stroke();
+    ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.round(maxAlt * g / 4) + '°', pad.l - 8, y);
+  }}
+
+  // Bars
+  const bw = cw / hours.length * 0.7;
+  hours.forEach((h, i) => {{
+    const x = pad.l + (i + 0.5) * (cw / hours.length);
+    const val = alts[i] / maxAlt;
+    const bh = val * ch;
+    const hue = alts[i] > 20 ? '48,96%' : alts[i] > 10 ? '35,90%' : alts[i] > 0 ? '200,70%' : '220,20%';
+    ctx.fillStyle = `hsla(${{hue}},${{alts[i] > 0 ? '60%' : '20%'}})`;
+    ctx.fillRect(x - bw/2, pad.t + ch - bh, bw, bh);
+    // Shadow length indicator on top
+    if (alts[i] > 0.5) {{
+      const shadowLen = D.height_m / Math.tan(alts[i] * Math.PI / 180);
+      ctx.fillStyle = '#f5f7fb'; ctx.font = 'bold 9px Inter'; ctx.textAlign = 'center';
+      ctx.fillText(Math.round(shadowLen) + 'm', x, pad.t + ch - bh - 6);
+    }}
+    // Hour label
+    ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
+    ctx.fillText(h + ':00', x, pad.t + ch + 16);
+  }});
+
+  // Title
+  ctx.fillStyle = '#c8d3df'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'left';
+  ctx.fillText('Solhøyde og skyggelengde — ' + D.typology + ' (' + D.height_m.toFixed(1) + ' m) — ' + D.season, pad.l, 18);
+  ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter';
+  ctx.fillText('Breddegrad: ' + D.lat.toFixed(2) + '° | Tall over søylene = skyggelengde fra bygghøyde', pad.l, pad.t + ch + 38);
+}})();
+</script>
+"""
+    components.html(shadow_html, height=300, scrolling=False)
+
     if site_intelligence_bundle.get('available'):
         st.markdown("<div class='section-header'>Stedskontekst</div>", unsafe_allow_html=True)
         gi_plan, gi_projects, gi_transport = st.columns(3)
@@ -4116,6 +4367,301 @@ if "analysis_results" in st.session_state:
                 f"BTA {option.gross_bta_m2:,.0f} m² | {option.unit_count} boliger | "
                 f"sol {option.solar_score:.0f}/100 | uteareal sol {option.sunlit_open_space_pct:.0f}%"
             )
+
+    # --- INTERAKTIV BYGNINGSEDITOR ---
+    st.markdown("<div class='section-header'>Planeditor — tegn og juster bygningsvolumer</div>", unsafe_allow_html=True)
+    st.caption("Klikk og dra for å plassere bygninger. Dra hjørner for å endre størrelse. Klikk på bygg for å endre etasjer. Dobbeltklikk for å slette.")
+
+    # Prepare site data for the editor
+    editor_site_coords = best.geometry.get("site_polygon_coords", [])
+    editor_buildable_coords = best.geometry.get("buildable_polygon_coords", [])
+    editor_neighbor_polys = best.geometry.get("neighbor_polygons", [])
+    editor_site_area = site_result.get("site_area_m2", 1000)
+    editor_max_bya = site_result.get("max_bya_pct", 35)
+    editor_efficiency = site_result.get("efficiency_ratio", 0.78)
+    editor_floor_h = site_result.get("floor_to_floor_m", 3.0)
+    editor_avg_unit = 55.0  # gjennomsnittlig leilighet m²
+
+    editor_payload = json.dumps({
+        "site": editor_site_coords,
+        "buildable": editor_buildable_coords,
+        "neighbors": editor_neighbor_polys,
+        "site_area": round(editor_site_area, 1),
+        "max_bya_pct": editor_max_bya,
+        "efficiency": editor_efficiency,
+        "floor_height": editor_floor_h,
+        "avg_unit_m2": editor_avg_unit,
+    }, ensure_ascii=False)
+
+    editor_html = """
+<div id="editor-wrap" style="width:100%;background:#0a1520;border:1px solid rgba(120,145,170,0.2);border-radius:12px;overflow:hidden;position:relative;">
+<canvas id="editorCanvas" style="width:100%;cursor:crosshair;display:block;"></canvas>
+<div id="editorHUD" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;font-family:Inter,sans-serif;min-width:200px;pointer-events:none;">
+  <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;font-weight:600;">Live beregning</div>
+  <div id="hudBTA" style="color:#f5f7fb;font-size:14px;font-weight:700;">BTA: 0 m²</div>
+  <div id="hudBRA" style="color:#c8d3df;font-size:12px;">BRA: 0 m²</div>
+  <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
+  <div id="hudBYA" style="color:#c8d3df;font-size:12px;">BYA: 0%</div>
+  <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
+</div>
+<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
+  <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
+  <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
+  <select id="floorSelect" onchange="setFloors()" style="background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
+    <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
+    <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
+  </select>
+</div>
+</div>
+<script>
+(function() {
+const P = __PAYLOAD__;
+const canvas = document.getElementById('editorCanvas');
+const ctx = canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 1;
+const W = canvas.parentElement.clientWidth;
+const H = Math.min(W * 0.65, 620);
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+ctx.scale(dpr, dpr);
+
+// Parse site polygon
+function flatCoords(groups) {
+  if (!groups || !groups.length) return [];
+  if (typeof groups[0][0] === 'number') return groups;
+  let flat = [];
+  groups.forEach(g => { if (g && g.length) flat = flat.concat(g); });
+  return flat;
+}
+const siteCoords = flatCoords(P.site);
+const buildableCoords = flatCoords(P.buildable);
+if (!siteCoords.length) return;
+
+// Compute bounds
+let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+siteCoords.forEach(p => { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); maxX = Math.max(maxX, p[0]); maxY = Math.max(maxY, p[1]); });
+const spanX = maxX - minX || 1, spanY = maxY - minY || 1;
+const margin = 40;
+const scaleX = (W - 2*margin) / spanX, scaleY = (H - 2*margin) / spanY;
+const scale = Math.min(scaleX, scaleY);
+const offX = margin + (W - 2*margin - spanX*scale)/2;
+const offY = margin + (H - 2*margin - spanY*scale)/2;
+
+function toScreen(x, y) { return [offX + (x - minX) * scale, offY + (maxY - y) * scale]; }
+function toWorld(sx, sy) { return [(sx - offX) / scale + minX, maxY - (sy - offY) / scale]; }
+
+// Buildings state
+let buildings = [];
+let selectedIdx = -1;
+let dragging = false, resizing = false, dragOff = [0,0], resizeCorner = -1;
+let defaultFloors = 4;
+
+function drawPoly(coords, fill, stroke, lw) {
+  if (!coords.length) return;
+  ctx.beginPath();
+  coords.forEach((p, i) => { const s = toScreen(p[0], p[1]); i === 0 ? ctx.moveTo(s[0], s[1]) : ctx.lineTo(s[0], s[1]); });
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1; ctx.stroke(); }
+}
+
+function drawBuilding(b, idx) {
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  const corners = [
+    [b.cx + hw*cos - hd*sin, b.cy + hw*sin + hd*cos],
+    [b.cx - hw*cos - hd*sin, b.cy - hw*sin + hd*cos],
+    [b.cx - hw*cos + hd*sin, b.cy - hw*sin - hd*cos],
+    [b.cx + hw*cos + hd*sin, b.cy + hw*sin - hd*cos],
+  ];
+  const sel = idx === selectedIdx;
+  const alpha = sel ? '90' : '60';
+  const colors = ['#22c55e','#38bdf8','#a78bfa','#f59e0b','#ec4899','#06b6d4','#ef4444'];
+  const c = colors[idx % colors.length];
+  drawPoly(corners, c + alpha, sel ? '#fff' : c, sel ? 2.5 : 1.5);
+  // Label
+  const sc = toScreen(b.cx, b.cy);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(b.name || ('B'+(idx+1)), sc[0], sc[1] - 8);
+  ctx.font = '10px Inter'; ctx.fillStyle = '#c8d3df';
+  ctx.fillText(b.floors + ' etg | ' + Math.round(b.w * b.d) + ' m²', sc[0], sc[1] + 8);
+  // Resize handles when selected
+  if (sel) {
+    corners.forEach(c => {
+      const s = toScreen(c[0], c[1]);
+      ctx.fillStyle = '#38bdf8'; ctx.fillRect(s[0]-4, s[1]-4, 8, 8);
+    });
+  }
+  return corners;
+}
+
+function computeStats() {
+  let totalFootprint = 0, totalBTA = 0;
+  buildings.forEach(b => { const fp = b.w * b.d; totalFootprint += fp; totalBTA += fp * b.floors; });
+  const bra = totalBTA * P.efficiency;
+  const units = Math.round(bra / P.avg_unit_m2);
+  const bya = P.site_area > 0 ? (totalFootprint / P.site_area * 100) : 0;
+  document.getElementById('hudBTA').textContent = 'BTA: ' + Math.round(totalBTA).toLocaleString() + ' m²';
+  document.getElementById('hudBRA').textContent = 'BRA: ' + Math.round(bra).toLocaleString() + ' m²';
+  document.getElementById('hudUnits').textContent = 'Boliger: ~' + units;
+  document.getElementById('hudBYA').textContent = 'BYA: ' + bya.toFixed(1) + '% (maks ' + P.max_bya_pct + '%)';
+  document.getElementById('hudBYA').style.color = bya > P.max_bya_pct ? '#f87171' : '#34d399';
+  document.getElementById('hudBuildings').textContent = 'Bygg: ' + buildings.length;
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  // Neighbors
+  (P.neighbors || []).forEach(n => {
+    const nc = flatCoords(n.coords || []);
+    if (nc.length) drawPoly(nc, 'rgba(100,100,120,0.25)', 'rgba(150,150,170,0.4)', 1);
+  });
+  // Site
+  drawPoly(siteCoords, 'rgba(56,189,248,0.06)', 'rgba(56,189,248,0.5)', 1.5);
+  // Buildable
+  if (buildableCoords.length) drawPoly(buildableCoords, null, 'rgba(52,211,153,0.35)', 1);
+  // Buildings
+  buildings.forEach((b, i) => drawBuilding(b, i));
+  // Scale bar
+  const barM = Math.pow(10, Math.floor(Math.log10(spanX * 0.3)));
+  const barPx = barM * scale;
+  ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter'; ctx.textAlign = 'left';
+  ctx.fillRect(14, H - 20, barPx, 3); ctx.fillText(barM + ' m', 14, H - 26);
+  computeStats();
+}
+
+window.addBuilding = function() {
+  const cx = (minX + maxX) / 2 + (Math.random() - 0.5) * spanX * 0.3;
+  const cy = (minY + maxY) / 2 + (Math.random() - 0.5) * spanY * 0.3;
+  buildings.push({ cx, cy, w: 40, d: 14, angle: 0, floors: defaultFloors, name: 'Bygg ' + String.fromCharCode(65 + buildings.length) });
+  selectedIdx = buildings.length - 1;
+  render();
+};
+
+window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
+
+window.setFloors = function() {
+  defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
+  if (selectedIdx >= 0) { buildings[selectedIdx].floors = defaultFloors; render(); }
+};
+
+// Hit testing
+function hitTest(sx, sy) {
+  for (let i = buildings.length - 1; i >= 0; i--) {
+    const b = buildings[i];
+    const [wx, wy] = toWorld(sx, sy);
+    const dx = wx - b.cx, dy = wy - b.cy;
+    const cos = Math.cos(-b.angle), sin = Math.sin(-b.angle);
+    const lx = dx*cos - dy*sin, ly = dx*sin + dy*cos;
+    if (Math.abs(lx) <= b.w/2 + 2 && Math.abs(ly) <= b.d/2 + 2) return i;
+  }
+  return -1;
+}
+
+function cornerHit(sx, sy) {
+  if (selectedIdx < 0) return -1;
+  const b = buildings[selectedIdx];
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  const corners = [
+    [b.cx + hw*cos - hd*sin, b.cy + hw*sin + hd*cos],
+    [b.cx - hw*cos - hd*sin, b.cy - hw*sin + hd*cos],
+    [b.cx - hw*cos + hd*sin, b.cy - hw*sin - hd*cos],
+    [b.cx + hw*cos + hd*sin, b.cy + hw*sin - hd*cos],
+  ];
+  for (let i = 0; i < 4; i++) {
+    const s = toScreen(corners[i][0], corners[i][1]);
+    if (Math.hypot(sx - s[0], sy - s[1]) < 10) return i;
+  }
+  return -1;
+}
+
+let lastClick = 0;
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left), sy = (e.clientY - rect.top);
+  const now = Date.now();
+  // Double click = delete
+  if (now - lastClick < 350) {
+    const idx = hitTest(sx, sy);
+    if (idx >= 0) { buildings.splice(idx, 1); selectedIdx = -1; render(); lastClick = 0; return; }
+  }
+  lastClick = now;
+  // Corner resize
+  const ci = cornerHit(sx, sy);
+  if (ci >= 0) { resizing = true; resizeCorner = ci; return; }
+  // Building drag
+  const idx = hitTest(sx, sy);
+  if (idx >= 0) {
+    selectedIdx = idx;
+    const [wx, wy] = toWorld(sx, sy);
+    dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy];
+    dragging = true;
+    document.getElementById('floorSelect').value = buildings[idx].floors;
+    render();
+    return;
+  }
+  selectedIdx = -1;
+  render();
+});
+
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left), sy = (e.clientY - rect.top);
+  if (dragging && selectedIdx >= 0) {
+    const [wx, wy] = toWorld(sx, sy);
+    buildings[selectedIdx].cx = wx - dragOff[0];
+    buildings[selectedIdx].cy = wy - dragOff[1];
+    render();
+  } else if (resizing && selectedIdx >= 0) {
+    const [wx, wy] = toWorld(sx, sy);
+    const b = buildings[selectedIdx];
+    const dx = wx - b.cx, dy = wy - b.cy;
+    b.w = Math.max(8, Math.abs(dx) * 2);
+    b.d = Math.max(8, Math.abs(dy) * 2);
+    render();
+  } else {
+    // Cursor hint
+    const ci = cornerHit(sx, sy);
+    canvas.style.cursor = ci >= 0 ? 'nwse-resize' : hitTest(sx, sy) >= 0 ? 'move' : 'crosshair';
+  }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; resizing = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; resizing = false; });
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
+  const idx = hitTest(sx, sy);
+  if (idx >= 0) { selectedIdx = idx; const [wx, wy] = toWorld(sx, sy); dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy]; dragging = true; render(); }
+}, {passive: false});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!dragging || selectedIdx < 0) return;
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  const [wx, wy] = toWorld(t.clientX - rect.left, t.clientY - rect.top);
+  buildings[selectedIdx].cx = wx - dragOff[0]; buildings[selectedIdx].cy = wy - dragOff[1];
+  render();
+}, {passive: false});
+canvas.addEventListener('touchend', () => { dragging = false; });
+
+// Rotation with scroll on selected building
+canvas.addEventListener('wheel', e => {
+  if (selectedIdx >= 0) {
+    e.preventDefault();
+    buildings[selectedIdx].angle += e.deltaY > 0 ? 0.05 : -0.05;
+    render();
+  }
+}, {passive: false});
+
+render();
+})();
+</script>
+""".replace("__PAYLOAD__", editor_payload)
+    components.html(editor_html, height=680, scrolling=False)
 
     st.markdown("<div class='section-header'>Leilighetsmiks per alternativ</div>", unsafe_allow_html=True)
     mix_rows = []
