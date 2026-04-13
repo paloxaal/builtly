@@ -380,6 +380,50 @@ def _latlon_to_utm33(lat: float, lon: float) -> tuple:
     return easting, northing
 
 
+def _utm33_to_latlon(easting: float, northing: float) -> tuple:
+    """Convert UTM33N (EPSG:25833) to lat/lon (WGS84)."""
+    k0, a, e, lon0 = 0.9996, 6378137.0, 0.0818192, 15.0
+    e2 = e**2
+    e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
+    M = northing / k0
+    mu = M / (a * (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256))
+    phi1 = mu + (3*e1/2 - 27*e1**3/32) * math.sin(2*mu) + (21*e1**2/16 - 55*e1**4/32) * math.sin(4*mu)
+    N1 = a / math.sqrt(1 - e2 * math.sin(phi1)**2)
+    T1 = math.tan(phi1)**2
+    C1 = (e2 / (1 - e2)) * math.cos(phi1)**2
+    R1 = a * (1 - e2) / ((1 - e2 * math.sin(phi1)**2)**1.5)
+    D = (easting - 500000) / (N1 * k0)
+    lat = phi1 - (N1 * math.tan(phi1) / R1) * (D**2/2 - (5 + 3*T1) * D**4/24)
+    lon = math.radians(lon0) + (D - (1 + 2*T1 + C1) * D**3/6) / math.cos(phi1)
+    return math.degrees(lat), math.degrees(lon)
+
+
+def _geocode_project_address(adresse: str, kommune: str) -> dict:
+    """Geokod prosjektadresse til UTM33 easting/northing via Geodata Online.
+    Returnerer dict med easting, northing, label, ok."""
+    try:
+        from geodata_client import GeodataOnlineClient
+        gdo = GeodataOnlineClient()
+        if not gdo.is_available():
+            return {"ok": False, "error": "Geodata Online ikke tilgjengelig"}
+        results = gdo.address_search(adresse, kommune, limit=1)
+        if not results:
+            return {"ok": False, "error": f"Fant ingen treff for '{adresse}, {kommune}'"}
+        hit = results[0]
+        x, y = hit.get("x"), hit.get("y")
+        if x and y:
+            return {
+                "ok": True, 
+                "easting": float(x), 
+                "northing": float(y),
+                "label": hit.get("label", f"{adresse}, {kommune}"),
+                "score": hit.get("score", 0),
+            }
+        return {"ok": False, "error": "Geokoding ga ingen koordinater"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:80]}
+
+
 def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600, auth=None, extra_params=None):
     xmin, ymin, xmax, ymax = bbox_25833
     for layer in layers_to_try:
@@ -422,16 +466,37 @@ def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=No
     return None
 
 
-def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=300):
-    if not HAS_REQUESTS: return None, "requests-biblioteket mangler"
+def geocode_project_address(adresse: str, kommune: str) -> dict:
+    """Geokod prosjektadressen til UTM33 koordinater via Geodata Online."""
     try:
-        easting, northing = _latlon_to_utm33(lat, lon)
-        bbox = (easting - buffer_m, northing - buffer_m, easting + buffer_m, northing + buffer_m)
-    except Exception:
-        return None, "Koordinatkonvertering feilet"
+        from geodata_client import GeodataOnlineClient
+        gdo = GeodataOnlineClient()
+        if gdo.is_available():
+            results = gdo.address_search(adresse, kommune, limit=1)
+            if results:
+                hit = results[0]
+                return {
+                    "easting": hit["x"],
+                    "northing": hit["y"],
+                    "label": hit.get("label", ""),
+                    "score": hit.get("score", 0),
+                    "ok": True,
+                }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "Geokoding feilet — sjekk adresse"}
 
-    errors = []
+
+def fetch_stoykart_image_utm(easting, northing, width=800, height=600, buffer_m=300):
+    """Hent støykart fra Geodata Online DOK Forurensning med UTM33 koordinater.
+    
+    Returnerer støysoner compositet over gråtone-bakgrunnskart.
+    """
+    if not HAS_REQUESTS: return None, "requests-biblioteket mangler"
+    
+    bbox = (easting - buffer_m, northing - buffer_m, easting + buffer_m, northing + buffer_m)
     xmin, ymin, xmax, ymax = bbox
+    errors = []
 
     try:
         from geodata_client import GeodataOnlineClient
@@ -449,7 +514,7 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
                 "f": "image", "token": token,
             }
             
-            # Steg 1: Hent bakgrunnskart (opakt, med veier/bygninger/terreng)
+            # Steg 1: Hent bakgrunnskart (opakt)
             basemap_img = None
             try:
                 bg_resp = gdo.session.get(
@@ -475,22 +540,20 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
                 if noise_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
                     noise_img = Image.open(io.BytesIO(noise_resp.content)).convert("RGBA")
                     
-                    # Steg 3: Composit støy over bakgrunnskart
+                    # Steg 3: Composit
                     if basemap_img and basemap_img.size == noise_img.size:
                         result = Image.alpha_composite(basemap_img, noise_img)
                         return result.convert("RGB"), None
                     elif basemap_img:
-                        # Resize hvis nødvendig
                         noise_resized = noise_img.resize(basemap_img.size, Image.LANCZOS)
                         result = Image.alpha_composite(basemap_img, noise_resized)
                         return result.convert("RGB"), None
                     else:
-                        # Ingen bakgrunnskart — bruk lys bakgrunn
                         bg = Image.new("RGBA", noise_img.size, (245, 245, 240, 255))
                         result = Image.alpha_composite(bg, noise_img)
                         return result.convert("RGB"), None
             
-            # Fallback: opakt bilde direkte fra DOK
+            # Fallback: opakt direkte
             opaque_resp = gdo.session.get(
                 f"{dok_url}/export",
                 params={**base_params, "format": "png", "transparent": "false", "layers": STOEY_LAYERS},
@@ -507,69 +570,65 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
     except Exception as e:
         errors.append(f"DOK Forurensning: {str(e)[:80]}")
 
-    # --- Source 2: Geonorge WMS (krever Norge digitalt-tilgang via Geodata Online) ---
-    gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
-    gdo_pass = os.environ.get("GEODATA_ONLINE_PASS", "")
-    gdo_auth = (gdo_user, gdo_pass) if gdo_user and gdo_pass else None
-
-    wms_sources = {
-        "vei": [("https://wms.geonorge.no/skwms1/wms.stoykartleggingveg",
-                 ["Støyvarselkart_Lden", "stoyvarselkart_lden", "Støyvarselkart", "0", "1", "2"])],
-        "bane": [("https://wms.geonorge.no/skwms1/wms.stoysonerjernbanenett",
-                  ["Støysoner", "stoysoner", "0", "1"])],
-        "fly": [("https://wms.geonorge.no/skwms1/wms.stoysonerlufthavn",
-                 ["Støysoner", "stoysoner", "0", "1"])],
-        "industri": [("https://wms.geonorge.no/skwms1/wms.stoykartleggingveg",
-                      ["Støyvarselkart_Lden", "0"])],
-    }
-
-    for wms_url, layer_candidates in wms_sources.get(kilde.lower(), []):
-        img, hit_layer = _fetch_wms_image(wms_url, layer_candidates, bbox, width, height, auth=gdo_auth)
-        if img: return img, None
-        errors.append(f"WMS {wms_url.split('/')[-1]}: ingen treff")
-
     return None, f"Kunne ikke hente støykart: {'; '.join(errors)}"
 
 
-def fetch_stoykart_contours(lat, lon, kilde="vei", buffer_m=300):
-    if not HAS_REQUESTS: return []
+# Bakoverkompatibel wrapper for lat/lon
+def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=300):
     try:
         easting, northing = _latlon_to_utm33(lat, lon)
+        return fetch_stoykart_image_utm(easting, northing, width, height, buffer_m)
     except Exception:
-        return []
+        return None, "Koordinatkonvertering feilet"
 
-    gdo_token = None
+
+def fetch_stoykart_contours_utm(easting, northing, buffer_m=300):
+    """Hent støykontur-data fra DOK Forurensning med UTM33 koordinater."""
+    if not HAS_REQUESTS: return []
     try:
         from geodata_client import GeodataOnlineClient
-        _gdo_client = GeodataOnlineClient()
-        if _gdo_client.is_available():
-            gdo_token = _gdo_client.get_token()
+        gdo = GeodataOnlineClient()
+        if not gdo.is_available(): return []
+        token = gdo.get_token()
     except Exception:
-        pass
-    if not gdo_token: return []
+        return []
 
     service_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
     params = {
         "geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
         "geometryType": "esriGeometryEnvelope", "inSR": "25833", "outSR": "25833",
         "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "returnGeometry": "false", "f": "json",
-        "token": gdo_token,
+        "token": token,
     }
     contours = []
-    for layer_id in [0, 1, 2, 3, 4, 5]:
+    for layer_id in [211, 212, 203, 204, 205, 206, 213, 214, 207, 208]:
         try:
-            resp = requests.get(f"{service_url}/{layer_id}/query", params=params, timeout=10)
+            resp = requests.get(f"{service_url}/{layer_id}/query", params=params, timeout=8)
             if resp.status_code == 200:
                 data = resp.json()
                 for feat in data.get("features", []):
                     attrs = feat.get("attributes", {})
-                    db_val = attrs.get("DB_LOW", attrs.get("db_low", attrs.get("Lden", attrs.get("dB", ""))))
-                    if db_val:
+                    db_val = None
+                    for key in ["DB_LOW", "db_low", "Lden", "dB", "LDEN", "stoyniva",
+                                "stoysonekategori", "DB_HIGH", "db_high"]:
+                        if key in attrs and attrs[key] is not None:
+                            db_val = attrs[key]; break
+                    if db_val is not None:
                         contours.append({"layer": layer_id, "db": str(db_val),
-                                         "name": attrs.get("NAVN", attrs.get("navn", "")), "type": kilde})
+                                         "name": attrs.get("NAVN", attrs.get("navn", "")),
+                                         "kilde": attrs.get("stoykilde", attrs.get("stoykildenavn", ""))})
         except Exception:
             continue
     return contours
+
+
+# Bakoverkompatibel
+def fetch_stoykart_contours(lat, lon, kilde="vei", buffer_m=300):
+    try:
+        easting, northing = _latlon_to_utm33(lat, lon)
+        return fetch_stoykart_contours_utm(easting, northing, buffer_m)
+    except Exception:
+        return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -965,30 +1024,46 @@ with st.expander("2. Bygningsdata & Lydklasse", expanded=True):
 with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
     st.info("For presise resultater: Last opp støyrapport fra akustiker (PDF), støykart med dB-verdier, og plantegninger.")
     
-    st.markdown("##### Automatisk stoykart fra Geodata Online")
-    stoy_col1, stoy_col2, stoy_col3 = st.columns(3)
-    stoy_lat = stoy_col1.number_input("Breddegrad (lat)", value=63.43, format="%.4f", key="stoy_lat")
-    stoy_lon = stoy_col2.number_input("Lengdegrad (lon)", value=10.40, format="%.4f", key="stoy_lon")
-    stoy_buffer = stoy_col3.number_input("Buffer (m)", value=300, min_value=100, max_value=1000, key="stoy_buffer")
+    st.markdown("##### Automatisk støykart fra Geodata Online")
     
-    stoy_kilde_map = {"Veitrafikk": "vei", "Bane/Tog": "bane", "Flystøy": "fly", "Industri/Næring": "industri"}
-    stoy_api_kilde = stoy_kilde_map.get(stoykilde, "vei")
+    # Auto-geokod prosjektadressen til UTM33 (skjer kun én gang)
+    if "stoy_utm" not in st.session_state:
+        proj_adresse = pd_state.get("adresse", "")
+        proj_kommune = pd_state.get("kommune", "")
+        if proj_adresse:
+            geo = _geocode_project_address(proj_adresse, proj_kommune)
+            st.session_state["stoy_utm"] = geo
+        else:
+            st.session_state["stoy_utm"] = {"ok": False, "error": "Ingen prosjektadresse"}
     
-    if st.button("Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True):
-        with st.spinner(f"Henter støykart ({stoy_api_kilde})..."):
-            stoy_img, stoy_err = fetch_stoykart_image(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
+    utm = st.session_state.get("stoy_utm", {})
+    
+    if utm.get("ok"):
+        st.caption(f"📍 {utm.get('label', '')} — UTM33: ({utm['easting']:.0f}, {utm['northing']:.0f})")
+    else:
+        st.warning(f"Geokoding feilet: {utm.get('error', 'ukjent')}. Støykart kan ikke hentes automatisk.")
+    
+    stoy_buffer = st.number_input("Buffer rundt prosjekt (m)", value=500, min_value=100, max_value=2000, 
+                                   key="stoy_buffer", help="Radius for støykartutsnitt")
+    
+    fetch_disabled = not utm.get("ok", False)
+    if st.button("📡 Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True, disabled=fetch_disabled):
+        with st.spinner("Henter støykart fra DOK Forurensning..."):
+            stoy_img, stoy_err = fetch_stoykart_image_utm(
+                utm["easting"], utm["northing"], buffer_m=stoy_buffer)
             if stoy_img:
-                stoy_img = stoy_img.convert("RGB")
-                st.session_state["stoykart_image"] = stoy_img
+                st.session_state["stoykart_image"] = stoy_img.convert("RGB")
                 st.success("Støykart hentet!")
             else:
                 st.warning(f"Kunne ikke hente: {stoy_err}. Last opp manuelt.")
-            contours = fetch_stoykart_contours(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
+            
+            contours = fetch_stoykart_contours_utm(utm["easting"], utm["northing"], buffer_m=stoy_buffer)
             if contours:
                 st.session_state["stoykart_contours"] = contours
     
     if "stoykart_image" in st.session_state:
-        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online", use_container_width=True)
+        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online (DOK Forurensning T-1442)", 
+                 use_container_width=True)
     
     st.markdown("##### Tegninger fra prosjektet")
     saved_images = []
