@@ -39,7 +39,7 @@ except Exception:
     class Transformer:  # type: ignore[override]
         @staticmethod
         def from_crs(*args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError("pyproj er ikke installert i miljoet.")
+            raise RuntimeError("pyproj er ikke installert i miljøet.")
 
 try:
     from rasterio.io import MemoryFile
@@ -184,18 +184,8 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def normalize_norwegian_text(text: str) -> str:
-    text = text or ""
-    replacements = {
-        "ø": "o",
-        "Ø": "O",
-        "å": "a",
-        "Å": "A",
-        "æ": "ae",
-        "Æ": "AE",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    return text
+    """Normaliser tekst for regex-matching — behold originaltekst men gjør case-insensitive."""
+    return text or ""
 
 
 def pick_model_name() -> Optional[str]:
@@ -226,7 +216,7 @@ def pick_model_name() -> Optional[str]:
 def geo_runtime_notes() -> List[str]:
     notes: List[str] = []
     if not HAS_PYPROJ:
-        notes.append("pyproj mangler: GeoJSON i lon/lat og OSM-nabohenting blir deaktivert eller mindre presist.")
+        notes.append("pyproj mangler: GeoJSON i lon/lat og OSM-nabohenting blir deaktivert eller mindre presis.")
     if not HAS_RASTERIO:
         notes.append("rasterio mangler: GeoTIFF/ASC terreng er deaktivert, men CSV/TXT med x,y,z virker fortsatt.")
     return notes
@@ -274,7 +264,7 @@ def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
 def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str, bounds: Optional[Tuple[float, float, float, float]] = None, _gdo_client: Any = None) -> Tuple[Optional[Image.Image], str]:
-    # 0. Geodata Online ortofoto (foerstevalg)
+    # 0. Ortofoto (førstevalg)
     if bounds is not None and _gdo_client is not None:
         try:
             img, source = _gdo_client.fetch_ortofoto(bbox=bounds, buffer_m=80.0, width=1200, height=1200)
@@ -632,8 +622,8 @@ def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: A
     if auto_polygon is not None:
         poly_local, _, info = normalize_polygon_to_local(auto_polygon)
         crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
-        info["source"] = st.session_state.get("auto_site_msg", "Geodata Online (Eksakt polygon)")
-        if "Geodata Online" not in info["source"]:
+        info["source"] = st.session_state.get("auto_site_msg", "Eksakt polygon")
+        if "Eksakt" not in info["source"]:
             info["source"] = "Eksakt polygon"
         info["crs"] = "EPSG:25833"
         return poly_local, crs_obj, info
@@ -837,7 +827,7 @@ def load_terrain_input(uploaded_terrain: Any, site_polygon: Optional[Polygon], s
         if suffix in {".csv", ".txt"}:
             points = terrain_points_from_csv_bytes(raw, site_crs)
         else:
-            raise ValueError("Stotter forelopig CSV/TXT for terreng.")
+            raise ValueError("Støtter foreløpig kun CSV/TXT for terreng.")
 
         x = points[:, 0]
         y = points[:, 1]
@@ -1502,8 +1492,8 @@ def parse_regulation_hints(free_text: str) -> Dict[str, float]:
         r"maks[^0-9]*(\d+)\s*plan",
     ]
     height_patterns = [
-        r"gesimshoyde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
-        r"byggehoyde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+        r"gesimsh[oø]yde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+        r"byggeh[oø]yde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
         r"maks[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
     ]
 
@@ -2032,9 +2022,9 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         elif typology == "Podium + Tårn":
             notes.append("Podium + tårn kombinerer urbant gategrep med høyde, men krever presis kontroll på sokkel, uteareal og planrisiko.")
         elif typology == "Rekke":
-            notes.append("Rekkehus gir flest enheter, lav byggehoeyde og effektiv arealbruk, men gir lavere BTA per tomt enn blokk.")
+            notes.append("Rekkehus gir flest enheter, lav byggehøyde og effektiv arealbruk, men gir lavere BTA per tomt enn blokk.")
         else:
-            notes.append("Tun/U-form gir hoey arealutnyttelse og tydelig uterom, men er mest saarbar for skygge fra egne floeyer og naboer.")
+            notes.append("Tun/U-form gir høy arealutnyttelse og tydelig uterom, men er mest sårbar for skygge fra egne fløyer og naboer.")
 
         score = rank_score(
             target_fit_pct=target_fit_pct,
@@ -2351,7 +2341,7 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
       const services = sc.services || {};
       const tkn = sc.token || '';
 
-      // Pre-register token for all Geodata Online services
+      // Pre-register token for map services
       if (tkn) {
         IdentityManager.registerToken({
           server: 'https://services.geodataonline.no/arcgis',
@@ -2896,7 +2886,7 @@ def build_deterministic_report(
     )
     if using_polygon:
         lines.append(
-            f"Analysen bruker faktisk tomtepolygon ({site.site_geometry_source}), reelt byggefelt på ca. {best.buildable_area_m2:.0f} m2 "
+            f"Analysen bruker faktisk tomtepolygon, reelt byggefelt på ca. {best.buildable_area_m2:.0f} m² "
             f"og {best.neighbor_count} nabobygg i sol/skygge-vurderingen."
         )
     if terrain_active:
@@ -2906,17 +2896,17 @@ def build_deterministic_report(
         )
     lines.append("")
     lines.append("# 2. GRUNNLAG")
-    lines.append(f"- Tomteareal brukt i motor: {site.site_area_m2:.0f} m2")
+    lines.append(f"- Tomteareal brukt i motor: {site.site_area_m2:.0f} m²")
     lines.append(f"- Tomtedimensjon (omsluttende orientert rektangel): ca. {site.site_width_m:.1f} x {site.site_depth_m:.1f} m")
     lines.append(
         f"- Byggegrenser / inntrekk: front {site.front_setback_m:.1f} m, bak {site.rear_setback_m:.1f} m, side {site.side_setback_m:.1f} m, "
         f"polygonbuffer {site.polygon_setback_m:.1f} m"
     )
     lines.append(f"- Maks BYA: {site.max_bya_pct:.1f}%")
-    lines.append(f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m2'}")
+    lines.append(f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m²'}")
     lines.append(f"- Maks etasjer: {site.max_floors}")
     lines.append(f"- Maks høyde: {site.max_height_m:.1f} m")
-    lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m2")
+    lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m²")
     lines.append(f"- Solanalyse basert på breddegrad: {site.latitude_deg:.3f}")
     lines.append(f"- Geometrikilde: {site.site_geometry_source}")
     lines.append(f"- Nabobygg brukt i analysen: {site.neighbor_count}")
@@ -2956,7 +2946,7 @@ def build_deterministic_report(
     lines.append("")
     lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
     lines.append(
-        f"Maks fotavtrykk styres av kombinasjonen av BYA og faktisk byggefelt. I denne runden er beregnet buildbar flate ca. {best.buildable_area_m2:.0f} m2. "
+        f"Maks fotavtrykk styres av kombinasjonen av BYA og faktisk byggefelt. I denne runden er beregnet bebbyggbar flate ca. {best.buildable_area_m2:.0f} m². "
         f"Høydebegrensning og etasjeantall gir et indikativt tak på {min(site.max_floors, max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))))} etasjer."
     )
     lines.append("")
@@ -2993,14 +2983,14 @@ def build_deterministic_report(
     lines.append("")
     lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
     lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
-    if best.neighbor_count > 0 and "Geodata Online" in site.site_geometry_source:
-        lines.append("- Nabohoyder er hentet fra Geodata Online ByggFlate og baserer seg paa registrerte etasjer i matrikkelen. "
+    if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
+        lines.append("- Nabohøyder er hentet automatisk og baserer seg på registrerte etasjer i matrikkelen. "
                      "Verifiser mot faktisk situasjon for naerliggende bygg.")
     elif best.neighbor_count > 0:
-        lines.append("- Nabohoyder fra GeoJSON/OSM maa kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
+        lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
     else:
         lines.append("- Ingen nabobygg er lagt inn. Skyggevurderingen gjelder kun eget volum. "
-                     "For mer realistisk analyse, sjekk at Geodata Online er tilkoblet og at sokeradius er tilstrekkelig.")
+                     "For mer realistisk analyse, sjekk at eiendomsdata er tilkoblet og at søkeradius er tilstrekkelig.")
     lines.append("- Terrengmodellen er forenklet og boer erstattes med detaljert kotegrunnlag hvis prosjektet gaar videre til konkret skisse.")
     lines.append("")
     lines.append("# 10. ANBEFALING / NESTE STEG")
@@ -3201,6 +3191,7 @@ st.markdown(
         --muted: #9fb0c3;
         --soft: #c8d3df;
         --accent: #38bdf8;
+        --accent2: #34d399;
         --radius-lg: 16px;
         --radius-xl: 24px;
     }
@@ -3227,13 +3218,14 @@ st.markdown(
         border: none !important;
         font-weight: 750 !important;
         border-radius: 12px !important;
-        padding: 12px 24px !important;
-        font-size: 1.05rem !important;
+        padding: 14px 28px !important;
+        font-size: 1.08rem !important;
+        letter-spacing: 0.02em !important;
         transition: all 0.2s ease !important;
     }
     button[kind="primary"]:hover {
         transform: translateY(-2px) !important;
-        box-shadow: 0 12px 24px rgba(56,194,201,0.25) !important;
+        box-shadow: 0 12px 28px rgba(56,194,201,0.3) !important;
     }
     button[kind="secondary"] {
         background-color: rgba(255,255,255,0.05) !important;
@@ -3296,22 +3288,101 @@ st.markdown(
     [data-testid="stAlert"] * {
         color: #f5f7fb !important;
     }
+    /* KPI Cards — enhanced with accent bar */
     .kpi-card {
-        padding: 1rem 1.2rem;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(120,145,170,0.2);
+        padding: 1.1rem 1.3rem;
+        background: linear-gradient(145deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+        border: 1px solid rgba(120,145,170,0.18);
         border-radius: 16px;
         margin-bottom: 1rem;
+        position: relative;
+        overflow: hidden;
+        backdrop-filter: blur(8px);
+    }
+    .kpi-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #38bdf8, #34d399);
+        border-radius: 16px 16px 0 0;
+    }
+    .kpi-card-hero {
+        padding: 1.3rem 1.5rem;
+        background: linear-gradient(145deg, rgba(56,194,201,0.08), rgba(52,211,153,0.04));
+        border: 1px solid rgba(56,194,201,0.25);
+        border-radius: 16px;
+        margin-bottom: 1rem;
+        position: relative;
+        overflow: hidden;
+    }
+    .kpi-card-hero::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #38bdf8, #34d399, #38bdf8);
     }
     .metric-title {
         color: #9fb0c3;
-        font-size: 0.85rem;
-        margin-bottom: 0.2rem;
+        font-size: 0.82rem;
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 500;
     }
     .metric-value {
         color: #f5f7fb;
-        font-size: 1.5rem;
+        font-size: 1.45rem;
         font-weight: 700;
+        line-height: 1.2;
+    }
+    .metric-value-hero {
+        color: #38bdf8;
+        font-size: 1.6rem;
+        font-weight: 800;
+        line-height: 1.2;
+    }
+    /* Section headers */
+    .section-header {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #f5f7fb;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(120,145,170,0.15);
+    }
+    /* Dataframe table styling */
+    [data-testid="stDataFrame"] {
+        border: 1px solid rgba(120,145,170,0.15) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+    }
+    /* Download button */
+    [data-testid="stDownloadButton"] button {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 12px !important;
+        transition: all 0.2s ease !important;
+    }
+    [data-testid="stDownloadButton"] button:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: 0 8px 20px rgba(56,194,201,0.25) !important;
+    }
+    /* Volume sketch cards */
+    .volume-card {
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(120,145,170,0.15);
+        border-radius: 12px;
+        padding: 0.8rem;
+        transition: all 0.2s ease;
+    }
+    .volume-card:hover {
+        border-color: rgba(56,194,201,0.4);
+        background: rgba(56,194,201,0.03);
     }
 </style>
 """,
@@ -3352,9 +3423,9 @@ if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
         else '<h2 style="margin:0; color:white;">Builtly</h2>'
     )
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    st.warning("Du ma sette opp prosjektdata for du kan bruke denne modulen.")
+    st.warning("Du må sette opp prosjektdata før du kan bruke denne modulen.")
     if find_page("Project"):
-        if st.button("Ga til Project Setup", type="primary"):
+        if st.button("Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
     st.stop()
 
@@ -3380,12 +3451,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<h1 style='font-size: 2.5rem; margin-bottom: 0;'>ARK - Mulighetsstudie / Tomtemotor</h1>",
+    "<h1 style='font-size: 2.5rem; margin-bottom: 0; font-weight: 800; letter-spacing: -0.02em;'>Mulighetsstudie</h1>",
     unsafe_allow_html=True,
 )
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
-    "Oppgradert modul med geospatial feasibility-motor: faktisk tomtepolygon, nabohoyder, terreng, volumalternativer og leilighetsmiks."
+    "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
     "</p>",
     unsafe_allow_html=True,
 )
@@ -3393,36 +3464,36 @@ st.markdown(
 if llm_available:
     st.success("AI-tekst er tilgjengelig. Tallsiden beregnes alltid deterministisk først.")
 else:
-    st.info("AI-tekst er ikke tilgjengelig akkurat na. Modulen kjører fortsatt hele feasibility-motoren deterministisk.")
+    st.info("AI-tekst er ikke tilgjengelig akkurat nå. Modulen kjører fortsatt hele feasibility-motoren deterministisk.")
 
 for geo_note in geo_runtime_notes():
     st.warning(geo_note)
 
 if geodata_token_ok:
-    st.success("Geodata Online tilkoblet — tomtehenting, nabobygg, ortofoto tilgjengelig via GeomapMatrikkel.")
+    st.success("Eiendomsdata tilkoblet — tomtehenting, nabobygg og ortofoto er tilgjengelig.")
 elif HAS_GEODATA_ONLINE and gdo is not None and gdo.is_available():
-    st.warning("Geodata Online: token-generering feilet. Sjekk brukernavn/passord.")
+    st.warning("Eiendomsdata: tilkobling feilet. Sjekk brukernavn/passord.")
 
 
 # --- 9. INPUT UI ---
 with st.expander("1. Prosjekt og lokasjon (SSOT)", expanded=True):
     c1, c2 = st.columns(2)
     p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
-    b_type = c2.text_input("Formaal / bygningstype", value=pd_state.get("b_type", "Bolig"), disabled=True)
+    b_type = c2.text_input("Formål / bygningstype", value=pd_state.get("b_type", "Bolig"), disabled=True)
     adresse_vis = f"{pd_state.get('adresse', '')}, {pd_state.get('kommune', '')}".strip(", ")
     adresse = st.text_input("Adresse", value=adresse_vis, disabled=True)
     c3, c4, c5 = st.columns(3)
     c3.text_input("Kunde", value=pd_state.get("c_name", ""), disabled=True)
-    c4.number_input("Onsket BTA fra prosjektdata", value=int(pd_state.get("bta", 0)), disabled=True)
+    c4.number_input("Ønsket BTA fra prosjektdata", value=int(pd_state.get("bta", 0)), disabled=True)
     c5.text_input("Land", value=pd_state.get("land", "Norge"), disabled=True)
 
 with st.expander("2. Tomtegeometri og regulering", expanded=True):
     st.info(
-        "Denne delen er ny: dere kan fortsatt bruke rektangulære fallback-tall, men modulen støtter nå også faktisk tomtepolygon, naboer og terreng."
+        "Dere kan bruke rektangulære fallback-tall, men modulen støtter også faktisk tomtepolygon, naboer og terreng."
     )
     regulation_text = st.text_area(
-        "Fritekst fra reguleringsplan (valgfritt, motoren henter ut BYA/BRA/hoyde hvis den finner noe)",
-        placeholder="Lim inn planbestemmelser, f.eks. %-BYA 35, maks gesimshoyde 12 m, 4 etasjer ...",
+        "Fritekst fra reguleringsplan (valgfritt, motoren henter ut BYA/BRA/høyde hvis den finner noe)",
+        placeholder="Lim inn planbestemmelser, f.eks. %-BYA 35, maks gesimshøyde 12 m, 4 etasjer ...",
         height=110,
     )
     parsed = parse_regulation_hints(regulation_text)
@@ -3431,7 +3502,7 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
 
     d1, d2, d3 = st.columns(3)
     default_site_area = max(1500.0, float(pd_state.get("bta", 0)) * 1.25) if pd_state.get("bta", 0) else 2500.0
-    site_area_m2 = d1.number_input("Tomteareal fallback (m2)", min_value=100.0, value=float(default_site_area), step=50.0)
+    site_area_m2 = d1.number_input("Tomteareal fallback (m²)", min_value=100.0, value=float(default_site_area), step=50.0)
     site_width_m = d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0)
     site_depth_m = d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0)
 
@@ -3443,14 +3514,14 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
 
     r1, r2, r3, r4 = st.columns(4)
     max_bya_pct = r1.number_input("Maks BYA (%)", min_value=1.0, max_value=100.0, value=float(parsed.get("max_bya_pct", 35.0)), step=1.0)
-    max_bra_m2 = r2.number_input("Maks BRA (m2, 0 = ikke satt)", min_value=0.0, value=float(parsed.get("max_bra_m2", 0.0)), step=50.0)
+    max_bra_m2 = r2.number_input("Maks BRA (m², 0 = ikke satt)", min_value=0.0, value=float(parsed.get("max_bra_m2", 0.0)), step=50.0)
     max_floors = r3.number_input("Maks etasjer", min_value=1, max_value=30, value=int(parsed.get("max_floors", max(3, int(pd_state.get("etasjer", 4))))), step=1)
-    max_height_m = r4.number_input("Maks hoyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
+    max_height_m = r4.number_input("Maks høyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
-with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
-    st.markdown("##### 1. Hent eiendom fra Geodata Online")
+with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
+    st.markdown("##### 1. Hent eiendom fra matrikkel")
     if not geodata_token_ok:
-        st.warning("Geodata Online er ikke tilkoblet. Sett GEODATA_ONLINE_USER og GEODATA_ONLINE_PASS.")
+        st.warning("Eiendomsdata er ikke tilkoblet. Kontakt administrator for oppsett.")
     st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4).")
 
     c_k, c_g = st.columns(2)
@@ -3462,11 +3533,11 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
 
     gnr_bnr_input = c_g.text_input("Gnr/Bnr (Bruk komma for flere)", value=default_gnr_bnr)
 
-    if st.button("Sok opp og lagre tomt", type="secondary"):
+    if st.button("Søk opp og lagre tomt", type="secondary"):
         if not kommune_nr_input or not gnr_bnr_input:
-            st.warning("Fyll inn baade kommune og Gnr/Bnr.")
+            st.warning("Fyll inn både kommune og Gnr/Bnr.")
         elif not geodata_token_ok:
-            st.error("Geodata Online er ikke tilkoblet. Kan ikke hente tomt.")
+            st.error("Eiendomsdata er ikke tilkoblet. Kan ikke hente tomt.")
         else:
             pairs = []
             # Stoett komma-separert ("57/270, 57/156") og slash-separert ("57/270/57/156")
@@ -3491,7 +3562,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
             if not pairs:
                 st.warning("Ugyldig format. Bruk formatet 15/2.")
             else:
-                with st.spinner("Henter tomt fra Geodata Online (DekTeigFlate)..."):
+                with st.spinner("Henter tomtegrense fra matrikkelen..."):
                     knr = get_kommunenummer(kommune_nr_input) or kommune_nr_input.strip().zfill(4)
                     poly, msg = gdo.fetch_tomt_polygon(knr, pairs)
                     if poly:
@@ -3502,7 +3573,7 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
                         st.error(f"Feilet: {msg}")
                     
     if st.session_state.get("auto_site_polygon") is not None:
-        st.success(f"✅ **Klar til bruk!** {st.session_state.get('auto_site_msg')} (Nøyaktig areal via UTM33: ca {int(st.session_state.auto_site_polygon.area)} m²)")
+        st.success(f"✅ **Klar til bruk!** Tomtegrense hentet. Nøyaktig areal: ca. {int(st.session_state.auto_site_polygon.area)} m²")
         if st.button("Tøm hentet tomt", type="secondary"):
             st.session_state.auto_site_polygon = None
             st.rerun()
@@ -3531,8 +3602,8 @@ with st.expander("2B. Ekte tomtepolygon, nabohoyder og terreng", expanded=True):
         ["Ingen", "Last opp GeoJSON", "Hent fra OSM rundt tomten"],
         horizontal=False,
     )
-    default_neighbor_height_m = n2.number_input("Fallback nabohoeyde (m)", min_value=3.0, max_value=80.0, value=9.0, step=0.5)
-    neighbor_radius_m = n3.number_input("Radius for nabosok (m)", min_value=30.0, max_value=400.0, value=160.0, step=10.0)
+    default_neighbor_height_m = n2.number_input("Fallback nabohøyde (m)", min_value=3.0, max_value=80.0, value=9.0, step=0.5)
+    neighbor_radius_m = n3.number_input("Radius for nabosøk (m)", min_value=30.0, max_value=400.0, value=160.0, step=10.0)
     neighbor_geojson = None
     if neighbor_mode == "Last opp GeoJSON":
         neighbor_geojson = st.file_uploader(
@@ -3556,18 +3627,18 @@ with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
     st.info("Her styrer dere hvor aggressivt motoren skal sikte mot volum, effektivitet og miks.")
     a1, a2, a3, a4 = st.columns(4)
     desired_bta_m2 = a1.number_input(
-        "Onsket BTA i studien (m2)",
+        "Ønsket BTA i studien (m²)",
         min_value=100.0,
         value=float(pd_state.get("bta", 0) or 2500.0),
         step=50.0,
     )
     efficiency_ratio = a2.number_input("Salgbarhetsfaktor", min_value=0.55, max_value=0.9, value=0.78, step=0.01)
-    floor_to_floor_m = a3.number_input("Etasjehoyde brutto (m)", min_value=2.8, max_value=5.5, value=3.2, step=0.1)
+    floor_to_floor_m = a3.number_input("Etasjehøyde brutto (m)", min_value=2.8, max_value=5.5, value=3.2, step=0.1)
     latitude_manual = a4.number_input("Breddegrad for solanalyse", min_value=45.0, max_value=72.0, value=59.91, step=0.01)
 
     p1, p2, p3 = st.columns(3)
     parking_ratio_per_unit = p1.number_input("Parkering pr. bolig", min_value=0.0, max_value=3.0, value=0.8, step=0.05)
-    parking_area_per_space_m2 = p2.number_input("Areal pr. p-plass (m2)", min_value=15.0, max_value=50.0, value=28.0, step=1.0)
+    parking_area_per_space_m2 = p2.number_input("Areal pr. p-plass (m²)", min_value=15.0, max_value=50.0, value=28.0, step=1.0)
     north_rotation_deg = p3.number_input("Nordretning i modell (grader)", min_value=0.0, max_value=359.0, value=0.0, step=1.0)
 
     st.markdown("##### Leilighetsmiks")
@@ -3583,7 +3654,7 @@ with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
         with mcols[idx]:
             st.markdown(f"**{label}**")
             share = st.number_input(f"Andel {label} (%)", min_value=0.0, max_value=100.0, value=share_default, step=1.0, key=f"share_{idx}")
-            avg_size = st.number_input(f"Gj.sn. storrelse {label} (m2)", min_value=20.0, max_value=180.0, value=size_default, step=1.0, key=f"size_{idx}")
+            avg_size = st.number_input(f"Gj.sn. størrelse {label} (m²)", min_value=20.0, max_value=180.0, value=size_default, step=1.0, key=f"size_{idx}")
             mix_inputs.append(MixSpec(label, share, avg_size))
     share_sum = sum(item.share_pct for item in mix_inputs)
     if abs(share_sum - 100.0) > 0.01:
@@ -3634,26 +3705,26 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
             type=["png", "jpg", "jpeg", "pdf"],
         )
 
-with st.expander("5. Hva modulen faktisk gjor na", expanded=False):
+with st.expander("5. Hva modulen faktisk gjør nå", expanded=False):
     st.markdown(
         """
-- Leser **ekte tomtepolygon** via Geodata Online (GeomapMatrikkel/FeatureServer), GeoJSON eller koordinatliste.
+- Leser **ekte tomtepolygon** fra matrikkel, GeoJSON eller koordinatliste.
 - Regner **7 volumalternativer** (lamell, karre, punkthus, tarn, podium+tarn, tun/U-form og rekke) innenfor faktisk byggefelt.
 - Lager **sammensatte volumdeler** som kan vises videre i 3D-scene.
-- Bruker **Geodata site intelligence** for plan, utbygging og mobilitet i rangering av typologier.
-- Kan vise volumene i **3D Geodata-scene** med Geodata-terreng som grunnlag.
-- Leser **nabobebyggelse** via Geodata Online ByggFlate, GeoJSON eller OSM og bruker hoyder i sol/skygge.
-- Henter **HD-ortofoto** fra Geodata Online for bedre kartgrunnlag i rapporten.
+- Bruker **stedsintelligens** for plan, utbygging og mobilitet i rangering av typologier.
+- Kan vise volumene i **3D terrengscene** med terrengmodell som grunnlag.
+- Leser **nabobebyggelse** automatisk fra kartdata, GeoJSON eller OSM og bruker høyder i sol/skygge.
+- Henter **HD-ortofoto** for bedre kartgrunnlag i rapporten.
 - Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
 - Degraderer kontrollert til fallback hvis geostacken i deployen mangler pyproj eller rasterio.
-- Regner **fotavtrykk, BTA, salgbarhetsareal, boligantall, leilighetsmiks og parkeringstrykk**.
-- Bruker eventuelt AI bare til a forklare funnene. Tallene kommer fra motoren.
+- Regner **fotavtrykk, BTA, salgbart areal, boligantall, leilighetsmiks og parkeringstrykk**.
+- Bruker eventuelt AI bare til å forklare funnene. Tallene kommer fra motoren.
 """
     )
 
 
 # --- 10. KJOR ANALYSE ---
-run_analysis = st.button("Kjor tomtestudie / volumstudie", type="primary", use_container_width=True)
+run_analysis = st.button("Kjør tomtestudie / volumstudie", type="primary", use_container_width=True)
 
 if run_analysis:
     images_for_context = list(saved_images)
@@ -3670,7 +3741,7 @@ if run_analysis:
             centroid = auto_poly.centroid
             transformer = Transformer.from_crs(CRS.from_epsg(25833), CRS.from_epsg(4326), always_xy=True)
             lon_geocoded, lat_geocoded = transformer.transform(centroid.x, centroid.y)
-            geo_source = "Geodata Online" if geodata_token_ok else "Kartverket Polygon"
+            geo_source = "Matrikkel" if geodata_token_ok else "Kartverket"
         except:
             lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
     else:
@@ -3685,7 +3756,7 @@ if run_analysis:
 
     # A) Nabobygg fra ByggFlate — ALLTID naar GDO er tilkoblet og tomt finnes
     if geodata_token_ok and site_polygon_input is not None:
-        with st.spinner("Henter nabobygg fra Geodata Online ByggFlate..."):
+        with st.spinner("Henter nabobebyggelse..."):
             try:
                 fkb_buildings, fkb_meta = gdo.fetch_byggflater(
                     bbox=site_polygon_input.bounds,
@@ -3698,11 +3769,11 @@ if run_analysis:
                         max_distance_m=float(neighbor_radius_m) + 20,
                     )
                     neighbor_meta = fkb_meta
-                    st.success(f"Hentet {len(neighbor_inputs)} nabobygg fra Geodata Online ByggFlate")
+                    st.success(f"Hentet {len(neighbor_inputs)} nabobygg i nærheten")
                 else:
-                    st.info("Ingen nabobygg funnet i ByggFlate innenfor sokeradius.")
+                    st.info("Ingen nabobygg funnet innenfor søkeradius.")
             except Exception as exc:
-                st.warning(f"ByggFlate feilet: {exc}")
+                st.warning(f"Nabohenting feilet: {exc}")
 
     # B) Fallback til GeoJSON/OSM KUN hvis GDO ikke ga resultat
     if not neighbor_inputs:
@@ -3725,7 +3796,7 @@ if run_analysis:
 
     # C) Ortofoto — AUTOMATISK naar GDO er tilkoblet og tomt finnes
     if geodata_token_ok and site_polygon_input is not None and st.session_state.ark_kart is None:
-        with st.spinner("Henter HD-ortofoto fra Geodata Online..."):
+        with st.spinner("Henter HD-ortofoto..."):
             try:
                 hd_img, hd_source = gdo.fetch_ortofoto(
                     bbox=site_polygon_input.bounds,
@@ -3736,7 +3807,7 @@ if run_analysis:
                 if hd_img:
                     st.session_state.ark_kart = hd_img
                     images_for_context.append(hd_img)
-                    st.success(f"HD-ortofoto hentet: {hd_source}")
+                    st.success("HD-ortofoto hentet")
             except Exception as exc:
                 st.caption(f"Ortofoto-henting feilet: {exc}")
 
@@ -3745,9 +3816,9 @@ if run_analysis:
         try:
             terrain_ctx = gdo.fetch_terrain_model(site_polygon_input, sample_spacing_m=10.0, max_points=180)
             if terrain_ctx is not None:
-                terrain_meta = {'source': terrain_ctx.get('source', 'Geodata Online Terrengmodell'), 'point_count': terrain_ctx.get('point_count', 0)}
+                terrain_meta = {'source': terrain_ctx.get('source', 'Terrengmodell'), 'point_count': terrain_ctx.get('point_count', 0)}
         except Exception as exc:
-            terrain_meta = {'source': 'Geodata Online Terrengmodell', 'error': str(exc)[:120]}
+            terrain_meta = {'source': 'Terrengmodell', 'error': str(exc)[:120]}
 
     site = SiteInputs(
         site_area_m2=site_area_m2,
@@ -3931,29 +4002,37 @@ if "analysis_results" in st.session_state:
     for option_data in result["options"]:
         options.append(OptionResult(**option_data))
 
-    st.success("Mulighetsstudie er generert med faktisk tomtepolygon, nabohoyder og terreng der dette er lagt inn.")
     best = options[0]
     site_result = result.get("site", {})
 
+    # Hero section — recommended option
+    st.markdown(
+        "<div style='margin-top:1rem; margin-bottom:0.5rem;'>"
+        "<span style='color:#38bdf8; font-size:0.9rem; text-transform:uppercase; letter-spacing:0.08em; font-weight:600;'>Anbefalt alternativ</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Anbefalt alternativ</div><div class='metric-value'>{}</div></div>".format(best.typology), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Typologi</div><div class='metric-value-hero'>{}</div></div>".format(best.typology), unsafe_allow_html=True)
     with k2:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>BTA</div><div class='metric-value'>{:.0f} m2</div></div>".format(best.gross_bta_m2), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>BTA</div><div class='metric-value-hero'>{:,.0f} m²</div></div>".format(best.gross_bta_m2), unsafe_allow_html=True)
     with k3:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Boliger</div><div class='metric-value'>{}</div></div>".format(best.unit_count), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Boliger</div><div class='metric-value-hero'>{}</div></div>".format(best.unit_count), unsafe_allow_html=True)
     with k4:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Solscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(best.solar_score), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Score</div><div class='metric-value-hero'>{:.0f}/100</div></div>".format(best.score), unsafe_allow_html=True)
 
     g1, g2, g3, g4 = st.columns(4)
+    geo_src_raw = site_result.get("site_geometry_source", "-")
+    geo_src_display = "Eksakt polygon" if any(k in geo_src_raw for k in ["Eksakt", "Hentet", "Geodata"]) else ("GeoJSON" if "GeoJSON" in geo_src_raw else geo_src_raw)
     with g1:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Geometrikilde</div><div class='metric-value'>{}</div></div>".format(site_result.get("site_geometry_source", "-")), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Tomtegrunnlag</div><div class='metric-value'>{}</div></div>".format(geo_src_display), unsafe_allow_html=True)
     with g2:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Buildbart areal</div><div class='metric-value'>{:.0f} m2</div></div>".format(best.buildable_area_m2), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Bebbyggbart areal</div><div class='metric-value'>{:,.0f} m²</div></div>".format(best.buildable_area_m2), unsafe_allow_html=True)
     with g3:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Naboer brukt</div><div class='metric-value'>{}</div></div>".format(best.neighbor_count), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Solscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(best.solar_score), unsafe_allow_html=True)
     with g4:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Terreng fall</div><div class='metric-value'>{:.1f}%</div></div>".format(best.terrain_slope_pct), unsafe_allow_html=True)
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Nabobygg i modell</div><div class='metric-value'>{}</div></div>".format(best.neighbor_count), unsafe_allow_html=True)
 
     polygon_meta = result.get("polygon_meta", {})
     neighbor_meta = result.get("neighbor_meta", {})
@@ -3961,9 +4040,13 @@ if "analysis_results" in st.session_state:
     site_intelligence_bundle = result.get('site_intelligence', {}) or {}
 
     if site_intelligence_bundle.get('available'):
+        st.markdown(
+            "<div class='section-header'>Stedsintelligens</div>",
+            unsafe_allow_html=True,
+        )
         s1, s2, s3, s4 = st.columns(4)
         with s1:
-            st.markdown("<div class='kpi-card'><div class='metric-title'>Site score</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('site_score', 0.0))), unsafe_allow_html=True)
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Stedscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('site_score', 0.0))), unsafe_allow_html=True)
         with s2:
             st.markdown("<div class='kpi-card'><div class='metric-title'>Mulighet</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('opportunity_score', 0.0))), unsafe_allow_html=True)
         with s3:
@@ -3972,41 +4055,39 @@ if "analysis_results" in st.session_state:
             favored = sorted((site_intelligence_bundle.get('typology_score_adjustments') or {}).items(), key=lambda item: item[1], reverse=True)
             favored_text = favored[0][0] if favored else '-'
             st.markdown("<div class='kpi-card'><div class='metric-title'>Favorisert grep</div><div class='metric-value'>{}</div></div>".format(favored_text), unsafe_allow_html=True)
+
+    # Data source caption
     meta_lines = []
     if polygon_meta:
-        meta_lines.append(f"Tomt: {polygon_meta.get('source', '-')}")
+        src = polygon_meta.get('source', '-')
+        clean_src = "Eksakt polygon" if any(k in src for k in ["Eksakt", "Hentet", "Geodata"]) else src
+        meta_lines.append(f"Tomt: {clean_src}")
     if neighbor_meta:
-        meta_lines.append(f"Naboer: {neighbor_meta.get('source', '-')} ({neighbor_meta.get('count', best.neighbor_count)})")
-        if neighbor_meta.get("error"):
-            meta_lines.append(f"Nabo-feil: {neighbor_meta.get('error')}")
-    if terrain_meta:
-        meta_lines.append(f"Terreng: {terrain_meta.get('source', '-')}")
-        if terrain_meta.get("error"):
-            meta_lines.append(f"Terreng-feil: {terrain_meta.get('error')}")
+        n_count = neighbor_meta.get('count', best.neighbor_count)
+        if n_count:
+            meta_lines.append(f"Naboer: {n_count} stk")
+    if terrain_meta and not terrain_meta.get("error"):
+        meta_lines.append("Terreng: aktiv")
+    if best.terrain_slope_pct > 0:
+        meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
     if meta_lines:
-        st.caption(" | ".join(meta_lines))
+        st.caption(" · ".join(meta_lines))
 
-    st.markdown("### Alternativsammenligning")
+    st.markdown("<div class='section-header'>Alternativsammenligning</div>", unsafe_allow_html=True)
     comparison_df = pd.DataFrame(
         [
             {
                 "Alternativ": option.name,
                 "Typologi": option.typology,
                 "Etasjer": option.floors,
-                "Fotavtrykk m2": option.footprint_area_m2,
-                "Buildbart areal m2": option.buildable_area_m2,
-                "BTA m2": option.gross_bta_m2,
-                "Salgbart m2": option.saleable_area_m2,
+                "Fotavtrykk m²": option.footprint_area_m2,
+                "BTA m²": option.gross_bta_m2,
+                "Salgbart m²": option.saleable_area_m2,
                 "Boliger": option.unit_count,
-                "Parkering": option.parking_spaces,
+                "P-plasser": option.parking_spaces,
                 "Solscore": option.solar_score,
-                "Solbelyst uteareal %": option.sunlit_open_space_pct,
-                "Skuldersesong soltimer": option.estimated_equinox_sun_hours,
-                "Vinter skygge kl12 m": option.winter_noon_shadow_m,
-                "Terreng fall %": option.terrain_slope_pct,
-                "Naboer": option.neighbor_count,
+                "Sol uteareal %": option.sunlit_open_space_pct,
                 "Score": option.score,
-                "Bygningsdeler": len((option.geometry or {}).get('massing_parts', []) or []),
             }
             for option in options
         ]
@@ -4014,7 +4095,7 @@ if "analysis_results" in st.session_state:
     st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
     if site_intelligence_bundle.get('available'):
-        st.markdown('### Geodata-kontekst')
+        st.markdown("<div class='section-header'>Stedskontekst</div>", unsafe_allow_html=True)
         gi_plan, gi_projects, gi_transport = st.columns(3)
         with gi_plan:
             st.caption('Plan og regulering')
@@ -4026,17 +4107,17 @@ if "analysis_results" in st.session_state:
             st.caption('Mobilitet og adkomst')
             st.json(site_intelligence_bundle.get('transport', {}), expanded=False)
 
-    st.markdown("### Volumskisser")
+    st.markdown("<div class='section-header'>Volumskisser</div>", unsafe_allow_html=True)
     cols = st.columns(len(options))
     for col, option, image in zip(cols, options, result["option_images"]):
         with col:
-            st.image(image, caption=f"{option.name} - {option.typology}", use_container_width=True)
+            st.image(image, caption=f"{option.name} — {option.typology}", use_container_width=True)
             st.caption(
-                f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | "
-                f"solscore {option.solar_score:.0f}/100 | uteareal sol {option.sunlit_open_space_pct:.0f}%"
+                f"BTA {option.gross_bta_m2:,.0f} m² | {option.unit_count} boliger | "
+                f"sol {option.solar_score:.0f}/100 | uteareal sol {option.sunlit_open_space_pct:.0f}%"
             )
 
-    st.markdown("### Leilighetsmiks per alternativ")
+    st.markdown("<div class='section-header'>Leilighetsmiks per alternativ</div>", unsafe_allow_html=True)
     mix_rows = []
     for option in options:
         row = {"Alternativ": option.name}
@@ -4046,16 +4127,16 @@ if "analysis_results" in st.session_state:
     mix_df = pd.DataFrame(mix_rows).fillna(0)
     st.dataframe(mix_df, use_container_width=True, hide_index=True)
 
-    st.markdown("### Sol/skygge og terreng")
+    st.markdown("<div class='section-header'>Sol, skygge og terreng</div>", unsafe_allow_html=True)
     solar_df = pd.DataFrame(
         {
             option.name: {
                 "Solbelyst uteareal %": option.sunlit_open_space_pct,
-                "Skuldersesong soltimer": option.estimated_equinox_sun_hours,
+                "Vår/høst soltimer": option.estimated_equinox_sun_hours,
                 "Vinter soltimer": option.estimated_winter_sun_hours,
-                "Vinterskygge kl 12 (m)": option.winter_noon_shadow_m,
-                "Sommerskygge kl 15 (m)": option.summer_afternoon_shadow_m,
-                "Terreng fall %": option.terrain_slope_pct,
+                "Vinterskygge kl. 12 (m)": option.winter_noon_shadow_m,
+                "Sommerskygge kl. 15 (m)": option.summer_afternoon_shadow_m,
+                "Terrengfall %": option.terrain_slope_pct,
                 "Terreng relieff m": option.terrain_relief_m,
             }
             for option in options
@@ -4064,7 +4145,7 @@ if "analysis_results" in st.session_state:
     st.dataframe(solar_df, use_container_width=True)
 
     if geodata_token_ok and gdo is not None:
-        st.markdown('### 3D Geodata-scene')
+        st.markdown("<div class='section-header'>3D Terrengscene</div>", unsafe_allow_html=True)
         selected_name = st.selectbox('Velg volum for 3D-scene', [opt.name for opt in options], index=0)
         selected_option = next((opt for opt in options if opt.name == selected_name), options[0])
         try:
@@ -4076,7 +4157,7 @@ if "analysis_results" in st.session_state:
             st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
 
     # --- Interaktiv Three.js 3D-modell ---
-    st.markdown('### 3D Volummodell (interaktiv)')
+    st.markdown("<div class='section-header'>3D Volummodell (interaktiv)</div>", unsafe_allow_html=True)
     sel3d_name = st.selectbox('Velg alternativ for 3D-visning', [opt.name for opt in options], index=0, key='sel3d')
     sel3d_opt = next((opt for opt in options if opt.name == sel3d_name), options[0])
     try:
@@ -4084,10 +4165,10 @@ if "analysis_results" in st.session_state:
     except Exception as exc:
         st.caption(f'3D-modell kunne ikke rendres: {exc}')
 
-    st.markdown("### Rapport")
+    st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
-    st.markdown("### Nedlasting og QA")
+    st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     cdl, cqa = st.columns(2)
     with cdl:
         st.download_button(
@@ -4099,5 +4180,5 @@ if "analysis_results" in st.session_state:
         )
     with cqa:
         if find_page("Review"):
-            if st.button("Ga til QA for godkjenning", type="secondary", use_container_width=True):
+            if st.button("Gå til QA for godkjenning", type="secondary", use_container_width=True):
                 st.switch_page(find_page("Review"))
