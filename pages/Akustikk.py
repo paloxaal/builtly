@@ -399,88 +399,50 @@ def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600,
     return None, None
 
 
-def _get_geodata_token() -> str:
-    """Hent ArcGIS token direkte fra Geodata Online med brukernavn/passord."""
-    gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
-    gdo_pass = os.environ.get("GEODATA_ONLINE_PASS", "")
-    if not gdo_user or not gdo_pass:
-        return ""
+def _get_gdo_client():
+    """Hent en GeodataOnlineClient instans (cached)."""
     try:
-        resp = requests.post(
-            "https://services.geodataonline.no/arcgis/tokens/generateToken",
-            data={"username": gdo_user, "password": gdo_pass, "client": "requestip", "f": "json"},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("token", "")
-    except Exception:
-        pass
-    return ""
-
-
-DOK_FORURENSNING_URL = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-BASEMAP_GRAATONE_URL = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
-
-
-def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=None, layers=None):
-    """Fetch image from ArcGIS MapServer export.
-    
-    Returns RGB image composited on light background (not transparent RGBA).
-    Returns None if image is empty/transparent-only.
-    """
-    xmin, ymin, xmax, ymax = bbox_25833
-    params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
-              "size": f"{width},{height}", "format": "png32", "transparent": "true", "f": "image"}
-    if token: params["token"] = token
-    if layers: params["layers"] = layers
-    try:
-        resp = requests.get(f"{service_url}/export", params=params, timeout=20)
-        if resp.status_code == 200 and len(resp.content) > 500:
-            ctype = resp.headers.get("content-type", "")
-            # Sjekk at det faktisk er et bilde (ikke JSON feilmelding)
-            if resp.content[:1] == b'{':
-                return None  # JSON feilrespons
-            if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
-                overlay = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-                
-                # Sjekk om bildet har synlig innhold
-                alpha = np.array(overlay.split()[3])
-                non_transparent = np.count_nonzero(alpha > 10)
-                if non_transparent < 50:
-                    return None  # Tomt/transparent bilde
-                
-                # Composit på lys bakgrunn for synlighet
-                bg = Image.new("RGBA", overlay.size, (245, 245, 240, 255))
-                result = Image.alpha_composite(bg, overlay)
-                return result.convert("RGB")
-    except Exception:
+        from geodata_client import GeodataOnlineClient, GEOMAP_DOKFORURENSNING_MS
+        gdo = GeodataOnlineClient()
+        if gdo.is_available():
+            return gdo
+    except ImportError:
         pass
     return None
 
 
-def _fetch_arcgis_overlay(service_url, bbox_25833, width=800, height=600, token=None, layers=None):
-    """Fetch RGBA overlay (no background compositing) for layering."""
+DOK_FORURENSNING_URL = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+
+
+def _fetch_arcgis_export(service_url, bbox_25833, width=800, height=600, 
+                          token=None, layers=None, transparent=True):
+    """Fetch image from ArcGIS MapServer export med full kontroll."""
     xmin, ymin, xmax, ymax = bbox_25833
-    params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
-              "size": f"{width},{height}", "format": "png32", "transparent": "true", "f": "image"}
+    params = {
+        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+        "bboxSR": "25833", "imageSR": "25833",
+        "size": f"{width},{height}",
+        "format": "png32" if transparent else "png",
+        "transparent": "true" if transparent else "false",
+        "f": "image",
+    }
     if token: params["token"] = token
     if layers: params["layers"] = layers
     try:
         resp = requests.get(f"{service_url}/export", params=params, timeout=20)
         if resp.status_code == 200 and len(resp.content) > 500:
             if resp.content[:1] == b'{':
-                return None
+                return None  # JSON feilrespons
             ctype = resp.headers.get("content-type", "")
             if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
-                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+                return Image.open(io.BytesIO(resp.content)).convert("RGBA" if transparent else "RGB")
     except Exception:
         pass
     return None
 
 
 def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=300):
-    """Hent støykart fra Geodata Online DOK Forurensning (primær) eller Geonorge WMS (sekundær)."""
+    """Hent støykart fra Geodata Online DOK Forurensning."""
     if not HAS_REQUESTS: return None, "requests-biblioteket mangler"
     try:
         easting, northing = _latlon_to_utm33(lat, lon)
@@ -489,47 +451,70 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
         return None, "Koordinatkonvertering feilet"
 
     errors = []
-
-    # --- PRIMÆR: Geodata Online DOK Forurensning MapServer ---
-    token = _get_geodata_token()
-    if token:
-        # Strategi 1: Hent støykart-overlay + bakgrunnskart separat, composit
-        noise_overlay = _fetch_arcgis_overlay(DOK_FORURENSNING_URL, bbox, width, height, token=token)
-        if noise_overlay is None:
-            # Prøv med eksplisitte lag
-            noise_overlay = _fetch_arcgis_overlay(DOK_FORURENSNING_URL, bbox, width, height, 
-                                                    token=token, layers="show:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20")
-        
-        if noise_overlay is not None:
-            # Sjekk at overlay har innhold
-            alpha = np.array(noise_overlay.split()[3])
-            has_content = np.count_nonzero(alpha > 10) > 50
+    gdo = _get_gdo_client()
+    
+    if gdo:
+        try:
+            token = gdo.get_token()
             
-            if has_content:
-                # Prøv å hente bakgrunnskart
-                try:
-                    basemap = _fetch_arcgis_image(BASEMAP_GRAATONE_URL, bbox, width, height, token=token)
+            # Steg 1: Finn støy-lag i DOK Forurensning
+            stoey_layer_ids = []
+            try:
+                layers = gdo.list_layers("Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer", leaf_only=False)
+                for lyr in layers:
+                    name = (lyr.get("name") or "").lower()
+                    if any(w in name for w in ["støy", "stoy", "noise", "lden", "veg", "bane", "fly"]):
+                        stoey_layer_ids.append(str(lyr.get("id")))
+            except Exception:
+                pass
+            
+            # Steg 2: Hent støy-overlay med spesifikke lag (eller alle)
+            noise_overlay = None
+            if stoey_layer_ids:
+                layer_spec = "show:" + ",".join(stoey_layer_ids)
+                noise_overlay = _fetch_arcgis_export(DOK_FORURENSNING_URL, bbox, width, height, 
+                                                       token=token, layers=layer_spec, transparent=True)
+            
+            if noise_overlay is None:
+                # Fallback: alle lag
+                noise_overlay = _fetch_arcgis_export(DOK_FORURENSNING_URL, bbox, width, height,
+                                                       token=token, transparent=True)
+            
+            if noise_overlay is None:
+                # Siste fallback: prøv med show:0-20
+                noise_overlay = _fetch_arcgis_export(DOK_FORURENSNING_URL, bbox, width, height,
+                                                       token=token, 
+                                                       layers="show:0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20",
+                                                       transparent=True)
+            
+            if noise_overlay is not None:
+                # Sjekk at overlay har innhold
+                alpha = np.array(noise_overlay.split()[3])
+                has_content = np.count_nonzero(alpha > 10) > 50
+                
+                if has_content:
+                    # Hent bakgrunnskart (gråtone) for compositing
+                    basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
+                    basemap = _fetch_arcgis_export(basemap_url, bbox, width, height, 
+                                                     token=token, transparent=False)
                     if basemap is not None:
-                        # Composit støy over bakgrunnskart
                         basemap_rgba = basemap.convert("RGBA")
                         result = Image.alpha_composite(basemap_rgba, noise_overlay)
                         return result.convert("RGB"), None
-                except Exception:
-                    pass
-                
-                # Fallback: støy på lys grå bakgrunn
-                bg = Image.new("RGBA", noise_overlay.size, (245, 245, 240, 255))
-                result = Image.alpha_composite(bg, noise_overlay)
-                return result.convert("RGB"), None
+                    
+                    # Fallback: støy på lys grå bakgrunn
+                    bg = Image.new("RGBA", noise_overlay.size, (245, 245, 240, 255))
+                    result = Image.alpha_composite(bg, noise_overlay)
+                    return result.convert("RGB"), None
+                else:
+                    errors.append("DOK Forurensning: bildet er transparent — ingen støydata i dette området")
             else:
-                errors.append("DOK Forurensning: ingen støydata synlig i dette området")
-        else:
-            errors.append("DOK Forurensning: MapServer export returnerte tomt bilde")
+                errors.append("DOK Forurensning: MapServer returnerte ingen data")
+                
+        except Exception as e:
+            errors.append(f"DOK Forurensning: {str(e)[:100]}")
     else:
-        if not os.environ.get("GEODATA_ONLINE_USER"):
-            errors.append("Mangler GEODATA_ONLINE_USER/PASS i Render miljøvariabler")
-        else:
-            errors.append("DOK Forurensning: token-generering feilet — sjekk brukernavn/passord")
+        errors.append("Geodata Online er ikke tilgjengelig — sjekk GEODATA_ONLINE_USER/PASS")
 
     # --- SEKUNDÆR: Geonorge WMS ---
     gdo_user = os.environ.get("GEODATA_ONLINE_USER", "")
@@ -559,15 +544,20 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
 
 
 def fetch_stoykart_contours(lat, lon, kilde="vei", buffer_m=300):
-    """Hent støykontur-data (feature query) fra DOK Forurensning."""
+    """Hent støykontur-data fra DOK Forurensning."""
     if not HAS_REQUESTS: return []
     try:
         easting, northing = _latlon_to_utm33(lat, lon)
     except Exception:
         return []
 
-    token = _get_geodata_token()
-    if not token: return []
+    gdo = _get_gdo_client()
+    if not gdo: return []
+    
+    try:
+        token = gdo.get_token()
+    except Exception:
+        return []
 
     params = {
         "geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
@@ -1034,44 +1024,37 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
         else:
             st.error("❌ GEODATA_ONLINE_PASS er IKKE satt")
         
-        # Steg 2: Token
-        st.caption("Prøver å hente token...")
-        token = _get_geodata_token()
-        if token:
-            st.caption(f"✅ Token hentet OK (lengde: {len(token)} tegn, starter med: {token[:10]}...)")
-        else:
-            st.error("❌ Token-generering feilet!")
-            # Debug: prøv manuelt og vis feilmelding
+        # Steg 2: Token via GeodataOnlineClient
+        st.caption("Prøver å hente token via GeodataOnlineClient...")
+        gdo = _get_gdo_client()
+        token = None
+        if gdo:
             try:
-                debug_resp = requests.post(
-                    "https://services.geodataonline.no/arcgis/tokens/generateToken",
-                    data={"username": gdo_u, "password": gdo_p, "client": "requestip", "f": "json"},
-                    timeout=10
-                )
-                st.caption(f"   HTTP status: {debug_resp.status_code}")
-                st.caption(f"   Respons: {debug_resp.text[:300]}")
+                token = gdo.get_token()
+                st.caption(f"✅ Token hentet OK (lengde: {len(token)} tegn, starter med: {token[:10]}...)")
             except Exception as e:
-                st.caption(f"   Feil: {e}")
+                st.error(f"❌ Token-generering feilet: {e}")
+        else:
+            st.error("❌ GeodataOnlineClient ikke tilgjengelig — sjekk at geodata_client.py finnes og GEODATA_ONLINE_USER/PASS er satt")
         
-        if token:
+        if token and gdo:
             # Steg 3: Liste lag i DOK Forurensning
             st.caption("Henter lag-liste fra DOK Forurensning...")
             try:
-                layers_resp = requests.get(f"{DOK_FORURENSNING_URL}?f=json&token={token}", timeout=10)
-                st.caption(f"   HTTP status: {layers_resp.status_code}")
-                if layers_resp.status_code == 200:
-                    svc = layers_resp.json()
-                    layers = svc.get("layers", [])
-                    st.caption(f"✅ Fant {len(layers)} lag i tjenesten:")
-                    for lyr in layers[:30]:
-                        name = lyr.get("name", "?")
-                        lid = lyr.get("id", "?")
-                        vis = "👁️" if lyr.get("defaultVisibility", False) else "  "
-                        is_noise = any(w in name.lower() for w in ["støy", "stoy", "noise", "lden", "vei", "bane"])
-                        prefix = "🔊" if is_noise else "  "
-                        st.caption(f"   {vis} {prefix} Lag {lid}: {name}")
-                else:
-                    st.caption(f"   Respons: {layers_resp.text[:300]}")
+                layers = gdo.list_layers("Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer", leaf_only=False)
+                st.caption(f"✅ Fant {len(layers)} lag i tjenesten:")
+                stoey_ids = []
+                for lyr in layers[:40]:
+                    name = lyr.get("name", "?")
+                    lid = lyr.get("id", "?")
+                    vis = "👁️" if lyr.get("defaultVisibility", False) else "  "
+                    is_noise = any(w in name.lower() for w in ["støy", "stoy", "noise", "lden", "veg", "bane", "fly"])
+                    prefix = "🔊" if is_noise else "  "
+                    if is_noise:
+                        stoey_ids.append(str(lid))
+                    st.caption(f"   {vis} {prefix} Lag {lid}: {name}")
+                if stoey_ids:
+                    st.success(f"Støy-lag funnet: {', '.join(stoey_ids)}")
             except Exception as e:
                 st.error(f"   Feil: {e}")
             
