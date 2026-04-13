@@ -435,6 +435,7 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         "flom": None, "kvikkleire": None, "skred": None,
         "geologi_gdo": None,
         "forurensning_gdo": None, "kulturminner_gdo": None, "samfunnssikkerhet_gdo": None,
+        "natur_gdo": None, "energi_gdo": None, "landbruk_gdo": None,
         "grunnforurensning": [],
         "geology_context": None,
         "coords": None, "bbox": None,
@@ -522,16 +523,22 @@ def fetch_all_geodata(adresse: str, kommune: str, gnr: str, bnr: str,
         except Exception as e:
             result["log"].append(f"⚠️ Geodata Online geologi kart: {str(e)[:60]}")
 
-    # Step 3b: Geodata Online — forurensning, kulturminner, samfunnssikkerhet temakart
+    # Step 3b: Geodata Online — forurensning, kulturminner, samfunnssikkerhet, natur, energi, landbruk temakart
     if _GDO_TOKEN_OK:
         try:
             from geodata_client import (GEOMAP_DOKFORURENSNING_MS,
                                          GEOMAP_DOKKULTUREMINNER_MS,
-                                         GEOMAP_DOKSAMFUNNSSIKKERHET_MS)
+                                         GEOMAP_DOKSAMFUNNSSIKKERHET_MS,
+                                         GEOMAP_DOKNATUR_MS,
+                                         GEOMAP_DOKENERGI_MS,
+                                         GEOMAP_DOKLANDBRUK_MS)
             for key, service, label in [
                 ("forurensning_gdo", GEOMAP_DOKFORURENSNING_MS, "DOK Forurensning"),
                 ("kulturminner_gdo", GEOMAP_DOKKULTUREMINNER_MS, "DOK Kulturminner"),
                 ("samfunnssikkerhet_gdo", GEOMAP_DOKSAMFUNNSSIKKERHET_MS, "DOK Samfunnssikkerhet"),
+                ("natur_gdo", GEOMAP_DOKNATUR_MS, "DOK Natur"),
+                ("energi_gdo", GEOMAP_DOKENERGI_MS, "DOK Energi"),
+                ("landbruk_gdo", GEOMAP_DOKLANDBRUK_MS, "DOK Landbruk"),
             ]:
                 try:
                     img = _geodata_online_map(service, bbox)
@@ -617,6 +624,9 @@ def geodata_summary_text(gd: dict) -> str:
         "forurensning_gdo": "DOK Forurensningskart (Geodata Online) — viser kartlagte forurensingssoner, deponier og registrerte forurensingslokaliteter",
         "kulturminner_gdo": "DOK Kulturminnekart (Geodata Online) — viser fredede og verneverdige kulturminner/kulturmiljøer",
         "samfunnssikkerhet_gdo": "DOK Samfunnssikkerhetskart (Geodata Online) — viser risiko- og sårbarhetsdata",
+        "natur_gdo": "DOK Naturmangfold (Geodata Online) — viser naturtyper, verneområder og artsobservasjoner",
+        "energi_gdo": "DOK Energi (Geodata Online) — viser kraftlinjer, transformatorer og energiinfrastruktur",
+        "landbruk_gdo": "DOK Landbruk (Geodata Online) — viser jordbruksareal, dyrkbar jord og jordvernområder",
     }
     fetched = [label for key, label in map_names.items() if gd.get(key) is not None]
     missing = [label for key, label in map_names.items() if gd.get(key) is None]
@@ -685,7 +695,7 @@ def find_page(base_name: str) -> str:
 def clean_pdf_text(text):
     if text is None: return ""
     text = str(text)
-    rep = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">="}
+    rep = {"–": "-", "—": "-", "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...", "•": "-", "≤": "<=", "≥": ">=", "`": "'"}
     for old, new in rep.items(): text = text.replace(old, new)
     return text.encode("latin-1", "replace").decode("latin-1")
 
@@ -1087,8 +1097,12 @@ def is_subheading_line(line: str) -> bool:
 def is_bullet_line(line: str) -> bool:
     return bool(re.match(r"^([-*•]|\d+\.)\s+", line.strip()))
 
+def is_sub_bullet_line(line: str) -> bool:
+    """Detect indented sub-bullets: lines starting with 2+ spaces then - or *."""
+    return bool(re.match(r"^  +([-*•])\s+", line))
+
 def strip_bullet(line: str) -> str:
-    return re.sub(r"^([-*•]|\d+\.)\s+", "", line.strip())
+    return re.sub(r"^\s*([-*•]|\d+\.)\s+", "", line.strip())
 
 class BuiltlyCorporatePDF(FPDF):
     def header(self):
@@ -1150,6 +1164,21 @@ class BuiltlyCorporatePDF(FPDF):
             self.set_xy(28, start_y)
             self.multi_cell(162, 5.2, clean)
             self.ln(0.8)
+
+    def sub_bullets(self, items):
+        """Sub-bullets with smaller font and more indent — for nested points."""
+        for item in items:
+            clean = ironclad_text_formatter(item)
+            if not clean: continue
+            self.ensure_space(9)
+            self.set_font("Helvetica", "", 9.2)
+            self.set_text_color(72, 79, 87)
+            start_y = self.get_y()
+            self.set_xy(32, start_y)
+            self.cell(5, 4.8, "-", 0, 0, "L")
+            self.set_xy(37, start_y)
+            self.multi_cell(153, 4.8, clean)
+            self.ln(0.4)
 
     def section_title(self, title: str):
         self.ensure_space(50) # Sikrer plass til overskrift + minst noen linjer innhold (unngår ensomme overskrifter)
@@ -1368,18 +1397,41 @@ def build_cover_page(pdf, project_data, client, recent_img, hist_img, source_tex
 def build_toc_page(pdf, include_appendices=False):
     pdf.add_page()
     pdf.section_title("INNHOLDSFORTEGNELSE")
-    items = ["1. Sammendrag og konklusjon", "2. Innledning og prosjektbeskrivelse", "3. Grunnforhold og geologi", "4. Naturfare og risiko", "5. Miljøteknisk historikk og forurensningsstatus", "6. Utførte grunnundersøkelser", "7. Resultater: grunnforhold og forurensning", "8. Geotekniske vurderinger", "9. Tiltaksplan og massehåndtering"]
-    if include_appendices: items.extend(["Vedlegg A. Sammenstilling av analyseresultater", "Vedlegg B. Tilstandsklassegrenser (utdrag)"])
-    pdf.set_font("Helvetica", "", 10.5)
-    pdf.set_text_color(45, 49, 55)
-    for item in items:
+    main_items = ["1. Sammendrag og konklusjon", "2. Innledning og prosjektbeskrivelse", "3. Grunnforhold og geologi", "4. Naturfare og risiko", "5. Miljøteknisk historikk og forurensningsstatus", "6. Utførte grunnundersøkelser", "7. Resultater: grunnforhold og forurensning", "8. Geotekniske vurderinger", "9. Tiltaksplan og massehåndtering"]
+    sub_items_9 = ["9.1  Masseoversikt og volumanslag", "9.2  Segregering og klassifisering", "9.3  Disponering per tilstandsklasse", "9.4  Transport og dokumentasjon", "9.5  HMS og vernetiltak", "9.6  Sluttkontroll og rapportering"]
+    appendix_items = ["Vedlegg A. Sammenstilling av analyseresultater", "Vedlegg B. Tilstandsklassegrenser (utdrag)"]
+    
+    for item in main_items:
         pdf.ensure_space(9)
         y = pdf.get_y()
+        pdf.set_font("Helvetica", "", 10.5)
+        pdf.set_text_color(45, 49, 55)
         pdf.set_x(22)
         pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
         pdf.set_draw_color(225, 229, 234)
         pdf.line(22, y + 6, 188, y + 6)
         pdf.ln(8)
+        # Add sub-items after chapter 9
+        if item.startswith("9."):
+            for sub in sub_items_9:
+                pdf.ensure_space(7)
+                pdf.set_font("Helvetica", "", 9.2)
+                pdf.set_text_color(100, 105, 112)
+                pdf.set_x(34)
+                pdf.cell(0, 5, clean_pdf_text(sub), 0, 0, "L")
+                pdf.ln(6)
+    if include_appendices:
+        pdf.ln(2)
+        for item in appendix_items:
+            pdf.ensure_space(9)
+            y = pdf.get_y()
+            pdf.set_font("Helvetica", "", 10.5)
+            pdf.set_text_color(45, 49, 55)
+            pdf.set_x(22)
+            pdf.cell(0, 6, clean_pdf_text(item), 0, 0, "L")
+            pdf.set_draw_color(225, 229, 234)
+            pdf.line(22, y + 6, 188, y + 6)
+            pdf.ln(8)
     pdf.ln(6)
     pdf.highlight_box("Dokumentoppsett", ["Rapporten er bygget med tydelig seksjonshierarki, figurtekster og dedikerte tabellvedlegg for laboratoriedata.", "Opplastede lab-data sammenstilles i egne analyseresultattabeller fremfor å ligge skjult som råtekst i brødteksten."])
 
@@ -1405,7 +1457,7 @@ def render_maps(pdf, recent_img, hist_img, source_text):
     pdf.set_y(start_y + max_height + 14)
 
 def render_ai_section_body(pdf, lines):
-    paragraph_buffer, bullet_buffer, first_para, empty_line_count = [], [], True, 0
+    paragraph_buffer, bullet_buffer, sub_bullet_buffer, first_para, empty_line_count = [], [], [], True, 0
 
     def flush_paragraph():
         nonlocal paragraph_buffer, first_para
@@ -1416,8 +1468,15 @@ def render_ai_section_body(pdf, lines):
                 first_para = False
         paragraph_buffer = []
 
+    def flush_sub_bullets():
+        nonlocal sub_bullet_buffer
+        if sub_bullet_buffer:
+            pdf.sub_bullets([strip_bullet(item) for item in sub_bullet_buffer])
+        sub_bullet_buffer = []
+
     def flush_bullets():
         nonlocal bullet_buffer
+        flush_sub_bullets()
         if bullet_buffer:
             pdf.bullets([strip_bullet(item) for item in bullet_buffer], numbered=all(re.match(r"^\d+\.\s+", item.strip()) for item in bullet_buffer))
         bullet_buffer = []
@@ -1428,7 +1487,7 @@ def render_ai_section_body(pdf, lines):
             flush_paragraph()
             flush_bullets()
             empty_line_count += 1
-            if empty_line_count == 1: pdf.ln(3) # Unngå evig lange blanke avsnitt
+            if empty_line_count == 1: pdf.ln(3)
             continue
         empty_line_count = 0
         if is_subheading_line(line):
@@ -1436,8 +1495,14 @@ def render_ai_section_body(pdf, lines):
             flush_bullets()
             pdf.subheading(line)
             continue
+        # Check for sub-bullets (indented lines)
+        if is_sub_bullet_line(raw_line):
+            flush_paragraph()
+            sub_bullet_buffer.append(raw_line)
+            continue
         if is_bullet_line(line):
             flush_paragraph()
+            flush_sub_bullets()
             bullet_buffer.append(line)
             continue
         flush_bullets()
@@ -1517,7 +1582,13 @@ def create_full_report_pdf(name, client, content, recent_img, hist_img, source_t
                 for key, label in [("losmasser", "Løsmassekart (NGU)"), ("berggrunn", "Bergrunnskart (NGU)"),
                                    ("radon", "Radon aktsomhet (NGU)"), ("geologi_gdo", "Geologi (Geodata Online)"),
                                    ("flom", "Flomsoner (NVE)"), ("kvikkleire", "Kvikkleire (NVE)"),
-                                   ("skred", "Skredfare (NVE)")]:
+                                   ("skred", "Skredfare (NVE)"),
+                                   ("forurensning_gdo", "Forurensning (Geodata Online)"),
+                                   ("kulturminner_gdo", "Kulturminner (Geodata Online)"),
+                                   ("samfunnssikkerhet_gdo", "Samfunnssikkerhet (Geodata Online)"),
+                                   ("natur_gdo", "Naturmangfold (Geodata Online)"),
+                                   ("energi_gdo", "Energi (Geodata Online)"),
+                                   ("landbruk_gdo", "Landbruk (Geodata Online)")]:
                     img = gd.get(key)
                     if img is not None:
                         pil_img = img.convert("RGB") if isinstance(img, Image.Image) else img
