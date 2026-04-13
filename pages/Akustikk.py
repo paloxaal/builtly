@@ -931,6 +931,13 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
         with st.spinner(f"Henter støykart ({stoy_api_kilde})..."):
             stoy_img, stoy_err = fetch_stoykart_image(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
             if stoy_img:
+                # Composite transparent PNG onto white background for visibility
+                if stoy_img.mode == "RGBA":
+                    bg = Image.new("RGB", stoy_img.size, (255, 255, 255))
+                    bg.paste(stoy_img, mask=stoy_img.split()[3])
+                    stoy_img = bg
+                else:
+                    stoy_img = stoy_img.convert("RGB")
                 st.session_state["stoykart_image"] = stoy_img
                 st.success("Støykart hentet!")
             else:
