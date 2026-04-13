@@ -1450,6 +1450,7 @@ class SiteInputs:
     neighbor_count: int = 0
     terrain_slope_pct: float = 0.0
     terrain_relief_m: float = 0.0
+    utnyttelsesgrad_bra_pct: float = 0.0  # %-BRA: overstyrer BYA som volumdriver
 
 
 @dataclass
@@ -1617,16 +1618,30 @@ def derive_limits(site: SiteInputs, geodata_context: Optional[Dict[str, Any]] = 
         buildable_depth = max(8.0, site.site_depth_m - site.front_setback_m - site.rear_setback_m)
         buildable_area = buildable_width * buildable_depth
         site_area = site.site_area_m2
-    max_footprint_by_bya = site_area * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
-    max_footprint = min(buildable_area, max_footprint_by_bya)
+
     floors_from_height = max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))) if site.max_height_m > 0 else site.max_floors
     allowed_floors = max(1, min(site.max_floors, floors_from_height))
+
+    # %-BRA overstyrer BYA som volumdriver for leilighetsprosjekter
+    if site.utnyttelsesgrad_bra_pct > 0:
+        target_bra = site_area * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta = target_bra / max(site.efficiency_ratio, 0.6)
+        # Beregn nødvendig fotavtrykk fra target BTA og tillatte etasjer
+        needed_footprint = target_bta / max(allowed_floors, 1)
+        # Begrens til bebbyggbart areal, men IKKE til BYA
+        max_footprint = min(buildable_area, needed_footprint * 1.1)  # 10% margin
+    else:
+        max_footprint_by_bya = site_area * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
+        max_footprint = min(buildable_area, max_footprint_by_bya)
+
     return {
         "buildable_width": buildable_width,
         "buildable_depth": buildable_depth,
         "buildable_area": buildable_area,
         "max_footprint": max_footprint,
         "allowed_floors": float(allowed_floors),
+        "target_bra_from_pct": round(site_area * site.utnyttelsesgrad_bra_pct / 100.0, 0) if site.utnyttelsesgrad_bra_pct > 0 else 0.0,
+        "volume_driver": "%-BRA" if site.utnyttelsesgrad_bra_pct > 0 else "BYA",
     }
 
 
@@ -1863,17 +1878,23 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         return []
 
     templates = [
-        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.78, "floor_bias": 0, "eff_adj": 0.02},
-        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.84, "floor_bias": 0, "eff_adj": 0.00},
-        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.52, "floor_bias": 2, "eff_adj": -0.01},
-        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.36, "floor_bias": 4, "eff_adj": -0.03},
-        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.58, "floor_bias": 3, "eff_adj": -0.02},
-        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.82, "floor_bias": -1, "eff_adj": -0.02},
-        {"name": "Alt G - Rekke", "typology": "Rekke", "coverage": 0.68, "floor_bias": -1, "eff_adj": 0.04},
+        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 5), "eff_adj": 0.02},
+        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.80, "floor_range": (3, 5), "eff_adj": 0.00},
+        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.45, "floor_range": (4, 7), "eff_adj": -0.01},
+        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.25, "floor_range": (6, 12), "eff_adj": -0.03},
+        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.55, "floor_range": (5, 8), "eff_adj": -0.02},
+        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.70, "floor_range": (3, 4), "eff_adj": -0.02},
+        {"name": "Alt G - Rekke", "typology": "Rekke", "coverage": 0.60, "floor_range": (2, 3), "eff_adj": 0.04},
     ]
 
     options: List[OptionResult] = []
-    target_bta = max(site.desired_bta_m2, 1.0)
+    # Mål-BTA: bruk %-BRA hvis satt, ellers desired_bta_m2
+    if site.utnyttelsesgrad_bra_pct > 0:
+        site_area_for_pct = max(1.0, geodata_context.get("site_area_m2", site.site_area_m2))
+        target_bra = site_area_for_pct * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta = max(target_bra / max(site.efficiency_ratio, 0.6), 1.0)
+    else:
+        target_bta = max(site.desired_bta_m2, 1.0)
     serialized_neighbors = serialize_neighbor_geometries(neighbors)
     terrain_summary = {
         "slope_pct": round(float((terrain or {}).get("slope_pct", 0.0)), 1),
@@ -1959,16 +1980,21 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         footprint_area = float(footprint_polygon.area)
 
-        floors_needed = math.ceil(target_bta / max(footprint_area, 1.0))
-        floors = clamp(floors_needed + template["floor_bias"], 2, allowed_floors)
-        floors = int(floors)
+        # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
+        fl_min, fl_max = template.get("floor_range", (3, 5))
+        fl_min = max(2, min(fl_min, allowed_floors))
+        fl_max = min(fl_max, allowed_floors)
 
-        if typology == "Tårn":
-            floors = int(clamp(max(floors, min(allowed_floors, 8)), 4, allowed_floors))
-        elif typology == "Podium + Tårn":
-            floors = int(clamp(max(floors, min(allowed_floors, 7)), 4, allowed_floors))
-        elif typology == "Karré":
-            floors = int(clamp(max(floors, 3), 2, allowed_floors))
+        # Finn optimalt etasjetall som treffer nærmest target_bta
+        best_floor_fit = fl_min
+        best_delta = float("inf")
+        for f_candidate in range(fl_min, fl_max + 1):
+            candidate_bta = footprint_area * f_candidate
+            delta = abs(candidate_bta - target_bta)
+            if delta < best_delta:
+                best_delta = delta
+                best_floor_fit = f_candidate
+        floors = best_floor_fit
 
         gross_bta = footprint_area * floors
         if site.max_bra_m2 > 0:
@@ -2156,6 +2182,7 @@ def refine_sketch_with_ai(
     max_height_m: float,
     floor_to_floor_m: float,
     neighbors: Optional[List[Dict[str, Any]]] = None,
+    **kwargs: Any,
 ) -> Optional[List[Dict[str, Any]]]:
     """
     AI-raffinering: Claude optimerer skissens bygningsplassering.
@@ -2170,9 +2197,13 @@ Optimer plasseringen med fokus på:
 3. SOLFORHOLD: Plasser lavere bygg mot sør, høyere mot nord for å unngå skygge på uteareal
 4. UTEROM: Skap tydelige, solrike uterom mellom bygningene
 5. ADKOMST: Plasser innganger mot vei/tilkomst
+6. STØY: Hvis det er støy fra vei, plasser soverom/stille sider bort fra støykilden, bruk bygningskroppen som skjerm
+7. DAGSLYS (TEK17 §13-7): Sørg for at alle leiligheter har tilstrekkelig dagslys — unngå at bygg skygger for hverandre
+8. UTSIKT: Orienter bygninger for å maksimere utsikt mot åpne retninger, unngå å blokkere nabobygningers utsikt
+9. VIND: Unngå smale passasjer mellom bygninger (venturi-effekt), plasser lavere bygg i dominerende vindretning
 
 Svar KUN med en JSON-array med bygninger. Hver bygning har:
-{"name": "str", "cx": float, "cy": float, "w": float, "d": float, "angle_deg": float, "floors": int, "role": "main|wing|tower", "reasoning": "kort begrunnelse for endring"}
+{"name": "str", "cx": float, "cy": float, "w": float, "d": float, "angle_deg": float, "floors": int, "role": "main|wing|tower", "reasoning": "kort begrunnelse for endring inkl. miljøhensyn"}
 
 Hold deg innenfor tomtegrensen. Behold omtrent samme totale BTA (±15%).
 IKKE inkluder noe annet enn JSON-arrayen i svaret."""
@@ -2193,6 +2224,23 @@ IKKE inkluder noe annet enn JSON-arrayen i svaret."""
         ],
     }
 
+    # Legg til miljødata hvis tilgjengelig
+    if kwargs.get("environment"):
+        env = kwargs["environment"]
+        env_summary = {}
+        if env.get("noise", {}).get("available"):
+            zones = env["noise"].get("zones", [])
+            if zones:
+                env_summary["noise"] = f"Støysone: {zones[0].get('zone', '–')}, {zones[0].get('db', 0):.0f} dB fra {zones[0].get('source_type', 'vei')}"
+        if env.get("wind", {}).get("available"):
+            env_summary["wind"] = f"Dominerende vind: {env['wind'].get('dominant_direction', '–')}, snitt {env['wind'].get('avg_speed_ms', 0):.1f} m/s"
+        if env.get("daylight", {}).get("available"):
+            env_summary["daylight_score"] = env["daylight"].get("overall_score", 0)
+        if env.get("views", {}).get("available"):
+            env_summary["view_score"] = env["views"].get("overall_score", 0)
+        if env_summary:
+            user_data["environment"] = env_summary
+
     user_prompt = f"""Optimer denne bygningsskissen for tomten.
 
 SKISSE-DATA:
@@ -2200,7 +2248,8 @@ SKISSE-DATA:
 
 Returner den optimerte bygningslisten som JSON-array. Behold antall bygg og omtrent samme dimensjoner,
 men juster posisjon (cx/cy), rotasjon (angle_deg) og eventuelt dybde/bredde for bedre arkitektonisk kvalitet.
-Forklar kort i "reasoning" hva du endret for hvert bygg."""
+Ta hensyn til miljøforhold (støy, vind, dagslys, utsikt) der dette er oppgitt.
+Forklar kort i "reasoning" hva du endret for hvert bygg, inkludert miljøhensyn."""
 
     result = _call_claude_json(system, user_prompt)
     if isinstance(result, list) and len(result) > 0:
@@ -2302,6 +2351,397 @@ def _deterministic_solar_refinement(
     return refined
 
 
+# --- MILJØANALYSE: STØY, DAGSLYS, UTSIKT, VIND ---
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: float = 100.0) -> Dict[str, Any]:
+    """Hent støysonekart fra Geonorge WFS (T-1442 klassifisering)."""
+    minx, miny, maxx, maxy = bbox_utm
+    minx -= buffer_m
+    miny -= buffer_m
+    maxx += buffer_m
+    maxy += buffer_m
+
+    result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata"}
+    services = [
+        ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneFelles"),
+        ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneVeg"),
+    ]
+    for url, layer in services:
+        try:
+            resp = requests.get(url, params={
+                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                "typenames": layer, "srsName": "EPSG:25833",
+                "outputFormat": "application/json",
+                "bbox": f"{minx},{miny},{maxx},{maxy},EPSG:25833",
+                "count": "50",
+            }, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                features = data.get("features", [])
+                for f in features:
+                    props = f.get("properties", {})
+                    zone = props.get("stoysone", props.get("sone", props.get("navn", "ukjent")))
+                    db_val = safe_float(props.get("db_verdi", props.get("lden", props.get("lydniva", 0))), 0)
+                    result["zones"].append({
+                        "zone": str(zone),
+                        "db": round(db_val, 1),
+                        "source_type": props.get("kildetype", props.get("type", "vei")),
+                    })
+                if features:
+                    result["available"] = True
+                    result["source"] = "Geonorge støykartlegging"
+                    break
+        except Exception:
+            continue
+    return result
+
+
+def calculate_daylight_tek17(
+    site_polygon: Polygon,
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbor_polygons: List[Dict[str, Any]],
+    latitude_deg: float,
+) -> Dict[str, Any]:
+    """
+    Forenklet TEK17 §13-7 dagslysanalyse.
+
+    Beregner sky view factor (SVF) og dagslysindikator for sør/nord/øst/vest-fasader.
+    Ikke en full Radiance-simulering, men gir indikasjon på dagslystilgang.
+    """
+    result = {"available": True, "facades": [], "overall_score": 0.0}
+    if not building_polygons:
+        result["available"] = False
+        return result
+
+    all_obstructions = []
+    for nb in neighbor_polygons:
+        nb_poly = nb.get("polygon")
+        if nb_poly is None:
+            continue
+        all_obstructions.append({"polygon": nb_poly, "height": float(nb.get("height_m", 9))})
+
+    facade_scores = []
+    cardinal_names = ["Sør", "Øst", "Nord", "Vest"]
+    cardinal_azimuths = [180, 90, 0, 270]
+
+    for bld_idx, (bld_poly, bld_h) in enumerate(zip(building_polygons, building_heights)):
+        centroid = bld_poly.centroid
+        bld_name = f"Bygg {chr(65 + bld_idx)}"
+
+        for card_idx, (card_name, azimuth) in enumerate(zip(cardinal_names, cardinal_azimuths)):
+            # Sky view factor: sjekk obstruksjoner i denne retningen
+            check_dist = 80.0
+            az_rad = math.radians(azimuth)
+            check_x = centroid.x + math.sin(az_rad) * check_dist
+            check_y = centroid.y + math.cos(az_rad) * check_dist
+
+            max_obstruction_angle = 0.0
+            for obs in all_obstructions:
+                obs_poly = obs["polygon"]
+                obs_h = obs["height"]
+                dist = bld_poly.distance(obs_poly)
+                if dist < 1.0 or dist > check_dist:
+                    continue
+                # Er obstruksjonen i denne retningen?
+                obs_cx = obs_poly.centroid.x - centroid.x
+                obs_cy = obs_poly.centroid.y - centroid.y
+                obs_az = math.degrees(math.atan2(obs_cx, obs_cy)) % 360
+                angle_diff = abs(obs_az - azimuth)
+                if angle_diff > 180:
+                    angle_diff = 360 - angle_diff
+                if angle_diff < 60:  # Innenfor ±60° av fasaderetningen
+                    obstruction_angle = math.degrees(math.atan2(max(obs_h - bld_h * 0.5, 0), max(dist, 1)))
+                    max_obstruction_angle = max(max_obstruction_angle, obstruction_angle)
+
+            # Dagslysindikator: 0-100 basert på obstruksjonsvinkel
+            # <10° = utmerket, 10-20° = god, 20-30° = akseptabel, >30° = svak
+            if max_obstruction_angle < 10:
+                score = 95.0
+                rating = "Utmerket"
+            elif max_obstruction_angle < 20:
+                score = 75.0
+                rating = "God"
+            elif max_obstruction_angle < 30:
+                score = 55.0
+                rating = "Akseptabel"
+            elif max_obstruction_angle < 45:
+                score = 35.0
+                rating = "Svak"
+            else:
+                score = 15.0
+                rating = "Utilstrekkelig"
+
+            # Sør-fasade har naturlig mer dagslys
+            if card_name == "Sør":
+                score = min(100, score * 1.15)
+            elif card_name == "Nord":
+                score = score * 0.85
+
+            facade_scores.append({
+                "building": bld_name,
+                "direction": card_name,
+                "score": round(score, 0),
+                "rating": rating,
+                "obstruction_deg": round(max_obstruction_angle, 1),
+            })
+
+    result["facades"] = facade_scores
+    if facade_scores:
+        result["overall_score"] = round(sum(f["score"] for f in facade_scores) / len(facade_scores), 1)
+    return result
+
+
+def calculate_view_score(
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbor_polygons: List[Dict[str, Any]],
+    terrain: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Utsiktsanalyse: beregner fri horisont per bygg og retning.
+
+    Bruker nabobygg og terreng for å estimere visuell åpenhet.
+    """
+    result = {"available": True, "buildings": [], "overall_score": 0.0}
+    if not building_polygons:
+        result["available"] = False
+        return result
+
+    building_scores = []
+    for bld_idx, (bld_poly, bld_h) in enumerate(zip(building_polygons, building_heights)):
+        centroid = bld_poly.centroid
+        bld_name = f"Bygg {chr(65 + bld_idx)}"
+
+        # Sjekk 8 retninger for fri sikt fra øverste etasje
+        directions = ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"]
+        azimuths = [0, 45, 90, 135, 180, 225, 270, 315]
+        dir_scores = []
+
+        for direction, azimuth in zip(directions, azimuths):
+            az_rad = math.radians(azimuth)
+            max_block_angle = 0.0
+
+            for nb in neighbor_polygons:
+                nb_poly = nb.get("polygon")
+                if nb_poly is None:
+                    continue
+                nb_h = float(nb.get("height_m", 9))
+                dist = bld_poly.distance(nb_poly)
+                if dist < 1.0 or dist > 200.0:
+                    continue
+
+                nb_cx = nb_poly.centroid.x - centroid.x
+                nb_cy = nb_poly.centroid.y - centroid.y
+                nb_az = math.degrees(math.atan2(nb_cx, nb_cy)) % 360
+                angle_diff = abs(nb_az - azimuth)
+                if angle_diff > 180:
+                    angle_diff = 360 - angle_diff
+                if angle_diff < 30:
+                    height_diff = max(nb_h - bld_h, 0)
+                    if height_diff > 0:
+                        block_angle = math.degrees(math.atan2(height_diff, max(dist, 1)))
+                        max_block_angle = max(max_block_angle, block_angle)
+
+            # Score: 100 = helt fri sikt, 0 = fullstendig blokkert
+            view = max(0.0, 100.0 - max_block_angle * 4.0)
+            dir_scores.append({"direction": direction, "score": round(view, 0)})
+
+        avg = sum(d["score"] for d in dir_scores) / max(len(dir_scores), 1)
+        best_dir = max(dir_scores, key=lambda d: d["score"])
+        building_scores.append({
+            "building": bld_name,
+            "average_score": round(avg, 0),
+            "best_direction": best_dir["direction"],
+            "best_score": best_dir["score"],
+            "directions": dir_scores,
+        })
+
+    result["buildings"] = building_scores
+    if building_scores:
+        result["overall_score"] = round(sum(b["average_score"] for b in building_scores) / len(building_scores), 1)
+    return result
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_wind_data(latitude: float, longitude: float) -> Dict[str, Any]:
+    """Hent vinddata fra MET Frost API (nærmeste stasjon)."""
+    client_id = os.environ.get("MET_FROST_CLIENT_ID", "")
+    result: Dict[str, Any] = {"available": False, "source": "Ingen vinddata"}
+
+    if not client_id:
+        # Fallback: bruk generelle norske vinddata basert på kystlinje/innland
+        is_coastal = longitude > 5.0 and latitude > 58.0  # Grov sjekk
+        result["available"] = True
+        result["source"] = "Estimat basert på plassering"
+        result["dominant_direction"] = "SV" if is_coastal else "S"
+        result["avg_speed_ms"] = 4.5 if is_coastal else 2.8
+        result["max_gust_ms"] = 18.0 if is_coastal else 12.0
+        result["exposure"] = "Moderat eksponert" if is_coastal else "Lav eksponering"
+        return result
+
+    try:
+        # Finn nærmeste stasjon
+        resp = requests.get(
+            "https://frost.met.no/sources/v0.jsonld",
+            params={"geometry": f"nearest(POINT({longitude} {latitude}))", "nearestmaxcount": "1"},
+            auth=(client_id, ""),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            sources = resp.json().get("data", [])
+            if sources:
+                station_id = sources[0].get("id", "")
+                station_name = sources[0].get("name", "")
+                # Hent vindstatistikk
+                wind_resp = requests.get(
+                    "https://frost.met.no/observations/v0.jsonld",
+                    params={
+                        "sources": station_id,
+                        "elements": "wind_speed,wind_from_direction,max(wind_speed_of_gust PT1H)",
+                        "referencetime": "latest",
+                    },
+                    auth=(client_id, ""),
+                    timeout=10,
+                )
+                if wind_resp.status_code == 200:
+                    obs = wind_resp.json().get("data", [])
+                    if obs:
+                        result["available"] = True
+                        result["source"] = f"MET Frost: {station_name}"
+                        result["station"] = station_name
+                        for o in obs:
+                            for v in o.get("observations", []):
+                                eid = v.get("elementId", "")
+                                val = safe_float(v.get("value"), 0)
+                                if "wind_speed" in eid and "gust" not in eid:
+                                    result["avg_speed_ms"] = round(val, 1)
+                                elif "direction" in eid:
+                                    result["dominant_direction_deg"] = round(val, 0)
+                                    dirs = ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"]
+                                    result["dominant_direction"] = dirs[int((val + 22.5) % 360 / 45)]
+                                elif "gust" in eid:
+                                    result["max_gust_ms"] = round(val, 1)
+    except Exception:
+        pass
+    return result
+
+
+def _wind_comfort_estimate(
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    wind_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Forenklet vindkomfort basert på Lawson-kriteriene."""
+    result = {"available": bool(wind_data.get("available")), "zones": [], "overall": "Ikke vurdert"}
+    if not result["available"] or not building_polygons:
+        return result
+
+    avg_wind = float(wind_data.get("avg_speed_ms", 3.0))
+    n_buildings = len(building_polygons)
+
+    # Forenklet vurdering basert på bygningskonfigurasjon
+    if n_buildings <= 1:
+        amplification = 1.0
+    else:
+        # Sjekk avstand mellom bygninger — trang passasje gir venturi-effekt
+        min_gap = float("inf")
+        for i in range(n_buildings):
+            for j in range(i + 1, n_buildings):
+                gap = building_polygons[i].distance(building_polygons[j])
+                if gap > 0:
+                    min_gap = min(min_gap, gap)
+
+        max_h = max(building_heights) if building_heights else 10
+        if min_gap < max_h * 0.5:
+            amplification = 1.6  # Sterk venturi
+        elif min_gap < max_h:
+            amplification = 1.3  # Moderat
+        else:
+            amplification = 1.1  # Minimal
+
+    effective_wind = avg_wind * amplification
+    # Lawson-kriterier (forenklet)
+    if effective_wind < 3.5:
+        result["overall"] = "Komfortabel (sitting/opphold)"
+        result["lawson_class"] = "A"
+    elif effective_wind < 5.5:
+        result["overall"] = "Akseptabel (gange)"
+        result["lawson_class"] = "B"
+    elif effective_wind < 8.0:
+        result["overall"] = "Ukomfortabel (rask gange)"
+        result["lawson_class"] = "C"
+    else:
+        result["overall"] = "Ubehagelig (vurdér vindskjerming)"
+        result["lawson_class"] = "D"
+
+    result["effective_wind_ms"] = round(effective_wind, 1)
+    result["amplification_factor"] = round(amplification, 2)
+    result["min_building_gap_m"] = round(min_gap, 1) if min_gap < float("inf") else None
+    return result
+
+
+def build_environment_analysis(
+    site_polygon: Optional[Polygon],
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbors: List[Dict[str, Any]],
+    latitude_deg: float,
+    longitude_deg: Optional[float] = None,
+    terrain: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Kjør komplett miljøanalyse: støy, dagslys, utsikt, vind."""
+    env: Dict[str, Any] = {"available": False}
+
+    # 1. Støy
+    if site_polygon is not None:
+        try:
+            env["noise"] = fetch_noise_zones(site_polygon.bounds)
+        except Exception:
+            env["noise"] = {"available": False}
+    else:
+        env["noise"] = {"available": False}
+
+    # 2. Dagslys (TEK17 §13-7)
+    try:
+        env["daylight"] = calculate_daylight_tek17(
+            site_polygon or Polygon(),
+            building_polygons,
+            building_heights,
+            neighbors,
+            latitude_deg,
+        )
+    except Exception:
+        env["daylight"] = {"available": False}
+
+    # 3. Utsikt
+    try:
+        env["views"] = calculate_view_score(
+            building_polygons,
+            building_heights,
+            neighbors,
+            terrain,
+        )
+    except Exception:
+        env["views"] = {"available": False}
+
+    # 4. Vind
+    try:
+        wind = fetch_wind_data(latitude_deg, longitude_deg or 10.4)
+        env["wind"] = wind
+        env["wind_comfort"] = _wind_comfort_estimate(building_polygons, building_heights, wind)
+    except Exception:
+        env["wind"] = {"available": False}
+        env["wind_comfort"] = {"available": False}
+
+    env["available"] = any(
+        env.get(k, {}).get("available", False)
+        for k in ["noise", "daylight", "views", "wind"]
+    )
+    return env
+
+
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """
     Isometrisk 3D-volumskisse.
@@ -2324,7 +2764,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     ISO_ANGLE = math.radians(30)
     COS_A = math.cos(ISO_ANGLE)
     SIN_A = math.sin(ISO_ANGLE)
-    Z_SCALE = 1.5
+    Z_SCALE = 0.55
 
     site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
@@ -2335,17 +2775,17 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    target_screen_span = min(canvas_w, canvas_h) * 0.48
+    target_screen_span = min(canvas_w, canvas_h) * 0.62
     pixel_scale = target_screen_span / site_span
 
     screen_cx = canvas_w * 0.50
-    screen_cy = canvas_h * 0.50
+    screen_cy = canvas_h * 0.55  # Litt lavere for å gi plass til høyde
 
     def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
         dx = (x - cx) * pixel_scale
         dy = (y - cy) * pixel_scale
         sx = screen_cx + (dx - dy) * COS_A
-        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE * 0.01
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
         return sx, sy
 
     def iso_pts(coords, z=0.0):
@@ -2390,7 +2830,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
 
     # --- Samle volumer for depth-sorting ---
     volumes = []
-    view_radius = site_span * 0.65
+    view_radius = site_span * 0.45
     for neighbor in neighbor_polys:
         ncoords = flatten_coord_groups(neighbor.get('coords', []))
         if not ncoords:
@@ -3814,6 +4254,28 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     max_floors = r3.number_input("Maks etasjer", min_value=1, max_value=30, value=int(parsed.get("max_floors", max(3, int(pd_state.get("etasjer", 4))))), step=1)
     max_height_m = r4.number_input("Maks høyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
 
+    st.markdown("---")
+    u1, u2, u3 = st.columns([1.2, 1, 1.5])
+    bra_pct_override = u1.checkbox("Styr volum fra %-BRA", value=False, key="bra_override",
+                                    help="Når aktivert overstyrer %-BRA alle andre begrensende faktorer (BYA, maks BRA). Brukes typisk for leilighetsprosjekter.")
+    utnyttelsesgrad_bra_pct = u2.number_input(
+        "Forutsatt %-BRA",
+        min_value=50.0, max_value=500.0, value=150.0, step=10.0,
+        disabled=not bra_pct_override,
+    )
+    if not bra_pct_override:
+        utnyttelsesgrad_bra_pct = 0.0
+    if bra_pct_override:
+        target_bra_from_pct = site_area_m2 * utnyttelsesgrad_bra_pct / 100.0
+        u3.markdown(
+            f"<div class='kpi-card-hero' style='padding:10px 14px;'>"
+            f"<div class='metric-title'>Mål-BRA fra {utnyttelsesgrad_bra_pct:.0f}%</div>"
+            f"<div class='metric-value-hero'>{target_bra_from_pct:,.0f} m²</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        u3.caption("Aktiver «Styr volum fra %-BRA» for å bruke utnyttelsesgrad som primær volumdriver.")
+
 with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
     st.markdown("##### 1. Hent eiendom fra matrikkel")
     if not geodata_token_ok:
@@ -4140,6 +4602,7 @@ if run_analysis:
         neighbor_count=len(neighbor_inputs),
         terrain_slope_pct=float((terrain_ctx or {}).get("slope_pct", 0.0)),
         terrain_relief_m=float((terrain_ctx or {}).get("relief_m", 0.0)),
+        utnyttelsesgrad_bra_pct=utnyttelsesgrad_bra_pct,
     )
 
     geodata_context = prepare_site_context(
@@ -4176,6 +4639,29 @@ if run_analysis:
     if not options:
         st.error("Klarte ikke å generere alternativer. Kontroller tomtepolygon, byggegrenser og BYA.")
         st.stop()
+
+    # --- MILJØANALYSE ---
+    environment_data: Dict[str, Any] = {"available": False}
+    if site_polygon_input is not None:
+        with st.spinner("Analyserer miljøforhold: støy, dagslys, utsikt, vind..."):
+            try:
+                best_option = max(options, key=lambda o: o.score)
+                fp_polys = split_geometry_to_polygons(
+                    Polygon(flatten_coord_groups(best_option.geometry.get("footprint_polygon_coords", [])))
+                ) if best_option.geometry.get("footprint_polygon_coords") else []
+                fp_heights = [best_option.building_height_m] * max(len(fp_polys), 1)
+
+                environment_data = build_environment_analysis(
+                    site_polygon=site_polygon_input,
+                    building_polygons=fp_polys,
+                    building_heights=fp_heights,
+                    neighbors=[n for n in geodata_context.get("neighbors", []) if n.get("polygon") is not None],
+                    latitude_deg=latitude_deg,
+                    longitude_deg=longitude_deg,
+                    terrain=terrain_ctx,
+                )
+            except Exception as exc:
+                environment_data = {"available": False, "error": str(exc)[:120]}
 
     option_images = [render_plan_diagram(site, option) for option in options]
     deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context))
@@ -4272,6 +4758,7 @@ KRAV:
         "terrain_meta": terrain_meta,
         "terrain_ctx": terrain_ctx,
         "site_intelligence": site_intelligence_bundle,
+        "environment": environment_data,
     }
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
@@ -4321,10 +4808,16 @@ if "analysis_results" in st.session_state:
     g1, g2, g3, g4 = st.columns(4)
     geo_src_raw = site_result.get("site_geometry_source", "-")
     geo_src_display = "Eksakt polygon" if any(k in geo_src_raw for k in ["Eksakt", "Hentet", "Geodata"]) else ("GeoJSON" if "GeoJSON" in geo_src_raw else geo_src_raw)
+
+    # Beregn %-BRA og BYA for best alternativ
+    sa = max(site_result.get("site_area_m2", 1.0), 1.0)
+    actual_bra_pct = (best.saleable_area_m2 / sa) * 100.0
+    actual_bya_pct = (best.footprint_area_m2 / sa) * 100.0
+
     with g1:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Tomtegrunnlag</div><div class='metric-value'>{}</div></div>".format(geo_src_display), unsafe_allow_html=True)
+        st.markdown(f"<div class='kpi-card'><div class='metric-title'>%-BRA (utnyttelse)</div><div class='metric-value'>{actual_bra_pct:.0f}%</div></div>", unsafe_allow_html=True)
     with g2:
-        st.markdown("<div class='kpi-card'><div class='metric-title'>Bebbyggbart areal</div><div class='metric-value'>{:,.0f} m²</div></div>".format(best.buildable_area_m2), unsafe_allow_html=True)
+        st.markdown(f"<div class='kpi-card'><div class='metric-title'>BYA (bebygd)</div><div class='metric-value'>{actual_bya_pct:.0f}%</div></div>", unsafe_allow_html=True)
     with g3:
         st.markdown("<div class='kpi-card'><div class='metric-title'>Solscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(best.solar_score), unsafe_allow_html=True)
     with g4:
@@ -4615,25 +5108,131 @@ if "analysis_results" in st.session_state:
     if site_intelligence_bundle.get('available'):
         st.markdown("<div class='section-header'>Stedskontekst</div>", unsafe_allow_html=True)
         gi_plan, gi_projects, gi_transport = st.columns(3)
+
+        # Plan og regulering — lesbar oppsummering
+        plan_data = site_intelligence_bundle.get('plan', {})
         with gi_plan:
-            st.caption('Plan og regulering')
-            st.json(site_intelligence_bundle.get('plan', {}), expanded=False)
+            nearby = plan_data.get('nearby_plan_count', plan_data.get('feature_count', 0))
+            risk = plan_data.get('regulatory_risk_score', 0)
+            risk_label = "Lav" if risk < 30 else "Moderat" if risk < 60 else "Høy"
+            risk_color = "#34d399" if risk < 30 else "#f59e0b" if risk < 60 else "#f87171"
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Plan og regulering</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;'>{nearby} planer i nærheten</div>"
+                f"<div style='color:{risk_color};font-size:0.85rem;margin-top:4px;'>Planrisiko: {risk_label}</div>"
+                f"</div>", unsafe_allow_html=True)
+
+        # Utbyggingsaktivitet
+        proj_data = site_intelligence_bundle.get('projects', {})
         with gi_projects:
-            st.caption('Utbyggingsaktivitet')
-            st.json(site_intelligence_bundle.get('projects', {}), expanded=False)
+            proj_count = proj_data.get('feature_count', proj_data.get('nearby_count', 0))
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Utbyggingsaktivitet</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;'>{proj_count} prosjekter</div>"
+                f"<div style='color:#9fb0c3;font-size:0.85rem;margin-top:4px;'>I nærområdet</div>"
+                f"</div>", unsafe_allow_html=True)
+
+        # Mobilitet og adkomst
+        transport = site_intelligence_bundle.get('transport', {})
         with gi_transport:
-            st.caption('Mobilitet og adkomst')
-            st.json(site_intelligence_bundle.get('transport', {}), expanded=False)
+            mob_score = transport.get('mobility_score', 0)
+            transit_m = transport.get('nearest_transit_m')
+            parking_n = transport.get('parking_within_300_m', 0)
+            transit_txt = f"{transit_m:.0f} m til kollektiv" if transit_m and transit_m > 0 else "Ingen kollektiv funnet"
+            mob_color = "#34d399" if mob_score >= 60 else "#f59e0b" if mob_score >= 30 else "#f87171"
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Mobilitet</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;color:{mob_color};'>{mob_score}/100</div>"
+                f"<div style='color:#9fb0c3;font-size:0.85rem;margin-top:4px;'>{transit_txt} · {parking_n} p-plasser</div>"
+                f"</div>", unsafe_allow_html=True)
+
+    # --- MILJØANALYSE RESULTATER ---
+    env_data = result.get("environment", {})
+    if env_data.get("available"):
+        st.markdown("<div class='section-header'>Miljøanalyse</div>", unsafe_allow_html=True)
+
+        env_cols = st.columns(4)
+
+        # Støy
+        noise = env_data.get("noise", {})
+        with env_cols[0]:
+            if noise.get("available") and noise.get("zones"):
+                worst_zone = max(noise["zones"], key=lambda z: z.get("db", 0))
+                db_val = worst_zone.get("db", 0)
+                noise_color = "#f87171" if db_val > 65 else "#f59e0b" if db_val > 55 else "#34d399"
+                st.markdown(f"<div class='kpi-card'><div class='metric-title'>Støy (T-1442)</div><div class='metric-value' style='color:{noise_color}'>{worst_zone.get('zone', '–')}</div></div>", unsafe_allow_html=True)
+                if db_val > 0:
+                    st.caption(f"{db_val:.0f} dB, {worst_zone.get('source_type', 'vei')}")
+            else:
+                st.markdown("<div class='kpi-card'><div class='metric-title'>Støy</div><div class='metric-value' style='color:#34d399'>Ingen data</div></div>", unsafe_allow_html=True)
+
+        # Dagslys
+        daylight = env_data.get("daylight", {})
+        with env_cols[1]:
+            dl_score = daylight.get("overall_score", 0)
+            dl_color = "#34d399" if dl_score >= 70 else "#f59e0b" if dl_score >= 50 else "#f87171"
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Dagslys §13-7</div><div class='metric-value' style='color:{dl_color}'>{dl_score:.0f}/100</div></div>", unsafe_allow_html=True)
+
+        # Utsikt
+        views = env_data.get("views", {})
+        with env_cols[2]:
+            view_score = views.get("overall_score", 0)
+            view_color = "#34d399" if view_score >= 70 else "#f59e0b" if view_score >= 50 else "#f87171"
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Utsikt</div><div class='metric-value' style='color:{view_color}'>{view_score:.0f}/100</div></div>", unsafe_allow_html=True)
+
+        # Vind
+        wind_comfort = env_data.get("wind_comfort", {})
+        with env_cols[3]:
+            wc_class = wind_comfort.get("lawson_class", "–")
+            wc_color = "#34d399" if wc_class in ["A", "B"] else "#f59e0b" if wc_class == "C" else "#f87171"
+            wc_label = wind_comfort.get("overall", "Ikke vurdert")
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Vindkomfort</div><div class='metric-value' style='color:{wc_color}'>Klasse {wc_class}</div></div>", unsafe_allow_html=True)
+
+        # Detaljer i expander
+        with st.expander("Miljødetaljer", expanded=False):
+            # Dagslys per fasade
+            if daylight.get("facades"):
+                st.markdown("**Dagslys per fasade (TEK17 §13-7 — forenklet)**")
+                dl_rows = [{"Bygg": f["building"], "Retning": f["direction"], "Score": f["score"], "Vurdering": f["rating"], "Obstruksjon": f"{f['obstruction_deg']}°"} for f in daylight["facades"]]
+                st.dataframe(pd.DataFrame(dl_rows), use_container_width=True, hide_index=True)
+
+            # Utsikt per bygg
+            if views.get("buildings"):
+                st.markdown("**Utsikt per bygg**")
+                for vb in views["buildings"]:
+                    st.caption(f"**{vb['building']}**: snitt {vb['average_score']:.0f}/100, best mot {vb['best_direction']} ({vb['best_score']:.0f}/100)")
+
+            # Vind
+            wind = env_data.get("wind", {})
+            if wind.get("available"):
+                st.markdown("**Vindforhold**")
+                st.caption(f"Kilde: {wind.get('source', '–')} | Dominerende retning: {wind.get('dominant_direction', '–')} | Snitt: {wind.get('avg_speed_ms', 0):.1f} m/s")
+                if wind_comfort.get("available"):
+                    st.caption(f"Vindkomfort: {wc_label} | Effektiv vind: {wind_comfort.get('effective_wind_ms', 0):.1f} m/s | Forsterkningsfaktor: {wind_comfort.get('amplification_factor', 1):.2f}")
+                    gap = wind_comfort.get("min_building_gap_m")
+                    if gap is not None:
+                        st.caption(f"Minste avstand mellom bygg: {gap:.0f} m" + (" ⚠️ Venturi-risiko" if gap < 12 else ""))
 
     st.markdown("<div class='section-header'>Volumskisser</div>", unsafe_allow_html=True)
-    cols = st.columns(len(options))
-    for col, option, image in zip(cols, options, result["option_images"]):
-        with col:
-            st.image(image, caption=f"{option.name} — {option.typology}", use_container_width=True)
-            st.caption(
-                f"BTA {option.gross_bta_m2:,.0f} m² | {option.unit_count} boliger | "
-                f"sol {option.solar_score:.0f}/100 | uteareal sol {option.sunlit_open_space_pct:.0f}%"
-            )
+    # Vis maks 4 per rad for lesbarhet
+    per_row = min(4, len(options))
+    option_image_pairs = list(zip(options, result["option_images"]))
+    for row_start in range(0, len(option_image_pairs), per_row):
+        row_items = option_image_pairs[row_start:row_start + per_row]
+        cols = st.columns(per_row)
+        for col_idx, (option, image) in enumerate(row_items):
+            with cols[col_idx]:
+                st.image(image, use_container_width=True)
+                is_best = (option.name == best.name)
+                badge = "⭐ " if is_best else ""
+                st.markdown(
+                    f"<div style='text-align:center;'>"
+                    f"<div style='color:{'#38bdf8' if is_best else '#c8d3df'};font-weight:{'700' if is_best else '500'};font-size:0.95rem;'>{badge}{option.typology}</div>"
+                    f"<div style='color:#9fb0c3;font-size:0.82rem;'>"
+                    f"BTA {option.gross_bta_m2:,.0f} m² · {option.unit_count} bol. · sol {option.solar_score:.0f}/100"
+                    f"</div></div>",
+                    unsafe_allow_html=True,
+                )
 
     # --- INTERAKTIV BYGNINGSEDITOR ---
     st.markdown("<div class='section-header'>Planeditor — tegn og juster bygningsvolumer</div>", unsafe_allow_html=True)
@@ -4667,8 +5266,8 @@ if "analysis_results" in st.session_state:
   <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;font-weight:600;">Live beregning</div>
   <div id="hudBTA" style="color:#f5f7fb;font-size:14px;font-weight:700;">BTA: 0 m²</div>
   <div id="hudBRA" style="color:#c8d3df;font-size:12px;">BRA: 0 m²</div>
+  <div id="hudBRApct" style="color:#38bdf8;font-size:13px;font-weight:600;">%-BRA: 0%</div>
   <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
-  <div id="hudBYA" style="color:#c8d3df;font-size:12px;">BYA: 0%</div>
   <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
 </div>
 <div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
@@ -4758,6 +5357,26 @@ function drawBuilding(b, idx) {
   ctx.fillText(b.name || ('B'+(idx+1)), sc[0], sc[1] - 8);
   ctx.font = '10px Inter'; ctx.fillStyle = '#c8d3df';
   ctx.fillText(b.floors + ' etg | ' + Math.round(b.w * b.d) + ' m²', sc[0], sc[1] + 8);
+
+  // Veggmål — bredde og dybde langs kanter
+  const s0 = toScreen(corners[0][0], corners[0][1]);
+  const s1 = toScreen(corners[1][0], corners[1][1]);
+  const s2 = toScreen(corners[2][0], corners[2][1]);
+  const s3 = toScreen(corners[3][0], corners[3][1]);
+  ctx.font = 'bold 10px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // Bredde (topp-kant: s0→s1)
+  const wMidX = (s0[0]+s1[0])/2, wMidY = (s0[1]+s1[1])/2;
+  const wTxt = b.w.toFixed(1) + ' m';
+  const wTw = ctx.measureText(wTxt).width;
+  ctx.fillStyle = 'rgba(6,17,26,0.85)'; ctx.fillRect(wMidX-wTw/2-3, wMidY-14, wTw+6, 13);
+  ctx.fillStyle = '#38bdf8'; ctx.fillText(wTxt, wMidX, wMidY-8);
+  // Dybde (høyre-kant: s0→s3)
+  const dMidX = (s0[0]+s3[0])/2, dMidY = (s0[1]+s3[1])/2;
+  const dTxt = b.d.toFixed(1) + ' m';
+  const dTw = ctx.measureText(dTxt).width;
+  ctx.fillStyle = 'rgba(6,17,26,0.85)'; ctx.fillRect(dMidX+6, dMidY-7, dTw+6, 13);
+  ctx.fillStyle = '#38bdf8'; ctx.fillText(dTxt, dMidX+9+dTw/2, dMidY);
+
   // Resize handles when selected
   if (sel) {
     corners.forEach(c => {
@@ -4773,13 +5392,67 @@ function computeStats() {
   buildings.forEach(b => { const fp = b.w * b.d; totalFootprint += fp; totalBTA += fp * b.floors; });
   const bra = totalBTA * P.efficiency;
   const units = Math.round(bra / P.avg_unit_m2);
-  const bya = P.site_area > 0 ? (totalFootprint / P.site_area * 100) : 0;
+  const braPct = P.site_area > 0 ? (bra / P.site_area * 100) : 0;
   document.getElementById('hudBTA').textContent = 'BTA: ' + Math.round(totalBTA).toLocaleString() + ' m²';
   document.getElementById('hudBRA').textContent = 'BRA: ' + Math.round(bra).toLocaleString() + ' m²';
+  document.getElementById('hudBRApct').textContent = '%-BRA: ' + braPct.toFixed(0) + '%';
+  document.getElementById('hudBRApct').style.color = braPct > 300 ? '#f87171' : braPct > 200 ? '#f59e0b' : '#38bdf8';
   document.getElementById('hudUnits').textContent = 'Boliger: ~' + units;
-  document.getElementById('hudBYA').textContent = 'BYA: ' + bya.toFixed(1) + '% (maks ' + P.max_bya_pct + '%)';
-  document.getElementById('hudBYA').style.color = bya > P.max_bya_pct ? '#f87171' : '#34d399';
   document.getElementById('hudBuildings').textContent = 'Bygg: ' + buildings.length;
+}
+
+// Avstandsmåling fra valgt bygg til tomtegrense
+function drawDistances(b) {
+  if (!siteCoords.length || siteCoords.length < 3) return;
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  // Midtpunkt på hver side av bygget
+  const sides = [
+    {label:'N', mx: b.cx - hd*sin, my: b.cy + hd*cos, dx: -sin, dy: cos},
+    {label:'S', mx: b.cx + hd*sin, my: b.cy - hd*cos, dx: sin, dy: -cos},
+    {label:'Ø', mx: b.cx + hw*cos, my: b.cy + hw*sin, dx: cos, dy: sin},
+    {label:'V', mx: b.cx - hw*cos, my: b.cy - hw*sin, dx: -cos, dy: -sin},
+  ];
+  sides.forEach(side => {
+    // Finn nærmeste punkt på tomtegrensen fra dette midtpunktet i denne retningen
+    let minDist = Infinity;
+    for (let i = 0; i < siteCoords.length; i++) {
+      const ax = siteCoords[i][0], ay = siteCoords[i][1];
+      const bx = siteCoords[(i+1)%siteCoords.length][0], by = siteCoords[(i+1)%siteCoords.length][1];
+      // Avstand fra punkt til linjestykke
+      const dx = bx-ax, dy = by-ay;
+      const len2 = dx*dx + dy*dy;
+      if (len2 < 0.01) continue;
+      let t = ((side.mx-ax)*dx + (side.my-ay)*dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const px = ax + t*dx, py = ay + t*dy;
+      const d = Math.hypot(side.mx-px, side.my-py);
+      if (d < minDist) minDist = d;
+    }
+    if (minDist < Infinity && minDist < 200) {
+      const endX = side.mx + side.dx * minDist;
+      const endY = side.my + side.dy * minDist;
+      const s1 = toScreen(side.mx, side.my);
+      const s2 = toScreen(endX, endY);
+      // Stiplet linje
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = 'rgba(248,250,252,0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+      ctx.setLineDash([]);
+      // Avstandslabel
+      const midSx = (s1[0]+s2[0])/2, midSy = (s1[1]+s2[1])/2;
+      ctx.font = 'bold 11px Inter, sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const txt = minDist.toFixed(1) + ' m';
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = 'rgba(6,17,26,0.8)';
+      ctx.fillRect(midSx - tw/2 - 3, midSy - 7, tw + 6, 14);
+      ctx.fillStyle = '#f5f7fb';
+      ctx.fillText(txt, midSx, midSy);
+    }
+  });
 }
 
 function render() {
@@ -4795,6 +5468,10 @@ function render() {
   if (buildableCoords.length) drawPoly(buildableCoords, null, 'rgba(52,211,153,0.35)', 1);
   // Buildings
   buildings.forEach((b, i) => drawBuilding(b, i));
+  // Avstandsmål for valgt bygg
+  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    drawDistances(buildings[selectedIdx]);
+  }
   // Scale bar
   const barM = Math.pow(10, Math.floor(Math.log10(spanX * 0.3)));
   const barPx = barM * scale;
@@ -5134,6 +5811,7 @@ render();
                                     max_height_m=site_result.get("max_height_m", 16),
                                     floor_to_floor_m=site_result.get("floor_to_floor_m", 3.0),
                                     neighbors=neighbor_data,
+                                    environment=result.get("environment", {}),
                                 )
                             else:
                                 refined = None
