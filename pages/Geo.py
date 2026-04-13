@@ -2087,8 +2087,6 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
 # --- NEDLASTING OG NAVIGASJON ---
 if "generated_geo_pdf" in st.session_state:
     st.success("✅ RIG-M Rapport er ferdigstilt og sendt til QA-køen!")
-    if st.session_state.get("_report_save_debug"):
-        st.caption(f"🔍 Debug: {st.session_state['_report_save_debug']}")
 
     col_dl, col_qa = st.columns(2)
     with col_dl:
