@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
 from fpdf import FPDF
 import os
 import base64
@@ -14,15 +13,76 @@ from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from pathlib import Path
 
+try:
+    import google.generativeai as genai
+    _HAS_GENAI = True
+except ImportError:
+    _HAS_GENAI = False
+    genai = None
+
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(page_title="Akustikk (RIAku) | Builtly", layout="wide", initial_sidebar_state="collapsed")
 
-google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key:
+# --- AI: Claude (primær) → Gemini (fallback) ---
+anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+google_key = os.environ.get("GOOGLE_API_KEY", "")
+
+_USE_CLAUDE = False
+_anthropic_client = None
+
+if anthropic_key:
+    try:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
+        _USE_CLAUDE = True
+    except ImportError:
+        pass
+
+if not _USE_CLAUDE and google_key and _HAS_GENAI:
     genai.configure(api_key=google_key)
-else:
-    st.error("Kritisk feil: Fant ingen API-nøkkel! Sjekk 'Environment Variables' i Render.")
+elif not _USE_CLAUDE and not google_key:
+    st.error("Kritisk feil: Fant ingen ANTHROPIC_API_KEY eller GOOGLE_API_KEY!")
     st.stop()
+
+
+def _pil_to_base64(img: Image.Image, max_size: int = 1200) -> str:
+    """Konverter PIL Image til base64 JPEG for Anthropic API."""
+    img = img.copy()
+    img.thumbnail((max_size, max_size))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def ai_generate(prompt: str, images: list = None, max_tokens: int = 8000) -> str:
+    """Unified AI — Claude (primær) eller Gemini (fallback)."""
+    if _USE_CLAUDE:
+        content = []
+        if images:
+            for img in images:
+                b64 = _pil_to_base64(img)
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}
+                })
+        content.append({"type": "text", "text": prompt})
+        claude_model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+        response = _anthropic_client.messages.create(
+            model=claude_model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": content}]
+        )
+        return response.content[0].text
+    else:
+        valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        valgt = valid_models[0]
+        for fav in ['models/gemini-2.5-flash-preview-04-17', 'models/gemini-2.5-pro-preview-03-25', 
+                    'models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
+            if fav in valid_models: valgt = fav; break
+        model = genai.GenerativeModel(valgt)
+        parts = [prompt] + (images or [])
+        return model.generate_content(parts).text
 
 try:
     import fitz  
@@ -350,6 +410,160 @@ class AcousticEngine:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# MARKER PLACEMENT ENGINE — Grid overlay + anti-kollisjon rendering
+# ═══════════════════════════════════════════════════════════════════════
+
+class MarkerPlacement:
+    GRID_COLS = 10
+    GRID_ROWS = 8
+    GRID_COLOR = (100, 180, 255, 80)
+    GRID_LABEL_COLOR = (100, 180, 255)
+
+    @staticmethod
+    def add_grid_overlay(img: Image.Image) -> Image.Image:
+        overlay = img.copy().convert("RGBA")
+        grid_layer = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(grid_layer)
+        w, h = overlay.size
+        col_w = w / MarkerPlacement.GRID_COLS
+        row_h = h / MarkerPlacement.GRID_ROWS
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(12, int(w * 0.015)))
+        except:
+            font = ImageFont.load_default()
+        for i in range(MarkerPlacement.GRID_COLS + 1):
+            x = int(i * col_w)
+            draw.line([(x, 0), (x, h)], fill=MarkerPlacement.GRID_COLOR, width=1)
+            if i < MarkerPlacement.GRID_COLS:
+                draw.text((int(x + col_w/2 - 5), 2), chr(65 + i), fill=MarkerPlacement.GRID_LABEL_COLOR, font=font)
+        for j in range(MarkerPlacement.GRID_ROWS + 1):
+            y = int(j * row_h)
+            draw.line([(0, y), (w, y)], fill=MarkerPlacement.GRID_COLOR, width=1)
+            if j < MarkerPlacement.GRID_ROWS:
+                draw.text((3, int(y + row_h/2 - 6)), str(j + 1), fill=MarkerPlacement.GRID_LABEL_COLOR, font=font)
+        return Image.alpha_composite(overlay, grid_layer).convert("RGB")
+
+    @staticmethod
+    def place_markers_from_bboxes(building_bboxes: list, facade_data: list) -> list:
+        DIRECTION_MAP = {
+            "nord": (0, -1), "sor": (0, 1), "sør": (0, 1), "ost": (1, 0), "øst": (1, 0),
+            "vest": (-1, 0), "nordost": (1, -1), "nordøst": (1, -1), "nordvest": (-1, -1),
+            "sorost": (1, 1), "sørøst": (1, 1), "sorvest": (-1, 1), "sørvest": (-1, 1),
+        }
+        bbox_lookup = {}
+        col_w = 100.0 / MarkerPlacement.GRID_COLS
+        row_h = 100.0 / MarkerPlacement.GRID_ROWS
+        for bb in building_bboxes:
+            bygg = bb.get("bygg", "").upper()
+            tl = bb.get("grid_topleft", "E4")
+            br = bb.get("grid_bottomright", "F5")
+            x1 = (ord(tl[0].upper()) - 65) * col_w
+            y1 = (int(tl[1:] if len(tl) > 1 else 4) - 1) * row_h
+            x2 = (ord(br[0].upper()) - 65 + 1) * col_w
+            y2 = int(br[1:] if len(br) > 1 else 5) * row_h
+            bbox_lookup[bygg] = {"x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                  "cx": (x1+x2)/2, "cy": (y1+y2)/2, "image_index": bb.get("image_index", 0)}
+        markers = []
+        for fd in facade_data:
+            bygg = fd.get("bygg", "").upper()
+            fasade = fd.get("fasade", "").lower().replace("-", "").replace(" ", "")
+            lden = fd.get("lden", 55)
+            bb = bbox_lookup.get(bygg)
+            if not bb:
+                markers.append({"image_index": 0, "x_pct": 50, "y_pct": 50, "db": str(lden),
+                               "color": MarkerPlacement._db_color(lden), "label": f"{bygg} {fasade}",
+                               "label_dir_x": 1, "label_dir_y": 0})
+                continue
+            dx, dy = DIRECTION_MAP.get(fasade, (1, 0))
+            if dx > 0: x = bb["x2"]
+            elif dx < 0: x = bb["x1"]
+            else: x = bb["cx"]
+            if dy > 0: y = bb["y2"]
+            elif dy < 0: y = bb["y1"]
+            else: y = bb["cy"]
+            x = max(2, min(98, x + dx * 2.5))
+            y = max(2, min(98, y + dy * 2.5))
+            markers.append({"image_index": bb["image_index"], "x_pct": round(x, 1), "y_pct": round(y, 1),
+                           "db": str(lden), "color": MarkerPlacement._db_color(lden),
+                           "label": f"{bygg} {fd.get('fasade', '')}", "label_dir_x": dx, "label_dir_y": dy})
+        return markers
+
+    @staticmethod
+    def _db_color(lden):
+        if lden >= 70: return "darkred"
+        if lden >= 65: return "red"
+        if lden >= 55: return "yellow"
+        return "green"
+
+    @staticmethod
+    def resolve_collisions(markers: list, min_dist_pct: float = 5.0) -> list:
+        result = [dict(m) for m in markers]
+        by_image = {}
+        for i, m in enumerate(result):
+            by_image.setdefault(m.get("image_index", 0), []).append(i)
+        for indices in by_image.values():
+            if len(indices) <= 1: continue
+            for _ in range(3):
+                for i in range(len(indices)):
+                    for j in range(i + 1, len(indices)):
+                        mi, mj = result[indices[i]], result[indices[j]]
+                        dx = mi["x_pct"] - mj["x_pct"]
+                        dy = mi["y_pct"] - mj["y_pct"]
+                        dist = math.sqrt(dx*dx + dy*dy)
+                        if 0.01 < dist < min_dist_pct:
+                            push = (min_dist_pct - dist) / 2 + 0.5
+                            nx, ny = dx/dist, dy/dist
+                            mi["x_pct"] = max(2, min(98, mi["x_pct"] + nx*push))
+                            mi["y_pct"] = max(2, min(98, mi["y_pct"] + ny*push))
+                            mj["x_pct"] = max(2, min(98, mj["x_pct"] - nx*push))
+                            mj["y_pct"] = max(2, min(98, mj["y_pct"] - ny*push))
+        return result
+
+    @staticmethod
+    def draw_markers_professional(img: Image.Image, markers: list, image_index: int = 0) -> Image.Image:
+        img = img.copy()
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        img_markers = [m for m in markers if m.get("image_index", 0) == image_index]
+        if not img_markers: return img
+        try:
+            font_db = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(10, int(w*0.012)))
+            font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(8, int(w*0.008)))
+        except:
+            font_db = font_label = ImageFont.load_default()
+        COLOR_MAP = {"green": ((46,204,113),(30,130,70)), "darkred": ((180,40,40),(120,20,20)),
+                     "red": ((231,76,60),(160,50,40)), "yellow": ((241,196,15),(170,140,10))}
+        for m in img_markers:
+            x = int((m.get("x_pct",50)/100.0)*w)
+            y = int((m.get("y_pct",50)/100.0)*h)
+            db_str = str(m.get("db","??"))
+            label = str(m.get("label",""))
+            cn = m.get("color","yellow").lower()
+            color_rgb, bg_rgb = COLOR_MAP.get(cn, COLOR_MAP["yellow"])
+            dot_r = max(3, int(w*0.004))
+            draw.ellipse((x-dot_r, y-dot_r, x+dot_r, y+dot_r), fill=color_rgb)
+            dir_x = m.get("label_dir_x", 1)
+            dir_y = m.get("label_dir_y", 0)
+            offset_px = max(20, int(w*0.03))
+            lx = max(5, min(w-60, x + int(dir_x * offset_px)))
+            ly = max(5, min(h-20, y + int(dir_y * offset_px)))
+            draw.line([(x, y), (lx, ly)], fill=color_rgb, width=max(1, int(w*0.001)))
+            try:
+                bb = draw.textbbox((0,0), db_str, font=font_db)
+                tw, th = bb[2]-bb[0], bb[3]-bb[1]
+            except: tw, th = 20, 12
+            pad = 3
+            try:
+                draw.rounded_rectangle((lx-pad, ly-pad, lx+tw+pad, ly+th+pad), radius=4, fill=bg_rgb, outline=color_rgb, width=1)
+            except AttributeError:
+                draw.rectangle((lx-pad, ly-pad, lx+tw+pad, ly+th+pad), fill=bg_rgb, outline=color_rgb, width=1)
+            draw.text((lx, ly), db_str, fill=(255,255,255), font=font_db)
+            if label:
+                draw.text((lx, ly+th+pad+2), label, fill=color_rgb, font=font_label)
+        return img
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # STØYKART WMS/ArcGIS (beholdt fra original)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -380,70 +594,6 @@ def _latlon_to_utm33(lat: float, lon: float) -> tuple:
     return easting, northing
 
 
-def _utm33_to_latlon(easting: float, northing: float) -> tuple:
-    """Convert UTM33N (EPSG:25833) to lat/lon (WGS84)."""
-    k0, a, e, lon0 = 0.9996, 6378137.0, 0.0818192, 15.0
-    e2 = e**2
-    e1 = (1 - math.sqrt(1 - e2)) / (1 + math.sqrt(1 - e2))
-    M = northing / k0
-    mu = M / (a * (1 - e2/4 - 3*e2**2/64 - 5*e2**3/256))
-    phi1 = mu + (3*e1/2 - 27*e1**3/32) * math.sin(2*mu) + (21*e1**2/16 - 55*e1**4/32) * math.sin(4*mu)
-    N1 = a / math.sqrt(1 - e2 * math.sin(phi1)**2)
-    T1 = math.tan(phi1)**2
-    C1 = (e2 / (1 - e2)) * math.cos(phi1)**2
-    R1 = a * (1 - e2) / ((1 - e2 * math.sin(phi1)**2)**1.5)
-    D = (easting - 500000) / (N1 * k0)
-    lat = phi1 - (N1 * math.tan(phi1) / R1) * (D**2/2 - (5 + 3*T1) * D**4/24)
-    lon = math.radians(lon0) + (D - (1 + 2*T1 + C1) * D**3/6) / math.cos(phi1)
-    return math.degrees(lat), math.degrees(lon)
-
-
-def _geocode_project_address(adresse: str, kommune: str) -> dict:
-    """Geokod prosjektadresse til UTM33. Prøver Geodata Online først, deretter Nominatim."""
-    
-    # Forsøk 1: Geodata Online GeocodeServer
-    try:
-        from geodata_client import GeodataOnlineClient
-        gdo = GeodataOnlineClient()
-        if gdo.is_available():
-            results = gdo.address_search(adresse, kommune, limit=1)
-            if results:
-                hit = results[0]
-                x, y = hit.get("x"), hit.get("y")
-                if x and y:
-                    return {
-                        "ok": True, "easting": float(x), "northing": float(y),
-                        "label": hit.get("label", f"{adresse}, {kommune}"),
-                    }
-    except Exception:
-        pass  # Geodata geocoder feilet (403 etc.) — prøv Nominatim
-    
-    # Forsøk 2: OpenStreetMap Nominatim (gratis, ingen auth)
-    try:
-        query = f"{adresse}, {kommune}, Norway"
-        nom_resp = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": query, "format": "json", "limit": "1", "countrycodes": "no"},
-            headers={"User-Agent": "Builtly/1.0"},
-            timeout=10,
-        )
-        if nom_resp.status_code == 200:
-            results = nom_resp.json()
-            if results:
-                lat = float(results[0]["lat"])
-                lon = float(results[0]["lon"])
-                # Konverter til UTM33
-                easting, northing = _latlon_to_utm33(lat, lon)
-                return {
-                    "ok": True, "easting": easting, "northing": northing,
-                    "label": results[0].get("display_name", query),
-                }
-    except Exception:
-        pass
-    
-    return {"ok": False, "error": f"Kunne ikke geokode '{adresse}, {kommune}'"}
-
-
 def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600, auth=None, extra_params=None):
     xmin, ymin, xmax, ymax = bbox_25833
     for layer in layers_to_try:
@@ -463,31 +613,8 @@ def _fetch_wms_image(base_url, layers_to_try, bbox_25833, width=800, height=600,
     return None, None
 
 
-def _fetch_arcgis_image(service_url, bbox_25833, width=800, height=600, token=None, layers=None):
-    """Fetch image from ArcGIS MapServer export.
-    
-    Args:
-        layers: Optional string like "show:0,1,2" to control which sublayers are visible.
-                If None, shows all layers.
-    """
-    xmin, ymin, xmax, ymax = bbox_25833
-    params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
-              "size": f"{width},{height}", "format": "png", "transparent": "true", "f": "image"}
-    if token: params["token"] = token
-    if layers: params["layers"] = layers
-    try:
-        resp = requests.get(f"{service_url}/export", params=params, timeout=15)
-        if resp.status_code == 200 and len(resp.content) > 500:
-            ctype = resp.headers.get("content-type", "")
-            if "image" in ctype or resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff"):
-                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    except Exception:
-        pass
-    return None
-
-
-def geocode_project_address(adresse: str, kommune: str) -> dict:
-    """Geokod prosjektadressen til UTM33 koordinater via Geodata Online."""
+def _geocode_project_address(adresse: str, kommune: str) -> dict:
+    """Geokod prosjektadresse til UTM33. Geodata Online → Nominatim fallback."""
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
@@ -495,160 +622,102 @@ def geocode_project_address(adresse: str, kommune: str) -> dict:
             results = gdo.address_search(adresse, kommune, limit=1)
             if results:
                 hit = results[0]
-                return {
-                    "easting": hit["x"],
-                    "northing": hit["y"],
-                    "label": hit.get("label", ""),
-                    "score": hit.get("score", 0),
-                    "ok": True,
-                }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return {"ok": False, "error": "Geokoding feilet — sjekk adresse"}
+                x, y = hit.get("x"), hit.get("y")
+                if x and y:
+                    return {"ok": True, "easting": float(x), "northing": float(y),
+                            "label": hit.get("label", f"{adresse}, {kommune}")}
+    except Exception:
+        pass
+    try:
+        nom_resp = requests.get("https://nominatim.openstreetmap.org/search",
+            params={"q": f"{adresse}, {kommune}, Norway", "format": "json", "limit": "1", "countrycodes": "no"},
+            headers={"User-Agent": "Builtly/1.0"}, timeout=10)
+        if nom_resp.status_code == 200 and nom_resp.json():
+            r = nom_resp.json()[0]
+            e, n = _latlon_to_utm33(float(r["lat"]), float(r["lon"]))
+            return {"ok": True, "easting": e, "northing": n, "label": r.get("display_name", "")}
+    except Exception:
+        pass
+    return {"ok": False, "error": f"Kunne ikke geokode '{adresse}, {kommune}'"}
 
 
-def fetch_stoykart_image_utm(easting, northing, width=800, height=600, buffer_m=300):
-    """Hent støykart fra Geodata Online DOK Forurensning med UTM33 koordinater.
-    
-    Returnerer støysoner compositet over gråtone-bakgrunnskart.
-    """
-    if not HAS_REQUESTS: return None, "requests-biblioteket mangler"
-    
+def fetch_stoykart_image_utm(easting, northing, width=800, height=600, buffer_m=500):
+    """Hent støykart: gråtone bakgrunn + transparent støy-overlay compositet."""
+    if not HAS_REQUESTS: return None, "requests mangler"
     bbox = (easting - buffer_m, northing - buffer_m, easting + buffer_m, northing + buffer_m)
     xmin, ymin, xmax, ymax = bbox
-    errors = []
-
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
-        if gdo.is_available():
-            token = gdo.get_token()
-            dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-            basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
-            STOEY_LAYERS = "show:201,202,211,212,203,204,205,206,213,214,207,208"
-            
-            base_params = {
-                "bbox": f"{xmin},{ymin},{xmax},{ymax}",
-                "bboxSR": "25833", "imageSR": "25833",
-                "size": f"{width},{height}",
-                "f": "image", "token": token,
-            }
-            
-            # Steg 1: Hent bakgrunnskart (opakt)
-            basemap_img = None
-            try:
-                bg_resp = gdo.session.get(
-                    f"{basemap_url}/export",
-                    params={**base_params, "format": "png", "transparent": "false"},
-                    timeout=20,
-                )
-                if bg_resp.status_code == 200 and len(bg_resp.content) > 1000:
-                    if bg_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in bg_resp.headers.get("Content-Type", ""):
-                        basemap_img = Image.open(io.BytesIO(bg_resp.content)).convert("RGBA")
-            except Exception:
-                pass
-            
-            # Steg 2: Hent støy-lag som transparent overlay
-            noise_resp = gdo.session.get(
-                f"{dok_url}/export",
-                params={**base_params, "format": "png32", "transparent": "true", "layers": STOEY_LAYERS},
-                timeout=20,
-            )
-            
-            if noise_resp.status_code == 200 and len(noise_resp.content) > 500:
-                ctype = noise_resp.headers.get("Content-Type", "")
-                if noise_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
-                    noise_img = Image.open(io.BytesIO(noise_resp.content)).convert("RGBA")
-                    
-                    # Steg 3: Composit
-                    if basemap_img and basemap_img.size == noise_img.size:
-                        result = Image.alpha_composite(basemap_img, noise_img)
-                        return result.convert("RGB"), None
-                    elif basemap_img:
-                        noise_resized = noise_img.resize(basemap_img.size, Image.LANCZOS)
-                        result = Image.alpha_composite(basemap_img, noise_resized)
-                        return result.convert("RGB"), None
-                    else:
-                        bg = Image.new("RGBA", noise_img.size, (245, 245, 240, 255))
-                        result = Image.alpha_composite(bg, noise_img)
-                        return result.convert("RGB"), None
-            
-            # Fallback: opakt direkte
-            opaque_resp = gdo.session.get(
-                f"{dok_url}/export",
-                params={**base_params, "format": "png", "transparent": "false", "layers": STOEY_LAYERS},
-                timeout=20,
-            )
-            if opaque_resp.status_code == 200 and len(opaque_resp.content) > 1000:
-                ctype = opaque_resp.headers.get("Content-Type", "")
-                if opaque_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
-                    return Image.open(io.BytesIO(opaque_resp.content)).convert("RGB"), None
-            
-            errors.append("DOK Forurensning: ingen støydata i dette området")
-    except ImportError:
-        errors.append("geodata_client mangler")
+        if not gdo.is_available(): return None, "Geodata Online ikke tilgjengelig"
+        token = gdo.get_token()
+        dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+        basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
+        STOEY_LAYERS = "show:201,202,211,212,203,204,205,206,213,214,207,208"
+        base_params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
+                       "size": f"{width},{height}", "f": "image", "token": token}
+        basemap_img = None
+        try:
+            bg_r = gdo.session.get(f"{basemap_url}/export", params={**base_params, "format": "png", "transparent": "false"}, timeout=20)
+            if bg_r.status_code == 200 and len(bg_r.content) > 1000:
+                basemap_img = Image.open(io.BytesIO(bg_r.content)).convert("RGBA")
+        except Exception: pass
+        noise_r = gdo.session.get(f"{dok_url}/export", params={**base_params, "format": "png32", "transparent": "true", "layers": STOEY_LAYERS}, timeout=20)
+        if noise_r.status_code == 200 and len(noise_r.content) > 500:
+            noise_img = Image.open(io.BytesIO(noise_r.content)).convert("RGBA")
+            if basemap_img:
+                if basemap_img.size != noise_img.size:
+                    noise_img = noise_img.resize(basemap_img.size, Image.LANCZOS)
+                return Image.alpha_composite(basemap_img, noise_img).convert("RGB"), None
+            bg = Image.new("RGBA", noise_img.size, (245, 245, 240, 255))
+            return Image.alpha_composite(bg, noise_img).convert("RGB"), None
+        # Fallback opakt
+        op_r = gdo.session.get(f"{dok_url}/export", params={**base_params, "format": "png", "transparent": "false", "layers": STOEY_LAYERS}, timeout=20)
+        if op_r.status_code == 200 and len(op_r.content) > 1000:
+            return Image.open(io.BytesIO(op_r.content)).convert("RGB"), None
+        return None, "Ingen støydata i dette området"
     except Exception as e:
-        errors.append(f"DOK Forurensning: {str(e)[:80]}")
-
-    return None, f"Kunne ikke hente støykart: {'; '.join(errors)}"
+        return None, f"Feil: {str(e)[:80]}"
 
 
-# Bakoverkompatibel wrapper for lat/lon
-def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=300):
-    try:
-        easting, northing = _latlon_to_utm33(lat, lon)
-        return fetch_stoykart_image_utm(easting, northing, width, height, buffer_m)
-    except Exception:
-        return None, "Koordinatkonvertering feilet"
-
-
-def fetch_stoykart_contours_utm(easting, northing, buffer_m=300):
-    """Hent støykontur-data fra DOK Forurensning med UTM33 koordinater."""
-    if not HAS_REQUESTS: return []
+def fetch_stoykart_contours_utm(easting, northing, buffer_m=500):
+    """Hent støykontur-features fra DOK Forurensning."""
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
         if not gdo.is_available(): return []
         token = gdo.get_token()
-    except Exception:
-        return []
-
-    service_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-    params = {
-        "geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
-        "geometryType": "esriGeometryEnvelope", "inSR": "25833", "outSR": "25833",
-        "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "returnGeometry": "false", "f": "json",
-        "token": token,
-    }
+    except Exception: return []
+    url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+    params = {"geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
+              "geometryType": "esriGeometryEnvelope", "inSR": "25833", "outSR": "25833",
+              "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "returnGeometry": "false", "f": "json", "token": token}
     contours = []
-    for layer_id in [211, 212, 203, 204, 205, 206, 213, 214, 207, 208]:
+    for lid in [211, 212, 203, 204, 205, 206, 213, 214, 207, 208]:
         try:
-            resp = requests.get(f"{service_url}/{layer_id}/query", params=params, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                for feat in data.get("features", []):
-                    attrs = feat.get("attributes", {})
-                    db_val = None
-                    for key in ["DB_LOW", "db_low", "Lden", "dB", "LDEN", "stoyniva",
-                                "stoysonekategori", "DB_HIGH", "db_high"]:
-                        if key in attrs and attrs[key] is not None:
-                            db_val = attrs[key]; break
-                    if db_val is not None:
-                        contours.append({"layer": layer_id, "db": str(db_val),
-                                         "name": attrs.get("NAVN", attrs.get("navn", "")),
-                                         "kilde": attrs.get("stoykilde", attrs.get("stoykildenavn", ""))})
-        except Exception:
-            continue
+            r = requests.get(f"{url}/{lid}/query", params=params, timeout=8)
+            if r.status_code == 200:
+                for feat in r.json().get("features", []):
+                    a = feat.get("attributes", {})
+                    for k in ["stoysonekategori", "DB_LOW", "Lden", "dB", "stoyniva"]:
+                        if k in a and a[k] is not None:
+                            contours.append({"layer": lid, "db": str(a[k]), "kilde": a.get("stoykilde", "")}); break
+        except Exception: continue
     return contours
 
 
-# Bakoverkompatibel
+# Bakoverkompatible wrappers
+def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=300):
+    try:
+        e, n = _latlon_to_utm33(lat, lon)
+        return fetch_stoykart_image_utm(e, n, width, height, buffer_m)
+    except: return None, "Feil"
+
 def fetch_stoykart_contours(lat, lon, kilde="vei", buffer_m=300):
     try:
-        easting, northing = _latlon_to_utm33(lat, lon)
-        return fetch_stoykart_contours_utm(easting, northing, buffer_m)
-    except Exception:
-        return []
+        e, n = _latlon_to_utm33(lat, lon)
+        return fetch_stoykart_contours_utm(e, n, buffer_m)
+    except: return []
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1045,45 +1114,35 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
     st.info("For presise resultater: Last opp støyrapport fra akustiker (PDF), støykart med dB-verdier, og plantegninger.")
     
     st.markdown("##### Automatisk støykart fra Geodata Online")
-    
-    # Auto-geokod prosjektadressen til UTM33 (skjer kun én gang ved suksess)
     if "stoy_utm" not in st.session_state or not st.session_state["stoy_utm"].get("ok"):
         proj_adresse = pd_state.get("adresse", "")
         proj_kommune = pd_state.get("kommune", "")
         if proj_adresse:
-            geo = _geocode_project_address(proj_adresse, proj_kommune)
-            st.session_state["stoy_utm"] = geo
+            st.session_state["stoy_utm"] = _geocode_project_address(proj_adresse, proj_kommune)
         else:
             st.session_state["stoy_utm"] = {"ok": False, "error": "Ingen prosjektadresse"}
-    
     utm = st.session_state.get("stoy_utm", {})
-    
     if utm.get("ok"):
         st.caption(f"📍 {utm.get('label', '')} — UTM33: ({utm['easting']:.0f}, {utm['northing']:.0f})")
     else:
-        st.warning(f"Geokoding feilet: {utm.get('error', 'ukjent')}. Støykart kan ikke hentes automatisk.")
+        st.warning(f"Geokoding feilet: {utm.get('error', 'ukjent')}")
     
-    stoy_buffer = st.number_input("Buffer rundt prosjekt (m)", value=500, min_value=100, max_value=2000, 
-                                   key="stoy_buffer", help="Radius for støykartutsnitt")
+    stoy_buffer = st.number_input("Buffer (m)", value=500, min_value=100, max_value=2000, key="stoy_buffer")
     
-    fetch_disabled = not utm.get("ok", False)
-    if st.button("📡 Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True, disabled=fetch_disabled):
+    if st.button("📡 Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True, disabled=not utm.get("ok")):
         with st.spinner("Henter støykart fra DOK Forurensning..."):
-            stoy_img, stoy_err = fetch_stoykart_image_utm(
-                utm["easting"], utm["northing"], buffer_m=stoy_buffer)
+            stoy_img, stoy_err = fetch_stoykart_image_utm(utm["easting"], utm["northing"], buffer_m=stoy_buffer)
             if stoy_img:
                 st.session_state["stoykart_image"] = stoy_img.convert("RGB")
                 st.success("Støykart hentet!")
             else:
                 st.warning(f"Kunne ikke hente: {stoy_err}. Last opp manuelt.")
-            
             contours = fetch_stoykart_contours_utm(utm["easting"], utm["northing"], buffer_m=stoy_buffer)
             if contours:
                 st.session_state["stoykart_contours"] = contours
     
     if "stoykart_image" in st.session_state:
-        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online (DOK Forurensning T-1442)", 
-                 use_container_width=True)
+        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online (DOK Forurensning T-1442)", use_container_width=True)
     
     st.markdown("##### Tegninger fra prosjektet")
     saved_images = []
@@ -1151,69 +1210,58 @@ if st.button("Kjør Akustisk Analyse (RIAku)", type="primary", use_container_wid
     reg_summary = "; ".join(reg_text) if reg_text else "Ingen spesifikke reguleringsbestemmelser angitt"
     
     with st.spinner("PASS 1: AI leser støykart og ekstraherer dB-verdier per fasade..."):
-        try:
-            valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        except:
-            st.error("Kunne ikke koble til Google AI.")
-            st.stop()
-
-        valgt_modell = valid_models[0]
-        for fav in ['models/gemini-2.5-flash-preview-04-17', 'models/gemini-2.5-pro-preview-03-25', 'models/gemini-1.5-pro', 'models/gemini-1.5-flash']:
-            if fav in valid_models: valgt_modell = fav; break
-        
-        model = genai.GenerativeModel(valgt_modell)
+        ai_label = "Claude" if _USE_CLAUDE else "Gemini"
+        st.caption(f"AI-motor: {ai_label}")
 
         # ═══════════════════════════════════════════════════════════
-        # PASS 1: STRUKTURERT DATAEKSTRAKSJON
-        # Les dB-verdier fra kart, identifiser bygg og fasader
+        # PASS 1: STRUKTURERT DATAEKSTRAKSJON MED GRID OVERLAY
         # ═══════════════════════════════════════════════════════════
         
-        pass1_prompt = f"""Du er en senior akustiker som leser stoykart og plantegninger.
+        # Legg grid overlay på bilder FØR AI ser dem
+        images_with_grid = [MarkerPlacement.add_grid_overlay(img) for img in images_for_ai]
+        
+        pass1_prompt = f"""Du er en senior akustiker som leser støykart og plantegninger.
 
-OPPGAVE: Ekstraher ALLE synlige dB-verdier og støynivåer fra bildene.
+VIKTIG: Bildene har et KOORDINATRUTENETT med bokstaver A-J (horisontalt) og tall 1-8 (vertikalt).
+Bruk dette rutenettet for å angi NØYAKTIG hvor bygningene befinner seg.
 
-VIKTIG - LES NØYE:
-1. Hvis bildene inneholder støykart med TALL (dB-verdier) skrevet på kartet, les disse EKSAKT.
-2. Hvis bildene har fargekoder uten tall, estimer nivåer KONSERVATIVT ut fra farger:
-   - Gult = 55-60 dB, Oransje = 60-65 dB, Rødt = 65-70 dB, Mørkerødt = >70 dB
-3. Hvis det finnes en profesjonell støyrapport (Brekke & Strand, Multiconsult etc.), 
-   bruk DERES tall som autoritative. De har gjort profesjonelle CadnaA-beregninger.
-4. IKKE overestimer. Hvis du er i tvil mellom to verdier, velg den LAVERE.
-5. Les alle synlige beregningspunkter på fasader med nøyaktige verdier.
+OPPGAVE 1 — BYGNINGSPOSISJONER:
+For HVERT bygg, angi hvilke grid-celler det dekker:
+- grid_topleft: Celle i øvre venstre hjørne (f.eks. "D2")
+- grid_bottomright: Celle i nedre høyre hjørne (f.eks. "F4")
 
-FOR HVERT BYGG OG HVER FASADERETNING, angi:
-- Byggnavn (A1, A2, B, C osv.)
-- Fasaderetning (nord, sør, øst, vest, nordøst osv.)
-- Etasje(r) det gjelder
-- Lden-verdi i dB (heltall)
-- Om det er beregningspunkt fra profesjonell rapport eller AI-estimat
+OPPGAVE 2 — STØYNIVÅER:
+Ekstraher ALLE synlige dB-verdier fra støykartene.
+1. Hvis bildene har TALL (dB-verdier) på kartet, les disse EKSAKT.
+2. Fargekoder: Gult = 55-60 dB, Oransje = 60-65 dB, Rødt = 65-70 dB, Mørkerødt = >70 dB
+3. Profesjonelle rapporter (Brekke & Strand, Multiconsult) er AUTORITATIVE.
+4. IKKE overestimer. Ved tvil, velg LAVERE verdi.
 
-Svar KUN med JSON i dette formatet:
+Svar KUN med JSON:
 ```json
 {{
   "kilde_kvalitet": "profesjonell_rapport|stoykart_med_tall|stoykart_farger|ai_estimat",
   "max_lden": 64,
   "stoysone_klassifisering": "gul|rod|gronn",
+  "building_bboxes": [
+    {{"bygg": "A1", "grid_topleft": "G2", "grid_bottomright": "H3", "image_index": 0}},
+    {{"bygg": "B", "grid_topleft": "D5", "grid_bottomright": "F7", "image_index": 0}}
+  ],
   "facade_data": [
-    {{"bygg": "A1", "fasade": "nordost", "etasje": "1-5", "lden": 64, "kilde": "beregnet"}},
-    {{"bygg": "A1", "fasade": "vest", "etasje": "1-5", "lden": 43, "kilde": "beregnet"}},
-    {{"bygg": "A2", "fasade": "ost", "etasje": "1-4", "lden": 63, "kilde": "beregnet"}}
+    {{"bygg": "A1", "fasade": "sorost", "etasje": "1-5", "lden": 64, "kilde": "beregnet"}},
+    {{"bygg": "A1", "fasade": "nordvest", "etasje": "1-5", "lden": 49, "kilde": "beregnet"}}
   ],
   "balkonger": [
-    {{"bygg": "A1", "retning": "ost", "etasje": "1", "lden_uten_tiltak": 64, "lden_med_tiltak": 55}}
+    {{"bygg": "A1", "retning": "sorost", "etasje": "1", "lden_uten_tiltak": 64, "lden_med_tiltak": 55}}
   ],
-  "eksisterende_tiltak": ["Støyskjerm mellom A1-A2 og A2-B, hoeyde 2m"],
+  "eksisterende_tiltak": ["Støyskjerm mellom A1-A2, hoyde 2m"],
   "stoykilde_beskrivelse": "Veitrafikk fra Industriveien"
 }}
 ```"""
         
-        pass1_parts = [pass1_prompt] + images_for_ai
-        
         try:
-            pass1_res = model.generate_content(pass1_parts)
-            pass1_raw = pass1_res.text
+            pass1_raw = ai_generate(pass1_prompt, images_with_grid)
             
-            # Parse JSON fra pass 1
             json_match = re.search(r'```json\s*(.*?)\s*```', pass1_raw, re.DOTALL)
             if not json_match:
                 json_match = re.search(r'\{[\s\S]*"facade_data"[\s\S]*\}', pass1_raw)
@@ -1224,18 +1272,20 @@ Svar KUN med JSON i dette formatet:
                     json_str = json_match.group(1) if json_match.lastindex else json_match.group(0)
                     extracted_data = json.loads(json_str)
                 except Exception as parse_err:
-                    st.warning(f"JSON-parsing feilet i Pass 1: {parse_err}. Bruker fallback.")
+                    st.warning(f"JSON-parsing feilet i Pass 1: {parse_err}.")
             
             facade_data = extracted_data.get("facade_data", [])
+            building_bboxes = extracted_data.get("building_bboxes", [])
             kilde_kvalitet = extracted_data.get("kilde_kvalitet", "ai_estimat")
             max_lden = extracted_data.get("max_lden", 65)
             
-            st.success(f"Pass 1 ferdig: Fant {len(facade_data)} fasadepunkter. "
-                       f"Kildekvalitet: {kilde_kvalitet}. Hoeyeste Lden: {max_lden} dB.")
+            st.success(f"Pass 1: {len(facade_data)} fasadepunkter, {len(building_bboxes)} bygningsbokser. "
+                       f"Kildekvalitet: {kilde_kvalitet}. Høyeste Lden: {max_lden} dB.")
             
         except Exception as e:
             st.error(f"Pass 1 feilet: {e}")
             facade_data = []
+            building_bboxes = []
             kilde_kvalitet = "ai_estimat"
             max_lden = 65
 
@@ -1291,6 +1341,22 @@ Svar KUN med JSON i dette formatet:
                     st.dataframe(facade_table_df, use_container_width=True, hide_index=True)
         else:
             st.warning("Ingen fasadedata ekstrahert. Rapporten baseres på AI-estimater.")
+
+    # ═══════════════════════════════════════════════════════════
+    # PASS 2.5: DETERMINISTISK MARKØRPLASSERING
+    # ═══════════════════════════════════════════════════════════
+    
+    det_markers = []
+    with st.spinner("Plasserer støymarkører deterministisk..."):
+        if building_bboxes and facade_data:
+            det_markers = MarkerPlacement.place_markers_from_bboxes(building_bboxes, facade_data)
+            det_markers = MarkerPlacement.resolve_collisions(det_markers, min_dist_pct=5.0)
+            for img_idx in range(len(images_for_ai)):
+                images_for_ai[img_idx] = MarkerPlacement.draw_markers_professional(
+                    images_for_ai[img_idx], det_markers, image_index=img_idx)
+            st.success(f"Plassert {len(det_markers)} markører deterministisk med anti-kollisjon.")
+        else:
+            st.caption("Ingen bygningsbokser — markører plasseres av AI i Pass 3.")
 
     # ═══════════════════════════════════════════════════════════
     # PASS 3: AI SKRIVER RAPPORT MED BEREGNINGSRESULTATER
@@ -1402,68 +1468,28 @@ Regler for JSON:
         pass3_parts = [pass3_prompt] + images_for_ai
 
         try:
-            res = model.generate_content(pass3_parts)
-            ai_raw_text = res.text
+            ai_raw_text = ai_generate(pass3_prompt, images_for_ai)
             
-            # --- Tegne markører ---
             clean_text = ai_raw_text
-            json_match = re.search(r'```json\s*(.*?)\s*```', ai_raw_text, re.DOTALL)
             
-            markers = []
-            if json_match:
-                try:
-                    markers = json.loads(json_match.group(1))
-                    clean_text = re.sub(r'```json\s*.*?\s*```', '', ai_raw_text, flags=re.DOTALL)
-                    
-                    for marker in markers:
-                        idx = int(marker.get("image_index", 0))
-                        if idx < len(images_for_ai):
-                            img = images_for_ai[idx]
-                            draw = ImageDraw.Draw(img)
-                            w, h = img.size
-                            x = int((marker.get("x_pct", 50) / 100.0) * w)
-                            y = int((marker.get("y_pct", 50) / 100.0) * h)
-                            db_str = str(marker.get("db", "??"))
-                            label = str(marker.get("label", ""))
-                            
-                            color_name = marker.get("color", "red").lower()
-                            if "green" in color_name:
-                                color_rgb = (46, 204, 113)
-                            elif "yellow" in color_name:
-                                color_rgb = (241, 196, 15)
-                            elif "darkred" in color_name:
-                                color_rgb = (153, 27, 27)
-                            else:
-                                color_rgb = (231, 76, 60)
-                            
-                            radius = int(w * 0.014)
-                            draw.ellipse((x-radius, y-radius, x+radius, y+radius), 
-                                         outline=color_rgb, width=max(2, int(w*0.003)))
-                            
-                            try:
-                                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(w * 0.013))
-                                font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", int(w * 0.009))
-                            except:
-                                font = ImageFont.load_default()
-                                font_small = font
-                            
-                            try:
-                                bbox = draw.textbbox((0,0), db_str, font=font)
-                                tw = bbox[2] - bbox[0]; th = bbox[3] - bbox[1]
-                            except:
-                                tw, th = 20, 12
-                            
-                            draw.rectangle((x-tw/2-2, y-th/2-1, x+tw/2+2, y+th/2+1), fill=color_rgb)
-                            draw.text((x-tw/2, y-th/2), db_str, fill=(255,255,255), font=font)
-                            
-                            if label:
-                                try: lw = draw.textbbox((0,0), label, font=font_small)[2]
-                                except: lw = len(label)*6
-                                draw.text((x-lw/2, y+radius+3), label, fill=color_rgb, font=font_small)
-                            
-                            images_for_ai[idx] = img
-                except Exception as e:
-                    print(f"Feil under tegning: {e}")
+            if det_markers:
+                # Deterministiske markører allerede tegnet i Pass 2.5
+                markers = det_markers
+                clean_text = re.sub(r'```json\s*.*?\s*```', '', ai_raw_text, flags=re.DOTALL)
+            else:
+                # Fallback: AI-plasserte markører med profesjonell renderer
+                json_match = re.search(r'```json\s*(.*?)\s*```', ai_raw_text, re.DOTALL)
+                markers = []
+                if json_match:
+                    try:
+                        markers = json.loads(json_match.group(1))
+                        clean_text = re.sub(r'```json\s*.*?\s*```', '', ai_raw_text, flags=re.DOTALL)
+                        markers = MarkerPlacement.resolve_collisions(markers, min_dist_pct=5.0)
+                        for img_idx in range(len(images_for_ai)):
+                            images_for_ai[img_idx] = MarkerPlacement.draw_markers_professional(
+                                images_for_ai[img_idx], markers, image_index=img_idx)
+                    except Exception as e:
+                        print(f"Feil under AI-markørtegning: {e}")
             
             # Lagre for redigering
             st.session_state["aku_markers"] = markers
@@ -1604,33 +1630,10 @@ if "generated_aku_pdf" in st.session_state:
                     if not originals: originals = st.session_state.get("aku_images", [])
                     fresh_images = [img.copy() for img in originals]
                     
-                    for marker in new_markers:
-                        idx = int(marker.get("image_index", 0))
-                        if idx < len(fresh_images):
-                            img = fresh_images[idx]
-                            draw = ImageDraw.Draw(img)
-                            w, h = img.size
-                            mx = int((marker.get("x_pct", 50) / 100.0) * w)
-                            my = int((marker.get("y_pct", 50) / 100.0) * h)
-                            db_str = str(marker.get("db", "??"))
-                            label = str(marker.get("label", ""))
-                            color_name = marker.get("color", "red").lower()
-                            color_rgb = (46,204,113) if "green" in color_name else (241,196,15) if "yellow" in color_name else (153,27,27) if "darkred" in color_name else (231,76,60)
-                            radius = int(w * 0.014)
-                            draw.ellipse((mx-radius, my-radius, mx+radius, my+radius), outline=color_rgb, width=max(2, int(w*0.003)))
-                            try:
-                                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(w * 0.013))
-                                font_s = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", int(w * 0.009))
-                            except:
-                                font = ImageFont.load_default(); font_s = font
-                            try: bb = draw.textbbox((0,0), db_str, font=font); tw=bb[2]-bb[0]; th=bb[3]-bb[1]
-                            except: tw, th = 20, 12
-                            draw.rectangle((mx-tw/2-2, my-th/2-1, mx+tw/2+2, my+th/2+1), fill=color_rgb)
-                            draw.text((mx-tw/2, my-th/2), db_str, fill=(255,255,255), font=font)
-                            if label:
-                                try: lw = draw.textbbox((0,0), label, font=font_s)[2]
-                                except: lw = len(label)*6
-                                draw.text((mx-lw/2, my+radius+3), label, fill=color_rgb, font=font_s)
+                    resolved = MarkerPlacement.resolve_collisions(new_markers, min_dist_pct=5.0)
+                    for img_idx in range(len(fresh_images)):
+                        fresh_images[img_idx] = MarkerPlacement.draw_markers_professional(
+                            fresh_images[img_idx], resolved, image_index=img_idx)
                     
                     st.session_state["aku_markers"] = new_markers
                     st.session_state["aku_images"] = fresh_images
