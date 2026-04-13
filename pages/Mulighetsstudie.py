@@ -2104,6 +2104,204 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     return options
 
 
+# --- AI-RAFFINERING AV SKISSE ---
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+
+
+def _call_claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 4000) -> Optional[Dict[str, Any]]:
+    """Kall Claude API og returner parset JSON."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        # Ekstraher JSON fra respons
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def refine_sketch_with_ai(
+    sketch_buildings: List[Dict[str, Any]],
+    site_polygon_coords: List[List[float]],
+    site_area_m2: float,
+    latitude_deg: float,
+    max_bya_pct: float,
+    max_floors: int,
+    max_height_m: float,
+    floor_to_floor_m: float,
+    neighbors: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    AI-raffinering: Claude optimerer skissens bygningsplassering.
+
+    Returnerer liste med raffinerte bygninger eller None.
+    """
+    system = """Du er en norsk arkitekt som optimerer bygningsplassering på tomter.
+Du mottar en bruker-skisse med bygningsbokser og tomtekontekst.
+Optimer plasseringen med fokus på:
+1. FASADEORIENTERING: Roter bygninger for å maksimere sør/sørvest-vendte fasader og dagslys
+2. AVSTAND: Sørg for min. 8m mellom bygninger (TEK17), helst 12-18m for lameller
+3. SOLFORHOLD: Plasser lavere bygg mot sør, høyere mot nord for å unngå skygge på uteareal
+4. UTEROM: Skap tydelige, solrike uterom mellom bygningene
+5. ADKOMST: Plasser innganger mot vei/tilkomst
+
+Svar KUN med en JSON-array med bygninger. Hver bygning har:
+{"name": "str", "cx": float, "cy": float, "w": float, "d": float, "angle_deg": float, "floors": int, "role": "main|wing|tower", "reasoning": "kort begrunnelse for endring"}
+
+Hold deg innenfor tomtegrensen. Behold omtrent samme totale BTA (±15%).
+IKKE inkluder noe annet enn JSON-arrayen i svaret."""
+
+    user_data = {
+        "sketch_buildings": sketch_buildings,
+        "site_polygon": site_polygon_coords[:50],  # Begrens antall punkter
+        "site_area_m2": round(site_area_m2, 0),
+        "latitude_deg": round(latitude_deg, 2),
+        "max_bya_pct": max_bya_pct,
+        "max_floors": max_floors,
+        "max_height_m": max_height_m,
+        "floor_to_floor_m": floor_to_floor_m,
+        "neighbor_count": len(neighbors or []),
+        "nearby_neighbors": [
+            {"height_m": n.get("height_m", 9), "distance_m": round(n.get("distance_m", 50), 0)}
+            for n in (neighbors or [])[:10]
+        ],
+    }
+
+    user_prompt = f"""Optimer denne bygningsskissen for tomten.
+
+SKISSE-DATA:
+{json.dumps(user_data, ensure_ascii=False, indent=2)}
+
+Returner den optimerte bygningslisten som JSON-array. Behold antall bygg og omtrent samme dimensjoner,
+men juster posisjon (cx/cy), rotasjon (angle_deg) og eventuelt dybde/bredde for bedre arkitektonisk kvalitet.
+Forklar kort i "reasoning" hva du endret for hvert bygg."""
+
+    result = _call_claude_json(system, user_prompt)
+    if isinstance(result, list) and len(result) > 0:
+        return result
+    return None
+
+
+def generate_sketch_variants(
+    sketch_buildings: List[Dict[str, Any]],
+    site_polygon_coords: List[List[float]],
+    site_area_m2: float,
+    latitude_deg: float,
+    max_bya_pct: float,
+    max_floors: int,
+    max_height_m: float,
+    floor_to_floor_m: float,
+    neighbors: Optional[List[Dict[str, Any]]] = None,
+    n_variants: int = 2,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    AI-generering av alternative volumløsninger innenfor skissens bounding box.
+    Returnerer dict med "variants" liste, hver med "name", "buildings", "description".
+    """
+    system = """Du er en norsk arkitekt som genererer alternative volumløsninger for tomter.
+Du mottar en bruker-skisse og skal lage varianter som holder seg innenfor omtrent
+samme bounding box og BTA, men varierer typologisk grep.
+
+Eksempler på varianter:
+- Variant A: "Kompakt lamell" — færre, lengre bygninger med flere etasjer
+- Variant B: "Punkthus-grep" — flere, mindre bygninger med mer åpent mellomrom
+- Variant C: "L-form / Tun" — bygninger i vinkel som skaper tydelig uterom
+
+Svar KUN med JSON:
+{
+  "variants": [
+    {
+      "name": "Variant A - Kompakt lamell",
+      "description": "Kort begrunnelse",
+      "buildings": [{"name":"Bygg A","cx":...,"cy":...,"w":...,"d":...,"angle_deg":...,"floors":...}]
+    }
+  ]
+}"""
+
+    user_data = {
+        "sketch_buildings": sketch_buildings,
+        "site_polygon": site_polygon_coords[:50],
+        "site_area_m2": round(site_area_m2, 0),
+        "latitude_deg": round(latitude_deg, 2),
+        "max_bya_pct": max_bya_pct,
+        "max_floors": max_floors,
+        "max_height_m": max_height_m,
+        "floor_to_floor_m": floor_to_floor_m,
+        "n_variants": n_variants,
+    }
+
+    user_prompt = f"""Generer {n_variants} alternative volumløsninger basert på denne skissen.
+Hold deg innenfor tomtens bounding box og ±20% av skissens totale BTA.
+
+SKISSE-DATA:
+{json.dumps(user_data, ensure_ascii=False, indent=2)}
+
+Returner JSON med "variants"-array."""
+
+    result = _call_claude_json(system, user_prompt, max_tokens=6000)
+    if isinstance(result, dict) and "variants" in result:
+        return result
+    return None
+
+
+def _deterministic_solar_refinement(
+    sketch_buildings: List[Dict[str, Any]],
+    latitude_deg: float,
+) -> List[Dict[str, Any]]:
+    """Deterministisk fallback: roter bygninger for optimal solorientering."""
+    # Optimal langside-orientering for skandinavisk breddegrad: øst-vest (vinkelrett på sør)
+    # dvs. bygningsdybden (kort side) peker mot sør for maks dagslys
+    optimal_angle = 0.0  # 0° = lang side øst-vest, kort side mot sør
+
+    refined = []
+    for bld in sketch_buildings:
+        b = dict(bld)
+        current = float(b.get("angle_deg", 0))
+        w = float(b.get("w", 40))
+        d = float(b.get("d", 14))
+
+        # Hvis bygningen er dyp (>16m), er det en lamell — orienter lang side øst-vest
+        if w > d * 1.5:
+            # Allerede bred — sjekk om den bør roteres
+            delta = abs(current - optimal_angle) % 180
+            if delta > 45 and delta < 135:
+                b["angle_deg"] = round(optimal_angle, 1)
+                b["reasoning"] = f"Rotert til {optimal_angle}° for å orientere langfasade øst-vest (best dagslys på breddegrad {latitude_deg:.0f}°)"
+            else:
+                b["reasoning"] = "Beholdt orientering — allerede god solretning"
+        else:
+            b["reasoning"] = "Kompakt fotavtrykk — orientering påvirker dagslys minimalt"
+
+        refined.append(b)
+    return refined
+
+
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """
     Isometrisk 3D-volumskisse.
@@ -2557,7 +2755,22 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
   }
 </style></head><body>
 <div id="info">__INFO__</div>
-<div id="help">Venstre mus: roter<br>Scroll: zoom<br>Shift+dra: panorer<br>Hoyre mus: panorer</div>
+<div id="help">Venstre mus: roter | Scroll: zoom | Shift+dra: panorer</div>
+<div id="sunControls" style="position:absolute;bottom:40px;left:14px;right:14px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:10px 16px;display:flex;gap:16px;align-items:center;font:12px -apple-system,sans-serif;">
+  <span style="color:#38bdf8;font-weight:700;white-space:nowrap;">☀ Sol/skygge</span>
+  <label style="color:#9fb0c3;white-space:nowrap;">Kl:
+    <input id="sunHour" type="range" min="6" max="20" step="0.5" value="12" style="width:120px;accent-color:#38bdf8;vertical-align:middle;">
+    <span id="sunHourLabel" style="color:#f5f7fb;font-weight:600;">12:00</span>
+  </label>
+  <label style="color:#9fb0c3;white-space:nowrap;">Dato:
+    <select id="sunSeason" style="background:#0d1824;border:1px solid rgba(120,145,170,0.3);color:#fff;padding:2px 6px;border-radius:4px;font-size:11px;">
+      <option value="80">Vår/høst</option>
+      <option value="172">Sommer</option>
+      <option value="355">Vinter</option>
+    </select>
+  </label>
+  <span id="sunInfo" style="color:#c8d3df;font-size:11px;"></span>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 const D = __DATA__;
@@ -2589,8 +2802,60 @@ sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh;
 sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;
 sun.shadow.camera.near = 0.5; sun.shadow.camera.far = D.site_span * 4;
 scene.add(sun);
+scene.add(sun.target);
 scene.add(new THREE.DirectionalLight(0x99bbdd, 0.25).translateX(-camDist).translateY(camDist * 0.3));
 scene.add(new THREE.HemisphereLight(0x8899cc, 0x334422, 0.3));
+
+// --- SOL/SKYGGE MOTOR ---
+const LAT = __LATITUDE__;
+function solarDeclRad(doy) { return 0.4093 * Math.sin(2 * Math.PI / 365 * (doy - 81)); }
+function solarAlt(lat, doy, hour) {
+  const latR = lat * Math.PI / 180;
+  const decl = solarDeclRad(doy);
+  const ha = (hour - 12) * 15 * Math.PI / 180;
+  const sinAlt = Math.sin(latR) * Math.sin(decl) + Math.cos(latR) * Math.cos(decl) * Math.cos(ha);
+  return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
+}
+function solarAz(lat, doy, hour) {
+  const latR = lat * Math.PI / 180;
+  const decl = solarDeclRad(doy);
+  const ha = (hour - 12) * 15 * Math.PI / 180;
+  const az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(latR) - Math.tan(decl) * Math.cos(latR));
+  return (az * 180 / Math.PI + 180) % 360;
+}
+function updateSunPosition(hour, doy) {
+  const alt = solarAlt(LAT, doy, hour);
+  const az = solarAz(LAT, doy, hour);
+  const dist = D.site_span * 1.5;
+  if (alt <= 0) {
+    sun.intensity = 0.05;
+    sun.position.set(0, -dist * 0.2, 0);
+    document.getElementById('sunInfo').textContent = 'Under horisonten';
+  } else {
+    const altRad = alt * Math.PI / 180;
+    const azRad = (az - 180) * Math.PI / 180;
+    sun.position.set(
+      dist * Math.cos(altRad) * Math.sin(azRad),
+      dist * Math.sin(altRad),
+      dist * Math.cos(altRad) * Math.cos(azRad)
+    );
+    sun.target.position.set(0, 0, 0);
+    sun.intensity = 0.4 + 0.8 * Math.sin(altRad);
+    const warmth = Math.max(0, 1 - alt / 50);
+    sun.color.setRGB(1.0, 0.96 - warmth * 0.08, 0.88 - warmth * 0.15);
+    const shadowLen = alt > 1 ? (16 / Math.tan(altRad)).toFixed(0) : '∞';
+    document.getElementById('sunInfo').textContent = 'Solhøyde: ' + alt.toFixed(1) + '° | Skygge ~' + shadowLen + 'm (16m bygg)';
+  }
+  const hh = Math.floor(hour); const mm = Math.round((hour - hh) * 60);
+  document.getElementById('sunHourLabel').textContent = hh + ':' + (mm < 10 ? '0' : '') + mm;
+}
+document.getElementById('sunHour').addEventListener('input', function() {
+  updateSunPosition(parseFloat(this.value), parseInt(document.getElementById('sunSeason').value));
+});
+document.getElementById('sunSeason').addEventListener('change', function() {
+  updateSunPosition(parseFloat(document.getElementById('sunHour').value), parseInt(this.value));
+});
+updateSunPosition(12, 80);
 
 // --- TERRENG ---
 const terrainGroup = new THREE.Group();
@@ -2856,8 +3121,10 @@ function animate() {
 animate();
 </script></body></html>
 """.replace('__DATA__', payload_json).replace('__HEIGHT__', str(int(height_px))).replace(
+        '__LATITUDE__', str(round(site.latitude_deg, 4))
+    ).replace(
         '__INFO__',
-        f"{option.name} | {option.typology} | BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger"
+        f"{option.name} | {option.typology} | BTA {option.gross_bta_m2:.0f} m² | {option.unit_count} boliger"
         + (f" | Terreng: {terrain_ctx.get('relief_m', 0):.1f}m relieff" if terrain_ctx and terrain_ctx.get('relief_m') else "")
     )
 
@@ -4407,10 +4674,16 @@ if "analysis_results" in st.session_state:
 <div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
+  <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
   <select id="floorSelect" onchange="setFloors()" style="background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
+</div>
+<div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
+  <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
+  <div style="color:#9fb0c3;font-size:12px;">Lim inn i feltet under editoren og klikk «Kjør motor fra skisse»</div>
+  <button onclick="document.getElementById('exportOverlay').style.display='none'" style="margin-top:12px;background:rgba(56,194,201,0.2);border:1px solid rgba(56,194,201,0.4);color:#38bdf8;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:12px;">OK</button>
 </div>
 </div>
 <script>
@@ -4545,6 +4818,24 @@ window.setFloors = function() {
   if (selectedIdx >= 0) { buildings[selectedIdx].floors = defaultFloors; render(); }
 };
 
+window.exportSketch = function() {
+  const data = buildings.map(b => ({
+    name: b.name, cx: Math.round(b.cx*100)/100, cy: Math.round(b.cy*100)/100,
+    w: Math.round(b.w*10)/10, d: Math.round(b.d*10)/10,
+    angle_deg: Math.round(b.angle * 180 / Math.PI * 10) / 10,
+    floors: b.floors, footprint_m2: Math.round(b.w * b.d),
+    bta_m2: Math.round(b.w * b.d * b.floors),
+  }));
+  const json = JSON.stringify(data, null, 2);
+  navigator.clipboard.writeText(json).then(() => {
+    document.getElementById('exportOverlay').style.display = 'block';
+    setTimeout(() => { document.getElementById('exportOverlay').style.display = 'none'; }, 3000);
+  }).catch(() => {
+    // Fallback: prompt
+    prompt('Kopier denne teksten:', json);
+  });
+};
+
 // Hit testing
 function hitTest(sx, sy) {
   for (let i = buildings.length - 1; i >= 0; i--) {
@@ -4662,6 +4953,249 @@ render();
 </script>
 """.replace("__PAYLOAD__", editor_payload)
     components.html(editor_html, height=680, scrolling=False)
+
+    # --- SKISSE TIL MOTOR ---
+    with st.expander("Kjør motor fra manuell skisse", expanded=False):
+        st.caption("Trykk «Kopier skisse» i editoren over, lim inn JSON her. Motoren oppdaterer hele resultatseksjonen.")
+        sketch_json = st.text_area(
+            "Lim inn skisse-data (JSON)",
+            height=120,
+            placeholder='[{"name":"Bygg A","cx":597400,"cy":7034200,"w":40,"d":14,"angle_deg":0,"floors":5}, ...]',
+            key="sketch_json_input",
+        )
+        sk_c1, sk_c2 = st.columns(2)
+        sketch_floors_override = sk_c1.number_input("Overstyr etasjer (0 = fra skisse)", min_value=0, max_value=12, value=0, key="sketch_floors")
+        sketch_efficiency = sk_c2.number_input("Salgbarhetsfaktor", min_value=0.55, max_value=0.90, value=0.78, step=0.01, key="sketch_eff")
+
+        if st.button("Kjør motor fra skisse", type="primary", use_container_width=True, key="run_sketch"):
+            if sketch_json and sketch_json.strip().startswith("["):
+                try:
+                    sketch_buildings = json.loads(sketch_json)
+                    SKETCH_COLORS = [
+                        [34, 197, 94, 200], [56, 189, 248, 200], [168, 130, 240, 200],
+                        [250, 180, 60, 200], [220, 80, 120, 200], [100, 200, 180, 200],
+                    ]
+
+                    total_footprint = 0.0
+                    total_bta = 0.0
+                    sketch_parts = []
+                    sketch_fp_polygons = []
+                    floor_to_floor = site_result.get("floor_to_floor_m", 3.0)
+
+                    for idx, bld in enumerate(sketch_buildings):
+                        floors = sketch_floors_override if sketch_floors_override > 0 else int(bld.get("floors", 4))
+                        w = float(bld.get("w", 40))
+                        d = float(bld.get("d", 14))
+                        cx_val = float(bld.get("cx", 0))
+                        cy_val = float(bld.get("cy", 0))
+                        angle = math.radians(float(bld.get("angle_deg", 0)))
+                        fp = w * d
+                        total_footprint += fp
+                        total_bta += fp * floors
+
+                        cos_a, sin_a = math.cos(angle), math.sin(angle)
+                        hw, hd = w / 2.0, d / 2.0
+                        corners = [
+                            (cx_val + hw*cos_a - hd*sin_a, cy_val + hw*sin_a + hd*cos_a),
+                            (cx_val - hw*cos_a - hd*sin_a, cy_val - hw*sin_a + hd*cos_a),
+                            (cx_val - hw*cos_a + hd*sin_a, cy_val - hw*sin_a - hd*cos_a),
+                            (cx_val + hw*cos_a + hd*sin_a, cy_val + hw*sin_a - hd*cos_a),
+                        ]
+                        bld_poly = Polygon(corners).buffer(0)
+                        sketch_fp_polygons.append(bld_poly)
+                        sketch_parts.append({
+                            "name": bld.get("name", f"Bygg {chr(65+idx)}"),
+                            "height_m": round(floors * floor_to_floor, 1),
+                            "floors": floors,
+                            "color": SKETCH_COLORS[idx % len(SKETCH_COLORS)],
+                            "coords": geometry_to_coord_groups(bld_poly),
+                        })
+
+                    # Bygg fullverdig OptionResult fra skissen
+                    site_area_val = site_result.get("site_area_m2", 1800)
+                    bya_pct = (total_footprint / max(site_area_val, 1.0)) * 100.0
+                    saleable = total_bta * sketch_efficiency
+                    avg_unit = sum(spec.share_pct * spec.avg_size_m2 for spec in mix_inputs) / max(sum(spec.share_pct for spec in mix_inputs), 1.0)
+                    mix_counts, _ = allocate_unit_mix(saleable, mix_inputs)
+                    unit_count = sum(mix_counts.values())
+                    max_floors = max((sketch_floors_override if sketch_floors_override > 0 else int(b.get("floors", 4))) for b in sketch_buildings)
+                    height_m = max_floors * floor_to_floor
+                    open_space_ratio = max(0.0, 1.0 - (total_footprint / max(site_area_val, 1.0)))
+                    parking_spaces = int(math.ceil(unit_count * site_result.get("parking_ratio_per_unit", 0.8)))
+
+                    # Sol/skygge
+                    combined_fp = unary_union(sketch_fp_polygons).buffer(0)
+                    site_poly = best.geometry.get("site_polygon_coords", [])
+                    site_polygon_obj = Polygon(flatten_coord_groups(site_poly)) if site_poly else box(0, 0, 50, 50)
+                    solar = evaluate_solar(
+                        site=SiteInputs(**site_result),
+                        site_polygon=site_polygon_obj,
+                        footprint_polygon=combined_fp,
+                        building_height_m=height_m,
+                        typology="Manuell",
+                    )
+
+                    sketch_option = OptionResult(
+                        name="Skisse (manuell)",
+                        typology="Manuell plassering",
+                        floors=max_floors,
+                        building_height_m=round(height_m, 1),
+                        footprint_area_m2=round(total_footprint, 1),
+                        gross_bta_m2=round(total_bta, 1),
+                        saleable_area_m2=round(saleable, 1),
+                        footprint_width_m=0.0,
+                        footprint_depth_m=0.0,
+                        buildable_area_m2=round(site_area_val, 1),
+                        open_space_ratio=round(open_space_ratio, 3),
+                        target_fit_pct=round(100.0 * total_bta / max(site_result.get("desired_bta_m2", total_bta), 1.0), 1),
+                        unit_count=unit_count,
+                        mix_counts=mix_counts,
+                        parking_spaces=parking_spaces,
+                        parking_pressure_pct=0.0,
+                        solar_score=round(solar["solar_score"], 1),
+                        estimated_equinox_sun_hours=round(solar["estimated_equinox_sun_hours"], 1),
+                        estimated_winter_sun_hours=round(solar["estimated_winter_sun_hours"], 1),
+                        sunlit_open_space_pct=round(solar["sunlit_open_space_pct"], 1),
+                        winter_noon_shadow_m=round(solar["winter_noon_shadow_m"], 1),
+                        equinox_noon_shadow_m=round(solar["equinox_noon_shadow_m"], 1),
+                        summer_afternoon_shadow_m=round(solar["summer_afternoon_shadow_m"], 1),
+                        efficiency_ratio=round(sketch_efficiency, 3),
+                        neighbor_count=best.neighbor_count,
+                        terrain_slope_pct=best.terrain_slope_pct,
+                        terrain_relief_m=best.terrain_relief_m,
+                        notes=[f"Manuell skisse med {len(sketch_buildings)} bygg.", f"BYA {bya_pct:.1f}% av tomteareal {site_area_val:.0f} m²."],
+                        score=round(solar["solar_score"] * 0.5 + min(100, 100 * total_bta / max(site_result.get("desired_bta_m2", total_bta), 1)) * 0.5, 1),
+                        geometry={
+                            "site_polygon_coords": best.geometry.get("site_polygon_coords", []),
+                            "buildable_polygon_coords": best.geometry.get("buildable_polygon_coords", []),
+                            "footprint_polygon_coords": geometry_to_coord_groups(combined_fp),
+                            "winter_shadow_polygon_coords": [],
+                            "neighbor_polygons": best.geometry.get("neighbor_polygons", []),
+                            "terrain_summary": best.geometry.get("terrain_summary", {}),
+                            "placement": {"source": "Manuell skisse"},
+                            "massing_parts": sketch_parts,
+                            "component_count": len(sketch_buildings),
+                        },
+                    )
+
+                    # Sett skissen som første (anbefalt) alternativ og behold de andre
+                    existing_options = result.get("options", [])
+                    new_options = [asdict(sketch_option)] + existing_options
+                    sketch_image = render_plan_diagram(SiteInputs(**site_result), sketch_option)
+
+                    # Oppdater analysis_results
+                    st.session_state.analysis_results["options"] = new_options
+                    st.session_state.analysis_results["option_images"] = [sketch_image] + result.get("option_images", [])
+                    st.rerun()
+
+                except json.JSONDecodeError:
+                    st.error("Ugyldig JSON. Trykk «Kopier skisse» i editoren og lim inn på nytt.")
+                except Exception as exc:
+                    st.error(f"Feil ved behandling av skisse: {exc}")
+            else:
+                st.warning("Lim inn skisse-data fra planediteren (JSON-format, starter med [).")
+
+    # --- AI-RAFFINERING OG ALTERNATIVGENERERING ---
+    with st.expander("AI-raffinering og alternative volumløsninger", expanded=False):
+        ai_available = bool(ANTHROPIC_API_KEY)
+        if not ai_available:
+            st.info("Claude API er ikke konfigurert. Sett ANTHROPIC_API_KEY for AI-raffinering. Deterministisk soloptimering er tilgjengelig.")
+
+        st.caption("Bruk skissen fra editoren som utgangspunkt. AI optimerer plassering, eller genererer alternativer innenfor samme bounding box.")
+
+        ai_sketch_json = st.text_area(
+            "Skisse-data for AI (JSON — bruk samme som over)",
+            height=100,
+            key="ai_sketch_json",
+            placeholder='Lim inn JSON fra «Kopier skisse»-knappen',
+        )
+
+        ai_col1, ai_col2 = st.columns(2)
+
+        # --- RAFFINER SKISSE ---
+        with ai_col1:
+            if st.button("Raffiner skisse med AI", type="primary", use_container_width=True, key="btn_refine_ai",
+                         disabled=not ai_sketch_json):
+                if ai_sketch_json and ai_sketch_json.strip().startswith("["):
+                    try:
+                        raw_buildings = json.loads(ai_sketch_json)
+                        site_poly_coords = flatten_coord_groups(best.geometry.get("site_polygon_coords", []))
+                        neighbor_data = best.geometry.get("neighbor_polygons", [])
+
+                        with st.spinner("Claude analyserer skissen og optimerer plassering..."):
+                            if ai_available:
+                                refined = refine_sketch_with_ai(
+                                    sketch_buildings=raw_buildings,
+                                    site_polygon_coords=site_poly_coords,
+                                    site_area_m2=site_result.get("site_area_m2", 2000),
+                                    latitude_deg=site_result.get("latitude_deg", 59.91),
+                                    max_bya_pct=site_result.get("max_bya_pct", 35),
+                                    max_floors=site_result.get("max_floors", 5),
+                                    max_height_m=site_result.get("max_height_m", 16),
+                                    floor_to_floor_m=site_result.get("floor_to_floor_m", 3.0),
+                                    neighbors=neighbor_data,
+                                )
+                            else:
+                                refined = None
+
+                            if refined is None:
+                                st.info("AI-kall feilet eller utilgjengelig — bruker deterministisk soloptimering.")
+                                refined = _deterministic_solar_refinement(raw_buildings, site_result.get("latitude_deg", 59.91))
+
+                        st.success(f"Raffinering fullført — {len(refined)} bygg optimert")
+
+                        # Vis endringer
+                        for bld in refined:
+                            reasoning = bld.get("reasoning", "")
+                            st.caption(f"**{bld.get('name', '?')}**: {bld.get('w', 0):.0f}×{bld.get('d', 0):.0f} m, "
+                                      f"{bld.get('floors', 4)} etg, vinkel {bld.get('angle_deg', 0):.0f}° — _{reasoning}_")
+
+                        # Lagre raffinert JSON for bruk i motor
+                        refined_json = json.dumps(refined, ensure_ascii=False, indent=2)
+                        st.text_area("Raffinert skisse (kopier til «Kjør motor fra skisse»)", value=refined_json, height=150, key="refined_output")
+
+                    except Exception as exc:
+                        st.error(f"Feil: {exc}")
+
+        # --- GENERER ALTERNATIVER ---
+        with ai_col2:
+            if st.button("Generer alternativer fra skisse", type="secondary", use_container_width=True, key="btn_variants",
+                         disabled=not ai_sketch_json or not ai_available):
+                if ai_sketch_json and ai_sketch_json.strip().startswith("["):
+                    try:
+                        raw_buildings = json.loads(ai_sketch_json)
+                        site_poly_coords = flatten_coord_groups(best.geometry.get("site_polygon_coords", []))
+
+                        with st.spinner("Claude genererer alternative volumløsninger..."):
+                            variants_result = generate_sketch_variants(
+                                sketch_buildings=raw_buildings,
+                                site_polygon_coords=site_poly_coords,
+                                site_area_m2=site_result.get("site_area_m2", 2000),
+                                latitude_deg=site_result.get("latitude_deg", 59.91),
+                                max_bya_pct=site_result.get("max_bya_pct", 35),
+                                max_floors=site_result.get("max_floors", 5),
+                                max_height_m=site_result.get("max_height_m", 16),
+                                floor_to_floor_m=site_result.get("floor_to_floor_m", 3.0),
+                                neighbors=best.geometry.get("neighbor_polygons", []),
+                            )
+
+                        if variants_result and variants_result.get("variants"):
+                            for var in variants_result["variants"]:
+                                var_name = var.get("name", "Variant")
+                                var_desc = var.get("description", "")
+                                var_buildings = var.get("buildings", [])
+                                total_bta = sum(b.get("w", 0) * b.get("d", 0) * b.get("floors", 4) for b in var_buildings)
+
+                                st.markdown(f"**{var_name}** — {var_desc}")
+                                st.caption(f"{len(var_buildings)} bygg, ~{total_bta:,.0f} m² BTA")
+
+                                var_json = json.dumps(var_buildings, ensure_ascii=False, indent=2)
+                                st.text_area(f"JSON for {var_name} (kopier til motor)", value=var_json, height=100, key=f"var_{var_name}")
+                        else:
+                            st.warning("Kunne ikke generere alternativer. Sjekk at Claude API er tilkoblet.")
+
+                    except Exception as exc:
+                        st.error(f"Feil: {exc}")
 
     st.markdown("<div class='section-header'>Leilighetsmiks per alternativ</div>", unsafe_allow_html=True)
     mix_rows = []
