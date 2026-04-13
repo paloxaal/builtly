@@ -431,41 +431,75 @@ def fetch_stoykart_image(lat, lon, kilde="vei", width=800, height=600, buffer_m=
         return None, "Koordinatkonvertering feilet"
 
     errors = []
+    xmin, ymin, xmax, ymax = bbox
 
-    # --- Source 1: Geodata Online DOK Forurensning ---
-    # Bruker NØYAKTIG SAMME tilnærming som geodata_client._image_export() som fungerer i Geo-modulen
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
         if gdo.is_available():
             token = gdo.get_token()
             dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
-            
+            basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
             STOEY_LAYERS = "show:201,202,211,212,203,204,205,206,213,214,207,208"
-            xmin, ymin, xmax, ymax = bbox
             
-            # Matcher _image_export: format=png, transparent=false, bruker gdo.session
-            resp = gdo.session.get(
+            base_params = {
+                "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+                "bboxSR": "25833", "imageSR": "25833",
+                "size": f"{width},{height}",
+                "f": "image", "token": token,
+            }
+            
+            # Steg 1: Hent bakgrunnskart (opakt, med veier/bygninger/terreng)
+            basemap_img = None
+            try:
+                bg_resp = gdo.session.get(
+                    f"{basemap_url}/export",
+                    params={**base_params, "format": "png", "transparent": "false"},
+                    timeout=20,
+                )
+                if bg_resp.status_code == 200 and len(bg_resp.content) > 1000:
+                    if bg_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in bg_resp.headers.get("Content-Type", ""):
+                        basemap_img = Image.open(io.BytesIO(bg_resp.content)).convert("RGBA")
+            except Exception:
+                pass
+            
+            # Steg 2: Hent støy-lag som transparent overlay
+            noise_resp = gdo.session.get(
                 f"{dok_url}/export",
-                params={
-                    "bbox": f"{xmin},{ymin},{xmax},{ymax}",
-                    "bboxSR": "25833",
-                    "imageSR": "25833",
-                    "size": f"{width},{height}",
-                    "format": "png",
-                    "transparent": "false",
-                    "layers": STOEY_LAYERS,
-                    "f": "image",
-                    "token": token,
-                },
+                params={**base_params, "format": "png32", "transparent": "true", "layers": STOEY_LAYERS},
                 timeout=20,
             )
             
-            if resp.status_code == 200 and len(resp.content) > 1000:
-                ctype = resp.headers.get("Content-Type", "")
-                if resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
-                    img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-                    return img, None
+            if noise_resp.status_code == 200 and len(noise_resp.content) > 500:
+                ctype = noise_resp.headers.get("Content-Type", "")
+                if noise_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
+                    noise_img = Image.open(io.BytesIO(noise_resp.content)).convert("RGBA")
+                    
+                    # Steg 3: Composit støy over bakgrunnskart
+                    if basemap_img and basemap_img.size == noise_img.size:
+                        result = Image.alpha_composite(basemap_img, noise_img)
+                        return result.convert("RGB"), None
+                    elif basemap_img:
+                        # Resize hvis nødvendig
+                        noise_resized = noise_img.resize(basemap_img.size, Image.LANCZOS)
+                        result = Image.alpha_composite(basemap_img, noise_resized)
+                        return result.convert("RGB"), None
+                    else:
+                        # Ingen bakgrunnskart — bruk lys bakgrunn
+                        bg = Image.new("RGBA", noise_img.size, (245, 245, 240, 255))
+                        result = Image.alpha_composite(bg, noise_img)
+                        return result.convert("RGB"), None
+            
+            # Fallback: opakt bilde direkte fra DOK
+            opaque_resp = gdo.session.get(
+                f"{dok_url}/export",
+                params={**base_params, "format": "png", "transparent": "false", "layers": STOEY_LAYERS},
+                timeout=20,
+            )
+            if opaque_resp.status_code == 200 and len(opaque_resp.content) > 1000:
+                ctype = opaque_resp.headers.get("Content-Type", "")
+                if opaque_resp.content[:4] in (b"\x89PNG", b"\xff\xd8\xff") or "image" in ctype:
+                    return Image.open(io.BytesIO(opaque_resp.content)).convert("RGB"), None
             
             errors.append("DOK Forurensning: ingen støydata i dette området")
     except ImportError:
