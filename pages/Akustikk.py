@@ -104,24 +104,24 @@ class AcousticEngine:
         """Klassifiser et punkt iht. T-1442 støysoner."""
         if kilde == "vei":
             if lden >= 65:
-                return {"zone": "rod", "color": "#ef4444", "text": "Rod sone", 
-                        "desc": "Normalt uegnet for stoyfolsomt bruksformaal"}
+                return {"zone": "rod", "color": "#ef4444", "text": "Rød sone", 
+                        "desc": "Normalt uegnet for støyfølsomt bruksformål"}
             elif lden >= 55:
                 return {"zone": "gul", "color": "#f59e0b", "text": "Gul sone",
-                        "desc": "Vurderingssone - kan tillates med avbotende tiltak"}
+                        "desc": "Vurderingssone — kan tillates med avbøtende tiltak"}
             else:
-                return {"zone": "gronn", "color": "#22c55e", "text": "Gronn sone",
-                        "desc": "Tilfredsstillende stoynivaa"}
+                return {"zone": "gronn", "color": "#22c55e", "text": "Grønn sone",
+                        "desc": "Tilfredsstillende støynivå"}
         elif kilde == "bane":
             if lden >= 68:
-                return {"zone": "rod", "color": "#ef4444", "text": "Rod sone", 
-                        "desc": "Normalt uegnet for stoyfolsomt bruksformaal"}
+                return {"zone": "rod", "color": "#ef4444", "text": "Rød sone", 
+                        "desc": "Normalt uegnet for støyfølsomt bruksformål"}
             elif lden >= 58:
                 return {"zone": "gul", "color": "#f59e0b", "text": "Gul sone",
                         "desc": "Vurderingssone"}
             else:
-                return {"zone": "gronn", "color": "#22c55e", "text": "Gronn sone",
-                        "desc": "Tilfredsstillende stoynivaa"}
+                return {"zone": "gronn", "color": "#22c55e", "text": "Grønn sone",
+                        "desc": "Tilfredsstillende støynivå"}
         return {"zone": "ukjent", "color": "#94a3b8", "text": "Ukjent", "desc": ""}
 
     @staticmethod
@@ -291,12 +291,12 @@ class AcousticEngine:
                 "Fasade": fd.get("fasade", "?"),
                 "Etasje": fd.get("etasje", "alle"),
                 "Lden (dB)": lden,
-                "Stoysone": analysis["zone"]["text"],
+                "Støysone": analysis["zone"]["text"],
                 "Krav Rw vegg": int(analysis["req_wall_rw"]),
                 "Krav Rw+Ctr vindu (soverom)": int(analysis["req_window_rw_ctr_soverom"]),
                 "Krav Rw+Ctr vindu (stue)": int(analysis["req_window_rw_ctr_stue"]),
                 "Stille side": "Ja" if analysis["is_stille_side"] else "Nei",
-                "Bal.vent. paakrevd": "Ja" if analysis["balansert_ventilasjon_paakrevd"] else "Nei",
+                "Bal.vent. påkrevd": "Ja" if analysis["balansert_ventilasjon_paakrevd"] else "Nei",
             })
         return pd.DataFrame(rows)
 
@@ -332,7 +332,7 @@ class AcousticEngine:
                     "fasade": fasade,
                     "lden": lden,
                     "severity": "KRITISK",
-                    "krav": f"Rod sone ({lden} dB): Boenhet skal vaere gjennomgaaende. "
+                    "krav": f"Rød sone ({lden} dB): Boenhet skal være gjennomgående. "
                             f"Min. halvparten av oppholdsrom mot stille side. "
                             f"Alle soverom mot stille side.",
                 })
@@ -529,12 +529,13 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
       <div style="display:flex;gap:3px;padding:6px 8px;background:#0a1929;border:1px solid #1a2a3a;border-radius:10px 10px 0 0;flex-wrap:wrap;align-items:center">
         <button onclick="AE.setTool('select')" id="at_select" class="at active" style="--tc:#38bdf8">Velg/Flytt</button>
         <span style="width:1px;height:16px;background:#1a2a3a"></span>
-        <button onclick="AE.setTool('db_red')" id="at_db_red" class="at" style="--tc:#ef4444">&#9679; &gt;65 dB</button>
+        <button onclick="AE.setTool('db_darkred')" id="at_db_darkred" class="at" style="--tc:#991b1b">&#9679; &gt;70 dB</button>
+        <button onclick="AE.setTool('db_red')" id="at_db_red" class="at" style="--tc:#ef4444">&#9679; 65-70 dB</button>
         <button onclick="AE.setTool('db_yellow')" id="at_db_yellow" class="at" style="--tc:#f59e0b">&#9679; 55-65 dB</button>
         <button onclick="AE.setTool('db_green')" id="at_db_green" class="at" style="--tc:#22c55e">&#9679; &lt;55 dB</button>
         <span style="width:1px;height:16px;background:#1a2a3a"></span>
-        <button onclick="AE.setTool('zone')" id="at_zone" class="at" style="--tc:#a78bfa">&#9645; Stoysone</button>
-        <button onclick="AE.setTool('barrier')" id="at_barrier" class="at" style="--tc:#94a3b8">&#9644; Stoyskjerm</button>
+        <button onclick="AE.setTool('zone')" id="at_zone" class="at" style="--tc:#a78bfa">&#9645; Støysone</button>
+        <button onclick="AE.setTool('barrier')" id="at_barrier" class="at" style="--tc:#94a3b8">&#9644; Støyskjerm</button>
         <button onclick="AE.setTool('facade')" id="at_facade" class="at" style="--tc:#f59e0b">&#9644; Utsatt fasade</button>
         <span style="flex:1"></span>
         <button onclick="AE.deleteSelected()" style="background:rgba(239,68,68,0.15);color:#ef4444;border-color:rgba(239,68,68,0.3)">Slett</button>
@@ -556,10 +557,10 @@ def render_acoustic_editor(images_with_markers, bridge_label: str, component_key
       var img=new Image();var els={marker_json};
       els=els.map(function(m,i){{m.id='m'+i;return m}});
       var tool='select',sel=-1,drag=null,sp=null,IW=0,IH=0;
-      var TMAP={{db_red:['circle','#ef4444','70'],db_yellow:['circle','#f59e0b','60'],db_green:['circle','#22c55e','50'],zone:['rect','rgba(168,85,247,0.3)','Stoysone'],barrier:['line','#94a3b8','Stoyskjerm'],facade:['line','#f59e0b','Utsatt fasade']}};
+      var TMAP={{db_darkred:['circle','#991b1b','75'],db_red:['circle','#ef4444','67'],db_yellow:['circle','#f59e0b','60'],db_green:['circle','#22c55e','50'],zone:['rect','rgba(168,85,247,0.3)','Støysone'],barrier:['line','#94a3b8','Støyskjerm'],facade:['line','#f59e0b','Utsatt fasade']}};
       function uid(){{return Math.random().toString(36).slice(2,10)}}
       function dist(a,b,c,d){{return Math.sqrt((c-a)*(c-a)+(d-b)*(d-b))}}
-      function render(){{if(!img.complete||IW<1)return;ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,IW,IH);for(var i=0;i<els.length;i++){{var e=els[i],isSel=i===sel;var x=(e.x_pct/100)*IW,y=(e.y_pct/100)*IH;var c=e.color||'#ef4444';ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=c;if(e.type==='circle'||!e.type){{var r=Math.max(8,IW*0.015);ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();if(isSel){{ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fill()}}var txt=(e.db||'??');ctx.font='bold '+Math.max(8,IW*0.01)+'px system-ui';var tw=ctx.measureText(txt).width;ctx.fillStyle=c;ctx.fillRect(x-tw/2-2,y-5,tw+4,11);ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+4);if(e.label){{ctx.font=Math.max(7,IW*0.008)+'px system-ui';ctx.fillStyle=c;ctx.fillText(e.label,x-r,y+r+10)}}}}else if(e.type==='rect'){{var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;ctx.fillStyle=c;ctx.fillRect(x,y,w,h);ctx.strokeStyle='#a78bfa';ctx.lineWidth=isSel?3:1.5;ctx.strokeRect(x,y,w,h);ctx.font='bold 11px system-ui';ctx.fillStyle='#a78bfa';ctx.fillText(e.label||'Sone',x+4,y+14)}}else if(e.type==='line'){{var x2=(e.x2_pct||e.x_pct+10)/100*IW,y2=(e.y2_pct||e.y_pct)/100*IH;ctx.strokeStyle=c;ctx.lineWidth=isSel?5:3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();ctx.font='bold 10px system-ui';ctx.fillStyle=c;ctx.fillText(e.label||'',((x+x2)/2),((y+y2)/2)-6)}}}}sts.textContent=els.length+' markorer | '+(tool==='select'?'Velg/flytt':tool);ex.value=JSON.stringify(els,null,2)}}
+      function render(){{if(!img.complete||IW<1)return;ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(img,0,0,IW,IH);for(var i=0;i<els.length;i++){{var e=els[i],isSel=i===sel;var x=(e.x_pct/100)*IW,y=(e.y_pct/100)*IH;var c=e.color||'#ef4444';ctx.lineWidth=isSel?4:2.5;ctx.strokeStyle=c;if(e.type==='circle'||!e.type){{var r=Math.max(8,IW*0.015);ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();if(isSel){{ctx.fillStyle='rgba(255,255,255,0.15)';ctx.fill()}}var txt=(e.db||'??');ctx.font='bold '+Math.max(8,IW*0.01)+'px system-ui';var tw=ctx.measureText(txt).width;ctx.fillStyle=c;ctx.fillRect(x-tw/2-2,y-5,tw+4,11);ctx.fillStyle='#fff';ctx.fillText(txt,x-tw/2,y+4);if(e.label){{ctx.font=Math.max(7,IW*0.008)+'px system-ui';ctx.fillStyle=c;ctx.fillText(e.label,x-r,y+r+10)}}}}else if(e.type==='rect'){{var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;ctx.fillStyle=c;ctx.fillRect(x,y,w,h);ctx.strokeStyle='#a78bfa';ctx.lineWidth=isSel?3:1.5;ctx.strokeRect(x,y,w,h);ctx.font='bold 11px system-ui';ctx.fillStyle='#a78bfa';ctx.fillText(e.label||'Sone',x+4,y+14)}}else if(e.type==='line'){{var x2=(e.x2_pct||e.x_pct+10)/100*IW,y2=(e.y2_pct||e.y_pct)/100*IH;ctx.strokeStyle=c;ctx.lineWidth=isSel?5:3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x2,y2);ctx.stroke();ctx.font='bold 10px system-ui';ctx.fillStyle=c;ctx.fillText(e.label||'',((x+x2)/2),((y+y2)/2)-6)}}}}sts.textContent=els.length+' markører | '+(tool==='select'?'Velg/flytt':tool);ex.value=JSON.stringify(els,null,2)}}
       function resize(){{var mw=cv.parentElement?cv.parentElement.clientWidth:900;if(mw<100)mw=900;var r=Math.min(1,mw/Math.max(img.naturalWidth||img.width||900,1));IW=Math.max(100,Math.round((img.naturalWidth||img.width||900)*r));IH=Math.max(100,Math.round((img.naturalHeight||img.height||600)*r));cv.width=IW;cv.height=IH;render()}}
       function gP(e){{var r=cv.getBoundingClientRect();return{{x:(e.clientX-r.left)*(cv.width/r.width),y:(e.clientY-r.top)*(cv.height/r.height)}}}}
       function hitTest(x,y){{for(var i=els.length-1;i>=0;i--){{var e=els[i],ex=(e.x_pct/100)*IW,ey=(e.y_pct/100)*IH;if(dist(x,y,ex,ey)<IW*0.025)return i;if(e.type==='rect'){{var w=(e.w_pct||10)/100*IW,h=(e.h_pct||8)/100*IH;if(x>=ex&&x<=ex+w&&y>=ey&&y<=ey+h)return i}}}}return -1}}
@@ -604,6 +605,10 @@ def find_page(base_name: str) -> str:
 
 def clean_pdf_text(text):
     if not text: return ""
+    # Norwegian æøå → latin-1 safe equivalents for FPDF
+    nor = {"æ": "ae", "Æ": "AE", "ø": "o", "Ø": "O", "å": "aa", "Å": "AA"}
+    for old, new in nor.items(): text = text.replace(old, new)
+    # Unicode punctuation → ASCII
     rep = {"\u2013": "-", "\u2014": "-", "\u201c": "\"", "\u201d": "\"", 
            "\u2018": "'", "\u2019": "'", "\u2026": "...", "\u2022": "*",
            "\u2264": "<=", "\u2265": ">="}
@@ -720,8 +725,8 @@ def create_full_report_pdf(name, client, content, maps, facade_table_df=None, ca
         pdf.ln(5)
         
         # Tabellheader
-        col_widths = [15, 25, 15, 18, 22, 22, 22, 15]
-        headers = ["Bygg", "Fasade", "Etg.", "Lden", "Sone", "Rw+C vindu\n(sov)", "Rw+C vindu\n(stue)", "Stille\nside"]
+        col_widths = [14, 22, 12, 14, 24, 24, 24, 16]
+        headers = ["Bygg", "Fasade", "Etg.", "Lden\n(dB)", "Stoysone", "Rw+Ctr vindu\n(soverom)", "Rw+Ctr vindu\n(stue)", "Stille\nside"]
         
         pdf.set_font('Helvetica', 'B', 7); pdf.set_text_color(255, 255, 255)
         pdf.set_fill_color(26, 43, 72)
@@ -732,8 +737,8 @@ def create_full_report_pdf(name, client, content, maps, facade_table_df=None, ca
         pdf.set_font('Helvetica', '', 7); pdf.set_text_color(0, 0, 0)
         for _, row in facade_table_df.iterrows():
             # Fargekode rad etter støysone
-            zone_text = str(row.get("Stoysone", ""))
-            if "Rod" in zone_text:
+            zone_text = str(row.get("Støysone", ""))
+            if "Rød" in zone_text or "Rod" in zone_text:
                 pdf.set_fill_color(255, 230, 230)
             elif "Gul" in zone_text:
                 pdf.set_fill_color(255, 245, 220)
@@ -745,7 +750,7 @@ def create_full_report_pdf(name, client, content, maps, facade_table_df=None, ca
                 str(row.get("Fasade", "")),
                 str(row.get("Etasje", "")),
                 str(int(row.get("Lden (dB)", 0))),
-                str(row.get("Stoysone", ""))[:8],
+                clean_pdf_text(str(row.get("Støysone", ""))),
                 str(int(row.get("Krav Rw+Ctr vindu (soverom)", 0))),
                 str(int(row.get("Krav Rw+Ctr vindu (stue)", 0))),
                 str(row.get("Stille side", "")),
@@ -811,7 +816,7 @@ IMG_DIR = DB_DIR / "project_images"
 
 if "project_data" not in st.session_state:
     st.session_state.project_data = {"p_name": "", "c_name": "", "p_desc": "", "adresse": "", 
-                                      "kommune": "", "gnr": "", "bnr": "", "b_type": "Naering", 
+                                      "kommune": "", "gnr": "", "bnr": "", "b_type": "Næring", 
                                       "etasjer": 1, "bta": 0, "land": "Norge"}
 
 if st.session_state.project_data.get("p_name") == "":
@@ -822,9 +827,9 @@ if st.session_state.project_data.get("p_name") == "":
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = f'<img src="{logo_data_uri()}" class="brand-logo">' if logo_data_uri() else '<h2 style="margin:0; color:white;">Builtly</h2>'
     render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
-    st.warning("Du maa sette opp prosjektdataen foer du kan bruke denne modulen.")
+    st.warning("Du må sette opp prosjektdataen før du kan bruke denne modulen.")
     if find_page("Project"):
-        if st.button("Gaa til Project Setup", type="primary"):
+        if st.button("Gå til Project Setup", type="primary"):
             st.switch_page(find_page("Project"))
     st.stop()
 
@@ -839,7 +844,7 @@ with top_l:
     render_html(logo_html)
 with top_r:
     st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
-    if st.button("<- Tilbake til SSOT", use_container_width=True, type="secondary"):
+    if st.button("← Tilbake til SSOT", use_container_width=True, type="secondary"):
         st.switch_page(find_page("Project"))
 
 st.markdown("<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>", unsafe_allow_html=True)
@@ -851,7 +856,7 @@ pd_state = st.session_state.project_data
 # ═══════════════════════════════════════════════════════════════════════
 
 st.markdown(f"<h1 style='font-size: 2.5rem; margin-bottom: 0;'>Lyd & Akustikk (RIAku)</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent med deterministisk beregningsmotor for stoyvurdering, fasadeisolasjon og romakustikk.</p>", unsafe_allow_html=True)
+st.markdown("<p style='color: #9fb0c3; font-size: 1.1rem; margin-bottom: 2rem;'>AI-agent med deterministisk beregningsmotor for støyvurdering, fasadeisolasjon og romakustikk.</p>", unsafe_allow_html=True)
 
 st.success(f"Prosjektdata for **{pd_state['p_name']}** er automatisk synkronisert.")
 
@@ -863,7 +868,7 @@ with st.expander("1. Prosjekt & Lokasjon (Auto-synced)", expanded=True):
 
 with st.expander("2. Bygningsdata & Lydklasse", expanded=True):
     c3, c4, c5 = st.columns(3)
-    b_type = c3.text_input("Formaal", value=pd_state["b_type"], disabled=True)
+    b_type = c3.text_input("Formål", value=pd_state["b_type"], disabled=True)
     etasjer = c4.number_input("Antall etasjer", value=int(pd_state["etasjer"]), disabled=True)
     bta = c5.number_input("Bruttoareal (BTA m2)", value=int(pd_state["bta"]), disabled=True)
     
@@ -872,9 +877,9 @@ with st.expander("2. Bygningsdata & Lydklasse", expanded=True):
     lydklasse = c6.selectbox("Lydklasse (NS 8175)", 
                               ["Klasse A (Spesielt gode)", "Klasse B (Gode)", 
                                "Klasse C (Minimumskrav i TEK)", "Klasse D (Eldre bygg)"], index=2)
-    stoykilde = c7.selectbox("Dominerende Stoykilde", 
-                              ["Veitrafikk", "Bane/Tog", "Flystoy", "Industri/Naering", 
-                               "Lite stoy (Stille omraade)"], index=0)
+    stoykilde = c7.selectbox("Dominerende støykilde", 
+                              ["Veitrafikk", "Bane/Tog", "Flystøy", "Industri/Næring", 
+                               "Lite støy (Stille område)"], index=0)
     vindusandel = c8.slider("Vindusandel i fasade (%)", 15, 50, 25, 5,
                              help="Prosentandel av fasadeareal som er vindu/dor. Pavirker krav til vinduisolasjon.")
 
@@ -884,12 +889,12 @@ with st.expander("2. Bygningsdata & Lydklasse", expanded=True):
     st.markdown("##### Reguleringsplanbestemmelser")
     reg_col1, reg_col2 = st.columns(2)
     reg_stille_side = reg_col1.checkbox("Krav om stille side (<55 dB) for alle boenheter", value=True)
-    reg_gjennomgaaende = reg_col2.checkbox("Krav om gjennomgaaende leiligheter i rod sone", value=True)
+    reg_gjennomgaaende = reg_col2.checkbox("Krav om gjennomgående leiligheter i rød sone", value=True)
     reg_soverom_stille = reg_col1.checkbox("Soverom mot stille side (gul sone)", value=True)
-    reg_halvpart_stille = reg_col2.checkbox("Halvparten av oppholdsrom mot stille side (rod sone)", value=True)
+    reg_halvpart_stille = reg_col2.checkbox("Halvparten av oppholdsrom mot stille side (rød sone)", value=True)
 
-with st.expander("3. Visuelt Grunnlag & Stoykart", expanded=True):
-    st.info("For presise resultater: Last opp stoyrapport fra akustiker (PDF), stoykart med dB-verdier, og plantegninger.")
+with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
+    st.info("For presise resultater: Last opp støyrapport fra akustiker (PDF), støykart med dB-verdier, og plantegninger.")
     
     st.markdown("##### Automatisk stoykart fra Geodata Online")
     stoy_col1, stoy_col2, stoy_col3 = st.columns(3)
@@ -897,15 +902,15 @@ with st.expander("3. Visuelt Grunnlag & Stoykart", expanded=True):
     stoy_lon = stoy_col2.number_input("Lengdegrad (lon)", value=10.40, format="%.4f", key="stoy_lon")
     stoy_buffer = stoy_col3.number_input("Buffer (m)", value=300, min_value=100, max_value=1000, key="stoy_buffer")
     
-    stoy_kilde_map = {"Veitrafikk": "vei", "Bane/Tog": "bane", "Flystoy": "fly", "Industri/Naering": "industri"}
+    stoy_kilde_map = {"Veitrafikk": "vei", "Bane/Tog": "bane", "Flystøy": "fly", "Industri/Næring": "industri"}
     stoy_api_kilde = stoy_kilde_map.get(stoykilde, "vei")
     
-    if st.button("Hent stoykart fra Geodata", key="fetch_stoykart", use_container_width=True):
-        with st.spinner(f"Henter stoykart ({stoy_api_kilde})..."):
+    if st.button("Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True):
+        with st.spinner(f"Henter støykart ({stoy_api_kilde})..."):
             stoy_img, stoy_err = fetch_stoykart_image(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
             if stoy_img:
                 st.session_state["stoykart_image"] = stoy_img
-                st.success("Stoykart hentet!")
+                st.success("Støykart hentet!")
             else:
                 st.warning(f"Kunne ikke hente: {stoy_err}. Last opp manuelt.")
             contours = fetch_stoykart_contours(stoy_lat, stoy_lon, stoy_api_kilde, buffer_m=stoy_buffer)
@@ -913,7 +918,7 @@ with st.expander("3. Visuelt Grunnlag & Stoykart", expanded=True):
                 st.session_state["stoykart_contours"] = contours
     
     if "stoykart_image" in st.session_state:
-        st.image(st.session_state["stoykart_image"], caption="Stoykart fra Geodata Online", use_container_width=True)
+        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online", use_container_width=True)
     
     st.markdown("##### Tegninger fra prosjektet")
     saved_images = []
@@ -926,7 +931,7 @@ with st.expander("3. Visuelt Grunnlag & Stoykart", expanded=True):
         st.warning("Ingen felles tegninger funnet. Last opp under.")
         
     st.markdown("##### Last opp Akustikk-vedlegg")
-    files = st.file_uploader("Last opp Stoyrapporter (PDF), Stoykart, Plantegninger", 
+    files = st.file_uploader("Last opp Støyrapporter (PDF), Støykart, Plantegninger", 
                               accept_multiple_files=True, type=['png', 'jpg', 'jpeg', 'pdf'])
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -936,7 +941,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # MULTI-PASS AI ANALYSE MED DETERMINISTISK MOTOR
 # ═══════════════════════════════════════════════════════════════════════
 
-if st.button("Kjoer Akustisk Analyse (RIAku)", type="primary", use_container_width=True):
+if st.button("Kjør Akustisk Analyse (RIAku)", type="primary", use_container_width=True):
     
     images_for_ai = saved_images.copy()
     
@@ -946,7 +951,7 @@ if st.button("Kjoer Akustisk Analyse (RIAku)", type="primary", use_container_wid
         images_for_ai.insert(0, stoy_rgb)
         
     if files:
-        with st.spinner("Leser ut stoykart og filer..."):
+        with st.spinner("Leser ut støykart og filer..."):
             try:
                 for f in files: 
                     f.seek(0)
@@ -969,18 +974,18 @@ if st.button("Kjoer Akustisk Analyse (RIAku)", type="primary", use_container_wid
     st.info(f"Sender {len(images_for_ai)} bilder/tegninger til AI.")
     saved_images_clean = [img.copy() for img in images_for_ai]
 
-    # --- Stoykilde-type for beregninger ---
+    # --- Støykildetype for beregninger ---
     kilde_type = stoy_api_kilde if stoy_api_kilde != "industri" else "vei"
 
     # --- Reguleringsbestemmelser-sammendrag ---
     reg_text = []
-    if reg_stille_side: reg_text.append("Alle boenheter skal ha tilgang til uterom paa stille side (<55 dB)")
-    if reg_soverom_stille: reg_text.append("Boenheter mot gul stoysone: minst ett soverom mot stille side")
-    if reg_gjennomgaaende: reg_text.append("Boenheter mot rod stoysone: skal vaere gjennomgaaende, tosidige")
-    if reg_halvpart_stille: reg_text.append("Rod sone: halvparten av rom for varig opphold mot stille side")
+    if reg_stille_side: reg_text.append("Alle boenheter skal ha tilgang til uterom på stille side (<55 dB)")
+    if reg_soverom_stille: reg_text.append("Boenheter mot gul støysone: minst ett soverom mot stille side")
+    if reg_gjennomgaaende: reg_text.append("Boenheter mot rød støysone: skal være gjennomgående, tosidige")
+    if reg_halvpart_stille: reg_text.append("Rød sone: halvparten av rom for varig opphold mot stille side")
     reg_summary = "; ".join(reg_text) if reg_text else "Ingen spesifikke reguleringsbestemmelser angitt"
     
-    with st.spinner("PASS 1: AI leser stoykart og ekstraherer dB-verdier per fasade..."):
+    with st.spinner("PASS 1: AI leser støykart og ekstraherer dB-verdier per fasade..."):
         try:
             valid_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         except:
@@ -1032,7 +1037,7 @@ Svar KUN med JSON i dette formatet:
   "balkonger": [
     {{"bygg": "A1", "retning": "ost", "etasje": "1", "lden_uten_tiltak": 64, "lden_med_tiltak": 55}}
   ],
-  "eksisterende_tiltak": ["Stoyskjerm mellom A1-A2 og A2-B, hoeyde 2m"],
+  "eksisterende_tiltak": ["Støyskjerm mellom A1-A2 og A2-B, hoeyde 2m"],
   "stoykilde_beskrivelse": "Veitrafikk fra Industriveien"
 }}
 ```"""
@@ -1120,7 +1125,7 @@ Svar KUN med JSON i dette formatet:
                 with st.expander("Beregningstabell (deterministisk)", expanded=True):
                     st.dataframe(facade_table_df, use_container_width=True, hide_index=True)
         else:
-            st.warning("Ingen fasadedata ekstrahert. Rapporten baseres paa AI-estimater.")
+            st.warning("Ingen fasadedata ekstrahert. Rapporten baseres på AI-estimater.")
 
     # ═══════════════════════════════════════════════════════════
     # PASS 3: AI SKRIVER RAPPORT MED BEREGNINGSRESULTATER
@@ -1261,6 +1266,8 @@ Regler for JSON:
                                 color_rgb = (46, 204, 113)
                             elif "yellow" in color_name:
                                 color_rgb = (241, 196, 15)
+                            elif "darkred" in color_name:
+                                color_rgb = (153, 27, 27)
                             else:
                                 color_rgb = (231, 76, 60)
                             
@@ -1392,7 +1399,7 @@ if "generated_aku_pdf" in st.session_state:
 
     # Interaktiv redigering
     if st.session_state.get("aku_markers") is not None and st.session_state.get("aku_images"):
-        with st.expander("Rediger stoymarkorer (dB-sirkler)", expanded=False):
+        with st.expander("Rediger støymarkører (dB-sirkler)", expanded=False):
             st.caption("Flytt, legg til eller slett dB-sirkler. Klikk Lagre, deretter Bruk endringer.")
             
             all_images = st.session_state.get("aku_images", [])
@@ -1419,14 +1426,14 @@ if "generated_aku_pdf" in st.session_state:
             
             st.text_area("AKU_MARKER_BRIDGE", key=marker_buffer_key, height=60, 
                          label_visibility="visible",
-                         help="Teknisk buffer - editoren skriver data hit.")
+                         help="Teknisk buffer — editoren skriver data hit.")
             
             edit_cols = st.columns(3)
             if edit_cols[0].button("Bruk endringer og oppdater PDF", key="aku_apply_markers", 
                                    use_container_width=True, type="primary"):
                 try:
                     new_markers = json.loads(st.session_state.get(marker_buffer_key, "[]") or "[]")
-                    if not isinstance(new_markers, list): raise ValueError("Maa vaere en liste")
+                    if not isinstance(new_markers, list): raise ValueError("Må være en liste")
                     
                     originals = st.session_state.get("aku_images_original", [])
                     if not originals: originals = st.session_state.get("aku_images", [])
@@ -1443,7 +1450,7 @@ if "generated_aku_pdf" in st.session_state:
                             db_str = str(marker.get("db", "??"))
                             label = str(marker.get("label", ""))
                             color_name = marker.get("color", "red").lower()
-                            color_rgb = (46,204,113) if "green" in color_name else (241,196,15) if "yellow" in color_name else (231,76,60)
+                            color_rgb = (46,204,113) if "green" in color_name else (241,196,15) if "yellow" in color_name else (153,27,27) if "darkred" in color_name else (231,76,60)
                             radius = int(w * 0.014)
                             draw.ellipse((mx-radius, my-radius, mx+radius, my+radius), outline=color_rgb, width=max(2, int(w*0.003)))
                             try:
@@ -1475,17 +1482,17 @@ if "generated_aku_pdf" in st.session_state:
                                                      file_path=f"Builtly_RIAku_{p_name}.pdf")
                         except Exception: pass
                     
-                    st.success("Markorer oppdatert og PDF regenerert!")
+                    st.success("Markører oppdatert og PDF regenerert!")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Feil: {exc}")
             
-            if edit_cols[1].button("Nullstill markorer", key="aku_reset_markers", use_container_width=True):
+            if edit_cols[1].button("Nullstill markører", key="aku_reset_markers", use_container_width=True):
                 st.session_state[marker_buffer_key] = json.dumps(
                     st.session_state.get("aku_markers", []), ensure_ascii=False, indent=2)
                 st.rerun()
             
-            if edit_cols[2].button("Toem alle markorer", key="aku_clear_markers", use_container_width=True):
+            if edit_cols[2].button("Tøm alle markører", key="aku_clear_markers", use_container_width=True):
                 st.session_state["aku_markers"] = []
                 st.session_state[marker_buffer_key] = "[]"
                 st.rerun()
