@@ -1924,15 +1924,22 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     if max_footprint <= 0 or buildable_polygon is None or buildable_polygon.is_empty:
         return []
 
-    # Når %-BRA overstyrer, bruk site_polygon i stedet for buffret buildable_polygon
+    # Når %-BRA overstyrer, bruk STØRSTE tilgjengelige polygon — ignorer setbacks
     placement_polygon = buildable_polygon
-    if site.utnyttelsesgrad_bra_pct > 0 and site_polygon is not None and not site_polygon.is_empty:
-        # Bruk tomtepolygon med minimal buffer (2m) for å unngå at bygninger treffer grensen eksakt
-        minimal_buffer = site_polygon.buffer(-2.0)
-        if minimal_buffer is not None and not minimal_buffer.is_empty and minimal_buffer.area > 50:
-            placement_polygon = minimal_buffer
-        else:
-            placement_polygon = site_polygon
+    if site.utnyttelsesgrad_bra_pct > 0:
+        # Prøv site_polygon først, deretter buildable, velg den største
+        candidates = [p for p in [site_polygon, buildable_polygon] if p is not None and not p.is_empty]
+        if candidates:
+            biggest = max(candidates, key=lambda p: p.area)
+            # Minimal 1m buffer for å ikke treffe tomtegrensen eksakt
+            try:
+                buffered = biggest.buffer(-1.0)
+                if buffered is not None and not buffered.is_empty and buffered.area > biggest.area * 0.3:
+                    placement_polygon = buffered
+                else:
+                    placement_polygon = biggest
+            except Exception:
+                placement_polygon = biggest
 
     templates = [
         {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 5), "eff_adj": 0.02},
@@ -4706,23 +4713,29 @@ if run_analysis:
             site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
 
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
-    with st.spinner(f"Regner volumalternativer med faktisk tomtepolygon, naboer og terreng{ai_label} ..."):
+    bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
+    with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
         options = generate_options(site, mix_inputs, geodata_context=geodata_context)
 
-    # Diagnostikk: vis hva motoren bruker
+    # Diagnostikk
     if site.utnyttelsesgrad_bra_pct > 0:
         limits_diag = derive_limits(site, geodata_context)
         target_bra_diag = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
+        sp_area = float(geodata_context["site_polygon"].area) if geodata_context.get("site_polygon") else 0
+        bp_area = float(geodata_context["buildable_polygon"].area) if geodata_context.get("buildable_polygon") else 0
+        st.caption(
+            f"Motor-diagnostikk: tomteareal={site.site_area_m2:.0f} m², "
+            f"site_polygon={sp_area:.0f} m², buildable_polygon={bp_area:.0f} m², "
+            f"max_footprint={limits_diag['max_footprint']:.0f} m², "
+            f"mål-BTA={target_bta_diag:.0f} m², oppnådd={best_bta:.0f} m²"
+        )
         shortfall = target_bta_diag - best_bta
         if shortfall > target_bta_diag * 0.2:
             st.warning(
-                f"%-BRA mål: {target_bra_diag:,.0f} m² BRA ({target_bta_diag:,.0f} m² BTA). "
-                f"Beste alternativ oppnår {best_bta:,.0f} m² BTA — {shortfall:,.0f} m² under mål. "
-                f"Tomteareal brukt: {site.site_area_m2:,.0f} m², bebbyggbart: {limits_diag['buildable_area']:,.0f} m², "
-                f"maks fotavtrykk: {limits_diag['max_footprint']:,.0f} m², etasjer: {int(limits_diag['allowed_floors'])}. "
-                f"Tips: reduser byggegrenser/setbacks til 0, eller øk maks etasjer."
+                f"%-BRA mål: {target_bra_diag:,.0f} m² BRA. Beste alternativ: {best_bta:,.0f} m² BTA — "
+                f"{shortfall:,.0f} m² under mål. Sjekk at polygonbuffer og byggegrenser er 0."
             )
 
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
