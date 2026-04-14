@@ -2911,6 +2911,8 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
 
     result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata", "debug": []}
 
+    result["debug"].append(f"bbox: {minx:.0f},{miny:.0f},{maxx:.0f},{maxy:.0f} | gdo: {'ja' if gdo_client else 'nei'}")
+
     # --- 1. GEODATA ONLINE: DOK Forurensning ---
     gdo_base = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
 
@@ -2931,6 +2933,7 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
                 pass
 
     if gdo_token:
+        result["debug"].append(f"token: {gdo_token[:8]}...")
         # Strategi A: identify med hele kartet
         try:
             identify_url = f"{gdo_base}/identify"
@@ -3030,6 +3033,8 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
             result["source"] = "Geodata Online DOK Forurensning"
             result["zones"].sort(key=lambda z: z.get("db", 0), reverse=True)
             return result
+    else:
+        result["debug"].append("Ingen GDO-token funnet")
 
     # --- 2. FALLBACK: Geonorge WFS ---
     services = [
@@ -3443,10 +3448,10 @@ def build_environment_analysis(
     if site_polygon is not None:
         try:
             env["noise"] = fetch_noise_zones(site_polygon.bounds, gdo_client=gdo_client)
-        except Exception:
-            env["noise"] = {"available": False}
+        except Exception as noise_exc:
+            env["noise"] = {"available": False, "debug": [f"Exception: {str(noise_exc)[:80]}"]}
     else:
-        env["noise"] = {"available": False}
+        env["noise"] = {"available": False, "debug": ["Ingen site_polygon"]}
 
     # 2. Dagslys (TEK17 §13-7)
     try:
