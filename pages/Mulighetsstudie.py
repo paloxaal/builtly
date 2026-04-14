@@ -912,7 +912,13 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
         ).intersection(site_polygon)
         source = "Rektangulert fallback"
     else:
-        site_polygon = largest_polygon(site_polygon_input)
+        # Bruk hele polygonen — unary_union samler alle deler i stedet for å kaste bort teiger
+        if hasattr(site_polygon_input, 'geoms'):
+            site_polygon = unary_union(list(site_polygon_input.geoms)).buffer(0)
+        else:
+            site_polygon = site_polygon_input.buffer(0) if site_polygon_input is not None else None
+        if site_polygon is None or site_polygon.is_empty:
+            site_polygon = largest_polygon(site_polygon_input)
         source = polygon_meta.get("source", "Tomtepolygon")
 
         # ADAPTIV BUFFER: reduser buffer hvis den spiser for mye av smal dimensjon
@@ -924,7 +930,9 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
             effective_setback = min(polygon_setback_m, max(1.5, max_allowed))
 
         buildable_polygon = site_polygon.buffer(-effective_setback) if effective_setback > 0 else site_polygon
-        buildable_polygon = largest_polygon(buildable_polygon)
+        # Behold hele geometrien, ikke bare største del
+        if hasattr(buildable_polygon, 'geoms'):
+            buildable_polygon = unary_union(list(buildable_polygon.geoms)).buffer(0)
         if buildable_polygon is None or buildable_polygon.is_empty or buildable_polygon.area < 20.0:
             # Progressiv fallback: proev halvert buffer, deretter 1.5m, deretter 0
             for fallback_buf in [effective_setback * 0.5, 1.5, 0.5, 0.0]:
@@ -3541,12 +3549,30 @@ function addVolume(rings, height, color, opacity, castShadow, baseY) {
 // Tomtegrense
 addFlatPoly(D.site_rings, 0x38bdf8, 0.15, 0.05);
 
-// Nabobygg
+// Nabobygg — med høyde-labels
 D.neighbors.forEach(n => {
   const cx = n.rings[0] ? n.rings[0].reduce((s,p) => s + p[0], 0) / n.rings[0].length : 0;
   const cy = n.rings[0] ? n.rings[0].reduce((s,p) => s + p[1], 0) / n.rings[0].length : 0;
   const baseY = D.terrain ? getTerrainY(cx, cy) : 0;
   addVolume(n.rings, n.height, 0x8a8e99, 0.50, false, baseY);
+  // Diskret høyde-label
+  if (n.height > 0) {
+    const lc = document.createElement('canvas');
+    lc.width = 128; lc.height = 32;
+    const lx = lc.getContext('2d');
+    lx.fillStyle = 'rgba(0,0,0,0.0)';
+    lx.fillRect(0, 0, 128, 32);
+    lx.fillStyle = 'rgba(180,185,195,0.8)';
+    lx.font = '14px sans-serif';
+    lx.textAlign = 'center';
+    lx.fillText(n.height.toFixed(0) + 'm', 64, 20);
+    const lt = new THREE.CanvasTexture(lc);
+    const lm = new THREE.SpriteMaterial({ map: lt, transparent: true, opacity: 0.7, depthTest: false });
+    const ls = new THREE.Sprite(lm);
+    ls.position.set(cx, baseY + n.height + D.site_span * 0.015, cy);
+    ls.scale.set(D.site_span * 0.10, D.site_span * 0.025, 1);
+    scene.add(ls);
+  }
 });
 
 // Foreslatte volumer
@@ -4293,7 +4319,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.4</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.5</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -4745,7 +4771,7 @@ if run_analysis:
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
         st.session_state["_motor_diag"] = (
-            f"v9.4 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"v9.5 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         )
@@ -5578,10 +5604,23 @@ function drawDistances(b) {
 
 function render() {
   ctx.clearRect(0, 0, W, H);
-  // Neighbors
+  // Neighbors — med høyde-labels
   (P.neighbors || []).forEach(n => {
     const nc = flatCoords(n.coords || []);
-    if (nc.length) drawPoly(nc, 'rgba(100,100,120,0.25)', 'rgba(150,150,170,0.4)', 1);
+    if (!nc.length) return;
+    drawPoly(nc, 'rgba(100,100,120,0.25)', 'rgba(150,150,170,0.4)', 1);
+    // Høyde-label — diskret, alltid synlig
+    const h = n.height_m || 0;
+    if (h > 0 && nc.length >= 3) {
+      let sx = 0, sy = 0;
+      nc.forEach(p => { const s = toScreen(p[0], p[1]); sx += s[0]; sy += s[1]; });
+      sx /= nc.length; sy /= nc.length;
+      ctx.font = '9px Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const txt = h.toFixed(0) + 'm';
+      ctx.fillStyle = 'rgba(150,155,170,0.7)';
+      ctx.fillText(txt, sx, sy);
+    }
   });
   // Site
   drawPoly(siteCoords, 'rgba(56,189,248,0.06)', 'rgba(56,189,248,0.5)', 1.5);
