@@ -1229,11 +1229,40 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
 
     footprint: Any = None
 
-    # Tilpass bygningsdybde til smal side
-    bld_w = min(limits["bld_w"], minor * 0.75)
-    bld_d = min(limits["bld_d"], minor * 0.55 if typology != "Karré" else minor * 0.7)
-    bld_w = max(8.0, bld_w)
-    bld_d = max(8.0, bld_d)
+    # Tilpass bygningsdybde — men behold typologisk karakter
+    if typology == "Punkthus":
+        # Kvadratisk, kompakt — ALDRI bredere enn 22m
+        bld_w = min(22.0, minor * 0.45)
+        bld_d = bld_w  # Alltid kvadratisk
+        bld_w = max(14.0, bld_w)
+        bld_d = max(14.0, bld_d)
+    elif typology == "Tårn":
+        bld_w = min(20.0, minor * 0.4)
+        bld_d = bld_w
+        bld_w = max(14.0, bld_w)
+        bld_d = max(14.0, bld_d)
+    elif typology == "Rekke":
+        # Lang og smal
+        bld_w = min(limits["bld_w"], major * 0.85)
+        bld_d = min(10.0, minor * 0.3)
+        bld_w = max(20.0, bld_w)
+        bld_d = max(8.0, bld_d)
+    elif typology == "Karré":
+        bld_w = min(limits["bld_w"], minor * 0.8)
+        bld_d = bld_w  # Kvadratisk ytre
+        bld_w = max(20.0, bld_w)
+        bld_d = max(20.0, bld_d)
+    elif typology == "Tun":
+        bld_w = min(limits["bld_w"], major * 0.5)
+        bld_d = min(12.0, minor * 0.4)
+        bld_w = max(15.0, bld_w)
+        bld_d = max(8.0, bld_d)
+    else:
+        # Lamell, Podium+Tårn: standard
+        bld_w = min(limits["bld_w"], major * 0.7)
+        bld_d = min(limits["bld_d"], minor * 0.45)
+        bld_w = max(12.0, bld_w)
+        bld_d = max(10.0, bld_d)
 
     if typology == 'Karré':
         # Ekte kvartaler med gaardrom
@@ -1304,9 +1333,13 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
                 footprint = podium
 
     else:
-        # Lamell, Punkthus, Rekke, Taarn: 2D-grid plassering
+        # Lamell, Punkthus, Rekke, Tårn: 2D-grid plassering
         single_area = bld_w * bld_d
         n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+
+        # Minimum antall bygg per typologi for visuell differensiering
+        min_buildings = {"Punkthus": 2, "Tårn": 1, "Lamell": 1, "Rekke": 1}.get(typology, 1)
+        n_needed = max(min_buildings, n_needed)
 
         buildings = _place_grid_buildings(
             buildable_polygon, bld_w, bld_d, angle,
@@ -1622,14 +1655,14 @@ def derive_limits(site: SiteInputs, geodata_context: Optional[Dict[str, Any]] = 
     floors_from_height = max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))) if site.max_height_m > 0 else site.max_floors
     allowed_floors = max(1, min(site.max_floors, floors_from_height))
 
-    # %-BRA overstyrer BYA som volumdriver for leilighetsprosjekter
+    # %-BRA overstyrer ALT — bruker tomteareal, ikke bebbyggbart areal
     if site.utnyttelsesgrad_bra_pct > 0:
         target_bra = site_area * site.utnyttelsesgrad_bra_pct / 100.0
         target_bta = target_bra / max(site.efficiency_ratio, 0.6)
-        # Beregn nødvendig fotavtrykk fra target BTA og tillatte etasjer
         needed_footprint = target_bta / max(allowed_floors, 1)
-        # Begrens til bebbyggbart areal, men IKKE til BYA
-        max_footprint = min(buildable_area, needed_footprint * 1.1)  # 10% margin
+        # Bruk tomteareal som øvre grense (ikke setback-krympet felt)
+        max_footprint = min(site_area * 0.95, needed_footprint * 1.1)
+        buildable_area = max(buildable_area, max_footprint)
     else:
         max_footprint_by_bya = site_area * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
         max_footprint = min(buildable_area, max_footprint_by_bya)
@@ -1877,6 +1910,16 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     if max_footprint <= 0 or buildable_polygon is None or buildable_polygon.is_empty:
         return []
 
+    # Når %-BRA overstyrer, bruk site_polygon i stedet for buffret buildable_polygon
+    placement_polygon = buildable_polygon
+    if site.utnyttelsesgrad_bra_pct > 0 and site_polygon is not None and not site_polygon.is_empty:
+        # Bruk tomtepolygon med minimal buffer (2m) for å unngå at bygninger treffer grensen eksakt
+        minimal_buffer = site_polygon.buffer(-2.0)
+        if minimal_buffer is not None and not minimal_buffer.is_empty and minimal_buffer.area > 50:
+            placement_polygon = minimal_buffer
+        else:
+            placement_polygon = site_polygon
+
     templates = [
         {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 5), "eff_adj": 0.02},
         {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.80, "floor_range": (3, 5), "eff_adj": 0.00},
@@ -1976,7 +2019,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         # --- GEOMETRISK FALLBACK ---
         if ai_result is None or not ai_result.get("buildings"):
-            footprint_polygon, placement = create_typology_footprint(buildable_polygon, typology, target_footprint)
+            footprint_polygon, placement = create_typology_footprint(placement_polygon, typology, target_footprint)
 
         footprint_area = float(footprint_polygon.area)
 
@@ -1997,7 +2040,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         floors = best_floor_fit
 
         gross_bta = footprint_area * floors
-        if site.max_bra_m2 > 0:
+        if site.max_bra_m2 > 0 and site.utnyttelsesgrad_bra_pct <= 0:
             gross_bta = min(gross_bta, site.max_bra_m2)
 
         actual_efficiency = clamp(site.efficiency_ratio + template["eff_adj"], 0.64, 0.88)
@@ -4869,14 +4912,13 @@ if "analysis_results" in st.session_state:
                 "Alternativ": option.name,
                 "Typologi": option.typology,
                 "Etasjer": option.floors,
-                "Fotavtrykk m²": option.footprint_area_m2,
-                "BTA m²": option.gross_bta_m2,
-                "Salgbart m²": option.saleable_area_m2,
+                "Fotavtrykk m²": round(option.footprint_area_m2, 0),
+                "BTA m²": round(option.gross_bta_m2, 0),
+                "BRA m²": round(option.saleable_area_m2, 0),
+                "%-BRA": round(option.saleable_area_m2 / max(sa, 1) * 100, 0),
                 "Boliger": option.unit_count,
-                "P-plasser": option.parking_spaces,
-                "Solscore": option.solar_score,
-                "Sol uteareal %": option.sunlit_open_space_pct,
-                "Score": option.score,
+                "Solscore": round(option.solar_score, 0),
+                "Score": round(option.score, 1),
             }
             for option in options
         ]
@@ -5633,11 +5675,11 @@ render();
 
     # --- SKISSE TIL MOTOR ---
     with st.expander("Kjør motor fra manuell skisse", expanded=False):
-        st.caption("Trykk «Kopier skisse» i editoren over, lim inn JSON her. Motoren oppdaterer hele resultatseksjonen.")
+        st.caption("Trykk «📋 Kopier skisse» i editoren, lim inn her, og kjør.")
         sketch_json = st.text_area(
-            "Lim inn skisse-data (JSON)",
-            height=120,
-            placeholder='[{"name":"Bygg A","cx":597400,"cy":7034200,"w":40,"d":14,"angle_deg":0,"floors":5}, ...]',
+            "Skisse-data",
+            height=80,
+            placeholder='Lim inn fra «Kopier skisse»',
             key="sketch_json_input",
         )
         sk_c1, sk_c2 = st.columns(2)
@@ -5781,10 +5823,10 @@ render();
         st.caption("Bruk skissen fra editoren som utgangspunkt. AI optimerer plassering, eller genererer alternativer innenfor samme bounding box.")
 
         ai_sketch_json = st.text_area(
-            "Skisse-data for AI (JSON — bruk samme som over)",
-            height=100,
+            "Skisse-data for AI",
+            height=80,
             key="ai_sketch_json",
-            placeholder='Lim inn JSON fra «Kopier skisse»-knappen',
+            placeholder='Lim inn fra «Kopier skisse»',
         )
 
         ai_col1, ai_col2 = st.columns(2)
