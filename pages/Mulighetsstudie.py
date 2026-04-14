@@ -605,8 +605,16 @@ def parse_coordinate_text(text: str) -> Optional[Polygon]:
 
 
 def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
-    poly = largest_polygon(poly)
+    # Behold ALLE deler av en MultiPolygon via unary_union — ikke bare den største
     if poly is None:
+        return None, None, {"is_geographic": False}
+    if hasattr(poly, 'geoms'):
+        poly = unary_union(list(poly.geoms)).buffer(0)
+    elif isinstance(poly, Polygon):
+        poly = poly.buffer(0)
+    else:
+        poly = largest_polygon(poly)
+    if poly is None or poly.is_empty:
         return None, None, {"is_geographic": False}
     info: Dict[str, Any] = {"is_geographic": False}
     if bounds_look_like_lonlat(poly.bounds):
