@@ -1207,11 +1207,11 @@ def _make_courtyard_block(
 # --- REALISTISKE BYGNINGSDIMENSJONER ---
 TYPOLOGY_LIMITS = {
     "Lamell":        {"bld_w": 50.0, "bld_d": 14.0, "sp_along": 18.0, "sp_across": 24.0, "max_n": 12},
-    "Punkthus":      {"bld_w": 20.0, "bld_d": 20.0, "sp_along": 24.0, "sp_across": 24.0, "max_n": 9},
-    "Rekke":         {"bld_w": 55.0, "bld_d": 10.0, "sp_along": 14.0, "sp_across": 18.0, "max_n": 12},
+    "Punkthus":      {"bld_w": 18.0, "bld_d": 18.0, "sp_along": 16.0, "sp_across": 16.0, "max_n": 6},
+    "Rekke":         {"bld_w": 50.0, "bld_d": 14.0, "sp_along": 18.0, "sp_across": 24.0, "max_n": 12},
     "Tun":           {"bld_w": 42.0, "bld_d": 11.0, "sp_along": 14.0, "sp_across": 16.0, "max_n": 6},
     "Karré":         {"bld_w": 45.0, "bld_d": 45.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 4, "ring_d": 11.0},
-    "Tårn":          {"bld_w": 22.0, "bld_d": 22.0, "sp_along": 28.0, "sp_across": 28.0, "max_n": 6},
+    "Tårn":          {"bld_w": 18.0, "bld_d": 18.0, "sp_along": 28.0, "sp_across": 28.0, "max_n": 1},
     "Podium + Tårn": {"bld_w": 45.0, "bld_d": 22.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 3},
 }
 
@@ -1248,22 +1248,23 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     sp_factor = 0.5 if high_utilization else 1.0
 
     if typology == "Punkthus":
-        # Kvadratisk, kompakt — ALDRI bredere enn 22m
-        bld_w = min(22.0, minor * 0.45)
+        # Flere SEPARATE kvadratiske hus (14-18m), med god avstand mellom
+        bld_w = min(18.0, minor * 0.35)
         bld_d = bld_w  # Alltid kvadratisk
         bld_w = max(14.0, bld_w)
         bld_d = max(14.0, bld_d)
     elif typology == "Tårn":
-        bld_w = min(20.0, minor * 0.4)
+        # LITE fotavtrykk — høyden gjør jobben (10+ etasjer)
+        bld_w = min(18.0, minor * 0.30)
         bld_d = bld_w
         bld_w = max(14.0, bld_w)
         bld_d = max(14.0, bld_d)
     elif typology == "Rekke":
-        # Lang og smal — strekk langs major
-        bld_w = min(limits["bld_w"], major * 0.90)
-        bld_d = min(11.0, minor * 0.35)
+        # Fallback til Lamell-oppførsel
+        bld_w = min(limits.get("bld_w", 50.0), major * 0.85)
+        bld_d = min(14.0, minor * 0.40)
         bld_w = max(20.0, bld_w)
-        bld_d = max(8.0, bld_d)
+        bld_d = max(11.0, bld_d)
     elif typology == "Karré":
         bld_w = min(limits["bld_w"], minor * 0.8)
         bld_d = bld_w  # Kvadratisk ytre
@@ -1365,8 +1366,12 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
 
         # Minimum antall bygg per typologi for visuell differensiering
-        min_buildings = {"Punkthus": 2, "Tårn": 1, "Lamell": 1, "Rekke": 1}.get(typology, 1)
-        n_needed = max(min_buildings, n_needed)
+        min_buildings = {"Punkthus": 3, "Tårn": 1, "Lamell": 1, "Rekke": 1}.get(typology, 1)
+        # Tårn: ALDRI mer enn 1 bygning — hele poenget er høyde
+        if typology == "Tårn":
+            n_needed = 1
+        else:
+            n_needed = max(min_buildings, n_needed)
 
         buildings = _place_grid_buildings(
             buildable_polygon, bld_w, bld_d, angle,
@@ -1837,12 +1842,12 @@ def build_massing_parts(
     base_color = COLORS.get(typology, [34, 197, 94, 0.80])
 
     if typology == "Podium + Tårn" and len(components) >= 1:
-        # Stoerste del = podium (lavere), resten = taarn (full hoyde)
+        # Podium: lav og bred (2 etg). Tårn: høyt og smalt (dobbel høyde av podium eller mer)
         sorted_comps = sorted(components, key=lambda p: p.area, reverse=True)
-        podium_floors = max(2, min(floors - 2, int(floors * 0.35)))
+        podium_floors = 2
         podium_height = podium_floors * floor_to_floor_m
-        tower_floors = floors
-        tower_height = full_height
+        tower_floors = max(floors, podium_floors + 4)  # Tårnet minst 4 etg over podium
+        tower_height = tower_floors * floor_to_floor_m
 
         # Podium
         podium = sorted_comps[0]
@@ -1854,26 +1859,27 @@ def build_massing_parts(
             "coords": geometry_to_coord_groups(podium),
         })
 
-        # Taarn(er): plasser i sentrum av podium, eller bruk oevrige deler
+        # Tårn: plasser i sentrum av podium, maks 35% av podiumets areal
         if len(sorted_comps) > 1:
             for i, comp in enumerate(sorted_comps[1:], start=1):
                 parts.append({
-                    "name": f"Taarn {i}",
+                    "name": f"Tårn {i}",
                     "height_m": round(tower_height, 1),
                     "floors": tower_floors,
                     "color": COLORS.get("Tårn", base_color),
                     "coords": geometry_to_coord_groups(comp),
                 })
         else:
-            # Lag et taarn-fotavtrykk fra sentrum av podium
+            # Lag et tårn-fotavtrykk fra sentrum av podium — 30% av podiumets areal
             cx, cy = podium.centroid.x, podium.centroid.y
-            tower_side = min(18.0, math.sqrt(podium.area) * 0.45)
+            tower_side = min(18.0, math.sqrt(podium.area * 0.30))
+            tower_side = max(12.0, tower_side)
             half = tower_side / 2.0
             tower_box = box(cx - half, cy - half, cx + half, cy + half)
             tower_clipped = tower_box.intersection(podium).buffer(0)
             if not tower_clipped.is_empty and tower_clipped.area > 20:
                 parts.append({
-                    "name": "Taarn",
+                    "name": "Tårn",
                     "height_m": round(tower_height, 1),
                     "floors": tower_floors,
                     "color": COLORS.get("Tårn", base_color),
@@ -2128,13 +2134,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 placement_polygon = biggest
 
     templates = [
-        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 5), "eff_adj": 0.02},
-        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.80, "floor_range": (3, 5), "eff_adj": 0.00},
-        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.45, "floor_range": (4, 7), "eff_adj": -0.01},
-        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.25, "floor_range": (6, 12), "eff_adj": -0.03},
-        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.55, "floor_range": (5, 8), "eff_adj": -0.02},
-        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.70, "floor_range": (3, 4), "eff_adj": -0.02},
-        {"name": "Alt G - Rekke", "typology": "Rekke", "coverage": 0.60, "floor_range": (2, 3), "eff_adj": 0.04},
+        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 6), "eff_adj": 0.02},
+        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.80, "floor_range": (3, 6), "eff_adj": 0.00},
+        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.35, "floor_range": (4, 8), "eff_adj": -0.01},
+        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.15, "floor_range": (10, 15), "eff_adj": -0.03},
+        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.55, "floor_range": (5, 10), "eff_adj": -0.02},
+        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.70, "floor_range": (3, 5), "eff_adj": -0.02},
     ]
 
     options: List[OptionResult] = []
@@ -2289,12 +2294,14 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         # Høy %-BRA (>150%): bruk allowed_floors som tak for ALLE typologier
         if site.utnyttelsesgrad_bra_pct > 150:
             fl_max = allowed_floors
-        # Tårn polygon-fill: overstyrer floor_range for å kompensere lite fotavtrykk
-        if placement.get("tower_override_floors") and typology == "Tårn":
-            fl_min = max(fl_min, 8)
-            fl_max = max(fl_max, min(12, allowed_floors))
+        # Tårn: ALLTID minimum 10 etasjer (det er definisjonen av et tårn)
+        if typology == "Tårn":
+            fl_min = max(fl_min, 10)
+            fl_max = max(fl_max, min(15, allowed_floors))
         fl_min = max(2, min(fl_min, allowed_floors))
         fl_max = min(fl_max, allowed_floors)
+        if fl_min > fl_max:
+            fl_max = fl_min
 
         # Finn optimalt etasjetall som treffer nærmest target_bta
         best_floor_fit = fl_min
@@ -2481,6 +2488,126 @@ def _call_claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 40
         return json.loads(text)
     except Exception:
         return None
+
+
+def _call_claude_text(system_prompt: str, user_prompt: str, max_tokens: int = 6000) -> Optional[str]:
+    """Kall Claude API og returner ren tekst (ikke JSON)."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=90,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        return text.strip() if text.strip() else None
+    except Exception:
+        return None
+
+
+def generate_ai_report_for_locked_sketch(
+    sketch_option: "OptionResult",
+    motor_options: List["OptionResult"],
+    site: "SiteInputs",
+    geodata_context: Dict[str, Any],
+) -> Optional[str]:
+    """
+    Sekundær AI-analyse: Claude skriver en profesjonell mulighetsstudie-rapport
+    basert på den låste skissen, sammenlignet med motorens alternativer.
+    
+    Returnerer fullstendig rapporttekst (markdown-format) eller None ved feil.
+    """
+    # Bygg kontekst for AI
+    pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+    site_area = max(site.site_area_m2, 1.0)
+    sketch_bra = sketch_option.saleable_area_m2
+    sketch_pct_bra = round(sketch_bra / site_area * 100, 0) if pct_bra_active else 0
+
+    motor_summary = []
+    for opt in motor_options[:6]:
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        motor_summary.append(
+            f"{opt.name} ({opt.typology}): {opt.gross_bta_m2:.0f} m² BTA, ~{bra:.0f} m² BRA, "
+            f"{opt.unit_count} boliger, {opt.floors} etg, sol {opt.solar_score:.0f}/100"
+        )
+
+    terrain_info = ""
+    terrain = geodata_context.get("terrain")
+    if terrain and terrain.get("slope_pct", 0) > 0:
+        terrain_info = f"Terreng: {terrain.get('slope_pct', 0):.1f}% fall, {terrain.get('relief_m', 0):.1f} m relieff."
+
+    system_prompt = """Du er en erfaren norsk arkitekt som skriver profesjonelle mulighetsstudier.
+Du skriver konsise, faglig presise rapporter på norsk bokmål. Bruk riktig norsk (æ, ø, å).
+
+Skriv rapporten med disse seksjonene, markert med # for overskrift:
+# 1. OPPSUMMERING
+# 2. GRUNNLAG
+# 3. VALGT VOLUMLØSNING
+# 4. ARKITEKTONISK VURDERING
+# 5. SOL- OG DAGSLYSFORHOLD
+# 6. SAMMENLIGNING MED ALTERNATIVER
+# 7. RISIKO OG AVKLARINGSPUNKTER
+# 8. ANBEFALING OG NESTE STEG
+
+Regler:
+- Bruk BRA (salgbart/bruksareal) som primærtall, BTA som sekundærtall
+- Vær konkret om styrker og svakheter ved den valgte løsningen
+- Kommenter sol/skygge basert på solscore og plassering
+- Nevn kort motorens alternativer som referanse, men fokuser på den valgte løsningen
+- Skriv 500-800 ord totalt. Ikke bruk bullet points med - i rapporten, skriv sammenhengende tekst.
+- Ikke dikter opp tall — bruk KUN tallene du får i konteksten
+"""
+
+    user_prompt = f"""Skriv en mulighetsstudie-rapport for dette prosjektet.
+
+TOMT OG REGULERING:
+- Adresse/prosjekt: {sketch_option.name}
+- Tomteareal: {site_area:.0f} m²
+- Byggefelt: {sketch_option.buildable_area_m2:.0f} m²
+- Maks BYA: {site.max_bya_pct:.1f}%
+- Maks etasjer: {site.max_floors}
+- Maks høyde: {site.max_height_m:.1f} m
+- Geometri: {site.site_geometry_source}
+- Nabobygg: {site.neighbor_count} stk i modellen
+{terrain_info}
+{"- %-BRA mål: " + str(site.utnyttelsesgrad_bra_pct) + "% → " + str(round(site_area * site.utnyttelsesgrad_bra_pct / 100)) + " m² BRA" if pct_bra_active else "- Ønsket BTA: " + str(site.desired_bta_m2) + " m²"}
+
+VALGT LØSNING (manuell skisse):
+- Antall bygg: {sketch_option.geometry.get('component_count', '?')}
+- Fotavtrykk: {sketch_option.footprint_area_m2:.0f} m²
+- BTA: {sketch_option.gross_bta_m2:.0f} m²
+- BRA (salgbart): {sketch_bra:.0f} m²
+{"- %-BRA oppnådd: " + str(sketch_pct_bra) + "%" if pct_bra_active else ""}
+- Etasjer: {sketch_option.floors}
+- Byggehøyde: {sketch_option.building_height_m:.1f} m
+- Leiligheter: {sketch_option.unit_count}
+- Fordeling: {json.dumps(sketch_option.mix_counts, ensure_ascii=False)}
+- Solscore: {sketch_option.solar_score:.0f}/100
+- Solbelyst uteareal: {sketch_option.sunlit_open_space_pct:.0f}%
+- Vinterskygge kl 12: {sketch_option.winter_noon_shadow_m:.0f} m
+
+MOTORENS ALTERNATIVER (referanse):
+{chr(10).join(motor_summary)}
+"""
+
+    return _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
 
 
 def refine_sketch_with_ai(
@@ -3416,6 +3543,147 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
             'fotavtrykk_m2': round(option.footprint_area_m2, 0),
         },
     }
+
+
+def _build_batch_capture_html(all_payloads_json: str, height_px: int = 620) -> str:
+    """
+    Lager en ArcGIS SceneView som automatisk cycler gjennom alle alternativer,
+    tar screenshot av hvert, og laster dem ned som PNG-filer.
+    """
+    return f"""
+    <div id="batchContainer" style="position:relative;width:100%;height:{height_px}px;border-radius:14px;overflow:hidden;border:2px solid rgba(56,189,248,0.5);">
+      <div id="batchView" style="width:100%;height:100%;"></div>
+      <div id="batchStatus" style="position:absolute;top:12px;left:12px;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.4);border-radius:8px;padding:10px 16px;color:#38bdf8;font-family:system-ui;font-size:13px;font-weight:600;">
+        Starter batch-capture...
+      </div>
+      <div id="batchStats" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;color:#ecf0f5;font-family:system-ui;font-size:13px;line-height:1.6;min-width:180px;"></div>
+    </div>
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
+    <script>
+    const allPayloads = {all_payloads_json};
+    let currentIdx = 0;
+
+    require([
+      'esri/Map', 'esri/views/SceneView', 'esri/layers/ImageryLayer',
+      'esri/layers/ElevationLayer', 'esri/layers/GraphicsLayer', 'esri/Graphic',
+      'esri/geometry/Polygon', 'esri/geometry/Point', 'esri/geometry/SpatialReference',
+      'esri/geometry/Extent', 'esri/identity/IdentityManager'
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, Point, SpatialReference, Extent, IdentityManager) {{
+      const sr = new SpatialReference({{ wkid: 4326 }});
+      const p0 = allPayloads[0] || {{}};
+      const sc = p0.scene_config || {{}};
+      const services = sc.services || {{}};
+      const tkn = sc.token || '';
+
+      if (tkn) {{
+        IdentityManager.registerToken({{ server: 'https://services.geodataonline.no/arcgis', token: tkn }});
+      }}
+
+      const map = new Map({{ basemap: 'satellite', ground: 'world-elevation' }});
+      if (services.elevation_url && tkn) {{
+        map.ground.layers.add(new ElevationLayer({{ url: services.elevation_url, customParameters: {{ token: tkn }} }}));
+      }}
+      if (services.imagery_latest_url && tkn) {{
+        map.add(new ImageryLayer({{ url: services.imagery_latest_url, opacity: 0.92, customParameters: {{ token: tkn }} }}));
+      }}
+
+      const graphicsLayer = new GraphicsLayer();
+      map.add(graphicsLayer);
+
+      function polygonFromRings(rings) {{
+        return new Polygon({{ rings: rings, spatialReference: sr }});
+      }}
+
+      function loadOption(payload) {{
+        graphicsLayer.removeAll();
+        // Tomtegrense
+        (payload.site.rings || []).forEach(ring => {{
+          graphicsLayer.add(new Graphic({{
+            geometry: polygonFromRings([ring]),
+            symbol: {{ type: 'simple-fill', color: [255,255,255,0.02], outline: {{ color: [210,220,235,0.6], width: 1.2 }} }}
+          }}));
+        }});
+        // Volumer
+        (payload.massing_parts || []).forEach(item => {{
+          (item.rings || []).forEach(ring => {{
+            const useColor = Array.isArray(item.color) ? [item.color[0], item.color[1], item.color[2], 0.82] : [34,197,94,0.82];
+            graphicsLayer.add(new Graphic({{
+              geometry: polygonFromRings([ring]),
+              symbol: {{ type: 'polygon-3d', symbolLayers: [{{ type: 'extrude', size: item.height_m || 3, material: {{ color: useColor }}, edges: {{ type: 'solid', color: [255,255,255,0.45], size: 0.6 }} }}] }}
+            }}));
+          }});
+        }});
+        // Naboer
+        (payload.neighbors || []).forEach(item => {{
+          (item.rings || []).forEach(ring => {{
+            graphicsLayer.add(new Graphic({{
+              geometry: polygonFromRings([ring]),
+              symbol: {{ type: 'polygon-3d', symbolLayers: [{{ type: 'extrude', size: item.height_m || 3, material: {{ color: [140,140,150,0.32] }}, edges: {{ type: 'solid', color: [200,200,210,0.25], size: 0.6 }} }}] }}
+            }}));
+          }});
+        }});
+        // Nøkkeltall
+        const s = payload.stats || {{}};
+        document.getElementById('batchStats').innerHTML =
+          '<div style="color:#38bdf8;font-weight:700;font-size:11px;letter-spacing:0.5px;margin-bottom:4px;">' + (payload.site_name || '') + '</div>' +
+          '<div style="font-weight:700;font-size:15px;">BTA: ' + (s.bta_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">BRA: ' + (s.bra_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">Boliger: ~' + (s.boliger||0) + '</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">' + (s.etasjer||0) + ' et. / ' + (s.hoyde_m||0) + ' m</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">Sol: ' + (s.sol||0) + '/100</div>';
+      }}
+
+      const centroid = p0.site_centroid || [10.75, 59.91];
+      const view = new SceneView({{
+        container: 'batchView', map: map, qualityProfile: 'high',
+        camera: {{ position: {{ x: centroid[0], y: centroid[1], z: 900 }}, tilt: 68, heading: 20, spatialReference: sr }},
+        environment: {{ atmosphereEnabled: true, starsEnabled: false }}
+      }});
+
+      function captureAndNext() {{
+        if (currentIdx >= allPayloads.length) {{
+          document.getElementById('batchStatus').textContent = 'Ferdig! ' + allPayloads.length + ' bilder lastet ned.';
+          document.getElementById('batchStatus').style.color = '#22c55e';
+          return;
+        }}
+        const payload = allPayloads[currentIdx];
+        document.getElementById('batchStatus').textContent = 'Rendrer ' + (currentIdx+1) + '/' + allPayloads.length + ': ' + (payload.site_name || '');
+        loadOption(payload);
+
+        setTimeout(function() {{
+          view.takeScreenshot({{ format: 'png', quality: 95, width: 1920, height: 1080 }}).then(function(screenshot) {{
+            const a = document.createElement('a');
+            a.href = screenshot.dataUrl;
+            a.download = 'terreng_' + (payload.site_name || 'alt').replace(/[^a-zA-Z0-9]/g, '_') + '.png';
+            a.click();
+            currentIdx++;
+            setTimeout(captureAndNext, 1500);
+          }});
+        }}, 3000);
+      }}
+
+      view.when(function() {{
+        // Zoom til tomten
+        let extent = null;
+        const rings = [].concat(p0.site.rings || []);
+        rings.forEach(ring => {{
+          ring.forEach(pt => {{
+            if (!extent) {{ extent = new Extent({{ xmin: pt[0], ymin: pt[1], xmax: pt[0], ymax: pt[1], spatialReference: sr }}); }}
+            else {{ extent.xmin = Math.min(extent.xmin, pt[0]); extent.ymin = Math.min(extent.ymin, pt[1]); extent.xmax = Math.max(extent.xmax, pt[0]); extent.ymax = Math.max(extent.ymax, pt[1]); }}
+          }});
+        }});
+        if (extent) {{
+          view.goTo(extent.expand(1.8)).then(function() {{
+            setTimeout(captureAndNext, 2000);
+          }});
+        }} else {{
+          setTimeout(captureAndNext, 2000);
+        }}
+      }});
+    }});
+    </script>
+    """
 
 
 def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any], height_px: int = 640) -> None:
@@ -4538,17 +4806,6 @@ def create_full_report_pdf(
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.ln(90)
-    elif option_images:
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER"), 0, 1)
-        pdf.ln(2)
-        for image in option_images:
-            pdf.check_space(88)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(86)
 
     pdf.add_page()
     for raw_line in report_text.split("\n"):
@@ -5989,6 +6246,7 @@ if "analysis_results" in st.session_state:
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
   <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
+  <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
   <select id="floorSelect" onchange="setFloors()" style="background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
@@ -5996,7 +6254,7 @@ if "analysis_results" in st.session_state:
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
-  <div style="color:#9fb0c3;font-size:12px;">Lim inn i feltet under editoren og klikk «Kjør motor fra skisse»</div>
+  <div style="color:#9fb0c3;font-size:12px;">JSON kopiert. Du kan også bruke «🔒 Lås og kjør motor» for direkte kjøring.</div>
   <button onclick="document.getElementById('exportOverlay').style.display='none'" style="margin-top:12px;background:rgba(56,194,201,0.2);border:1px solid rgba(56,194,201,0.4);color:#38bdf8;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:12px;">OK</button>
 </div>
 </div>
@@ -6236,9 +6494,56 @@ window.exportSketch = function() {
     document.getElementById('exportOverlay').style.display = 'block';
     setTimeout(() => { document.getElementById('exportOverlay').style.display = 'none'; }, 3000);
   }).catch(() => {
-    // Fallback: prompt
     prompt('Kopier denne teksten:', json);
   });
+};
+
+window.lockAndRunSketch = function() {
+  const data = buildings.map(b => ({
+    name: b.name, cx: Math.round(b.cx*100)/100, cy: Math.round(b.cy*100)/100,
+    w: Math.round(b.w*10)/10, d: Math.round(b.d*10)/10,
+    angle_deg: Math.round(b.angle * 180 / Math.PI * 10) / 10,
+    floors: b.floors, footprint_m2: Math.round(b.w * b.d),
+    bta_m2: Math.round(b.w * b.d * b.floors),
+  }));
+  if (data.length === 0) { alert('Tegn minst ett bygg først!'); return; }
+  const json = JSON.stringify(data, null, 2);
+  // Skriv direkte til Streamlit textarea og klikk «Kjør motor»
+  try {
+    const parent = window.parent.document;
+    const textareas = parent.querySelectorAll('textarea');
+    let filled = false;
+    for (const ta of textareas) {
+      const label = ta.getAttribute('aria-label') || '';
+      if (label.includes('Skisse-data') || label.includes('skisse')) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, json);
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+        filled = true;
+        break;
+      }
+    }
+    if (filled) {
+      // Klikk «Kjør motor fra skisse»-knappen
+      setTimeout(() => {
+        const buttons = parent.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent && btn.textContent.includes('motor fra skisse')) {
+            btn.click();
+            return;
+          }
+        }
+      }, 300);
+    } else {
+      // Fallback: kopier til utklippstavle
+      navigator.clipboard.writeText(json);
+      alert('Kunne ikke fylle feltet automatisk. Skissen er kopiert — lim inn manuelt.');
+    }
+  } catch(e) {
+    navigator.clipboard.writeText(json);
+    alert('Automatisk utfylling støttes ikke. Skissen er kopiert — lim inn manuelt.');
+  }
 };
 
 // Hit testing
@@ -6361,11 +6666,11 @@ render();
 
     # --- SKISSE TIL MOTOR ---
     with st.expander("Kjør motor fra manuell skisse", expanded=False):
-        st.caption("Trykk «📋 Kopier skisse» i editoren, lim inn her, og kjør.")
+        st.caption("Bruk «🔒 Lås og kjør motor» i editoren for direkte kjøring, eller lim inn manuelt her.")
         sketch_json = st.text_area(
             "Skisse-data",
-            height=80,
-            placeholder='Lim inn fra «Kopier skisse»',
+            height=60,
+            placeholder='Fylles automatisk fra «🔒 Lås og kjør motor» eller lim inn manuelt',
             key="sketch_json_input",
         )
         sk_c1, sk_c2 = st.columns(2)
@@ -6492,7 +6797,7 @@ render();
                     sketch_views = render_sketch_views(site_obj, sketch_option)
                     sketch_image = sketch_views[0] if sketch_views else render_plan_diagram(site_obj, sketch_option)
 
-                    # --- REGENERER RAPPORTTEKST med manuell overstyring ---
+                    # --- SEKUNDÆR AI-ANALYSE av den låste skissen ---
                     motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in existing_options]
                     manual_override_data = {
                         "gross_bta_m2": sketch_option.gross_bta_m2,
@@ -6506,15 +6811,40 @@ render();
                         "mix_counts": sketch_option.mix_counts,
                         "n_buildings": len(sketch_buildings),
                     }
-                    try:
-                        updated_report = build_deterministic_report(
-                            site_obj, motor_options, {}, has_visual_input=True,
-                            manual_override=manual_override_data,
-                        )
-                    except Exception:
-                        updated_report = result.get("report_text", "")
 
-                    # --- REGENERER PDF med skissebilder og oppdatert tekst ---
+                    # AI-rapport: Claude analyserer den låste skissen
+                    updated_report = None
+                    if ANTHROPIC_API_KEY:
+                        with st.spinner("Claude analyserer den valgte volumløsningen..."):
+                            try:
+                                # Bygg enkel geodata-kontekst for AI
+                                ai_geodata = {
+                                    "site_area_m2": site_result.get("site_area_m2", 1800),
+                                    "terrain": {
+                                        "slope_pct": site_result.get("terrain_slope_pct", 0),
+                                        "relief_m": site_result.get("terrain_relief_m", 0),
+                                    },
+                                }
+                                updated_report = generate_ai_report_for_locked_sketch(
+                                    sketch_option=sketch_option,
+                                    motor_options=motor_options,
+                                    site=site_obj,
+                                    geodata_context=ai_geodata,
+                                )
+                            except Exception:
+                                updated_report = None
+
+                    # Fallback: deterministisk rapport hvis AI feiler
+                    if not updated_report:
+                        try:
+                            updated_report = build_deterministic_report(
+                                site_obj, motor_options, {}, has_visual_input=True,
+                                manual_override=manual_override_data,
+                            )
+                        except Exception:
+                            updated_report = result.get("report_text", "")
+
+                    # --- REGENERER PDF med skissebilder og AI-rapport ---
                     all_option_images = [sketch_image] + result.get("option_images", [])
                     try:
                         pd_state = st.session_state.get("project_data", {})
@@ -6685,8 +7015,16 @@ render();
         try:
             scene_config = gdo.fetch_scene_config()
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
-            scene_payload = build_geodata_scene_payload(SiteInputs(**site_result), selected_option, scene_config)
-            st.download_button('Last ned scene-payload (JSON)', json.dumps(scene_payload, ensure_ascii=False, indent=2), file_name=f'scene_{selected_option.typology.lower().replace(" ", "_")}.json', use_container_width=True)
+
+            # --- BATCH CAPTURE: ta bilder av alle alternativer ---
+            if st.button("📸 Ta bilder av alle alternativer", use_container_width=True, key="batch_capture_btn"):
+                all_payloads = []
+                for opt in options:
+                    p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
+                    all_payloads.append(p)
+                batch_json = json.dumps(all_payloads, ensure_ascii=False)
+                batch_html = _build_batch_capture_html(batch_json, height_px=620)
+                components.html(batch_html, height=660, scrolling=False)
         except Exception as exc:
             st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
 
