@@ -2547,6 +2547,7 @@ def generate_ai_report_for_locked_sketch(
     motor_options: List["OptionResult"],
     site: "SiteInputs",
     geodata_context: Dict[str, Any],
+    environment_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Sekundær AI-analyse: Claude skriver en profesjonell mulighetsstudie-rapport
@@ -2573,6 +2574,24 @@ def generate_ai_report_for_locked_sketch(
     if terrain and terrain.get("slope_pct", 0) > 0:
         terrain_info = f"Terreng: {terrain.get('slope_pct', 0):.1f}% fall, {terrain.get('relief_m', 0):.1f} m relieff."
 
+    # Miljødata
+    env = environment_data or {}
+    noise_info = ""
+    noise = env.get("noise", {})
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        noise_info = f"Støy: {worst.get('zone', '')} — {worst.get('db', 0):.0f} dB Lden fra {worst.get('source_type', 'vei')}. Kilde: {noise.get('source', 'kartlegging')}."
+        if len(noise["zones"]) > 1:
+            noise_info += f" Totalt {len(noise['zones'])} støysoner registrert."
+    daylight_info = ""
+    dl = env.get("daylight", {})
+    if dl.get("available") and dl.get("overall_score", 0) > 0:
+        daylight_info = f"Dagslysindikator: {dl['overall_score']:.0f}/100."
+    wind_info = ""
+    wc = env.get("wind_comfort", {})
+    if wc.get("available"):
+        wind_info = f"Vindkomfort: Klasse {wc.get('lawson_class', '?')} ({wc.get('overall', '')})."
+
     system_prompt = """Du er en erfaren norsk arkitekt som skriver profesjonelle mulighetsstudier.
 Du skriver konsise, faglig presise rapporter på norsk bokmål. Bruk riktig norsk (æ, ø, å).
 
@@ -2582,16 +2601,18 @@ Skriv rapporten med disse seksjonene, markert med # for overskrift:
 # 3. VALGT VOLUMLØSNING
 # 4. ARKITEKTONISK VURDERING
 # 5. SOL- OG DAGSLYSFORHOLD
-# 6. SAMMENLIGNING MED ALTERNATIVER
-# 7. RISIKO OG AVKLARINGSPUNKTER
-# 8. ANBEFALING OG NESTE STEG
+# 6. STØY OG MILJØFORHOLD
+# 7. SAMMENLIGNING MED ALTERNATIVER
+# 8. RISIKO OG AVKLARINGSPUNKTER
+# 9. ANBEFALING OG NESTE STEG
 
 Regler:
 - Bruk BRA (salgbart/bruksareal) som primærtall, BTA som sekundærtall
 - Vær konkret om styrker og svakheter ved den valgte løsningen
 - Kommenter sol/skygge basert på solscore og plassering
+- Hvis støydata finnes, kommenter konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering)
 - Nevn kort motorens alternativer som referanse, men fokuser på den valgte løsningen
-- Skriv 500-800 ord totalt. Ikke bruk bullet points med - i rapporten, skriv sammenhengende tekst.
+- Skriv 600-900 ord totalt. Ikke bruk bullet points med - i rapporten, skriv sammenhengende tekst.
 - Ikke dikter opp tall — bruk KUN tallene du får i konteksten
 """
 
@@ -2608,6 +2629,11 @@ TOMT OG REGULERING:
 - Nabobygg: {site.neighbor_count} stk i modellen
 {terrain_info}
 {"- %-BRA mål: " + str(site.utnyttelsesgrad_bra_pct) + "% → " + str(round(site_area * site.utnyttelsesgrad_bra_pct / 100)) + " m² BRA" if pct_bra_active else "- Ønsket BTA: " + str(site.desired_bta_m2) + " m²"}
+
+MILJØFORHOLD:
+{noise_info if noise_info else "Ingen støydata registrert."}
+{daylight_info if daylight_info else ""}
+{wind_info if wind_info else ""}
 
 VALGT LØSNING (manuell skisse):
 - Antall bygg: {sketch_option.geometry.get('component_count', '?')}
@@ -4522,6 +4548,7 @@ def build_deterministic_report(
     parsed_hints: Dict[str, float],
     has_visual_input: bool,
     manual_override: Optional[Dict[str, Any]] = None,
+    environment_data: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not options:
         return (
@@ -4633,6 +4660,47 @@ def build_deterministic_report(
         lines.append(
             f"Terrengflaten viser omtrent {best.terrain_slope_pct:.1f}% gjennomsnittlig fall. Dette påvirker adkomst, underetasje, parkering og skyggeutbredelse."
         )
+
+    # Miljødata: støy, dagslys, vind
+    env = environment_data or {}
+    noise = env.get("noise", {})
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        db = worst.get("db", 0)
+        src = worst.get("source_type", "vei")
+        zone = worst.get("zone", "")
+        lines.append("")
+        lines.append(f"Støydata fra {noise.get('source', 'kartlegging')}: Tomten er berørt av støysone {zone} ({db:.0f} dB Lden fra {src}).")
+        if db >= 65:
+            lines.append(
+                "Støynivået er over 65 dB og krever spesiell oppmerksomhet ved boligprosjektering. "
+                "TEK17 stiller krav til innendørs lydnivå og det vil sannsynligvis kreves gjennomgående leiligheter med stille side, "
+                "lydskjermende fasadeløsninger og/eller støyskjerm."
+            )
+        elif db >= 55:
+            lines.append(
+                "Støynivået er moderat (55-65 dB). Gjennomgående leiligheter med stille side anbefales. "
+                "Balkong og uteoppholdsareal bør orienteres bort fra støykilden."
+            )
+        else:
+            lines.append("Støynivået er under 55 dB, noe som gir gode rammer for boligutvikling uten spesielle støytiltak.")
+        if len(noise["zones"]) > 1:
+            other_sources = set(z.get("source_type", "") for z in noise["zones"] if z.get("source_type") != src)
+            if other_sources:
+                lines.append(f"Det er også registrert støy fra: {', '.join(other_sources)}.")
+    elif noise.get("source", "").startswith("Geodata"):
+        lines.append("")
+        lines.append("Støydata er sjekket mot DOK Forurensning. Ingen registrerte støysoner berører tomten direkte.")
+
+    daylight = env.get("daylight", {})
+    if daylight.get("available") and daylight.get("overall_score", 0) > 0:
+        dl = daylight["overall_score"]
+        lines.append(f"Dagslysindikator (forenklet TEK17 §13-7): {dl:.0f}/100.")
+
+    wind_c = env.get("wind_comfort", {})
+    if wind_c.get("available"):
+        lines.append(f"Vindkomfort: Klasse {wind_c.get('lawson_class', '?')} ({wind_c.get('overall', 'ikke vurdert')}).")
+
     lines.append("")
     lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
     lines.append(
@@ -4867,9 +4935,12 @@ def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
     return img
 
 
-def _render_context_summary(options: List[OptionResult], site: "SiteInputs") -> Image.Image:
-    """Rendrer en kompakt stedskontekst-oppsummering med nøkkeltall."""
-    w, h = 800, 200
+def _render_context_summary(options: List[OptionResult], site: "SiteInputs", environment_data: Optional[Dict[str, Any]] = None) -> Image.Image:
+    """Rendrer en kompakt stedskontekst-oppsummering med nøkkeltall og miljødata."""
+    env = environment_data or {}
+    has_env = bool(env.get("available"))
+    h = 200 if not has_env else 270
+    w = 800
     img = Image.new('RGB', (w, h), (6, 17, 26))
     draw = ImageDraw.Draw(img)
     font = ImageFont.load_default()
@@ -4899,10 +4970,43 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs") -> 
         x = 20 + col * col_w
         y = 45 + row * 65
 
-        # Boks
         draw.rectangle([(x, y), (x + col_w - 10, y + 50)], outline=(56, 189, 248, 80))
         draw.text((x + 8, y + 6), label.upper(), fill=(130, 145, 165), font=font)
         draw.text((x + 8, y + 24), value, fill=(245, 247, 251), font=font)
+
+    # Miljødata-rad
+    if has_env:
+        env_y = 175
+        draw.text((20, env_y - 10), "MILJØFORHOLD", fill=(56, 189, 248), font=font)
+
+        noise = env.get("noise", {})
+        daylight = env.get("daylight", {})
+        wind_c = env.get("wind_comfort", {})
+
+        env_items = []
+        if noise.get("available") and noise.get("zones"):
+            worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+            db = worst.get("db", 0)
+            color = (248, 113, 113) if db > 65 else (245, 158, 11) if db > 55 else (52, 211, 153)
+            env_items.append(("STØY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
+        else:
+            env_items.append(("STØY", "Ingen data", (130, 145, 165)))
+
+        if daylight.get("available"):
+            dl = daylight.get("overall_score", 0)
+            color = (52, 211, 153) if dl >= 70 else (245, 158, 11) if dl >= 50 else (248, 113, 113)
+            env_items.append(("DAGSLYS", f"{dl:.0f}/100", color))
+
+        if wind_c.get("available"):
+            wclass = wind_c.get("lawson_class", "?")
+            color = (52, 211, 153) if wclass in ["A", "B"] else (245, 158, 11) if wclass == "C" else (248, 113, 113)
+            env_items.append(("VIND", f"Klasse {wclass}", color))
+
+        for i, (label, value, color) in enumerate(env_items):
+            x = 20 + i * col_w
+            draw.rectangle([(x, env_y + 5), (x + col_w - 10, env_y + 55)], outline=(56, 189, 248, 80))
+            draw.text((x + 8, env_y + 11), label, fill=(130, 145, 165), font=font)
+            draw.text((x + 8, env_y + 29), value, fill=color, font=font)
 
     return img
 
@@ -4917,6 +5021,7 @@ def create_full_report_pdf(
     visual_attachments: List[Image.Image],
     manual_sketch_images: Optional[List[Image.Image]] = None,
     site: Optional["SiteInputs"] = None,
+    environment_data: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
@@ -4992,7 +5097,7 @@ def create_full_report_pdf(
     # --- TOMTEKONTEKST ---
     if options and site is not None:
         try:
-            ctx_chart = _render_context_summary(options, site)
+            ctx_chart = _render_context_summary(options, site, environment_data=environment_data)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 ctx_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
                 pdf.check_space(55)
@@ -5883,7 +5988,7 @@ if run_analysis:
                 environment_data = {"available": False, "error": str(exc)[:120]}
 
     option_images = [render_plan_diagram(site, option) for option in options]
-    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context))
+    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         deterministic_report = deterministic_report + "\n\n" + build_site_intelligence_markdown(site_intelligence_bundle)
     final_report_text = deterministic_report
@@ -5947,6 +6052,7 @@ KRAV:
             option_images=option_images,
             visual_attachments=images_for_context,
             site=site,
+            environment_data=environment_data,
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
@@ -7086,6 +7192,7 @@ render();
                                     motor_options=motor_options,
                                     site=site_obj,
                                     geodata_context=ai_geodata,
+                                    environment_data=result.get("environment"),
                                 )
                             except Exception:
                                 updated_report = None
@@ -7096,6 +7203,7 @@ render();
                             updated_report = build_deterministic_report(
                                 site_obj, motor_options, {}, has_visual_input=True,
                                 manual_override=manual_override_data,
+                                environment_data=result.get("environment"),
                             )
                         except Exception:
                             updated_report = result.get("report_text", "")
@@ -7114,6 +7222,7 @@ render();
                             visual_attachments=[],
                             manual_sketch_images=sketch_views,
                             site=site_obj,
+                            environment_data=result.get("environment"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
@@ -7332,6 +7441,7 @@ render();
                             visual_attachments=scene_images_for_pdf,
                             manual_sketch_images=manual_views if manual_views else None,
                             site=SiteInputs(**site_result) if site_result else None,
+                            environment_data=result.get("environment"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
