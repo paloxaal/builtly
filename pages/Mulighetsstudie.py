@@ -1977,18 +1977,20 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             fl_min, fl_max = template.get("floor_range", (3, 5))
             fl_max_eff = min(fl_max, allowed_floors)
             fl_min_eff = max(fl_min, 2)
-            # Velg etasjer som gir fotavtrykk nærmest tilgjengelig areal
+            # Velg etasjer som gir fotavtrykk innenfor TOMTEAREAL (ikke placement_polygon)
+            site_area_limit = max(geodata_context.get("site_area_m2", site.site_area_m2), 100.0)
             best_fp = 0
             best_fl = fl_min_eff
             for f in range(fl_min_eff, fl_max_eff + 1):
                 fp = target_bta / max(f, 1)
-                if fp <= placement_polygon.area and fp > best_fp:
+                if fp <= site_area_limit * 0.92 and fp > best_fp:
                     best_fp = fp
                     best_fl = f
             if best_fp < 50:
                 best_fp = target_bta / max(fl_max_eff, 1)
                 best_fl = fl_max_eff
-            target_footprint = min(best_fp, placement_polygon.area * 0.92)
+            # INGEN cap mot placement_polygon — %-BRA overstyrer alt
+            target_footprint = best_fp
         else:
             target_footprint = max_footprint * template["coverage"]
 
@@ -4276,7 +4278,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.2</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.3</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -4718,26 +4720,20 @@ if run_analysis:
     with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
         options = generate_options(site, mix_inputs, geodata_context=geodata_context)
 
-    # Diagnostikk
+    # Diagnostikk — lagre i session_state for visning i resultatene
     if site.utnyttelsesgrad_bra_pct > 0:
         limits_diag = derive_limits(site, geodata_context)
+        sp_area = float(geodata_context["site_polygon"].area) if geodata_context.get("site_polygon") else 0
+        bp_area = float(geodata_context["buildable_polygon"].area) if geodata_context.get("buildable_polygon") else 0
+        pp_area = float(placement_polygon.area) if 'placement_polygon' in dir() else 0
         target_bra_diag = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
-        sp_area = float(geodata_context["site_polygon"].area) if geodata_context.get("site_polygon") else 0
-        bp_area = float(geodata_context["buildable_polygon"].area) if geodata_context.get("buildable_polygon") else 0
-        st.caption(
-            f"Motor-diagnostikk: tomteareal={site.site_area_m2:.0f} m², "
-            f"site_polygon={sp_area:.0f} m², buildable_polygon={bp_area:.0f} m², "
-            f"max_footprint={limits_diag['max_footprint']:.0f} m², "
-            f"mål-BTA={target_bta_diag:.0f} m², oppnådd={best_bta:.0f} m²"
+        st.session_state["_motor_diag"] = (
+            f"v9.3 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
+            f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         )
-        shortfall = target_bta_diag - best_bta
-        if shortfall > target_bta_diag * 0.2:
-            st.warning(
-                f"%-BRA mål: {target_bra_diag:,.0f} m² BRA. Beste alternativ: {best_bta:,.0f} m² BTA — "
-                f"{shortfall:,.0f} m² under mål. Sjekk at polygonbuffer og byggegrenser er 0."
-            )
 
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         options = apply_site_intelligence_to_options(options, site_intelligence_bundle)
@@ -4967,6 +4963,11 @@ if "analysis_results" in st.session_state:
         meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
     if meta_lines:
         st.caption(" · ".join(meta_lines))
+
+    # Motor-diagnostikk (persistent)
+    diag = st.session_state.get("_motor_diag")
+    if diag:
+        st.caption(f"🔧 {diag}")
 
     st.markdown("<div class='section-header'>Alternativsammenligning</div>", unsafe_allow_html=True)
     comparison_df = pd.DataFrame(
