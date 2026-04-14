@@ -2163,6 +2163,10 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     for template in templates:
         typology = template["typology"]
 
+        # Tårn krever minimum 10 etasjer — hopp over hvis ikke mulig
+        if typology == "Tårn" and allowed_floors < 10:
+            continue
+
         # Når %-BRA overstyrer: beregn target_footprint direkte fra BTA-mål
         if site.utnyttelsesgrad_bra_pct > 0:
             fl_min, fl_max = template.get("floor_range", (3, 5))
@@ -2389,6 +2393,22 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             efficiency_ratio=actual_efficiency,
             parking_pressure_pct=parking_pressure_pct,
         )
+
+        # Tomteform-bonus: favoriser typologier som passer tomtens form
+        site_shape = _analyze_polygon(placement_polygon)
+        if site_shape.get('is_elongated', False):
+            # Smal/avlang tomt → Lamell passer klart best
+            shape_bonus = {"Lamell": 10.0, "Tun": 4.0, "Karré": -6.0, "Punkthus": -5.0, "Tårn": -2.0, "Podium + Tårn": -3.0}
+        else:
+            # Kompakt/kvadratisk tomt → Karré og Punkthus passer godt
+            shape_bonus = {"Lamell": 0.0, "Tun": 1.0, "Karré": 4.0, "Punkthus": 3.0, "Tårn": 2.0, "Podium + Tårn": 3.0}
+        score = round(score + shape_bonus.get(typology, 0.0), 1)
+
+        # Ekstra straff: typologier som brukte polygon-fill mister differensiering
+        if placement.get("source", "").startswith("polygon-fill"):
+            # Lamell er den naturlige polygon-fill-formen — andre typologier straffes
+            if typology != "Lamell":
+                score = round(score - 3.0, 1)
 
         winter_alt = solar_altitude_deg(site.latitude_deg, 355, 12.0)
         winter_az = (solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) % 360.0
@@ -2792,8 +2812,8 @@ def _deterministic_solar_refinement(
 # --- MILJØANALYSE: STØY, DAGSLYS, UTSIKT, VIND ---
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: float = 100.0) -> Dict[str, Any]:
-    """Hent støysonekart fra Geonorge WFS (T-1442 klassifisering)."""
+def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: float = 100.0, gdo_client: Any = None) -> Dict[str, Any]:
+    """Hent støysonekart. Prøver Geodata Online DOK Forurensning først, deretter Geonorge WFS."""
     minx, miny, maxx, maxy = bbox_utm
     minx -= buffer_m
     miny -= buffer_m
@@ -2801,6 +2821,91 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
     maxy += buffer_m
 
     result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata"}
+
+    # --- 1. GEODATA ONLINE: DOK Forurensning (ArcGIS MapServer identify) ---
+    gdo_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer/identify"
+    try:
+        gdo_token = ""
+        if gdo_client is not None and hasattr(gdo_client, '_token'):
+            gdo_token = gdo_client._token or ""
+        elif gdo_client is not None and hasattr(gdo_client, 'token'):
+            gdo_token = gdo_client.token or ""
+
+        params = {
+            "geometry": f"{minx},{miny},{maxx},{maxy}",
+            "geometryType": "esriGeometryEnvelope",
+            "sr": "25833",
+            "layers": "all",
+            "tolerance": "0",
+            "mapExtent": f"{minx},{miny},{maxx},{maxy}",
+            "imageDisplay": "400,400,96",
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        if gdo_token:
+            params["token"] = gdo_token
+
+        resp = requests.get(gdo_url, params=params, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            gdo_results = data.get("results", [])
+            for feat in gdo_results:
+                attrs = feat.get("attributes", {})
+                layer_name = feat.get("layerName", "").lower()
+
+                # Støydata: finn dB-verdi og kildetype fra attributter
+                db_val = 0.0
+                zone_name = ""
+                source_type = "ukjent"
+
+                # Typiske feltnavn i DOK Forurensning støylag
+                for db_key in ["lden", "db", "lydniva", "stoyniva", "desibel", "lnight", "Lden", "LDEN"]:
+                    if db_key in attrs:
+                        db_val = safe_float(attrs[db_key], 0)
+                        if db_val > 0:
+                            break
+
+                for zone_key in ["stoysone", "sone", "navn", "støysone", "STOYSONE", "klasse"]:
+                    if zone_key in attrs:
+                        zone_name = str(attrs[zone_key])
+                        break
+
+                if not zone_name:
+                    zone_name = feat.get("layerName", "Støysone")
+
+                # Kildetype fra lagnavn
+                ln = layer_name
+                if "veg" in ln or "vei" in ln or "road" in ln:
+                    source_type = "veg"
+                elif "jernbane" in ln or "bane" in ln or "rail" in ln:
+                    source_type = "jernbane"
+                elif "industri" in ln or "virksomhet" in ln:
+                    source_type = "industri"
+                elif "fly" in ln or "luft" in ln:
+                    source_type = "flyplass"
+                elif "skyte" in ln or "skytefelt" in ln:
+                    source_type = "skytefelt"
+                else:
+                    source_type = "sammensatt"
+
+                if db_val > 0 or zone_name:
+                    result["zones"].append({
+                        "zone": zone_name or f"Støysone ({source_type})",
+                        "db": round(db_val, 1),
+                        "source_type": source_type,
+                        "layer": feat.get("layerName", ""),
+                    })
+
+            if result["zones"]:
+                result["available"] = True
+                result["source"] = "Geodata Online DOK Forurensning"
+                # Sortér: høyest dB først
+                result["zones"].sort(key=lambda z: z.get("db", 0), reverse=True)
+                return result
+    except Exception:
+        pass
+
+    # --- 2. FALLBACK: Geonorge WFS ---
     services = [
         ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneFelles"),
         ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneVeg"),
@@ -3128,14 +3233,15 @@ def build_environment_analysis(
     latitude_deg: float,
     longitude_deg: Optional[float] = None,
     terrain: Optional[Dict[str, Any]] = None,
+    gdo_client: Any = None,
 ) -> Dict[str, Any]:
     """Kjør komplett miljøanalyse: støy, dagslys, utsikt, vind."""
     env: Dict[str, Any] = {"available": False}
 
-    # 1. Støy
+    # 1. Støy (Geodata Online DOK Forurensning → Geonorge fallback)
     if site_polygon is not None:
         try:
-            env["noise"] = fetch_noise_zones(site_polygon.bounds)
+            env["noise"] = fetch_noise_zones(site_polygon.bounds, gdo_client=gdo_client)
         except Exception:
             env["noise"] = {"available": False}
     else:
@@ -3815,16 +3921,18 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
           const fl = item.floors || '?';
           const label = (item.name || '') + '\\n' + fl + ' et. / ' + h.toFixed(0) + ' m';
           graphicsLayer.add(new Graphic({
-            geometry: new Point({ x: cx, y: cy, z: h + 5, spatialReference: sr }),
+            geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
             symbol: {
               type: 'point-3d',
+              verticalOffset: { screenLength: 30, maxWorldLength: h + 12, minWorldLength: h + 2 },
+              callout: { type: 'line', size: 1, color: [255, 255, 255, 150] },
               symbolLayers: [{
                 type: 'text',
-                material: { color: [255, 255, 255, 1] },
+                material: { color: [255, 255, 255] },
                 text: label,
                 size: 11,
                 font: { weight: 'bold' },
-                halo: { color: [0, 0, 0, 0.75], size: 1.5 }
+                halo: { color: [0, 0, 0], size: 1.5 }
               }]
             }
           }));
@@ -3841,15 +3949,17 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
           cx /= ring.length; cy /= ring.length;
           const h = item.height_m || 3;
           graphicsLayer.add(new Graphic({
-            geometry: new Point({ x: cx, y: cy, z: h + 2, spatialReference: sr }),
+            geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
             symbol: {
               type: 'point-3d',
+              verticalOffset: { screenLength: 20, maxWorldLength: h + 8, minWorldLength: h },
               symbolLayers: [{
                 type: 'text',
-                material: { color: [180, 190, 210, 0.8] },
+                material: { color: [200, 210, 225] },
                 text: h.toFixed(0) + ' m',
-                size: 8,
-                halo: { color: [0, 0, 0, 0.5], size: 1 }
+                size: 9,
+                font: { weight: 'normal' },
+                halo: { color: [0, 0, 0], size: 1.2 }
               }]
             }
           }));
@@ -4710,6 +4820,93 @@ def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]],
     pdf.ln(4)
 
 
+def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
+    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ."""
+    w, h = 800, max(280, 50 + len(options) * 40)
+    img = Image.new('RGB', (w, h), (6, 17, 26))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    draw.text((20, 10), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(56, 189, 248), font=font)
+
+    bar_h = 22
+    y_start = 45
+    max_sol = max((o.solar_score for o in options), default=100)
+    max_bra = max((o.gross_bta_m2 * o.efficiency_ratio for o in options), default=1)
+
+    for i, opt in enumerate(options):
+        y = y_start + i * 40
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        sol = opt.solar_score
+
+        # Typologi-label
+        label = f"{opt.typology}"
+        draw.text((20, y + 2), label, fill=(200, 211, 223), font=font)
+
+        # Sol-bar (cyan)
+        sol_w = max(4, int(sol / max(max_sol, 1) * 280))
+        draw.rectangle([(160, y), (160 + sol_w, y + bar_h // 2 - 1)], fill=(56, 189, 248))
+        draw.text((165 + sol_w, y - 1), f"Sol {sol:.0f}", fill=(56, 189, 248), font=font)
+
+        # BRA-bar (grønn)
+        bra_w = max(4, int(bra / max(max_bra, 1) * 280))
+        draw.rectangle([(160, y + bar_h // 2 + 1), (160 + bra_w, y + bar_h)], fill=(34, 197, 94))
+        draw.text((165 + bra_w, y + bar_h // 2 + 1), f"BRA {bra:.0f} m²", fill=(34, 197, 94), font=font)
+
+        # Boliger (høyre side)
+        draw.text((620, y + 4), f"{opt.unit_count} bol.", fill=(159, 176, 195), font=font)
+        draw.text((700, y + 4), f"{opt.floors} et.", fill=(130, 145, 165), font=font)
+
+    # Legende
+    ly = h - 25
+    draw.rectangle([(20, ly), (32, ly + 10)], fill=(56, 189, 248))
+    draw.text((38, ly - 1), "Solscore", fill=(159, 176, 195), font=font)
+    draw.rectangle([(120, ly), (132, ly + 10)], fill=(34, 197, 94))
+    draw.text((138, ly - 1), "BRA (salgbart areal)", fill=(159, 176, 195), font=font)
+
+    return img
+
+
+def _render_context_summary(options: List[OptionResult], site: "SiteInputs") -> Image.Image:
+    """Rendrer en kompakt stedskontekst-oppsummering med nøkkeltall."""
+    w, h = 800, 200
+    img = Image.new('RGB', (w, h), (6, 17, 26))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    draw.text((20, 10), "TOMTE- OG STEDSKONTEKST", fill=(56, 189, 248), font=font)
+
+    best = options[0] if options else None
+    if best is None:
+        return img
+
+    # Nøkkeltall i rutenett
+    items = [
+        ("Tomteareal", f"{site.site_area_m2:.0f} m²"),
+        ("Byggefelt", f"{best.buildable_area_m2:.0f} m²"),
+        ("Nabobygg", f"{site.neighbor_count} stk"),
+        ("Maks etasjer", f"{site.max_floors}"),
+        ("Maks høyde", f"{site.max_height_m:.0f} m"),
+        ("Maks BYA", f"{site.max_bya_pct:.0f}%"),
+    ]
+    if site.utnyttelsesgrad_bra_pct > 0:
+        items.append(("%-BRA mål", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
+
+    col_w = 190
+    for i, (label, value) in enumerate(items):
+        col = i % 4
+        row = i // 4
+        x = 20 + col * col_w
+        y = 45 + row * 65
+
+        # Boks
+        draw.rectangle([(x, y), (x + col_w - 10, y + 50)], outline=(56, 189, 248, 80))
+        draw.text((x + 8, y + 6), label.upper(), fill=(130, 145, 165), font=font)
+        draw.text((x + 8, y + 24), value, fill=(245, 247, 251), font=font)
+
+    return img
+
+
 def create_full_report_pdf(
     name: str,
     client: str,
@@ -4719,6 +4916,7 @@ def create_full_report_pdf(
     option_images: List[Image.Image],
     visual_attachments: List[Image.Image],
     manual_sketch_images: Optional[List[Image.Image]] = None,
+    site: Optional["SiteInputs"] = None,
 ) -> bytes:
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
@@ -4778,6 +4976,52 @@ def create_full_report_pdf(
             rows=rows,
             widths=[30, 30, 22, 22, 20, 18, 18],
         )
+
+        # --- SOLANALYSE-DIAGRAM ---
+        try:
+            solar_chart = _render_solar_chart(options)
+            pdf.ln(4)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                solar_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                pdf.check_space(70)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(65)
+        except Exception:
+            pass
+
+    # --- TOMTEKONTEKST ---
+    if options and site is not None:
+        try:
+            ctx_chart = _render_context_summary(options, site)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                ctx_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                pdf.check_space(55)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(50)
+        except Exception:
+            pass
+
+    # --- TOP 3 VOLUMSKISSER (automatisk) ---
+    if option_images and not manual_sketch_images:
+        pdf.add_page()
+        pdf.set_font(PDF_FONT, "B", 16)
+        pdf.set_text_color(26, 43, 72)
+        pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER — TOPP 3 ALTERNATIVER"), 0, 1)
+        pdf.ln(2)
+        for i, image in enumerate(option_images[:3]):
+            pdf.check_space(88)
+            if i < len(options):
+                opt = options[i]
+                bra = opt.gross_bta_m2 * opt.efficiency_ratio
+                pdf.set_font(PDF_FONT, "B", 11)
+                pdf.set_text_color(50, 50, 50)
+                pdf.cell(0, 8, clean_pdf_text(
+                    f"{opt.name} — {opt.typology} | ~{bra:.0f} m² BRA | {opt.unit_count} bol. | Sol {opt.solar_score:.0f}/100"
+                ), 0, 1)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(82)
 
     # Volumskisser: vis KUN manuell skisse hvis bruker har overstyrt
     if manual_sketch_images:
@@ -4863,7 +5107,13 @@ def create_full_report_pdf(
                 pdf.set_text_color(100, 100, 100)
                 pdf.cell(0, 8, clean_pdf_text(f"Figur V-{idx}: visuelt grunnlag brukt i analysen."), 0, 1)
 
-    return bytes(pdf.output(dest="S"))
+    output = pdf.output(dest="S")
+    if isinstance(output, bytes):
+        return output
+    elif isinstance(output, str):
+        return output.encode("latin-1")
+    else:
+        return bytes(output)
 
 
 # --- 6. STYLING ---
@@ -5627,6 +5877,7 @@ if run_analysis:
                     latitude_deg=latitude_deg,
                     longitude_deg=longitude_deg,
                     terrain=terrain_ctx,
+                    gdo_client=gdo if geodata_token_ok else None,
                 )
             except Exception as exc:
                 environment_data = {"available": False, "error": str(exc)[:120]}
@@ -5686,15 +5937,20 @@ KRAV:
             except Exception:
                 final_report_text = deterministic_report
 
-    pdf_bytes = create_full_report_pdf(
-        name=p_name,
-        client=pd_state.get("c_name", "Ukjent"),
-        land=pd_state.get("land", "Norge"),
-        report_text=final_report_text,
-        options=options,
-        option_images=option_images,
-        visual_attachments=images_for_context,
-    )
+    try:
+        pdf_bytes = create_full_report_pdf(
+            name=p_name,
+            client=pd_state.get("c_name", "Ukjent"),
+            land=pd_state.get("land", "Norge"),
+            report_text=final_report_text,
+            options=options,
+            option_images=option_images,
+            visual_attachments=images_for_context,
+            site=site,
+        )
+    except Exception as pdf_exc:
+        st.warning(f"PDF-generering feilet: {pdf_exc}")
+        pdf_bytes = b""
 
     if "pending_reviews" not in st.session_state:
         st.session_state.pending_reviews = {}
@@ -6857,6 +7113,7 @@ render();
                             option_images=all_option_images,
                             visual_attachments=[],
                             manual_sketch_images=sketch_views,
+                            site=site_obj,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
@@ -7074,6 +7331,7 @@ render();
                             option_images=all_images,
                             visual_attachments=scene_images_for_pdf,
                             manual_sketch_images=manual_views if manual_views else None,
+                            site=SiteInputs(**site_result) if site_result else None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -7087,13 +7345,19 @@ render();
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     cdl, cqa = st.columns(2)
     with cdl:
-        st.download_button(
-            "Last ned mulighetsstudie (PDF)",
-            st.session_state.generated_ark_pdf,
-            st.session_state.generated_ark_filename,
-            type="primary",
-            use_container_width=True,
-        )
+        pdf_data = st.session_state.get("generated_ark_pdf")
+        pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+        if pdf_data:
+            st.download_button(
+                "Last ned mulighetsstudie (PDF)",
+                data=pdf_data,
+                file_name=pdf_name,
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
+        else:
+            st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
     with cqa:
         if find_page("Review"):
             if st.button("Gå til QA for godkjenning", type="secondary", use_container_width=True):
