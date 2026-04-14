@@ -1919,6 +1919,179 @@ def build_massing_parts(
     return parts
 
 
+def _typology_polygon_fill(
+    placement_polygon: Polygon,
+    typology: str,
+    target_footprint_m2: float,
+    angle_deg: float,
+) -> Tuple[Optional[Polygon], Dict[str, Any]]:
+    """
+    Typologi-differensiert polygon-fill for høy utnyttelse.
+
+    I stedet for å skalere tomtepolygonen generisk, lages ULIKE former
+    per typologi slik at volumskissene er visuelt distinkte.
+
+    Returnerer (footprint_polygon, placement_info_updates) eller (None, {})
+    hvis fallback ikke lykkes.
+    """
+    rad = math.radians(angle_deg)
+    pcx, pcy = placement_polygon.centroid.x, placement_polygon.centroid.y
+    perp_rad = rad + math.pi / 2.0
+    shape = _analyze_polygon(placement_polygon)
+    major, minor = shape['major_m'], shape['minor_m']
+    poly_area = shape['area_m2']
+    result: Optional[Polygon] = None
+    info: Dict[str, Any] = {"source": "polygon-fill"}
+
+    if typology == "Lamell":
+        # 2-3 parallelle rektangler langs major-aksen, 8-12m gap
+        bld_depth = min(13.0, minor * 0.28)
+        bld_depth = max(11.0, bld_depth)
+        gap = min(12.0, max(8.0, minor * 0.15))
+        n_bars = max(2, min(3, int(minor / (bld_depth + gap))))
+        bld_width = min(major * 0.85, target_footprint_m2 / max(n_bars * bld_depth, 1.0))
+        bld_width = max(20.0, bld_width)
+
+        bars: List[Polygon] = []
+        total_span = (n_bars - 1) * (bld_depth + gap)
+        for i in range(n_bars):
+            offset_across = -total_span / 2.0 + i * (bld_depth + gap)
+            bx = pcx + offset_across * math.cos(perp_rad)
+            by = pcy + offset_across * math.sin(perp_rad)
+            bar = _make_oriented_rect(bx, by, bld_width, bld_depth, rad)
+            clipped = bar.intersection(placement_polygon).buffer(0)
+            if not clipped.is_empty and clipped.area > 40:
+                bars.append(clipped)
+        if bars:
+            result = unary_union(bars).buffer(0)
+            info["n_buildings"] = len(bars)
+
+    elif typology == "Punkthus":
+        # 2-4 kvadratiske bokser (16×16m) med 12-18m mellomrom
+        side = min(18.0, minor * 0.35)
+        side = max(14.0, side)
+        spacing = min(18.0, max(12.0, minor * 0.2))
+        n_pts = max(2, min(4, math.ceil(target_footprint_m2 / max(side * side, 1.0))))
+        n_along = max(1, min(n_pts, int(major / (side + spacing)) + 1))
+        n_across = max(1, math.ceil(n_pts / n_along))
+        step_a = side + spacing
+        step_c = side + spacing
+
+        boxes: List[Polygon] = []
+        span_a = (n_along - 1) * step_a
+        span_c = (n_across - 1) * step_c
+        for row in range(n_along):
+            for col in range(n_across):
+                if len(boxes) >= n_pts:
+                    break
+                oa = -span_a / 2.0 + row * step_a
+                oc = -span_c / 2.0 + col * step_c
+                bx = pcx + oa * math.cos(rad) + oc * math.cos(perp_rad)
+                by = pcy + oa * math.sin(rad) + oc * math.sin(perp_rad)
+                bx_box = _make_oriented_rect(bx, by, side, side, rad)
+                clipped = bx_box.intersection(placement_polygon).buffer(0)
+                if not clipped.is_empty and clipped.area > 40:
+                    boxes.append(clipped)
+        if boxes:
+            result = unary_union(boxes).buffer(0)
+            info["n_buildings"] = len(boxes)
+
+    elif typology == "Karré":
+        # Ring-form med gårdsrom via buffer-difference
+        ring_depth = min(12.0, minor * 0.18)
+        ring_depth = max(8.0, ring_depth)
+        # Skaler polygonen ned til å matche target
+        sf = math.sqrt(min(target_footprint_m2 * 1.8, poly_area * 0.85) / max(poly_area, 1.0))
+        sf = min(sf, 0.92)
+        outer = affinity.scale(placement_polygon, xfact=sf, yfact=sf,
+                               origin=placement_polygon.centroid).buffer(0)
+        inner = outer.buffer(-ring_depth)
+        if inner.is_valid and not inner.is_empty and inner.area > 30:
+            ring = outer.difference(inner).buffer(0)
+            if not ring.is_empty and ring.area > 50:
+                result = ring
+                info["n_buildings"] = 1
+                info["courtyard_count"] = 1
+
+    elif typology == "Tun":
+        # L-form eller U-form — hovedfløy langs major + 1-2 sidefløyer
+        wing_depth = min(12.0, minor * 0.25)
+        wing_depth = max(8.0, wing_depth)
+        main_w = min(major * 0.75, target_footprint_m2 * 0.45 / max(wing_depth, 1.0))
+        main_w = max(18.0, main_w)
+
+        # Hovedfløy
+        main_rect = _make_oriented_rect(pcx, pcy, main_w, wing_depth, rad)
+        main_clipped = main_rect.intersection(placement_polygon).buffer(0)
+        wings: List[Polygon] = []
+
+        if not main_clipped.is_empty and main_clipped.area > 30:
+            # Plasser sidefløyer i ender (U-form)
+            for side_sign in [1.0, -1.0]:
+                wing_w = min(minor * 0.5, target_footprint_m2 * 0.2 / max(wing_depth, 1.0))
+                wing_w = max(12.0, wing_w)
+                end_offset = (main_w / 2.0 - wing_depth / 2.0) * side_sign
+                wx = pcx + end_offset * math.cos(rad) + (wing_w / 2.0 + wing_depth / 2.0) * 0.5 * math.cos(perp_rad)
+                wy = pcy + end_offset * math.sin(rad) + (wing_w / 2.0 + wing_depth / 2.0) * 0.5 * math.sin(perp_rad)
+                wing_rect = _make_oriented_rect(wx, wy, wing_depth, wing_w, rad)
+                wing_clipped = wing_rect.intersection(placement_polygon).buffer(0)
+                if not wing_clipped.is_empty and wing_clipped.area > 30:
+                    wings.append(wing_clipped)
+
+            parts = [main_clipped] + wings
+            result = unary_union(parts).buffer(0)
+            info["n_buildings"] = len(parts)
+
+    elif typology == "Tårn":
+        # Lite fotavtrykk (20×20m), mange etasjer — overstyrer floor_range
+        side = min(20.0, minor * 0.35)
+        side = max(16.0, side)
+        tower = _make_oriented_rect(pcx, pcy, side, side, rad)
+        clipped = tower.intersection(placement_polygon).buffer(0)
+        if not clipped.is_empty and clipped.area > 100:
+            result = clipped
+            info["n_buildings"] = 1
+            info["tower_override_floors"] = True  # Signal til generate_options
+
+    elif typology == "Podium + Tårn":
+        # Stort podium (dekker mye av tomten) + lite tårn oppå
+        pod_sf = math.sqrt(min(target_footprint_m2 * 0.7, poly_area * 0.6) / max(poly_area, 1.0))
+        pod_sf = min(pod_sf, 0.88)
+        podium = affinity.scale(placement_polygon, xfact=pod_sf, yfact=pod_sf,
+                                origin=placement_polygon.centroid).buffer(0)
+        tower_side = min(20.0, math.sqrt(podium.area) * 0.4)
+        tower_side = max(14.0, tower_side)
+        tower = _make_oriented_rect(pcx, pcy, tower_side, tower_side, rad)
+        tower_clipped = tower.intersection(podium).buffer(0)
+
+        if not podium.is_empty and podium.area > 80:
+            parts_list = [podium]
+            if not tower_clipped.is_empty and tower_clipped.area > 50:
+                parts_list.append(tower_clipped)
+            result = unary_union(parts_list).buffer(0)
+            info["n_buildings"] = 2
+            info["podium_tower_split"] = True
+
+    elif typology == "Rekke":
+        # 1 lang smal bygning langs major
+        bld_depth = min(10.0, minor * 0.25)
+        bld_depth = max(8.0, bld_depth)
+        bld_width = min(major * 0.90, target_footprint_m2 / max(bld_depth, 1.0))
+        bld_width = max(25.0, bld_width)
+        row_rect = _make_oriented_rect(pcx, pcy, bld_width, bld_depth, rad)
+        clipped = row_rect.intersection(placement_polygon).buffer(0)
+        if not clipped.is_empty and clipped.area > 50:
+            result = clipped
+            info["n_buildings"] = 1
+
+    # Generic fallback: skalert polygon (gammel oppførsel)
+    if result is None or result.is_empty or result.area < 30:
+        return None, {}
+
+    info["fit_scale"] = round(float(result.area) / max(target_footprint_m2, 1.0), 3)
+    return result, info
+
+
 def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context: Optional[Dict[str, Any]] = None) -> List[OptionResult]:
     geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
     limits = derive_limits(site, geodata_context)
@@ -2073,23 +2246,37 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         footprint_area = float(footprint_polygon.area)
 
-        # --- HØY UTNYTTELSE FALLBACK ---
-        # Når %-BRA er aktiv og fotavtrykket er under 50% av mål: fyll polygonen direkte
+        # --- HØY UTNYTTELSE FALLBACK (typologi-differensiert) ---
+        # Når %-BRA er aktiv og fotavtrykket er under 50% av mål:
+        # lager ULIKE former per typologi i stedet for generisk skalert polygon
         if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * 0.50:
-            # Skaler tomtepolygonen ned til target_footprint
-            scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
-            scale_ratio = min(scale_ratio, 0.95)  # Aldri mer enn 95% av polygonen
-            filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
-                                       origin=placement_polygon.centroid).buffer(0)
+            fill_angle = placement.get("orientation_deg", 0.0)
+            filled_fp, fill_info = _typology_polygon_fill(
+                placement_polygon, typology, target_footprint, fill_angle,
+            )
             if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
                 footprint_polygon = filled_fp
                 footprint_area = float(footprint_polygon.area)
-                placement["source"] = "polygon-fill"
-                placement["n_buildings"] = 1
-                placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
+                placement.update(fill_info)
+            else:
+                # Siste utvei: generisk skalert polygon (gammel oppførsel)
+                scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
+                scale_ratio = min(scale_ratio, 0.95)
+                filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
+                                           origin=placement_polygon.centroid).buffer(0)
+                if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
+                    footprint_polygon = filled_fp
+                    footprint_area = float(footprint_polygon.area)
+                    placement["source"] = "polygon-fill-generic"
+                    placement["n_buildings"] = 1
+                    placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
 
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
+        # Tårn polygon-fill: overstyrer floor_range for å kompensere lite fotavtrykk
+        if placement.get("tower_override_floors") and typology == "Tårn":
+            fl_min = max(fl_min, 8)
+            fl_max = max(fl_max, min(12, allowed_floors))
         fl_min = max(2, min(fl_min, allowed_floors))
         fl_max = min(fl_max, allowed_floors)
 
@@ -2872,7 +3059,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     ISO_ANGLE = math.radians(30)
     COS_A = math.cos(ISO_ANGLE)
     SIN_A = math.sin(ISO_ANGLE)
-    Z_SCALE = 0.55
+    Z_SCALE = 0.82
 
     site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
@@ -2883,11 +3070,11 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    target_screen_span = min(canvas_w, canvas_h) * 0.62
+    target_screen_span = min(canvas_w, canvas_h) * 0.55
     pixel_scale = target_screen_span / site_span
 
     screen_cx = canvas_w * 0.50
-    screen_cy = canvas_h * 0.55  # Litt lavere for å gi plass til høyde
+    screen_cy = canvas_h * 0.60  # Lavere for å gi plass til høyere bygninger
 
     def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
         dx = (x - cx) * pixel_scale
