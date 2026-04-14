@@ -367,6 +367,69 @@ def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Ima
 # --- 4. GEOSPATIAL HJELPERE ---
 DEFAULT_FLOOR_HEIGHT_M = 3.2
 
+def fetch_noise_map_image(
+    bbox_utm: Tuple[float, float, float, float],
+    buffer_m: float = 150.0,
+    gdo_client: Any = None,
+    width: int = 800,
+    height: int = 800,
+) -> Tuple[Optional[Image.Image], str]:
+    """
+    Henter et visuelt støykart fra Geodata Online DOK Forurensning MapServer.
+    Returnerer (PIL Image, kilde-tekst) eller (None, feilmelding).
+    """
+    minx, miny, maxx, maxy = bbox_utm
+    minx -= buffer_m
+    miny -= buffer_m
+    maxx += buffer_m
+    maxy += buffer_m
+
+    gdo_token = ""
+    if gdo_client is not None:
+        for attr in ['_token', 'token', '_access_token', 'access_token']:
+            tkn = getattr(gdo_client, attr, None)
+            if tkn and isinstance(tkn, str) and len(tkn) > 10:
+                gdo_token = tkn
+                break
+        if not gdo_token:
+            try:
+                sc = gdo_client.fetch_scene_config()
+                gdo_token = sc.get("token", "")
+            except Exception:
+                pass
+
+    if not gdo_token:
+        return None, "Ingen GDO-token tilgjengelig"
+
+    gdo_base = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+    # Vis alle støylag: 211 (veg-gruppe), 212 (veg-flate), 203-208 (andre)
+    try:
+        params = {
+            "bbox": f"{minx},{miny},{maxx},{maxy}",
+            "bboxSR": "25833",
+            "imageSR": "25833",
+            "size": f"{width},{height}",
+            "format": "png32",
+            "transparent": "true",
+            "layers": "show:212,204,206,208,214",
+            "f": "image",
+            "token": gdo_token,
+        }
+        resp = requests.get(f"{gdo_base}/export", params=params, timeout=15)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+            from io import BytesIO
+            img = Image.open(BytesIO(resp.content)).convert("RGBA")
+            # Sjekk om bildet er helt tomt/transparent (ingen støy i området)
+            extrema = img.getextrema()
+            if extrema[3][1] < 10:  # Alpha-kanal maks < 10 = helt transparent
+                return None, "Ingen støysoner i dette området"
+            return img, "Geodata Online DOK Forurensning"
+        else:
+            return None, f"Støykart HTTP {resp.status_code}"
+    except Exception as exc:
+        return None, f"Støykart-feil: {str(exc)[:60]}"
+
+
 def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
     if not isinstance(obj, dict):
         return []
@@ -3010,53 +3073,70 @@ def _parse_gdo_noise_results(gdo_results: List[Dict[str, Any]], result: Dict[str
 
 
 def _parse_single_noise_feature(attrs: Dict[str, Any], layer_name: str, result: Dict[str, Any]) -> None:
-    """Parser ett støy-feature fra GDO til result['zones']."""
+    """Parser ett støy-feature fra GDO DOK Forurensning. Bruker T-1442 feltnavn."""
     db_val = 0.0
     zone_name = ""
     source_type = "ukjent"
 
-    # Finn dB-verdi fra alle kjente feltnavn
-    for db_key in ["Lden", "LDEN", "lden", "db", "lydniva", "stoyniva", "desibel", "Lnight", "lnight",
-                    "DB", "Lydniva", "Stoyniva", "dB", "db_verdi", "LYDNIVA"]:
-        val = attrs.get(db_key)
-        if val is not None:
-            db_val = safe_float(val, 0)
-            if db_val > 0:
+    # T-1442 kategori: G = Gul (55-65 dB Lden), R = Rød (>65 dB Lden)
+    kategori = str(attrs.get("stoysonekategori", attrs.get("Stoysonekategori", ""))).strip().upper()
+    if kategori == "R":
+        zone_name = "Rød støysone"
+        db_val = 65.0
+    elif kategori == "G":
+        zone_name = "Gul støysone"
+        db_val = 55.0
+
+    # Direkte dB-verdier (andre lag)
+    if db_val == 0:
+        for db_key in ["Lden", "LDEN", "lden", "db", "lydniva", "stoyniva", "desibel",
+                        "Lnight", "lnight", "DB", "db_verdi"]:
+            val = attrs.get(db_key)
+            if val is not None:
+                db_val = safe_float(val, 0)
+                if db_val > 0:
+                    break
+
+    # Sonenavn
+    if not zone_name:
+        for zone_key in ["stoysone", "sone", "navn", "klasse", "objtype"]:
+            val = attrs.get(zone_key)
+            if val is not None and str(val).strip():
+                zone_name = str(val).strip()
                 break
-
-    # Finn sonenavn
-    for zone_key in ["stoysone", "Stoysone", "STOYSONE", "sone", "Sone", "navn", "Navn",
-                      "klasse", "Klasse", "KLASSE", "støysone", "kategori", "type"]:
-        val = attrs.get(zone_key)
-        if val is not None and str(val).strip():
-            zone_name = str(val).strip()
-            break
-
     if not zone_name:
         zone_name = layer_name
 
-    # Kildetype fra lagnavn
-    ln = layer_name.lower()
-    if any(k in ln for k in ["veg", "vei", "road"]):
-        source_type = "veg"
-    elif any(k in ln for k in ["jernbane", "bane", "rail", "tog"]):
-        source_type = "jernbane"
-    elif any(k in ln for k in ["industri", "virksomhet"]):
-        source_type = "industri"
-    elif any(k in ln for k in ["fly", "luft", "airport"]):
-        source_type = "flyplass"
-    elif any(k in ln for k in ["skyte", "skytefelt"]):
-        source_type = "skytefelt"
+    # Kildetype fra felt eller lagnavn
+    stoykilde = str(attrs.get("stoykilde", "")).strip()
+    stoykildenavn = str(attrs.get("stoykildenavn", "")).strip()
+    if stoykilde:
+        source_type = stoykilde.lower()
     else:
-        source_type = "sammensatt"
+        ln = layer_name.lower()
+        if any(k in ln for k in ["veg", "vei", "road"]):
+            source_type = "veg"
+        elif any(k in ln for k in ["jernbane", "bane", "rail"]):
+            source_type = "jernbane"
+        elif any(k in ln for k in ["fly", "luft"]):
+            source_type = "flyplass"
+        elif any(k in ln for k in ["skyte"]):
+            source_type = "skytefelt"
+        else:
+            source_type = "sammensatt"
 
-    if db_val > 0 or zone_name:
-        result["zones"].append({
+    if db_val > 0 or (zone_name and zone_name != layer_name):
+        entry: Dict[str, Any] = {
             "zone": zone_name,
             "db": round(db_val, 1),
             "source_type": source_type,
             "layer": layer_name,
-        })
+        }
+        if stoykildenavn:
+            entry["source_name"] = stoykildenavn
+        if kategori:
+            entry["kategori"] = kategori
+        result["zones"].append(entry)
 
 
 def calculate_daylight_tek17(
@@ -5856,6 +5936,27 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
         if st.session_state.ark_kart is not None:
             st.image(st.session_state.ark_kart, caption="Situasjonskart", use_container_width=True)
 
+        # Støykart — hentes automatisk når ortofoto er hentet
+        if "ark_stoykart" not in st.session_state:
+            st.session_state.ark_stoykart = None
+        if st.session_state.ark_kart is not None and st.session_state.ark_stoykart is None:
+            auto_poly = st.session_state.get("auto_site_polygon")
+            if auto_poly is not None and geodata_token_ok:
+                with st.spinner("Henter støykart fra DOK Forurensning..."):
+                    noise_img, noise_src = fetch_noise_map_image(
+                        auto_poly.bounds,
+                        buffer_m=200.0,
+                        gdo_client=gdo,
+                    )
+                    if noise_img is not None:
+                        st.session_state.ark_stoykart = noise_img
+                        st.success(f"Støykart hentet! ({noise_src})")
+                    else:
+                        st.session_state.ark_stoykart = "empty"  # Marker som sjekket
+                        st.caption(f"Støykart: {noise_src}")
+        if st.session_state.get("ark_stoykart") is not None and st.session_state.ark_stoykart != "empty":
+            st.image(st.session_state.ark_stoykart, caption="Støykart (DOK Forurensning — T-1442)", use_container_width=True)
+
     with c_upload:
         uploaded_files = st.file_uploader(
             "Last opp kart, situasjonsplan, PDF eller skisser",
@@ -5888,6 +5989,9 @@ if run_analysis:
     images_for_context = list(saved_images)
     if st.session_state.ark_kart is not None:
         images_for_context.append(st.session_state.ark_kart)
+    stoykart = st.session_state.get("ark_stoykart")
+    if stoykart is not None and stoykart != "empty":
+        images_for_context.append(stoykart)
     images_for_context.extend(load_uploaded_visuals(uploaded_files))
 
     auto_poly = st.session_state.get("auto_site_polygon")
