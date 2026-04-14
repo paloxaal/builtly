@@ -4276,6 +4276,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.2</span>"
     "</p>",
     unsafe_allow_html=True,
 )
