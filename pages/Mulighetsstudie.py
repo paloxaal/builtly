@@ -2900,7 +2900,6 @@ def _deterministic_solar_refinement(
 
 # --- MILJØANALYSE: STØY, DAGSLYS, UTSIKT, VIND ---
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: float = 100.0, gdo_client: Any = None) -> Dict[str, Any]:
     """Hent støysonekart. Prøver Geodata Online DOK Forurensning først, deretter Geonorge WFS."""
     minx, miny, maxx, maxy = bbox_utm
