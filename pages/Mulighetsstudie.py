@@ -2065,6 +2065,21 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         footprint_area = float(footprint_polygon.area)
 
+        # --- HØY UTNYTTELSE FALLBACK ---
+        # Når %-BRA er aktiv og fotavtrykket er under 50% av mål: fyll polygonen direkte
+        if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * 0.50:
+            # Skaler tomtepolygonen ned til target_footprint
+            scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
+            scale_ratio = min(scale_ratio, 0.95)  # Aldri mer enn 95% av polygonen
+            filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
+                                       origin=placement_polygon.centroid).buffer(0)
+            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
+                footprint_polygon = filled_fp
+                footprint_area = float(footprint_polygon.area)
+                placement["source"] = "polygon-fill"
+                placement["n_buildings"] = 1
+                placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
+
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
         fl_min = max(2, min(fl_min, allowed_floors))
@@ -4278,7 +4293,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.3</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.4</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -4730,7 +4745,7 @@ if run_analysis:
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
         st.session_state["_motor_diag"] = (
-            f"v9.3 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"v9.4 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         )
