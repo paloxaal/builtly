@@ -161,11 +161,8 @@ def clean_pdf_text(text: Any) -> str:
     text = text.replace("\u2026", "...").replace("\u2022", "*")
     if HAS_DEJAVU:
         return text
-    # Fallback: latin-1 for Helvetica (mangler TTF-font)
+    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
     text = text.replace("\u00b2", "2").replace("\u00b3", "3")
-    text = text.replace("\u00f8", "o").replace("\u00d8", "O")
-    text = text.replace("\u00e5", "a").replace("\u00c5", "A")
-    text = text.replace("\u00e6", "ae").replace("\u00c6", "AE")
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
@@ -2253,14 +2250,15 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         footprint_area = float(footprint_polygon.area)
 
         # --- HØY UTNYTTELSE FALLBACK (typologi-differensiert) ---
-        # Når %-BRA er aktiv og fotavtrykket er under 50% av mål:
+        # Når %-BRA er aktiv og fotavtrykket er under 85% av mål:
         # lager ULIKE former per typologi i stedet for generisk skalert polygon
-        if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * 0.50:
+        pct_bra_fill_threshold = 0.85 if site.utnyttelsesgrad_bra_pct > 150 else 0.50
+        if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * pct_bra_fill_threshold:
             fill_angle = placement.get("orientation_deg", 0.0)
             filled_fp, fill_info = _typology_polygon_fill(
                 placement_polygon, typology, target_footprint, fill_angle,
             )
-            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
+            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.05:
                 footprint_polygon = filled_fp
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
@@ -2271,7 +2269,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 scale_ratio = min(scale_ratio, max_scale)
                 filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
                                            origin=placement_polygon.centroid).buffer(0)
-                if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
+                if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.05:
                     footprint_polygon = filled_fp
                     footprint_area = float(footprint_polygon.area)
                     placement["source"] = "polygon-fill-generic"
@@ -3557,6 +3555,31 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
         });
       });
 
+      // Høyde-labels over nabobygg (dempet stil)
+      (payload.neighbors || []).forEach(item => {
+        if (!item.height_m || item.height_m < 3) return;
+        (item.rings || []).forEach(ring => {
+          if (!ring || ring.length < 3) return;
+          let cx = 0, cy = 0;
+          ring.forEach(pt => { cx += pt[0]; cy += pt[1]; });
+          cx /= ring.length; cy /= ring.length;
+          const h = item.height_m || 3;
+          graphicsLayer.add(new Graphic({
+            geometry: new Point({ x: cx, y: cy, z: h + 2, spatialReference: sr }),
+            symbol: {
+              type: 'point-3d',
+              symbolLayers: [{
+                type: 'text',
+                material: { color: [180, 190, 210, 0.8] },
+                text: h.toFixed(0) + ' m',
+                size: 8,
+                halo: { color: [0, 0, 0, 0.5], size: 1 }
+              }]
+            }
+          }));
+        });
+      });
+
       let extent = null;
       const allRings = [].concat(payload.site.rings || [], payload.buildable.rings || [], payload.footprint.rings || []);
       allRings.forEach(ring => {
@@ -4131,22 +4154,36 @@ def build_deterministic_report(
 
     if has_manual:
         mo = manual_override
-        lines.append(
-            f"Brukeren har manuelt overstyrt volumforslaget med en tilpasset skisse. "
-            f"Den manuelle løsningen gir {mo.get('gross_bta_m2', 0):.0f} m² BTA, "
-            f"{mo.get('saleable_area_m2', 0):.0f} m² salgbart areal og ca. {mo.get('unit_count', 0)} boliger. "
-            f"Tallene nedenfor reflekterer den manuelle plasseringen, som avviker fra motorens opprinnelige forslag."
-        )
-        lines.append(
-            f"Motorens beste indikative alternativ var {best.name} ({best.typology}) med score {best.score}/100, "
-            f"men brukeren har valgt å gå videre med egen volumplassering."
-        )
+        pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+        manual_bra = mo.get('saleable_area_m2', 0)
+        manual_pct_bra = round(manual_bra / max(site.site_area_m2, 1) * 100, 0) if pct_bra_active else 0
+        if pct_bra_active:
+            lines.append(
+                f"Brukeren har manuelt overstyrt volumforslaget. "
+                f"Den manuelle løsningen gir {manual_bra:.0f} m² BRA ({manual_pct_bra:.0f}% utnyttelse), "
+                f"{mo.get('gross_bta_m2', 0):.0f} m² BTA og ca. {mo.get('unit_count', 0)} boliger."
+            )
+        else:
+            lines.append(
+                f"Brukeren har manuelt overstyrt volumforslaget. "
+                f"Den manuelle løsningen gir {mo.get('gross_bta_m2', 0):.0f} m² BTA, "
+                f"{manual_bra:.0f} m² BRA og ca. {mo.get('unit_count', 0)} boliger."
+            )
     else:
-        lines.append(
-            f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
-            f"Det gir omtrent {best.gross_bta_m2:.0f} m2 BTA, {best.saleable_area_m2:.0f} m2 salgbart areal "
-            f"og ca. {best.unit_count} boliger innenfor dagens oppgitte rammer."
-        )
+        best_bra = best.gross_bta_m2 * best.efficiency_ratio
+        if site.utnyttelsesgrad_bra_pct > 0:
+            best_pct_bra = round(best_bra / max(site.site_area_m2, 1) * 100, 0)
+            lines.append(
+                f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
+                f"Det gir omtrent {best_bra:.0f} m² BRA ({best_pct_bra:.0f}% utnyttelse), "
+                f"{best.gross_bta_m2:.0f} m² BTA og ca. {best.unit_count} boliger."
+            )
+        else:
+            lines.append(
+                f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
+                f"Det gir omtrent {best.gross_bta_m2:.0f} m² BTA, {best_bra:.0f} m² BRA "
+                f"og ca. {best.unit_count} boliger."
+            )
     if using_polygon:
         lines.append(
             f"Analysen bruker faktisk tomtepolygon, reelt byggefelt på ca. {best.buildable_area_m2:.0f} m² "
@@ -4169,7 +4206,11 @@ def build_deterministic_report(
     lines.append(f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m²'}")
     lines.append(f"- Maks etasjer: {site.max_floors}")
     lines.append(f"- Maks høyde: {site.max_height_m:.1f} m")
-    lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m²")
+    if site.utnyttelsesgrad_bra_pct > 0:
+        target_bra = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        lines.append(f"- %-BRA mål: {site.utnyttelsesgrad_bra_pct:.0f}% → {target_bra:.0f} m² BRA")
+    else:
+        lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m²")
     lines.append(f"- Solanalyse basert på breddegrad: {site.latitude_deg:.3f}")
     lines.append(f"- Geometrikilde: {site.site_geometry_source}")
     lines.append(f"- Nabobygg brukt i analysen: {site.neighbor_count}")
@@ -4213,61 +4254,32 @@ def build_deterministic_report(
         f"Høydebegrensning og etasjeantall gir et indikativt tak på {min(site.max_floors, max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))))} etasjer."
     )
     lines.append("")
-    lines.append("# 6. ARKITEKTONISK VURDERING")
-    lines.append(
-        f"{best.typology} fremstår som sterkest i denne runden fordi kombinasjonen av volumtreff, solscore ({best.solar_score:.0f}/100), "
-        f"solbelyst uteareal ({best.sunlit_open_space_pct:.0f}%) og utnyttelse av faktisk byggefelt er best balansert."
-    )
-    lines.append("")
-    lines.append("# 7. MULIGE UTVIKLINGSGREP")
-    for option in options:
-        lines.append(
-            f"- {option.name}: {option.typology}, {option.floors} etasjer, {option.gross_bta_m2:.0f} m2 BTA, "
-            f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100 og ca. {option.sunlit_open_space_pct:.0f}% solbelyst uteareal."
-        )
-    lines.append("")
-    lines.append("# 8. ALTERNATIVER")
-    for option in options:
-        lines.append(f"## {option.name}")
-        lines.append(
-            f"- Typologi: {option.typology}\n"
-            f"- Fotavtrykk: {option.footprint_area_m2:.0f} m2 ({option.footprint_width_m:.1f} x {option.footprint_depth_m:.1f} m)\n"
-            f"- Buildbar flate: {option.buildable_area_m2:.0f} m2\n"
-            f"- BTA: {option.gross_bta_m2:.0f} m2\n"
-            f"- Salgbart areal: {option.saleable_area_m2:.0f} m2\n"
-            f"- Leiligheter: {option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})\n"
-            f"- Parkering: {option.parking_spaces} plasser\n"
-            f"- Solbelyst uteareal (skuldersesong): ca. {option.sunlit_open_space_pct:.0f}%\n"
-            f"- Vinterskygge kl 12: ca. {option.winter_noon_shadow_m:.0f} m\n"
-            f"- Skuldersesong soltimer: ca. {option.estimated_equinox_sun_hours:.1f} timer"
-        )
-        for note in option.notes:
-            lines.append(f"- {note}")
-    lines.append("")
-    lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
-    lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
-    if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
-        lines.append("- Nabohøyder er hentet automatisk og baserer seg på registrerte etasjer i matrikkelen. "
-                     "Verifiser mot faktisk situasjon for naerliggende bygg.")
-    elif best.neighbor_count > 0:
-        lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres dersom de skal brukes beslutningskritisk; OSM-data er ofte ufullstendig.")
-    else:
-        lines.append("- Ingen nabobygg er lagt inn. Skyggevurderingen gjelder kun eget volum. "
-                     "For mer realistisk analyse, sjekk at eiendomsdata er tilkoblet og at søkeradius er tilstrekkelig.")
-    lines.append("- Terrengmodellen er forenklet og boer erstattes med detaljert kotegrunnlag hvis prosjektet gaar videre til konkret skisse.")
-    lines.append("")
 
-    # --- MANUELL OVERSTYRING (kun når brukeren har låst en skisse) ---
+    # --- Når manuell overstyring er aktiv: kompakt rapport uten gammel alternativliste ---
     if has_manual:
         mo = manual_override
-        lines.append("# 10. MANUELL VOLUMOVERSTYRING")
+        pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+        site_area = max(site.site_area_m2, 1.0)
+        manual_bra = mo.get('saleable_area_m2', 0)
+        manual_bta = mo.get('gross_bta_m2', 0)
+        manual_pct_bra = round(manual_bra / site_area * 100, 0) if pct_bra_active else 0
+
+        lines.append("# 6. VALGT VOLUMLØSNING (MANUELL OVERSTYRING)")
         lines.append(
-            f"Brukeren har valgt å overstyre motorens forslag med en manuell volumplassering. "
-            f"Den manuelle skissen består av {mo.get('n_buildings', '?')} bygg og gir følgende nøkkeltall:"
+            f"Brukeren har overstyrt motorens forslag med en manuell volumplassering. "
+            f"Den manuelle skissen består av {mo.get('n_buildings', '?')} bygg."
         )
+        lines.append("")
+
+        if pct_bra_active:
+            lines.append(f"- BRA (salgbart areal): {manual_bra:.0f} m²")
+            lines.append(f"- %-BRA: {manual_pct_bra:.0f}% (mål: {site.utnyttelsesgrad_bra_pct:.0f}%)")
+            lines.append(f"- BTA (bruttoareal): {manual_bta:.0f} m²")
+        else:
+            lines.append(f"- BTA (bruttoareal): {manual_bta:.0f} m²")
+            lines.append(f"- BRA (salgbart areal): {manual_bra:.0f} m²")
+
         lines.append(f"- Fotavtrykk: {mo.get('footprint_area_m2', 0):.0f} m²")
-        lines.append(f"- BTA: {mo.get('gross_bta_m2', 0):.0f} m²")
-        lines.append(f"- Salgbart areal: {mo.get('saleable_area_m2', 0):.0f} m²")
         lines.append(f"- Leiligheter: {mo.get('unit_count', 0)}")
         mix_c = mo.get("mix_counts")
         if mix_c:
@@ -4278,43 +4290,90 @@ def build_deterministic_report(
         lines.append(f"- Solbelyst uteareal: {mo.get('sunlit_open_space_pct', 0):.0f}%")
         lines.append("")
 
-        # Sammenlign med beste motorforslag
-        motor_bta = best.gross_bta_m2
-        manual_bta = mo.get('gross_bta_m2', 0)
-        bta_diff_pct = ((manual_bta - motor_bta) / max(motor_bta, 1)) * 100
-        motor_sol = best.solar_score
-        manual_sol = mo.get('solar_score', 0)
-        lines.append("## Avvik fra motorens beste forslag")
-        lines.append(
-            f"Den manuelle løsningen avviker med {bta_diff_pct:+.0f}% i BTA sammenlignet med motorens beste forslag ({best.name}). "
-            f"Solscoren er {manual_sol:.0f}/100 mot motorens {motor_sol:.0f}/100."
-        )
-        if abs(bta_diff_pct) > 20:
+        lines.append("# 7. SAMMENLIGNING MED MOTORENS FORSLAG")
+        lines.append("Motorens automatiske alternativ ble beregnet som referanse. Kun sammendrag vises:")
+        for option in options[:5]:  # maks 5 alternativer i kort form
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
             lines.append(
-                "Avviket i BTA er betydelig. Verifiser at den manuelle plasseringen er i tråd med reguleringsplanens rammer."
-            )
-        if manual_sol < motor_sol * 0.8:
-            lines.append(
-                "Solscoren for den manuelle løsningen er vesentlig lavere enn motorens forslag. "
-                "Vurder om bygningenes plassering kan optimeres for bedre dagslys og solforhold."
+                f"- {option.name}: {option.gross_bta_m2:.0f} m² BTA, "
+                f"~{bra_est:.0f} m² BRA, {option.unit_count} boliger, sol {option.solar_score:.0f}/100"
             )
         lines.append("")
 
-        lines.append("# 11. ANBEFALING / NESTE STEG")
+        lines.append("# 8. RISIKO OG AVKLARINGSPUNKTER")
+        lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
+        if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
+            lines.append("- Nabohøyder er hentet automatisk fra matrikkelen. Verifiser mot faktisk situasjon.")
+        elif best.neighbor_count > 0:
+            lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
+        lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
+
+        if pct_bra_active and manual_pct_bra < site.utnyttelsesgrad_bra_pct * 0.9:
+            lines.append(
+                f"- OBS: Oppnådd %-BRA ({manual_pct_bra:.0f}%) er lavere enn mål ({site.utnyttelsesgrad_bra_pct:.0f}%). "
+                f"Vurder høyere etasjetall eller større fotavtrykk."
+            )
+        lines.append("")
+
+        lines.append("# 9. ANBEFALING / NESTE STEG")
         lines.append(
             f"Den manuelle skissen er valgt som utgangspunkt for videre bearbeiding. "
             f"Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
             f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell."
         )
-        lines.append(
-            f"Motorens opprinnelige forslag ({best.name}) er beholdt som referanse og kan brukes som sammenligningsgrunnlag."
-        )
     else:
+        # --- STANDARD RAPPORT (uten manuell overstyring) ---
+        lines.append("# 6. ARKITEKTONISK VURDERING")
+        lines.append(
+            f"{best.typology} fremstår som sterkest i denne runden fordi kombinasjonen av volumtreff, solscore ({best.solar_score:.0f}/100), "
+            f"solbelyst uteareal ({best.sunlit_open_space_pct:.0f}%) og utnyttelse av faktisk byggefelt er best balansert."
+        )
+        lines.append("")
+        lines.append("# 7. MULIGE UTVIKLINGSGREP")
+        for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            if site.utnyttelsesgrad_bra_pct > 0:
+                lines.append(
+                    f"- {option.name}: {option.typology}, {option.floors} etasjer, ~{bra_est:.0f} m² BRA, "
+                    f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
+                )
+            else:
+                lines.append(
+                    f"- {option.name}: {option.typology}, {option.floors} etasjer, {option.gross_bta_m2:.0f} m² BTA, "
+                    f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
+                )
+        lines.append("")
+        lines.append("# 8. ALTERNATIVER")
+        for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            lines.append(f"## {option.name}")
+            lines.append(
+                f"- Typologi: {option.typology}\n"
+                f"- Fotavtrykk: {option.footprint_area_m2:.0f} m²\n"
+                f"- BTA: {option.gross_bta_m2:.0f} m²\n"
+                f"- BRA (salgbart): ~{bra_est:.0f} m²\n"
+                f"- Leiligheter: {option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})\n"
+                f"- Parkering: {option.parking_spaces} plasser\n"
+                f"- Solbelyst uteareal: ca. {option.sunlit_open_space_pct:.0f}%\n"
+                f"- Vinterskygge kl 12: ca. {option.winter_noon_shadow_m:.0f} m"
+            )
+            for note in option.notes:
+                lines.append(f"- {note}")
+        lines.append("")
+        lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
+        lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
+        if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
+            lines.append("- Nabohøyder er hentet automatisk fra matrikkelen. Verifiser mot faktisk situasjon.")
+        elif best.neighbor_count > 0:
+            lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
+        lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
+        lines.append("")
         lines.append("# 10. ANBEFALING / NESTE STEG")
         lines.append(
             f"Start videre bearbeiding med {best.name}. Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
-            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell dersom prosjektet skal løftes videre."
+            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell."
         )
+
     return "\n".join(lines)
 
 
@@ -4425,12 +4484,13 @@ def create_full_report_pdf(
         pdf.ln(2)
         rows = []
         for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
             rows.append(
                 [
                     option.name.replace("Alt ", ""),
                     option.typology,
                     f"{option.gross_bta_m2:.0f}",
-                    f"{option.saleable_area_m2:.0f}",
+                    f"{bra_est:.0f}",
                     str(option.unit_count),
                     f"{option.solar_score:.0f}",
                     f"{option.score:.0f}",
@@ -4438,38 +4498,26 @@ def create_full_report_pdf(
             )
         add_pdf_table(
             pdf,
-            headers=["Alt", "Typologi", "BTA", "Salgb.", "Enheter", "Sol", "Score"],
+            headers=["Alt", "Typologi", "BTA", "BRA", "Enheter", "Sol", "Score"],
             rows=rows,
-            widths=[22, 28, 22, 22, 20, 18, 18],
+            widths=[30, 30, 22, 22, 20, 18, 18],
         )
 
-    if option_images:
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER"), 0, 1)
-        pdf.ln(2)
-        for image in option_images:
-            pdf.check_space(88)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(86)
-
-    # --- MANUELL SKISSE-VISUALISERINGER ---
+    # Volumskisser: vis KUN manuell skisse hvis bruker har overstyrt
     if manual_sketch_images:
         pdf.add_page()
         pdf.set_font(PDF_FONT, "B", 16)
         pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("MANUELL VOLUMOVERSTYRING — VISUALISERINGER"), 0, 1)
+        pdf.cell(0, 12, clean_pdf_text("VALGT VOLUMLØSNING"), 0, 1)
         pdf.ln(2)
         pdf.set_font(PDF_FONT, "", 10)
         pdf.set_text_color(0, 0, 0)
         pdf.multi_cell(150, 5, clean_pdf_text(
-            "Bildene nedenfor viser den manuelt redigerte volumplasseringen. "
-            "Denne erstatter motorens opprinnelige forslag som primaeralternativ."
+            "Bildene nedenfor viser den manuelt redigerte volumplasseringen "
+            "som er valgt for videre bearbeiding."
         ))
         pdf.ln(4)
-        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "Alternativ vinkel", "Detalj"]
+        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             label = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
@@ -4482,6 +4530,17 @@ def create_full_report_pdf(
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.ln(90)
+    elif option_images:
+        pdf.set_font(PDF_FONT, "B", 16)
+        pdf.set_text_color(26, 43, 72)
+        pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER"), 0, 1)
+        pdf.ln(2)
+        for image in option_images:
+            pdf.check_space(88)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(86)
 
     pdf.add_page()
     for raw_line in report_text.split("\n"):
@@ -4519,7 +4578,7 @@ def create_full_report_pdf(
         pdf.set_x(25)
         pdf.set_font(PDF_FONT, "B", 16)
         pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VEDLEGG: KART OG REFERANSER"), 0, 1)
+        pdf.cell(0, 12, clean_pdf_text("VEDLEGG: FLYFOTO, 3D-SCENE OG REFERANSER"), 0, 1)
         pdf.ln(2)
         for idx, image in enumerate(visual_attachments, start=1):
             if idx > 1:
