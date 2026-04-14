@@ -5936,26 +5936,55 @@ with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
         if st.session_state.ark_kart is not None:
             st.image(st.session_state.ark_kart, caption="Situasjonskart", use_container_width=True)
 
-        # Støykart — hentes automatisk når ortofoto er hentet
+        # Støykart — hentes automatisk og legges over ortofoto
         if "ark_stoykart" not in st.session_state:
             st.session_state.ark_stoykart = None
         if st.session_state.ark_kart is not None and st.session_state.ark_stoykart is None:
             auto_poly = st.session_state.get("auto_site_polygon")
             if auto_poly is not None and geodata_token_ok:
                 with st.spinner("Henter støykart fra DOK Forurensning..."):
+                    # Bruk SAMME bounds som ortofoto (80m buffer)
                     noise_img, noise_src = fetch_noise_map_image(
                         auto_poly.bounds,
-                        buffer_m=200.0,
+                        buffer_m=80.0,  # Match ortofoto-buffer
                         gdo_client=gdo,
+                        width=1200,
+                        height=1200,
                     )
                     if noise_img is not None:
-                        st.session_state.ark_stoykart = noise_img
-                        st.success(f"Støykart hentet! ({noise_src})")
+                        # Komponer støykart over ortofoto
+                        combined = None
+                        try:
+                            ortofoto_raw = st.session_state.ark_kart
+                            if isinstance(ortofoto_raw, Image.Image):
+                                ortofoto = ortofoto_raw.convert("RGBA")
+                                noise_rgba = noise_img.convert("RGBA")
+                                # Resize til samme størrelse
+                                target_size = ortofoto.size
+                                if noise_rgba.size != target_size:
+                                    try:
+                                        noise_rgba = noise_rgba.resize(target_size, Image.Resampling.LANCZOS)
+                                    except AttributeError:
+                                        noise_rgba = noise_rgba.resize(target_size, Image.LANCZOS)
+                                # Forsterk alpha med point() (rask)
+                                r, g, b, a = noise_rgba.split()
+                                a = a.point(lambda x: min(int(x * 1.3), 180) if x > 5 else 0)
+                                noise_rgba = Image.merge("RGBA", (r, g, b, a))
+                                combined = Image.alpha_composite(ortofoto, noise_rgba).convert("RGB")
+                        except Exception as comp_err:
+                            st.caption(f"Kompositt-feil: {comp_err}")
+
+                        if combined is not None:
+                            st.session_state.ark_stoykart = combined
+                            st.success(f"Støykart lagt over ortofoto ({noise_src})")
+                        else:
+                            st.session_state.ark_stoykart = noise_img.convert("RGB")
+                            st.success(f"Støykart hentet ({noise_src})")
                     else:
-                        st.session_state.ark_stoykart = "empty"  # Marker som sjekket
+                        st.session_state.ark_stoykart = "empty"
                         st.caption(f"Støykart: {noise_src}")
         if st.session_state.get("ark_stoykart") is not None and st.session_state.ark_stoykart != "empty":
-            st.image(st.session_state.ark_stoykart, caption="Støykart (DOK Forurensning — T-1442)", use_container_width=True)
+            st.image(st.session_state.ark_stoykart, caption="Ortofoto med støysoner (T-1442 — Gul: 55-65 dB, Rød: >65 dB)", use_container_width=True)
 
     with c_upload:
         uploaded_files = st.file_uploader(
