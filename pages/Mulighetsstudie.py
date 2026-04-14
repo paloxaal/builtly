@@ -1230,6 +1230,10 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     footprint: Any = None
 
     # Tilpass bygningsdybde — men behold typologisk karakter
+    # Reduser spacing ved høy utnyttelse
+    high_utilization = target_footprint_m2 > area * 0.4
+    sp_factor = 0.5 if high_utilization else 1.0
+
     if typology == "Punkthus":
         # Kvadratisk, kompakt — ALDRI bredere enn 22m
         bld_w = min(22.0, minor * 0.45)
@@ -1242,9 +1246,9 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         bld_w = max(14.0, bld_w)
         bld_d = max(14.0, bld_d)
     elif typology == "Rekke":
-        # Lang og smal
-        bld_w = min(limits["bld_w"], major * 0.85)
-        bld_d = min(10.0, minor * 0.3)
+        # Lang og smal — strekk langs major
+        bld_w = min(limits["bld_w"], major * 0.90)
+        bld_d = min(11.0, minor * 0.35)
         bld_w = max(20.0, bld_w)
         bld_d = max(8.0, bld_d)
     elif typology == "Karré":
@@ -1253,16 +1257,26 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         bld_w = max(20.0, bld_w)
         bld_d = max(20.0, bld_d)
     elif typology == "Tun":
-        bld_w = min(limits["bld_w"], major * 0.5)
-        bld_d = min(12.0, minor * 0.4)
+        bld_w = min(limits["bld_w"], major * 0.55)
+        bld_d = min(12.0, minor * 0.40)
         bld_w = max(15.0, bld_w)
         bld_d = max(8.0, bld_d)
+    elif typology == "Lamell":
+        # Lamell: lang, 12-14m dyp, strekk langs major
+        bld_w = min(limits["bld_w"], major * 0.85)
+        bld_d = min(14.0, minor * 0.40)
+        bld_w = max(20.0, bld_w)
+        bld_d = max(11.0, bld_d)
     else:
-        # Lamell, Podium+Tårn: standard
+        # Podium+Tårn: standard
         bld_w = min(limits["bld_w"], major * 0.7)
         bld_d = min(limits["bld_d"], minor * 0.45)
         bld_w = max(12.0, bld_w)
         bld_d = max(10.0, bld_d)
+
+    # Juster spacing for høy utnyttelse
+    effective_sp_along = limits["sp_along"] * sp_factor
+    effective_sp_across = limits["sp_across"] * sp_factor
 
     if typology == 'Karré':
         # Ekte kvartaler med gaardrom
@@ -1272,7 +1286,7 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
 
         # Plasser kvartaler i grid
-        step = karre_side + limits["sp_along"]
+        step = karre_side + effective_sp_along
         n_along = max(1, int(math.sqrt(n_needed) + 0.5))
         n_across = max(1, math.ceil(n_needed / n_along))
 
@@ -1343,8 +1357,8 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
 
         buildings = _place_grid_buildings(
             buildable_polygon, bld_w, bld_d, angle,
-            spacing_along=limits["sp_along"],
-            spacing_across=limits["sp_across"],
+            spacing_along=effective_sp_along,
+            spacing_across=effective_sp_across,
             max_buildings=n_needed,
             max_footprint_m2=target_footprint_m2,
         )
@@ -1950,7 +1964,26 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
     for template in templates:
         typology = template["typology"]
-        target_footprint = max_footprint * template["coverage"]
+
+        # Når %-BRA overstyrer: beregn target_footprint direkte fra BTA-mål
+        if site.utnyttelsesgrad_bra_pct > 0:
+            fl_min, fl_max = template.get("floor_range", (3, 5))
+            fl_max_eff = min(fl_max, allowed_floors)
+            fl_min_eff = max(fl_min, 2)
+            # Velg etasjer som gir fotavtrykk nærmest tilgjengelig areal
+            best_fp = 0
+            best_fl = fl_min_eff
+            for f in range(fl_min_eff, fl_max_eff + 1):
+                fp = target_bta / max(f, 1)
+                if fp <= placement_polygon.area and fp > best_fp:
+                    best_fp = fp
+                    best_fl = f
+            if best_fp < 50:
+                best_fp = target_bta / max(fl_max_eff, 1)
+                best_fl = fl_max_eff
+            target_footprint = min(best_fp, placement_polygon.area * 0.92)
+        else:
+            target_footprint = max_footprint * template["coverage"]
 
         ai_result = None
         ai_massing = None
@@ -4675,6 +4708,22 @@ if run_analysis:
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     with st.spinner(f"Regner volumalternativer med faktisk tomtepolygon, naboer og terreng{ai_label} ..."):
         options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+
+    # Diagnostikk: vis hva motoren bruker
+    if site.utnyttelsesgrad_bra_pct > 0:
+        limits_diag = derive_limits(site, geodata_context)
+        target_bra_diag = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
+        best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
+        shortfall = target_bta_diag - best_bta
+        if shortfall > target_bta_diag * 0.2:
+            st.warning(
+                f"%-BRA mål: {target_bra_diag:,.0f} m² BRA ({target_bta_diag:,.0f} m² BTA). "
+                f"Beste alternativ oppnår {best_bta:,.0f} m² BTA — {shortfall:,.0f} m² under mål. "
+                f"Tomteareal brukt: {site.site_area_m2:,.0f} m², bebbyggbart: {limits_diag['buildable_area']:,.0f} m², "
+                f"maks fotavtrykk: {limits_diag['max_footprint']:,.0f} m², etasjer: {int(limits_diag['allowed_floors'])}. "
+                f"Tips: reduser byggegrenser/setbacks til 0, eller øk maks etasjer."
+            )
 
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         options = apply_site_intelligence_to_options(options, site_intelligence_bundle)
