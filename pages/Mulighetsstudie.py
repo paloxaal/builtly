@@ -2846,90 +2846,125 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
     maxx += buffer_m
     maxy += buffer_m
 
-    result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata"}
+    result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata", "debug": []}
 
-    # --- 1. GEODATA ONLINE: DOK Forurensning (ArcGIS MapServer identify) ---
-    gdo_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer/identify"
-    try:
-        gdo_token = ""
-        if gdo_client is not None and hasattr(gdo_client, '_token'):
-            gdo_token = gdo_client._token or ""
-        elif gdo_client is not None and hasattr(gdo_client, 'token'):
-            gdo_token = gdo_client.token or ""
+    # --- 1. GEODATA ONLINE: DOK Forurensning ---
+    gdo_base = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
 
-        params = {
-            "geometry": f"{minx},{miny},{maxx},{maxy}",
-            "geometryType": "esriGeometryEnvelope",
-            "sr": "25833",
-            "layers": "all",
-            "tolerance": "0",
-            "mapExtent": f"{minx},{miny},{maxx},{maxy}",
-            "imageDisplay": "400,400,96",
-            "returnGeometry": "false",
-            "f": "json",
-        }
-        if gdo_token:
-            params["token"] = gdo_token
+    # Ekstraher token fra GDO-klienten
+    gdo_token = ""
+    if gdo_client is not None:
+        for attr in ['_token', 'token', '_access_token', 'access_token']:
+            tkn = getattr(gdo_client, attr, None)
+            if tkn and isinstance(tkn, str) and len(tkn) > 10:
+                gdo_token = tkn
+                break
+        # Prøv scene_config som siste utvei
+        if not gdo_token:
+            try:
+                sc = gdo_client.fetch_scene_config()
+                gdo_token = sc.get("token", "")
+            except Exception:
+                pass
 
-        resp = requests.get(gdo_url, params=params, timeout=12)
-        if resp.status_code == 200:
-            data = resp.json()
-            gdo_results = data.get("results", [])
-            for feat in gdo_results:
-                attrs = feat.get("attributes", {})
-                layer_name = feat.get("layerName", "").lower()
+    if gdo_token:
+        # Strategi A: identify med hele kartet
+        try:
+            identify_url = f"{gdo_base}/identify"
+            params = {
+                "geometry": json.dumps({"xmin": minx, "ymin": miny, "xmax": maxx, "ymax": maxy, "spatialReference": {"wkid": 25833}}),
+                "geometryType": "esriGeometryEnvelope",
+                "sr": "25833",
+                "layers": "all",
+                "tolerance": "10",
+                "mapExtent": f"{minx},{miny},{maxx},{maxy}",
+                "imageDisplay": "600,600,96",
+                "returnGeometry": "false",
+                "f": "json",
+                "token": gdo_token,
+            }
+            resp = requests.get(identify_url, params=params, timeout=15)
+            result["debug"].append(f"identify: HTTP {resp.status_code}")
 
-                # Støydata: finn dB-verdi og kildetype fra attributter
-                db_val = 0.0
-                zone_name = ""
-                source_type = "ukjent"
-
-                # Typiske feltnavn i DOK Forurensning støylag
-                for db_key in ["lden", "db", "lydniva", "stoyniva", "desibel", "lnight", "Lden", "LDEN"]:
-                    if db_key in attrs:
-                        db_val = safe_float(attrs[db_key], 0)
-                        if db_val > 0:
-                            break
-
-                for zone_key in ["stoysone", "sone", "navn", "støysone", "STOYSONE", "klasse"]:
-                    if zone_key in attrs:
-                        zone_name = str(attrs[zone_key])
-                        break
-
-                if not zone_name:
-                    zone_name = feat.get("layerName", "Støysone")
-
-                # Kildetype fra lagnavn
-                ln = layer_name
-                if "veg" in ln or "vei" in ln or "road" in ln:
-                    source_type = "veg"
-                elif "jernbane" in ln or "bane" in ln or "rail" in ln:
-                    source_type = "jernbane"
-                elif "industri" in ln or "virksomhet" in ln:
-                    source_type = "industri"
-                elif "fly" in ln or "luft" in ln:
-                    source_type = "flyplass"
-                elif "skyte" in ln or "skytefelt" in ln:
-                    source_type = "skytefelt"
+            if resp.status_code == 200:
+                data = resp.json()
+                if "error" in data:
+                    result["debug"].append(f"identify error: {data['error'].get('message', '')[:80]}")
                 else:
-                    source_type = "sammensatt"
+                    _parse_gdo_noise_results(data.get("results", []), result)
+        except Exception as exc:
+            result["debug"].append(f"identify exception: {str(exc)[:60]}")
 
-                if db_val > 0 or zone_name:
-                    result["zones"].append({
-                        "zone": zone_name or f"Støysone ({source_type})",
-                        "db": round(db_val, 1),
-                        "source_type": source_type,
-                        "layer": feat.get("layerName", ""),
-                    })
+        # Strategi B: query kjente støylag direkte (hardkodede lag-IDer fra DOK Forurensning)
+        if not result["available"]:
+            noise_layers = [
+                (212, "Støykartlegging veg T-1442", "veg"),
+                (206, "Støysoner jernbane", "jernbane"),
+                (204, "Støysoner lufthavn", "flyplass"),
+                (214, "Støysoner Forsvarets flyplasser", "flyplass"),
+                (208, "Støysoner skyte- og øvingsfelt", "skytefelt"),
+            ]
+            geom_json = json.dumps({
+                "xmin": minx, "ymin": miny, "xmax": maxx, "ymax": maxy,
+                "spatialReference": {"wkid": 25833}
+            })
+            for layer_id, layer_label, src_type in noise_layers:
+                try:
+                    query_url = f"{gdo_base}/{layer_id}/query"
+                    q_params = {
+                        "geometry": geom_json,
+                        "geometryType": "esriGeometryEnvelope",
+                        "spatialRel": "esriSpatialRelIntersects",
+                        "outFields": "*",
+                        "returnGeometry": "false",
+                        "f": "json",
+                        "token": gdo_token,
+                    }
+                    q_resp = requests.get(query_url, params=q_params, timeout=10)
+                    if q_resp.status_code == 200:
+                        q_data = q_resp.json()
+                        if "error" in q_data:
+                            result["debug"].append(f"layer {layer_id}: {q_data['error'].get('message', '')[:50]}")
+                            continue
+                        features = q_data.get("features", [])
+                        if features:
+                            result["debug"].append(f"layer {layer_id} ({layer_label}): {len(features)} treff")
+                            for feat in features:
+                                attrs = feat.get("attributes", {})
+                                _parse_single_noise_feature(attrs, layer_label, result)
+                                # Override source_type med kjent verdi
+                                if result["zones"]:
+                                    result["zones"][-1]["source_type"] = src_type
+                except Exception as exc:
+                    result["debug"].append(f"layer {layer_id} feil: {str(exc)[:40]}")
+                    continue
 
-            if result["zones"]:
-                result["available"] = True
-                result["source"] = "Geodata Online DOK Forurensning"
-                # Sortér: høyest dB først
-                result["zones"].sort(key=lambda z: z.get("db", 0), reverse=True)
-                return result
-    except Exception:
-        pass
+            # Sjekk også forurenset grunn (lag 202) for kontekst
+            try:
+                q_resp = requests.get(f"{gdo_base}/202/query", params={
+                    "geometry": geom_json,
+                    "geometryType": "esriGeometryEnvelope",
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "outFields": "*",
+                    "returnGeometry": "false",
+                    "f": "json",
+                    "token": gdo_token,
+                }, timeout=10)
+                if q_resp.status_code == 200:
+                    q_data = q_resp.json()
+                    features = q_data.get("features", [])
+                    if features:
+                        result["debug"].append(f"Forurenset grunn: {len(features)} treff")
+                        result["contaminated_ground"] = True
+                        result["contaminated_count"] = len(features)
+            except Exception:
+                pass
+
+        if result["zones"]:
+            result["available"] = True
+            result["source"] = "Geodata Online DOK Forurensning"
+            result["zones"].sort(key=lambda z: z.get("db", 0), reverse=True)
+            return result
 
     # --- 2. FALLBACK: Geonorge WFS ---
     services = [
@@ -2964,6 +2999,64 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
         except Exception:
             continue
     return result
+
+
+def _parse_gdo_noise_results(gdo_results: List[Dict[str, Any]], result: Dict[str, Any]) -> None:
+    """Parser GDO identify-resultater til støysoner."""
+    for feat in gdo_results:
+        attrs = feat.get("attributes", {})
+        layer_name = feat.get("layerName", "Støysone")
+        _parse_single_noise_feature(attrs, layer_name, result)
+
+
+def _parse_single_noise_feature(attrs: Dict[str, Any], layer_name: str, result: Dict[str, Any]) -> None:
+    """Parser ett støy-feature fra GDO til result['zones']."""
+    db_val = 0.0
+    zone_name = ""
+    source_type = "ukjent"
+
+    # Finn dB-verdi fra alle kjente feltnavn
+    for db_key in ["Lden", "LDEN", "lden", "db", "lydniva", "stoyniva", "desibel", "Lnight", "lnight",
+                    "DB", "Lydniva", "Stoyniva", "dB", "db_verdi", "LYDNIVA"]:
+        val = attrs.get(db_key)
+        if val is not None:
+            db_val = safe_float(val, 0)
+            if db_val > 0:
+                break
+
+    # Finn sonenavn
+    for zone_key in ["stoysone", "Stoysone", "STOYSONE", "sone", "Sone", "navn", "Navn",
+                      "klasse", "Klasse", "KLASSE", "støysone", "kategori", "type"]:
+        val = attrs.get(zone_key)
+        if val is not None and str(val).strip():
+            zone_name = str(val).strip()
+            break
+
+    if not zone_name:
+        zone_name = layer_name
+
+    # Kildetype fra lagnavn
+    ln = layer_name.lower()
+    if any(k in ln for k in ["veg", "vei", "road"]):
+        source_type = "veg"
+    elif any(k in ln for k in ["jernbane", "bane", "rail", "tog"]):
+        source_type = "jernbane"
+    elif any(k in ln for k in ["industri", "virksomhet"]):
+        source_type = "industri"
+    elif any(k in ln for k in ["fly", "luft", "airport"]):
+        source_type = "flyplass"
+    elif any(k in ln for k in ["skyte", "skytefelt"]):
+        source_type = "skytefelt"
+    else:
+        source_type = "sammensatt"
+
+    if db_val > 0 or zone_name:
+        result["zones"].append({
+            "zone": zone_name,
+            "db": round(db_val, 1),
+            "source_type": source_type,
+            "layer": layer_name,
+        })
 
 
 def calculate_daylight_tek17(
@@ -6496,9 +6589,12 @@ if "analysis_results" in st.session_state:
                 noise_color = "#f87171" if db_val > 65 else "#f59e0b" if db_val > 55 else "#34d399"
                 st.markdown(f"<div class='kpi-card'><div class='metric-title'>Støy (T-1442)</div><div class='metric-value' style='color:{noise_color}'>{worst_zone.get('zone', '–')}</div></div>", unsafe_allow_html=True)
                 if db_val > 0:
-                    st.caption(f"{db_val:.0f} dB, {worst_zone.get('source_type', 'vei')}")
+                    st.caption(f"{db_val:.0f} dB, {worst_zone.get('source_type', 'vei')} | Kilde: {noise.get('source', '?')}")
             else:
                 st.markdown("<div class='kpi-card'><div class='metric-title'>Støy</div><div class='metric-value' style='color:#34d399'>Ingen data</div></div>", unsafe_allow_html=True)
+                debug = noise.get("debug", [])
+                if debug:
+                    st.caption(f"Debug: {' | '.join(debug[:3])}")
 
         # Dagslys
         daylight = env_data.get("daylight", {})
