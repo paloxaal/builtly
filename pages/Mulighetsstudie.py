@@ -2156,8 +2156,14 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         # Når %-BRA overstyrer: beregn target_footprint direkte fra BTA-mål
         if site.utnyttelsesgrad_bra_pct > 0:
             fl_min, fl_max = template.get("floor_range", (3, 5))
-            fl_max_eff = min(fl_max, allowed_floors)
-            fl_min_eff = max(fl_min, 2)
+            # Høy %-BRA (>150%): ignorer template floor_range og bruk allowed_floors
+            # slik at motoren kan nå målet med færre m² fotavtrykk
+            if site.utnyttelsesgrad_bra_pct > 150:
+                fl_max_eff = allowed_floors
+                fl_min_eff = max(fl_min, 2)
+            else:
+                fl_max_eff = min(fl_max, allowed_floors)
+                fl_min_eff = max(fl_min, 2)
             # Velg etasjer som gir fotavtrykk innenfor TOMTEAREAL (ikke placement_polygon)
             site_area_limit = max(geodata_context.get("site_area_m2", site.site_area_m2), 100.0)
             best_fp = 0
@@ -2261,7 +2267,8 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             else:
                 # Siste utvei: generisk skalert polygon (gammel oppførsel)
                 scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
-                scale_ratio = min(scale_ratio, 0.95)
+                max_scale = 0.98 if site.utnyttelsesgrad_bra_pct > 200 else 0.95
+                scale_ratio = min(scale_ratio, max_scale)
                 filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
                                            origin=placement_polygon.centroid).buffer(0)
                 if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.3:
@@ -2273,6 +2280,9 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
+        # Høy %-BRA (>150%): bruk allowed_floors som tak for ALLE typologier
+        if site.utnyttelsesgrad_bra_pct > 150:
+            fl_max = allowed_floors
         # Tårn polygon-fill: overstyrer floor_range for å kompensere lite fotavtrykk
         if placement.get("tower_override_floors") and typology == "Tårn":
             fl_min = max(fl_min, 8)
@@ -3043,7 +3053,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     Viser foreslatte volumer, nabobygg og tomtegrense fra skraa vinkel
     slik at siktlinjer, hoyder og romlige forhold er tydelige.
     """
-    canvas_w, canvas_h = 1100, 780
+    canvas_w, canvas_h = 1100, 900
     img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
     font = ImageFont.load_default()
@@ -3059,7 +3069,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     ISO_ANGLE = math.radians(30)
     COS_A = math.cos(ISO_ANGLE)
     SIN_A = math.sin(ISO_ANGLE)
-    Z_SCALE = 0.82
+    Z_SCALE = 1.2
 
     site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
@@ -3070,11 +3080,11 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    target_screen_span = min(canvas_w, canvas_h) * 0.55
+    target_screen_span = min(canvas_w, canvas_h) * 0.48
     pixel_scale = target_screen_span / site_span
 
     screen_cx = canvas_w * 0.50
-    screen_cy = canvas_h * 0.60  # Lavere for å gi plass til høyere bygninger
+    screen_cy = canvas_h * 0.65  # Langt ned for å gi maks plass til høyde
 
     def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
         dx = (x - cx) * pixel_scale
@@ -3212,6 +3222,138 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     return img.convert('RGB')
 
 
+def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
+    """
+    Planvisning (fugleperspektiv / top-down) av volumskisse.
+    Viser tomtegrense, byggefelt, fotavtrykk og bygninger med etasjefarge-koding.
+    """
+    canvas_w, canvas_h = 1100, 780
+    img = Image.new('RGBA', (canvas_w, canvas_h), (240, 243, 248, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = ImageFont.load_default()
+
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+
+    site_pts = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    margin = 60
+    target_span = min(canvas_w, canvas_h) - 2 * margin
+    scale = target_span / site_span
+    ox = canvas_w / 2.0
+    oy = canvas_h / 2.0
+
+    def proj(x: float, y: float) -> Tuple[float, float]:
+        return ox + (x - cx) * scale, oy + (y - cy) * scale
+
+    def pts(coords):
+        return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
+
+    # Tomtegrense
+    sp = pts(flatten_coord_groups(site_coords))
+    if len(sp) >= 3:
+        draw.polygon(sp, fill=(220, 225, 233, 180), outline=(100, 110, 130, 220))
+
+    # Byggefelt
+    bp = pts(flatten_coord_groups(buildable_coords))
+    if len(bp) >= 3:
+        draw.polygon(bp, fill=(200, 218, 240, 60), outline=(56, 140, 248, 120))
+
+    # Nabobygg
+    for neighbor in neighbor_polys:
+        ncoords = neighbor.get('coords') or neighbor.get('polygon_coords', [])
+        if isinstance(ncoords, str):
+            continue
+        np_ = pts(flatten_coord_groups(ncoords))
+        if len(np_) >= 3:
+            draw.polygon(np_, fill=(180, 185, 195, 120), outline=(140, 145, 155, 180))
+
+    # Bygningsvolumer
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords:
+            continue
+        pp = pts(pcoords)
+        if len(pp) < 3:
+            continue
+        base_c = part.get('color', [34, 197, 94, 200])
+        base_c = tuple(int(v) if v > 1 else int(v * 255) for v in base_c)
+        if len(base_c) < 4:
+            base_c = (base_c[0], base_c[1], base_c[2], 200)
+        draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 220))
+        draw.line(pp + [pp[0]], fill=(255, 255, 255, 220), width=2)
+
+        # Label
+        avg_x = sum(p[0] for p in pp) / len(pp)
+        avg_y = sum(p[1] for p in pp) / len(pp)
+        floors = part.get('floors', 0)
+        name = part.get('name', '')
+        draw.text((avg_x - 20, avg_y - 8), f"{name}", fill=(30, 30, 30, 255), font=font)
+        draw.text((avg_x - 15, avg_y + 4), f"{floors} et.", fill=(60, 60, 60, 220), font=font)
+
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay + 22, ax, ay - 16), fill=(60, 70, 90, 200), width=3)
+    draw.polygon([(ax, ay - 25), (ax - 7, ay - 7), (ax + 7, ay - 7)], fill=(60, 70, 90, 200))
+    draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font)
+
+    # Målestokk
+    scale_bar_m = 10.0
+    while scale_bar_m * scale < 40:
+        scale_bar_m *= 2
+    while scale_bar_m * scale > 200:
+        scale_bar_m /= 2
+    bar_px = scale_bar_m * scale
+    bx, by_s = 40, canvas_h - 50
+    draw.line([(bx, by_s), (bx + bar_px, by_s)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx, by_s - 4), (bx, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx + bar_px, by_s - 4), (bx + bar_px, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.text((bx + bar_px / 2 - 10, by_s - 16), f"{scale_bar_m:.0f} m", fill=(60, 70, 90, 220), font=font)
+
+    # Infopanel
+    yt = canvas_h - 35
+    draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(240, 243, 248, 240))
+    title = f"PLANVISNING | {option.name} | {option.typology}"
+    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font)
+    draw.text((30, yt + 14), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(80, 90, 110, 220), font=font)
+
+    return img.convert('RGB')
+
+
+def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[Image.Image]:
+    """
+    Renderer multiple visninger av en manuell skisse for PDF-rapport.
+
+    Returnerer [isometrisk, planvisning] — begge som PIL Image.
+    """
+    views: List[Image.Image] = []
+
+    # 1. Isometrisk volumskisse (standard)
+    try:
+        iso_img = render_plan_diagram(site, sketch_option)
+        views.append(iso_img)
+    except Exception:
+        pass
+
+    # 2. Planvisning (fugleperspektiv)
+    try:
+        plan_img = render_plan_view(site, sketch_option)
+        views.append(plan_img)
+    except Exception:
+        pass
+
+    return views
+
+
 def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
     geometry = option.geometry or {}
     src_crs = site.polygon_crs or 'EPSG:25833'
@@ -3257,6 +3399,16 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
         'neighbors': neighbors[:40],
         'shadow': {'rings': project_coord_groups_to_lonlat(geometry.get('winter_shadow_polygon_coords') or [], src_crs=src_crs)},
         'placement': geometry.get('placement', {}),
+        'stats': {
+            'bta_m2': round(option.gross_bta_m2, 0),
+            'bra_m2': round(option.saleable_area_m2, 0),
+            'pct_bra': round(option.gross_bta_m2 * option.efficiency_ratio / max(site.site_area_m2, 1) * 100, 0),
+            'boliger': option.unit_count,
+            'etasjer': option.floors,
+            'hoyde_m': round(option.building_height_m, 1),
+            'sol': round(option.solar_score, 0),
+            'fotavtrykk_m2': round(option.footprint_area_m2, 0),
+        },
     }
 
 
@@ -3264,11 +3416,45 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
     payload = build_geodata_scene_payload(site, option, scene_config)
     payload_json = json.dumps(payload, ensure_ascii=False)
     html_template = """
-    <div id="viewDiv" style="width:100%;height:__HEIGHT__px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);"></div>
+    <div id="sceneContainer" style="position:relative;width:100%;height:__HEIGHT__px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
+      <div id="viewDiv" style="width:100%;height:100%;"></div>
+      <div id="statsPanel" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;color:#ecf0f5;font-family:-apple-system,system-ui,sans-serif;font-size:13px;line-height:1.6;pointer-events:none;min-width:180px;backdrop-filter:blur(8px);">
+        <div style="color:#38bdf8;font-weight:700;font-size:11px;letter-spacing:0.5px;margin-bottom:4px;">NØKKELTALL</div>
+        <div style="font-weight:700;font-size:16px;" id="statBTA"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statBRA"></div>
+        <div style="font-size:12px;color:#f87171;font-weight:600;" id="statPctBRA"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statBoliger"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statEtasjer"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statSol"></div>
+      </div>
+      <button id="screenshotBtn" onclick="captureScene()" style="position:absolute;bottom:12px;right:12px;background:rgba(56,189,248,0.9);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:12px;font-weight:600;cursor:pointer;pointer-events:auto;backdrop-filter:blur(4px);display:flex;align-items:center;gap:6px;">
+        📸 Last ned bilde
+      </button>
+    </div>
     <script src="https://js.arcgis.com/4.30/"></script>
     <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
     <script>
     const payload = __PAYLOAD__;
+    // Fyll stats-panel
+    const s = payload.stats || {};
+    document.getElementById('statBTA').textContent = 'BTA: ' + (s.bta_m2 || 0).toLocaleString('nb-NO') + ' m²';
+    document.getElementById('statBRA').textContent = 'BRA: ' + (s.bra_m2 || 0).toLocaleString('nb-NO') + ' m²';
+    document.getElementById('statPctBRA').textContent = '%-BRA: ' + (s.pct_bra || 0) + '%';
+    document.getElementById('statBoliger').textContent = 'Boliger: ~' + (s.boliger || 0);
+    document.getElementById('statEtasjer').textContent = (s.etasjer || 0) + ' etasjer / ' + (s.hoyde_m || 0) + ' m';
+    document.getElementById('statSol').textContent = 'Sol: ' + (s.sol || 0) + '/100';
+
+    let _sceneView = null;
+    function captureScene() {
+      if (!_sceneView) return;
+      _sceneView.takeScreenshot({ format: 'png', quality: 95, width: 1920, height: 1080 }).then(function(screenshot) {
+        const a = document.createElement('a');
+        a.href = screenshot.dataUrl;
+        a.download = 'terrengscene_' + (payload.site_name || 'scene').replace(/[^a-zA-Z0-9]/g, '_') + '.png';
+        a.click();
+      });
+    }
+
     require([
       'esri/Map',
       'esri/views/SceneView',
@@ -3277,10 +3463,11 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
       'esri/layers/GraphicsLayer',
       'esri/Graphic',
       'esri/geometry/Polygon',
+      'esri/geometry/Point',
       'esri/geometry/SpatialReference',
       'esri/geometry/Extent',
       'esri/identity/IdentityManager'
-    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, SpatialReference, Extent, IdentityManager) {
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, Point, SpatialReference, Extent, IdentityManager) {
       const sr = new SpatialReference({ wkid: 4326 });
       const sc = payload.scene_config || {};
       const services = sc.services || {};
@@ -3343,6 +3530,33 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
       addExtrusions(payload.neighbors, [140,140,150], 0.32, [200,200,210,0.25]);
       addExtrusions(payload.massing_parts, [34,197,94], 0.82, [255,255,255,0.45]);
 
+      // Høyde-labels over foreslåtte bygninger
+      (payload.massing_parts || []).forEach(item => {
+        (item.rings || []).forEach(ring => {
+          if (!ring || ring.length < 3) return;
+          let cx = 0, cy = 0;
+          ring.forEach(pt => { cx += pt[0]; cy += pt[1]; });
+          cx /= ring.length; cy /= ring.length;
+          const h = item.height_m || 3;
+          const fl = item.floors || '?';
+          const label = (item.name || '') + '\\n' + fl + ' et. / ' + h.toFixed(0) + ' m';
+          graphicsLayer.add(new Graphic({
+            geometry: new Point({ x: cx, y: cy, z: h + 5, spatialReference: sr }),
+            symbol: {
+              type: 'point-3d',
+              symbolLayers: [{
+                type: 'text',
+                material: { color: [255, 255, 255, 1] },
+                text: label,
+                size: 11,
+                font: { weight: 'bold' },
+                halo: { color: [0, 0, 0, 0.75], size: 1.5 }
+              }]
+            }
+          }));
+        });
+      });
+
       let extent = null;
       const allRings = [].concat(payload.site.rings || [], payload.buildable.rings || [], payload.footprint.rings || []);
       allRings.forEach(ring => {
@@ -3367,6 +3581,7 @@ def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: D
         camera: { position: { x: centroid[0], y: centroid[1], z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
         environment: { atmosphereEnabled: true, starsEnabled: false }
       });
+      _sceneView = view;
       view.when(() => { if (extent) { view.goTo(extent.expand(1.8)).catch(() => {}); } });
     });
     </script>
@@ -3897,6 +4112,7 @@ def build_deterministic_report(
     options: List[OptionResult],
     parsed_hints: Dict[str, float],
     has_visual_input: bool,
+    manual_override: Optional[Dict[str, Any]] = None,
 ) -> str:
     if not options:
         return (
@@ -3909,13 +4125,28 @@ def build_deterministic_report(
     best = options[0]
     using_polygon = site.site_geometry_source not in {"Rektangulert fallback", "Rektangel", "Manuell rektangeltomt"}
     terrain_active = best.terrain_relief_m > 0.0 or best.terrain_slope_pct > 0.0
+    has_manual = manual_override is not None
     lines = []
     lines.append("# 1. OPPSUMMERING")
-    lines.append(
-        f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
-        f"Det gir omtrent {best.gross_bta_m2:.0f} m2 BTA, {best.saleable_area_m2:.0f} m2 salgbart areal "
-        f"og ca. {best.unit_count} boliger innenfor dagens oppgitte rammer."
-    )
+
+    if has_manual:
+        mo = manual_override
+        lines.append(
+            f"Brukeren har manuelt overstyrt volumforslaget med en tilpasset skisse. "
+            f"Den manuelle løsningen gir {mo.get('gross_bta_m2', 0):.0f} m² BTA, "
+            f"{mo.get('saleable_area_m2', 0):.0f} m² salgbart areal og ca. {mo.get('unit_count', 0)} boliger. "
+            f"Tallene nedenfor reflekterer den manuelle plasseringen, som avviker fra motorens opprinnelige forslag."
+        )
+        lines.append(
+            f"Motorens beste indikative alternativ var {best.name} ({best.typology}) med score {best.score}/100, "
+            f"men brukeren har valgt å gå videre med egen volumplassering."
+        )
+    else:
+        lines.append(
+            f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
+            f"Det gir omtrent {best.gross_bta_m2:.0f} m2 BTA, {best.saleable_area_m2:.0f} m2 salgbart areal "
+            f"og ca. {best.unit_count} boliger innenfor dagens oppgitte rammer."
+        )
     if using_polygon:
         lines.append(
             f"Analysen bruker faktisk tomtepolygon, reelt byggefelt på ca. {best.buildable_area_m2:.0f} m² "
@@ -4025,11 +4256,65 @@ def build_deterministic_report(
                      "For mer realistisk analyse, sjekk at eiendomsdata er tilkoblet og at søkeradius er tilstrekkelig.")
     lines.append("- Terrengmodellen er forenklet og boer erstattes med detaljert kotegrunnlag hvis prosjektet gaar videre til konkret skisse.")
     lines.append("")
-    lines.append("# 10. ANBEFALING / NESTE STEG")
-    lines.append(
-        f"Start videre bearbeiding med {best.name}. Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
-        f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell dersom prosjektet skal løftes videre."
-    )
+
+    # --- MANUELL OVERSTYRING (kun når brukeren har låst en skisse) ---
+    if has_manual:
+        mo = manual_override
+        lines.append("# 10. MANUELL VOLUMOVERSTYRING")
+        lines.append(
+            f"Brukeren har valgt å overstyre motorens forslag med en manuell volumplassering. "
+            f"Den manuelle skissen består av {mo.get('n_buildings', '?')} bygg og gir følgende nøkkeltall:"
+        )
+        lines.append(f"- Fotavtrykk: {mo.get('footprint_area_m2', 0):.0f} m²")
+        lines.append(f"- BTA: {mo.get('gross_bta_m2', 0):.0f} m²")
+        lines.append(f"- Salgbart areal: {mo.get('saleable_area_m2', 0):.0f} m²")
+        lines.append(f"- Leiligheter: {mo.get('unit_count', 0)}")
+        mix_c = mo.get("mix_counts")
+        if mix_c:
+            lines.append(f"- Fordeling: {json.dumps(mix_c, ensure_ascii=False)}")
+        lines.append(f"- Etasjer (maks): {mo.get('floors', '?')}")
+        lines.append(f"- Byggehøyde: {mo.get('building_height_m', 0):.1f} m")
+        lines.append(f"- Solscore: {mo.get('solar_score', 0):.0f}/100")
+        lines.append(f"- Solbelyst uteareal: {mo.get('sunlit_open_space_pct', 0):.0f}%")
+        lines.append("")
+
+        # Sammenlign med beste motorforslag
+        motor_bta = best.gross_bta_m2
+        manual_bta = mo.get('gross_bta_m2', 0)
+        bta_diff_pct = ((manual_bta - motor_bta) / max(motor_bta, 1)) * 100
+        motor_sol = best.solar_score
+        manual_sol = mo.get('solar_score', 0)
+        lines.append("## Avvik fra motorens beste forslag")
+        lines.append(
+            f"Den manuelle løsningen avviker med {bta_diff_pct:+.0f}% i BTA sammenlignet med motorens beste forslag ({best.name}). "
+            f"Solscoren er {manual_sol:.0f}/100 mot motorens {motor_sol:.0f}/100."
+        )
+        if abs(bta_diff_pct) > 20:
+            lines.append(
+                "Avviket i BTA er betydelig. Verifiser at den manuelle plasseringen er i tråd med reguleringsplanens rammer."
+            )
+        if manual_sol < motor_sol * 0.8:
+            lines.append(
+                "Solscoren for den manuelle løsningen er vesentlig lavere enn motorens forslag. "
+                "Vurder om bygningenes plassering kan optimeres for bedre dagslys og solforhold."
+            )
+        lines.append("")
+
+        lines.append("# 11. ANBEFALING / NESTE STEG")
+        lines.append(
+            f"Den manuelle skissen er valgt som utgangspunkt for videre bearbeiding. "
+            f"Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
+            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell."
+        )
+        lines.append(
+            f"Motorens opprinnelige forslag ({best.name}) er beholdt som referanse og kan brukes som sammenligningsgrunnlag."
+        )
+    else:
+        lines.append("# 10. ANBEFALING / NESTE STEG")
+        lines.append(
+            f"Start videre bearbeiding med {best.name}. Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
+            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell dersom prosjektet skal løftes videre."
+        )
     return "\n".join(lines)
 
 
@@ -4098,6 +4383,7 @@ def create_full_report_pdf(
     options: List[OptionResult],
     option_images: List[Image.Image],
     visual_attachments: List[Image.Image],
+    manual_sketch_images: Optional[List[Image.Image]] = None,
 ) -> bytes:
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
@@ -4168,6 +4454,34 @@ def create_full_report_pdf(
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.ln(86)
+
+    # --- MANUELL SKISSE-VISUALISERINGER ---
+    if manual_sketch_images:
+        pdf.add_page()
+        pdf.set_font(PDF_FONT, "B", 16)
+        pdf.set_text_color(26, 43, 72)
+        pdf.cell(0, 12, clean_pdf_text("MANUELL VOLUMOVERSTYRING — VISUALISERINGER"), 0, 1)
+        pdf.ln(2)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.multi_cell(150, 5, clean_pdf_text(
+            "Bildene nedenfor viser den manuelt redigerte volumplasseringen. "
+            "Denne erstatter motorens opprinnelige forslag som primaeralternativ."
+        ))
+        pdf.ln(4)
+        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "Alternativ vinkel", "Detalj"]
+        for i, image in enumerate(manual_sketch_images):
+            pdf.check_space(100)
+            label = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
+            pdf.set_font(PDF_FONT, "B", 11)
+            pdf.set_text_color(50, 50, 50)
+            pdf.cell(0, 8, clean_pdf_text(label), 0, 1)
+            pdf.set_font(PDF_FONT, "", 10)
+            pdf.set_text_color(0, 0, 0)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(90)
 
     pdf.add_page()
     for raw_line in report_text.split("\n"):
@@ -6105,11 +6419,59 @@ render();
                     # Sett skissen som første (anbefalt) alternativ og behold de andre
                     existing_options = result.get("options", [])
                     new_options = [asdict(sketch_option)] + existing_options
-                    sketch_image = render_plan_diagram(SiteInputs(**site_result), sketch_option)
+
+                    # Render flere visninger av den manuelle skissen
+                    site_obj = SiteInputs(**site_result)
+                    sketch_views = render_sketch_views(site_obj, sketch_option)
+                    sketch_image = sketch_views[0] if sketch_views else render_plan_diagram(site_obj, sketch_option)
+
+                    # --- REGENERER RAPPORTTEKST med manuell overstyring ---
+                    motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in existing_options]
+                    manual_override_data = {
+                        "gross_bta_m2": sketch_option.gross_bta_m2,
+                        "saleable_area_m2": sketch_option.saleable_area_m2,
+                        "unit_count": sketch_option.unit_count,
+                        "footprint_area_m2": sketch_option.footprint_area_m2,
+                        "floors": sketch_option.floors,
+                        "building_height_m": sketch_option.building_height_m,
+                        "solar_score": sketch_option.solar_score,
+                        "sunlit_open_space_pct": sketch_option.sunlit_open_space_pct,
+                        "mix_counts": sketch_option.mix_counts,
+                        "n_buildings": len(sketch_buildings),
+                    }
+                    try:
+                        updated_report = build_deterministic_report(
+                            site_obj, motor_options, {}, has_visual_input=True,
+                            manual_override=manual_override_data,
+                        )
+                    except Exception:
+                        updated_report = result.get("report_text", "")
+
+                    # --- REGENERER PDF med skissebilder og oppdatert tekst ---
+                    all_option_images = [sketch_image] + result.get("option_images", [])
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        new_pdf_bytes = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=updated_report,
+                            options=motor_options,
+                            option_images=all_option_images,
+                            visual_attachments=[],
+                            manual_sketch_images=sketch_views,
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf_bytes
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
+                    except Exception:
+                        pass  # Behold gammel PDF hvis regen feiler
 
                     # Oppdater analysis_results
                     st.session_state.analysis_results["options"] = new_options
-                    st.session_state.analysis_results["option_images"] = [sketch_image] + result.get("option_images", [])
+                    st.session_state.analysis_results["option_images"] = all_option_images
+                    st.session_state.analysis_results["report_text"] = updated_report
+                    st.session_state.analysis_results["manual_override"] = manual_override_data
+                    st.session_state.analysis_results["manual_sketch_views"] = sketch_views
                     st.rerun()
 
                 except json.JSONDecodeError:
@@ -6269,6 +6631,50 @@ render();
         render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
     except Exception as exc:
         st.caption(f'3D-modell kunne ikke rendres: {exc}')
+
+    # --- 3D-scene bilder til rapport ---
+    with st.expander("Legg til 3D-scenebilder i rapporten", expanded=False):
+        st.caption("Bruk «📸 Last ned bilde» i 3D-terrengscenen for å ta bilder fra ønsket vinkel, "
+                   "og last dem opp her for å inkludere dem i PDF-rapporten.")
+        scene_uploads = st.file_uploader(
+            "Last opp 3D-scenebilder (PNG/JPG)",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="scene_image_uploads",
+        )
+        if scene_uploads:
+            scene_images_for_pdf = []
+            for f in scene_uploads:
+                try:
+                    img_uploaded = Image.open(f).convert("RGB")
+                    scene_images_for_pdf.append(img_uploaded)
+                except Exception:
+                    pass
+            if scene_images_for_pdf:
+                st.success(f"{len(scene_images_for_pdf)} bilde(r) lastet opp — klikk «Oppdater PDF» for å inkludere i rapporten.")
+                if st.button("Oppdater PDF med 3D-bilder", type="primary", use_container_width=True, key="regen_pdf_3d"):
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+                        manual_ov = result.get("manual_override")
+                        updated_report = result.get("report_text", "")
+                        manual_views = result.get("manual_sketch_views", [])
+                        all_images = result.get("option_images", [])
+                        new_pdf_bytes = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=updated_report,
+                            options=motor_options,
+                            option_images=all_images,
+                            visual_attachments=scene_images_for_pdf,
+                            manual_sketch_images=manual_views if manual_views else None,
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf_bytes
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Feil ved PDF-oppdatering: {exc}")
 
     st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
