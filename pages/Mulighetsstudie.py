@@ -2975,10 +2975,12 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
                 try:
                     query_url = f"{gdo_base}/{layer_id}/query"
                     q_params = {
+                        "where": "1=1",
                         "geometry": geom_json,
                         "geometryType": "esriGeometryEnvelope",
+                        "inSR": "25833",
                         "spatialRel": "esriSpatialRelIntersects",
-                        "outFields": "*",
+                        "outFields": "stoysonekategori,stoykilde,stoykildenavn,kommune,objtype",
                         "returnGeometry": "false",
                         "f": "json",
                         "token": gdo_token,
@@ -2990,14 +2992,14 @@ def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: flo
                             result["debug"].append(f"layer {layer_id}: {q_data['error'].get('message', '')[:50]}")
                             continue
                         features = q_data.get("features", [])
-                        if features:
-                            result["debug"].append(f"layer {layer_id} ({layer_label}): {len(features)} treff")
-                            for feat in features:
-                                attrs = feat.get("attributes", {})
-                                _parse_single_noise_feature(attrs, layer_label, result)
-                                # Override source_type med kjent verdi
-                                if result["zones"]:
-                                    result["zones"][-1]["source_type"] = src_type
+                        result["debug"].append(f"lag {layer_id}: {len(features)} treff")
+                        for feat in features:
+                            attrs = feat.get("attributes", {})
+                            _parse_single_noise_feature(attrs, layer_label, result)
+                            if result["zones"]:
+                                result["zones"][-1]["source_type"] = src_type
+                    else:
+                        result["debug"].append(f"lag {layer_id}: HTTP {q_resp.status_code}")
                 except Exception as exc:
                     result["debug"].append(f"layer {layer_id} feil: {str(exc)[:40]}")
                     continue
@@ -6216,7 +6218,10 @@ if run_analysis:
     option_images = [render_plan_diagram(site, option) for option in options]
     deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
-        deterministic_report = deterministic_report + "\n\n" + build_site_intelligence_markdown(site_intelligence_bundle)
+        si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
+        # Rekke er slått sammen med Lamell — erstatt i output
+        si_markdown = si_markdown.replace("Rekke:", "Lamell (tidl. Rekke):").replace("favoriserer mest Rekke", "favoriserer mest Lamell")
+        deterministic_report = deterministic_report + "\n\n" + si_markdown
     final_report_text = deterministic_report
 
     if llm_available:
