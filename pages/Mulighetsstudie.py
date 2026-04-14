@@ -5027,43 +5027,124 @@ def _register_fonts(pdf: FPDF) -> None:
                 pass
 
 
+# --- PDF v11 Color constants ---
+_NAVY = (26, 43, 72)
+_BUILTLY_BLUE = (0, 96, 155)
+_BODY_BLACK = (30, 30, 30)
+_MUTED = (120, 130, 145)
+_TABLE_HEADER_BG = (26, 43, 72)
+_TABLE_HEADER_FG = (255, 255, 255)
+_TABLE_ROW_ALT = (247, 249, 252)
+_TABLE_ROW_WHITE = (255, 255, 255)
+_SCORE_GREEN = (16, 185, 129)
+_SCORE_AMBER = (245, 158, 11)
+_SCORE_RED = (239, 68, 68)
+
+
 class BuiltlyProPDF(FPDF):
+    """McKinsey-quality PDF with professional header/footer (v11)."""
+
     def header(self) -> None:
-        if self.page_no() > 1:
-            self.set_y(15)
-            self.set_font(PDF_FONT, "B", 10)
-            self.set_text_color(26, 43, 72)
-            self.cell(0, 10, clean_pdf_text(f"PROSJEKT: {self.p_name} | Dokumentnr: ARK-002"), 0, 1, "R")
-            self.set_draw_color(200, 200, 200)
-            self.line(25, 25, 185, 25)
-            self.set_y(30)
+        if self.page_no() == 1:
+            return
+        self.set_y(10)
+        self.set_draw_color(*_BUILTLY_BLUE)
+        self.set_line_width(0.8)
+        self.line(0, 5, 210, 5)
+        self.set_line_width(0.2)
+        self.set_font(PDF_FONT, "", 8)
+        self.set_text_color(*_MUTED)
+        self.cell(0, 8, clean_pdf_text(f"PROSJEKT: {self.p_name}"), 0, 0, "L")
+        self.cell(0, 8, clean_pdf_text("Dokumentnr: ARK-002"), 0, 1, "R")
+        self.set_draw_color(220, 225, 232)
+        self.line(25, 20, 185, 20)
+        self.set_y(24)
 
     def footer(self) -> None:
+        self.set_y(-18)
+        self.set_draw_color(220, 225, 232)
+        self.line(25, self.get_y(), 185, self.get_y())
         self.set_y(-15)
-        self.set_font(PDF_FONT, "I", 8)
-        self.set_text_color(150, 150, 150)
-        self.cell(0, 10, clean_pdf_text(f"UTKAST — KREVER FAGLIG KONTROLL | Side {self.page_no()}"), 0, 0, "C")
+        self.set_font(PDF_FONT, "", 7)
+        self.set_text_color(*_MUTED)
+        self.cell(85, 8, clean_pdf_text("UTKAST - KREVER FAGLIG KONTROLL"), 0, 0, "L")
+        self.set_font(PDF_FONT, "", 7)
+        self.cell(0, 8, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
     def check_space(self, height: float) -> None:
-        if self.get_y() + height > 270:
+        if self.get_y() + height > 268:
             self.add_page()
-            self.set_margins(25, 25, 25)
+            self.set_margins(25, 25, 20)
             self.set_x(25)
 
+    def section_title(self, text: str, size: int = 16) -> None:
+        """Navy section header with accent underline."""
+        self.check_space(20)
+        self.ln(4)
+        self.set_x(25)
+        self.set_font(PDF_FONT, "B", size)
+        self.set_text_color(*_NAVY)
+        self.multi_cell(155, 8, clean_pdf_text(text), 0, "L")
+        y = self.get_y()
+        self.set_draw_color(*_BUILTLY_BLUE)
+        self.set_line_width(0.6)
+        self.line(25, y + 1, 80, y + 1)
+        self.set_line_width(0.2)
+        self.ln(5)
 
-def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]], widths: List[float]) -> None:
-    pdf.set_font(PDF_FONT, "B", 9)
-    pdf.set_fill_color(232, 239, 247)
+    def body_text(self, text: str) -> None:
+        """Standard body text."""
+        self.set_x(25)
+        self.set_font(PDF_FONT, "", 10)
+        self.set_text_color(*_BODY_BLACK)
+        self.multi_cell(155, 5.5, ironclad_text_formatter(text))
+
+    def subtitle(self, text: str) -> None:
+        """Builtly-blue subtitle."""
+        self.check_space(14)
+        self.ln(3)
+        self.set_x(25)
+        self.set_font(PDF_FONT, "B", 12)
+        self.set_text_color(*_BUILTLY_BLUE)
+        self.multi_cell(155, 7, clean_pdf_text(text), 0, "L")
+        self.set_font(PDF_FONT, "", 10)
+        self.set_text_color(*_BODY_BLACK)
+        self.ln(2)
+
+
+def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]], widths: List[float], score_col: int = -1) -> None:
+    """Professional table with navy header, alternating rows, color-coded score column."""
+    pdf.set_font(PDF_FONT, "B", 8)
+    pdf.set_fill_color(*_TABLE_HEADER_BG)
+    pdf.set_text_color(*_TABLE_HEADER_FG)
+    pdf.set_draw_color(200, 205, 215)
     for idx, header in enumerate(headers):
-        pdf.cell(widths[idx], 8, clean_pdf_text(header), 1, 0, "C", fill=True)
+        pdf.cell(widths[idx], 9, clean_pdf_text(header), 1, 0, "C", fill=True)
     pdf.ln()
 
     pdf.set_font(PDF_FONT, "", 8)
-    for row in rows:
-        pdf.check_space(8)
-        for idx, value in enumerate(row):
-            pdf.cell(widths[idx], 8, clean_pdf_text(value), 1, 0, "C")
+    for row_idx, row in enumerate(rows):
+        pdf.check_space(9)
+        is_alt = row_idx % 2 == 0
+        bg = _TABLE_ROW_ALT if is_alt else _TABLE_ROW_WHITE
+        pdf.set_fill_color(*bg)
+        for col_idx, value in enumerate(row):
+            if col_idx == score_col:
+                try:
+                    score_val = float(value)
+                    if score_val >= 60:
+                        pdf.set_text_color(*_SCORE_GREEN)
+                    elif score_val >= 40:
+                        pdf.set_text_color(180, 130, 0)
+                    else:
+                        pdf.set_text_color(*_SCORE_RED)
+                except ValueError:
+                    pdf.set_text_color(*_BODY_BLACK)
+            else:
+                pdf.set_text_color(*_BODY_BLACK)
+            pdf.cell(widths[col_idx], 9, clean_pdf_text(value), 1, 0, "C", fill=True)
         pdf.ln()
+    pdf.set_text_color(*_BODY_BLACK)
     pdf.ln(4)
 
 
@@ -5190,6 +5271,317 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
     return img
 
 
+# --- SOL/SKYGGE SNAPSHOT RENDERING (v11) ---
+
+def render_solar_snapshot(
+    site: SiteInputs,
+    option: OptionResult,
+    day_of_year: int,
+    solar_hour: float,
+    label: str = "",
+) -> Image.Image:
+    """
+    Plan-view sol/skygge-snapshot for en gitt dag og klokkeslett.
+    Viser tomtegrense, bygningsvolumer, skyggepolygoner og solretning.
+    """
+    canvas_w, canvas_h = 560, 420
+    bg = (248, 250, 252, 255)
+    img = Image.new('RGBA', (canvas_w, canvas_h), bg)
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = ImageFont.load_default()
+
+    site_coords = option.geometry.get('site_polygon_coords') or []
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+
+    site_pts_raw = flatten_coord_groups(site_coords)
+    if not site_pts_raw:
+        site_pts_raw = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts_raw]
+    sys_ = [p[1] for p in site_pts_raw]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    margin = 55
+    target_span = min(canvas_w, canvas_h) - 2 * margin
+    scale = target_span / site_span
+    ox = canvas_w / 2.0
+    oy = canvas_h / 2.0
+
+    def proj(x, y):
+        return ox + (x - cx) * scale, oy - (y - cy) * scale
+
+    def pts(coords):
+        return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
+
+    # Solar beregninger
+    lat = site.latitude_deg
+    alt_deg = solar_altitude_deg(lat, day_of_year, solar_hour)
+    az_deg = solar_azimuth_deg(lat, day_of_year, solar_hour)
+    az_local = (az_deg - site.north_rotation_deg) % 360.0
+    sun_above = alt_deg > 0.5
+
+    # Tomtegrense
+    sp = pts(flatten_coord_groups(site_coords))
+    if len(sp) >= 3:
+        draw.polygon(sp, fill=(232, 237, 243, 200), outline=(120, 135, 155, 200))
+
+    # Nabobygg + naboskygger
+    view_radius = site_span * 0.45
+    for neighbor in neighbor_polys:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
+            continue
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        np_ = pts(ncoords)
+        if len(np_) >= 3:
+            draw.polygon(np_, fill=(195, 200, 210, 130), outline=(160, 168, 180, 160))
+        if sun_above:
+            nh = float(neighbor.get('height_m', 9.0))
+            if nh > 0:
+                try:
+                    nfp = Polygon([(p[0], p[1]) for p in ncoords])
+                    if nfp.is_valid and not nfp.is_empty:
+                        n_shadow = build_shadow_polygon(nfp, nh, az_local, alt_deg, None)
+                        if n_shadow and not n_shadow.is_empty:
+                            ns_coords = geometry_to_coord_groups(n_shadow)
+                            ns_pts = pts(flatten_coord_groups(ns_coords))
+                            if len(ns_pts) >= 3:
+                                draw.polygon(ns_pts, fill=(40, 50, 70, 35))
+                except Exception:
+                    pass
+
+    # Bygningsvolumer + skygger
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords or len(pcoords) < 3:
+            continue
+        h = float(part.get('height_m', option.building_height_m))
+        if sun_above and h > 0:
+            try:
+                fp = Polygon([(p[0], p[1]) for p in pcoords])
+                if fp.is_valid and not fp.is_empty:
+                    shadow = build_shadow_polygon(fp, h, az_local, alt_deg, None)
+                    if shadow and not shadow.is_empty:
+                        s_coords = geometry_to_coord_groups(shadow)
+                        s_pts = pts(flatten_coord_groups(s_coords))
+                        if len(s_pts) >= 3:
+                            draw.polygon(s_pts, fill=(26, 43, 72, 55))
+            except Exception:
+                pass
+        pp = pts(pcoords)
+        if len(pp) >= 3:
+            base_c = part.get('color', [0, 96, 155, 220])
+            base_c = tuple(int(v) if v > 1 else int(v * 255) for v in base_c)
+            if len(base_c) < 4:
+                base_c = (base_c[0], base_c[1], base_c[2], 220)
+            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 240))
+
+    # Solretning-pil
+    if sun_above:
+        sun_rad = math.radians(az_local)
+        arrow_len = 45
+        arr_cx, arr_cy = canvas_w - 70, 55
+        dx = math.sin(sun_rad) * arrow_len
+        dy = -math.cos(sun_rad) * arrow_len
+        ax1, ay1 = arr_cx - dx * 0.5, arr_cy - dy * 0.5
+        ax2, ay2 = arr_cx + dx * 0.5, arr_cy + dy * 0.5
+        draw.line([(ax1, ay1), (ax2, ay2)], fill=(245, 180, 30, 220), width=3)
+        draw.ellipse([(ax1 - 8, ay1 - 8), (ax1 + 8, ay1 + 8)], fill=(255, 210, 60, 200))
+        draw.text((ax1 - 3, ay1 - 5), "S", fill=(80, 50, 0, 255), font=font)
+
+    # Nordpil
+    nx, ny = 35, 40
+    draw.line((nx, ny + 18, nx, ny - 12), fill=(26, 43, 72, 200), width=2)
+    draw.polygon([(nx, ny - 18), (nx - 5, ny - 5), (nx + 5, ny - 5)], fill=(26, 43, 72, 200))
+    draw.text((nx - 3, ny + 22), 'N', fill=(26, 43, 72, 200), font=font)
+
+    # Label
+    month_names = {80: "21. mars", 172: "21. juni", 355: "21. des"}
+    date_str = month_names.get(day_of_year, f"dag {day_of_year}")
+    hour_str = f"{int(solar_hour):02d}:{int((solar_hour % 1) * 60):02d}"
+    alt_str = f"h={alt_deg:.1f}\u00b0" if sun_above else "sol under horisont"
+    lbl_y = canvas_h - 38
+    draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(26, 43, 72, 220))
+    display_label = label or f"{date_str} kl. {hour_str}"
+    draw.text((12, lbl_y + 5), display_label, fill=(245, 247, 251, 255), font=font)
+    draw.text((12, lbl_y + 19), f"Solhoyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font)
+
+    return img.convert('RGB')
+
+
+def render_solar_snapshot_grid(
+    site: SiteInputs,
+    option: OptionResult,
+) -> Image.Image:
+    """
+    Rendrer en 3x2 rutenett med 5 sol/skygge-snapshots:
+      Rad 1: Varjevndogn 12:00, 15:00, Sommersolverv 12:00
+      Rad 2: Sommersolverv 15:00, 18:00, (infopanel)
+    """
+    snapshots = [
+        (80, 12.0, "Varjevndogn - 21. mars kl. 12:00"),
+        (80, 15.0, "Varjevndogn - 21. mars kl. 15:00"),
+        (172, 12.0, "Sommersolverv - 21. juni kl. 12:00"),
+        (172, 15.0, "Sommersolverv - 21. juni kl. 15:00"),
+        (172, 18.0, "Sommersolverv - 21. juni kl. 18:00"),
+    ]
+    cell_w, cell_h = 560, 420
+    cols, rows = 3, 2
+    grid_w = cols * cell_w
+    grid_h = rows * cell_h
+
+    grid = Image.new('RGB', (grid_w, grid_h), (248, 250, 252))
+    draw = ImageDraw.Draw(grid)
+    font = ImageFont.load_default()
+
+    for idx, (doy, hour, lbl) in enumerate(snapshots):
+        col = idx % cols
+        row = idx // cols
+        try:
+            snap = render_solar_snapshot(site, option, doy, hour, lbl)
+            grid.paste(snap, (col * cell_w, row * cell_h))
+        except Exception as e:
+            x0, y0 = col * cell_w, row * cell_h
+            draw.rectangle([(x0, y0), (x0 + cell_w, y0 + cell_h)], fill=(240, 243, 248))
+            draw.text((x0 + 20, y0 + 200), f"Feil: {str(e)[:60]}", fill=(200, 50, 50))
+
+    # Siste celle: infopanel
+    ix, iy = 2 * cell_w, 1 * cell_h
+    draw.rectangle([(ix, iy), (ix + cell_w, iy + cell_h)], fill=(26, 43, 72))
+    draw.text((ix + 30, iy + 40), "SOL/SKYGGE-ANALYSE", fill=(56, 189, 248), font=font)
+    draw.text((ix + 30, iy + 70), f"Breddegrad: {site.latitude_deg:.2f} N", fill=(200, 211, 223), font=font)
+    draw.text((ix + 30, iy + 90), f"Typologi: {option.typology}", fill=(200, 211, 223), font=font)
+    draw.text((ix + 30, iy + 110), f"Hoyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font)
+    draw.text((ix + 30, iy + 130), f"Etasjer: {option.floors}", fill=(200, 211, 223), font=font)
+    draw.text((ix + 30, iy + 160), "Skygger er vist som", fill=(160, 175, 195), font=font)
+    draw.text((ix + 30, iy + 176), "semitransparente felt.", fill=(160, 175, 195), font=font)
+    draw.text((ix + 30, iy + 210), "Gul sirkel = solretning", fill=(255, 210, 60), font=font)
+    draw.text((ix + 30, iy + 236), "Morkeblaa = bygningsskygge", fill=(100, 130, 170), font=font)
+    draw.text((ix + 30, iy + 262), "Lysegraa = naboskygge", fill=(160, 170, 185), font=font)
+    draw.text((ix + 30, iy + cell_h - 50), "Generert av Builtly ARK Motor", fill=(80, 100, 130), font=font)
+
+    return grid
+
+
+# --- EXECUTIVE SUMMARY KPI IMAGE (v11) ---
+
+def _render_executive_summary(
+    options: List[OptionResult],
+    site: SiteInputs,
+    environment_data: Optional[Dict[str, Any]] = None,
+) -> Image.Image:
+    """McKinsey-style executive summary med fargede KPI-bokser."""
+    w, h = 900, 520
+    img = Image.new('RGB', (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+
+    navy = (26, 43, 72)
+    builtly_blue = (0, 96, 155)
+    accent_green = (16, 185, 129)
+    accent_amber = (245, 158, 11)
+    accent_red = (239, 68, 68)
+    light_bg = (248, 250, 252)
+    card_border = (226, 232, 240)
+
+    best = options[0] if options else None
+    if not best:
+        return img
+    bra_best = best.gross_bta_m2 * best.efficiency_ratio
+
+    # Header stripe
+    draw.rectangle([(0, 0), (w, 6)], fill=builtly_blue)
+    draw.text((30, 20), "EXECUTIVE SUMMARY", fill=navy, font=font)
+    draw.text((30, 38), f"Anbefalt: {best.name} ({best.typology})", fill=builtly_blue, font=font)
+
+    # KPI Cards row 1
+    kpi_cards = [
+        ("BRA", f"{bra_best:,.0f} m2".replace(",", " "), "Salgbart areal", builtly_blue),
+        ("ENHETER", f"{best.unit_count}", "Boliger", builtly_blue),
+        ("SOL", f"{best.solar_score:.0f}/100", "Solscore", accent_green if best.solar_score >= 50 else accent_amber),
+        ("SCORE", f"{best.score:.0f}/100", "Totalscore", accent_green if best.score >= 60 else accent_amber),
+    ]
+    card_w, card_h = 195, 90
+    card_y = 65
+    for i, (title, value, subtitle, color) in enumerate(kpi_cards):
+        x = 30 + i * (card_w + 12)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + card_h)], fill=light_bg, outline=card_border)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + 4)], fill=color)
+        draw.text((x + 12, card_y + 14), title, fill=(120, 130, 145), font=font)
+        draw.text((x + 12, card_y + 34), value, fill=navy, font=font)
+        draw.text((x + 12, card_y + 58), subtitle, fill=(150, 160, 175), font=font)
+
+    # KPI Cards row 2 — Tomt
+    site_cards = [
+        ("TOMTEAREAL", f"{site.site_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
+        ("BYGGEFELT", f"{best.buildable_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
+        ("MAKS HOYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", builtly_blue),
+        ("NABOBYGG", f"{site.neighbor_count} stk", builtly_blue),
+    ]
+    card_y2 = card_y + card_h + 20
+    for i, (title, value, color) in enumerate(site_cards):
+        x = 30 + i * (card_w + 12)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 65)], fill=light_bg, outline=card_border)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 3)], fill=color)
+        draw.text((x + 12, card_y2 + 12), title, fill=(120, 130, 145), font=font)
+        draw.text((x + 12, card_y2 + 32), value, fill=navy, font=font)
+
+    # Miljo-rad
+    env = environment_data or {}
+    env_y = card_y2 + 85
+    draw.text((30, env_y), "MILJOFORHOLD", fill=navy, font=font)
+    env_y += 22
+
+    env_items = []
+    noise = env.get("noise", {}) if env.get("available") else {}
+    daylight = env.get("daylight", {}) if env.get("available") else {}
+
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        db = worst.get("db", 0)
+        color = accent_red if db > 65 else accent_amber if db > 55 else accent_green
+        env_items.append(("STOY", f"{db:.0f} dB", color))
+    else:
+        env_items.append(("STOY", "Ingen data", (150, 160, 175)))
+
+    if daylight.get("available"):
+        dl = daylight.get("overall_score", 0)
+        color = accent_green if dl >= 70 else accent_amber if dl >= 50 else accent_red
+        env_items.append(("DAGSLYS", f"{dl:.0f}/100", color))
+    else:
+        env_items.append(("DAGSLYS", "Ikke vurdert", (150, 160, 175)))
+
+    env_items.append(("%-BRA MAL", f"{site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else "Ikke satt", builtly_blue))
+
+    for i, (title, value, color) in enumerate(env_items):
+        x = 30 + i * (card_w + 12)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 65)], fill=light_bg, outline=card_border)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 3)], fill=color)
+        draw.text((x + 12, env_y + 12), title, fill=(120, 130, 145), font=font)
+        draw.text((x + 12, env_y + 32), value, fill=navy, font=font)
+
+    # Ranking bar
+    rank_y = env_y + 85
+    draw.text((30, rank_y), "ALTERNATIV-RANKING (SCORE)", fill=navy, font=font)
+    rank_y += 22
+    max_score = max((o.score for o in options), default=100)
+    bar_max_w = 650
+    for i, opt in enumerate(sorted(options, key=lambda o: o.score, reverse=True)):
+        y = rank_y + i * 28
+        bar_w = max(8, int(opt.score / max(max_score, 1) * bar_max_w))
+        bar_color = accent_green if opt.score >= 60 else accent_amber if opt.score >= 40 else accent_red
+        draw.rectangle([(150, y), (150 + bar_w, y + 18)], fill=bar_color)
+        draw.text((30, y + 2), f"{opt.typology}", fill=navy, font=font)
+        draw.text((155 + bar_w, y + 2), f"{opt.score:.0f}", fill=navy, font=font)
+
+    return img
+
+
 def create_full_report_pdf(
     name: str,
     client: str,
@@ -5201,194 +5593,284 @@ def create_full_report_pdf(
     manual_sketch_images: Optional[List[Image.Image]] = None,
     site: Optional["SiteInputs"] = None,
     environment_data: Optional[Dict[str, Any]] = None,
+    solar_grid_image: Optional[Image.Image] = None,
 ) -> bytes:
+    """
+    McKinsey-quality PDF v11:
+      Page 1:  Cover
+      Page 2:  Table of Contents
+      Page 3:  Executive Summary (KPI boxes)
+      Page 4:  Nokkeltall + sol/BRA-chart + kontekst
+      Page 5+: Volumskisser (top 3)
+      Page N:  Sol/skygge-grid
+      Page N+: Rapport tekst
+      Last:    Vedlegg (flyfoto, 3D-scene)
+    """
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
     pdf.p_name = name.upper()
-    pdf.set_margins(25, 25, 25)
-    pdf.set_auto_page_break(True, 25)
+    pdf.set_margins(25, 25, 20)
+    pdf.set_auto_page_break(True, 22)
 
+    # ================================================================
+    # PAGE 1: COVER
+    # ================================================================
     pdf.add_page()
+    pdf.set_fill_color(*_BUILTLY_BLUE)
+    pdf.rect(0, 0, 210, 6, 'F')
+
     if os.path.exists("logo.png"):
         pdf.image("logo.png", x=25, y=20, w=50)
 
-    pdf.set_y(95)
-    pdf.set_font(PDF_FONT, "B", 22)
-    pdf.set_text_color(26, 43, 72)
-    pdf.multi_cell(0, 12, clean_pdf_text("MULIGHETSSTUDIE OG TOMTEANALYSE (ARK)"), 0, "L")
-    pdf.ln(2)
-    pdf.set_font(PDF_FONT, "", 16)
-    pdf.set_text_color(0, 0, 0)
-    pdf.multi_cell(0, 10, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
-    pdf.ln(25)
+    pdf.set_y(90)
+    pdf.set_font(PDF_FONT, "B", 24)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
+    pdf.ln(3)
+    pdf.set_font(PDF_FONT, "", 14)
+    pdf.set_text_color(*_BUILTLY_BLUE)
+    pdf.multi_cell(0, 9, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
+    pdf.ln(20)
 
     for label, value in [
-        ("OPPDRAGSGIVER:", client or "Ukjent"),
-        ("DATO:", datetime.now().strftime("%d.%m.%Y")),
-        ("UTARBEIDET AV:", "Builtly ARK Motor + AI"),
-        ("REGELVERK:", land),
+        ("OPPDRAGSGIVER", client or "Ukjent"),
+        ("DATO", datetime.now().strftime("%d.%m.%Y")),
+        ("UTARBEIDET AV", "Builtly ARK Motor + AI"),
+        ("REGELVERK", land),
     ]:
         pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "B", 10)
-        pdf.cell(50, 8, clean_pdf_text(label), 0, 0)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(42, 9, clean_pdf_text(label), 0, 0)
         pdf.set_font(PDF_FONT, "", 10)
-        pdf.cell(0, 8, clean_pdf_text(value), 0, 1)
+        pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 9, clean_pdf_text(value), 0, 1)
 
+    pdf.set_y(280)
+    pdf.set_fill_color(*_BUILTLY_BLUE)
+    pdf.rect(0, 290, 210, 7, 'F')
+
+    # ================================================================
+    # PAGE 2: TABLE OF CONTENTS
+    # ================================================================
+    pdf.add_page()
+    pdf.section_title("INNHOLDSFORTEGNELSE", 18)
+    pdf.ln(4)
+
+    toc_items = [
+        ("1.", "Executive Summary"),
+        ("2.", "Nokkeltall fra motor"),
+        ("3.", "Volumskisser - topp 3 alternativer"),
+    ]
+    toc_idx = 4
+    if solar_grid_image is not None:
+        toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
+        toc_idx += 1
+
+    for raw_line in report_text.split("\n"):
+        line = raw_line.strip()
+        if re.match(r"^\d+\.\s[A-Z]", line):
+            toc_items.append((f"{toc_idx}.", line.strip()))
+            toc_idx += 1
+        elif line.startswith("# "):
+            toc_items.append((f"{toc_idx}.", line.replace("#", "").strip()))
+            toc_idx += 1
+
+    if visual_attachments:
+        toc_items.append((f"{toc_idx}.", "Vedlegg: Flyfoto, 3D-scene og referanser"))
+
+    for num, title in toc_items:
+        pdf.set_x(30)
+        pdf.set_font(PDF_FONT, "B", 10)
+        pdf.set_text_color(*_BUILTLY_BLUE)
+        pdf.cell(10, 8, clean_pdf_text(num), 0, 0)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(*_BODY_BLACK)
+        title_w = pdf.get_string_width(clean_pdf_text(title))
+        max_title_w = 120
+        if title_w > max_title_w:
+            title_w = max_title_w
+        pdf.cell(title_w + 2, 8, clean_pdf_text(title[:80]), 0, 0)
+        remaining = max(5, 155 - 10 - title_w - 2)
+        dots = "." * max(2, int(remaining / 1.8))
+        pdf.set_text_color(*_MUTED)
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.cell(0, 8, dots, 0, 1)
+
+    # ================================================================
+    # PAGE 3: EXECUTIVE SUMMARY
+    # ================================================================
+    if options and site is not None:
+        pdf.add_page()
+        pdf.section_title("EXECUTIVE SUMMARY", 18)
+        try:
+            exec_img = _render_executive_summary(options, site, environment_data)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                exec_img.convert("RGB").save(tmp.name, format="JPEG", quality=94)
+                img_w = 160
+                img_h = img_w * (exec_img.height / max(exec_img.width, 1))
+                pdf.check_space(img_h + 5)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
+        except Exception:
+            pass
+
+    # ================================================================
+    # PAGE 4: NOKKELTALL + CHARTS
+    # ================================================================
     if options:
         pdf.add_page()
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("NØKKELTALL FRA MOTOR"), 0, 1)
-        pdf.ln(2)
+        pdf.section_title("NOKKELTALL FRA MOTOR", 16)
+
         rows = []
         for option in options:
             bra_est = option.gross_bta_m2 * option.efficiency_ratio
-            rows.append(
-                [
-                    option.name.replace("Alt ", ""),
-                    option.typology,
-                    f"{option.gross_bta_m2:.0f}",
-                    f"{bra_est:.0f}",
-                    str(option.unit_count),
-                    f"{option.solar_score:.0f}",
-                    f"{option.score:.0f}",
-                ]
-            )
+            rows.append([
+                option.name.replace("Alt ", ""),
+                option.typology,
+                f"{option.gross_bta_m2:.0f}",
+                f"{bra_est:.0f}",
+                str(option.unit_count),
+                f"{option.solar_score:.0f}",
+                f"{option.score:.0f}",
+            ])
         add_pdf_table(
             pdf,
             headers=["Alt", "Typologi", "BTA", "BRA", "Enheter", "Sol", "Score"],
             rows=rows,
             widths=[30, 30, 22, 22, 20, 18, 18],
+            score_col=6,
         )
 
-        # --- SOLANALYSE-DIAGRAM ---
         try:
             solar_chart = _render_solar_chart(options)
-            pdf.ln(4)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 solar_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
-                pdf.check_space(70)
+                pdf.check_space(72)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(65)
+                pdf.ln(67)
         except Exception:
             pass
 
-    # --- TOMTEKONTEKST ---
     if options and site is not None:
         try:
             ctx_chart = _render_context_summary(options, site, environment_data=environment_data)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 ctx_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
-                pdf.check_space(55)
+                pdf.check_space(57)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(50)
+                pdf.ln(52)
         except Exception:
             pass
 
-    # --- TOP 3 VOLUMSKISSER (automatisk) ---
+    # ================================================================
+    # PAGE 5+: VOLUMSKISSER - TOPP 3
+    # ================================================================
     if option_images and not manual_sketch_images:
         pdf.add_page()
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VOLUMSKISSER — TOPP 3 ALTERNATIVER"), 0, 1)
-        pdf.ln(2)
+        pdf.section_title("VOLUMSKISSER - TOPP 3 ALTERNATIVER", 16)
         for i, image in enumerate(option_images[:3]):
-            pdf.check_space(88)
+            pdf.check_space(92)
             if i < len(options):
                 opt = options[i]
                 bra = opt.gross_bta_m2 * opt.efficiency_ratio
-                pdf.set_font(PDF_FONT, "B", 11)
-                pdf.set_text_color(50, 50, 50)
-                pdf.cell(0, 8, clean_pdf_text(
-                    f"{opt.name} — {opt.typology} | ~{bra:.0f} m² BRA | {opt.unit_count} bol. | Sol {opt.solar_score:.0f}/100"
-                ), 0, 1)
+                pdf.subtitle(
+                    f"{opt.name} - {opt.typology} | ~{bra:.0f} m2 BRA | {opt.unit_count} bol. | Sol {opt.solar_score:.0f}/100"
+                )
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(82)
+                pdf.ln(84)
 
-    # Volumskisser: vis KUN manuell skisse hvis bruker har overstyrt
     if manual_sketch_images:
         pdf.add_page()
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VALGT VOLUMLØSNING"), 0, 1)
-        pdf.ln(2)
-        pdf.set_font(PDF_FONT, "", 10)
-        pdf.set_text_color(0, 0, 0)
-        pdf.multi_cell(150, 5, clean_pdf_text(
+        pdf.section_title("VALGT VOLUMLOSNING", 16)
+        pdf.body_text(
             "Bildene nedenfor viser den manuelt redigerte volumplasseringen "
             "som er valgt for videre bearbeiding."
-        ))
+        )
         pdf.ln(4)
         view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
-            label = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
-            pdf.set_font(PDF_FONT, "B", 11)
-            pdf.set_text_color(50, 50, 50)
-            pdf.cell(0, 8, clean_pdf_text(label), 0, 1)
-            pdf.set_font(PDF_FONT, "", 10)
-            pdf.set_text_color(0, 0, 0)
+            lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
+            pdf.subtitle(lbl)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(90)
+                pdf.ln(92)
 
+    # ================================================================
+    # SOL/SKYGGE GRID PAGE
+    # ================================================================
+    if solar_grid_image is not None:
+        pdf.add_page()
+        pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
+        pdf.body_text(
+            "Diagrammene viser beregnede skyggeforhold for varjevndogn (21. mars) "
+            "og sommersolverv (21. juni) ved utvalgte klokkeslett. "
+            "Skygger fra foreslatte volumer og nabobygg er inkludert."
+        )
+        pdf.ln(4)
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                solar_grid_image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                img_w = 160
+                img_h = img_w * (solar_grid_image.height / max(solar_grid_image.width, 1))
+                if img_h > 190:
+                    img_h = 190
+                    img_w = img_h * (solar_grid_image.width / max(solar_grid_image.height, 1))
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
+        except Exception:
+            pass
+
+    # ================================================================
+    # RAPPORT TEKST
+    # ================================================================
     pdf.add_page()
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
         if not line:
-            pdf.ln(4)
+            pdf.ln(3)
             continue
-
         if line.startswith("# ") or re.match(r"^\d+\.\s[A-Z]", line):
-            pdf.check_space(30)
-            pdf.ln(6)
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "B", 14)
-            pdf.set_text_color(26, 43, 72)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace("#", "").strip()))
-            pdf.ln(1)
-            pdf.set_font(PDF_FONT, "", 10)
-            pdf.set_text_color(0, 0, 0)
+            pdf.section_title(line.replace("#", "").strip(), 14)
         elif line.startswith("##"):
-            pdf.check_space(20)
-            pdf.ln(4)
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "B", 12)
-            pdf.set_text_color(50, 50, 50)
-            pdf.multi_cell(150, 7, ironclad_text_formatter(line.replace("#", "").strip()))
+            pdf.subtitle(line.replace("#", "").strip())
+        elif line.startswith("- "):
+            pdf.check_space(7)
+            pdf.set_x(30)
             pdf.set_font(PDF_FONT, "", 10)
-            pdf.set_text_color(0, 0, 0)
+            pdf.set_text_color(*_BODY_BLACK)
+            bullet = "\u2022 " if HAS_DEJAVU else "* "
+            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + line[2:]))
         else:
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "", 10)
-            pdf.multi_cell(150, 5, ironclad_text_formatter(line))
+            pdf.check_space(7)
+            pdf.body_text(line)
 
+    # ================================================================
+    # VEDLEGG
+    # ================================================================
     if visual_attachments:
         pdf.add_page()
-        pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(26, 43, 72)
-        pdf.cell(0, 12, clean_pdf_text("VEDLEGG: FLYFOTO, 3D-SCENE OG REFERANSER"), 0, 1)
-        pdf.ln(2)
+        pdf.section_title("VEDLEGG: FLYFOTO, 3D-SCENE OG REFERANSER", 16)
         for idx, image in enumerate(visual_attachments, start=1):
             if idx > 1:
                 pdf.add_page()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=86)
                 ratio_h = 160 * (image.height / max(image.width, 1))
-                if ratio_h > 230:
-                    ratio_h = 230
+                if ratio_h > 220:
+                    ratio_h = 220
                     ratio_w = ratio_h * (image.width / max(image.height, 1))
                     pdf.image(tmp.name, x=105 - (ratio_w / 2), y=pdf.get_y(), w=ratio_w)
                 else:
                     pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
                 pdf.set_y(pdf.get_y() + ratio_h + 4)
                 pdf.set_x(25)
-                pdf.set_font(PDF_FONT, "I", 9)
-                pdf.set_text_color(100, 100, 100)
+                pdf.set_font(PDF_FONT, "I", 8)
+                pdf.set_text_color(*_MUTED)
                 pdf.cell(0, 8, clean_pdf_text(f"Figur V-{idx}: visuelt grunnlag brukt i analysen."), 0, 1)
 
     output = pdf.output(dest="S")
@@ -6278,6 +6760,12 @@ KRAV:
                 final_report_text = deterministic_report
 
     try:
+        solar_grid_img = None
+        if options and site is not None:
+            try:
+                solar_grid_img = render_solar_snapshot_grid(site, options[0])
+            except Exception:
+                pass
         pdf_bytes = create_full_report_pdf(
             name=p_name,
             client=pd_state.get("c_name", "Ukjent"),
@@ -6288,6 +6776,7 @@ KRAV:
             visual_attachments=images_for_context,
             site=site,
             environment_data=environment_data,
+            solar_grid_image=solar_grid_img,
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
@@ -7450,6 +7939,12 @@ render();
                     all_option_images = [sketch_image] + result.get("option_images", [])
                     try:
                         pd_state = st.session_state.get("project_data", {})
+                        _solar_grid = None
+                        if motor_options and site_obj is not None:
+                            try:
+                                _solar_grid = render_solar_snapshot_grid(site_obj, motor_options[0])
+                            except Exception:
+                                pass
                         new_pdf_bytes = create_full_report_pdf(
                             name=pd_state.get("p_name", "Prosjekt"),
                             client=pd_state.get("c_name", "Ukjent"),
@@ -7461,6 +7956,7 @@ render();
                             manual_sketch_images=sketch_views,
                             site=site_obj,
                             environment_data=result.get("environment"),
+                            solar_grid_image=_solar_grid,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
@@ -7669,6 +8165,13 @@ render();
                         updated_report = result.get("report_text", "")
                         manual_views = result.get("manual_sketch_views", [])
                         all_images = result.get("option_images", [])
+                        _site_obj_3d = SiteInputs(**site_result) if site_result else None
+                        _solar_grid_3d = None
+                        if motor_options and _site_obj_3d is not None:
+                            try:
+                                _solar_grid_3d = render_solar_snapshot_grid(_site_obj_3d, motor_options[0])
+                            except Exception:
+                                pass
                         new_pdf_bytes = create_full_report_pdf(
                             name=pd_state.get("p_name", "Prosjekt"),
                             client=pd_state.get("c_name", "Ukjent"),
@@ -7678,8 +8181,9 @@ render();
                             option_images=all_images,
                             visual_attachments=scene_images_for_pdf,
                             manual_sketch_images=manual_views if manual_views else None,
-                            site=SiteInputs(**site_result) if site_result else None,
+                            site=_site_obj_3d,
                             environment_data=result.get("environment"),
+                            solar_grid_image=_solar_grid_3d,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
