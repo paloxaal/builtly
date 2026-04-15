@@ -3506,7 +3506,7 @@ def build_environment_analysis(
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """
     Isometrisk 3D-volumskisse.
-    Viser foreslatte volumer, nabobygg og tomtegrense fra skraa vinkel
+    Viser foreslåtte volumer, nabobygg og tomtegrense fra skrå vinkel
     slik at siktlinjer, hoyder og romlige forhold er tydelige.
     """
     canvas_w, canvas_h = 1100, 900
@@ -3647,6 +3647,12 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         if vol['type'] == 'neighbor':
             alpha = min(180, int(80 + h * 6))
             draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(220,alpha+30)), 1)
+            # Nabohøyde-label (grå, over bygget)
+            if h > 3:
+                avg_x = sum(p[0] for p in coords) / len(coords)
+                avg_y = sum(p[1] for p in coords) / len(coords)
+                lx, ly = iso_project(avg_x, avg_y, h * 1.05)
+                draw.text((lx - 10, ly - 6), f"{h:.0f}m", fill=(180,190,205,160), font=font_info)
         else:
             base = vol.get('color', (34,197,94,200))
             base = tuple(int(v) if v > 1 else int(v * 255) for v in base)  # handle 0.0-1.0 alpha
@@ -3674,7 +3680,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     if n_parts > 1:
         title += f" | {n_parts} deler"
     draw.text((30, yt), title, fill=(245,247,251,255), font=font_bold)
-    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Hoyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Høyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
     draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font_info)
     draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font_info)
 
@@ -5232,7 +5238,7 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
         ("BYGGEFELT", f"{best.buildable_area_m2:.0f} m2"),
         ("NABOBYGG", f"{site.neighbor_count} stk"),
         ("MAKS ETASJER", f"{site.max_floors}"),
-        ("MAKS HOYDE", f"{site.max_height_m:.0f} m"),
+        ("MAKS HØYDE", f"{site.max_height_m:.0f} m"),
         ("MAKS BYA", f"{site.max_bya_pct:.0f}%"),
     ]
     if site.utnyttelsesgrad_bra_pct > 0:
@@ -5250,7 +5256,7 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
 
     if has_env:
         env_y = 320
-        draw.text((40, env_y - 15), "MILJOFORHOLD", fill=(56, 189, 248), font=font_title)
+        draw.text((40, env_y - 15), "MILJØFORHOLD", fill=(56, 189, 248), font=font_title)
 
         noise = env.get("noise", {})
         daylight = env.get("daylight", {})
@@ -5261,9 +5267,9 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
             worst = max(noise["zones"], key=lambda z: z.get("db", 0))
             db = worst.get("db", 0)
             color = (248, 113, 113) if db > 65 else (245, 158, 11) if db > 55 else (52, 211, 153)
-            env_items.append(("STOY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
+            env_items.append(("STØY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
         else:
-            env_items.append(("STOY", "Ingen data", (130, 145, 165)))
+            env_items.append(("STØY", "Ingen data", (130, 145, 165)))
 
         if daylight.get("available"):
             dl = daylight.get("overall_score", 0)
@@ -5356,6 +5362,13 @@ def render_solar_snapshot(
         np_ = pts(ncoords)
         if len(np_) >= 3:
             draw.polygon(np_, fill=(195, 200, 210, 130), outline=(160, 168, 180, 160))
+            # Nabohøyde-label (bare for nære naboer)
+            nh_label = float(neighbor.get('height_m', 0))
+            dist = math.hypot(avg_x - cx, avg_y - cy)
+            if nh_label > 0 and dist < view_radius * 0.7:
+                nav_sx = sum(p[0] for p in np_) / len(np_)
+                nav_sy = sum(p[1] for p in np_) / len(np_)
+                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(100, 110, 130, 180), font=font_small)
         if sun_above:
             nh = float(neighbor.get('height_m', 9.0))
             if nh > 0:
@@ -5397,6 +5410,16 @@ def render_solar_snapshot(
                 base_c = (base_c[0], base_c[1], base_c[2], 220)
             draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 240))
 
+            # Bygningslabel: etasjer + hoyde
+            floors = int(part.get('floors', option.floors))
+            avg_sx = sum(p[0] for p in pp) / len(pp)
+            avg_sy = sum(p[1] for p in pp) / len(pp)
+            lbl = f"{floors}et/{h:.0f}m"
+            # Hvit boks bak tekst for lesbarhet
+            tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 8
+            draw.rectangle([(avg_sx - tw/2 - 4, avg_sy - 10), (avg_sx + tw/2 + 4, avg_sy + 10)], fill=(255, 255, 255, 200))
+            draw.text((avg_sx - tw/2, avg_sy - 8), lbl, fill=(26, 43, 72, 255), font=font_small)
+
     # Solretning-pil
     if sun_above:
         sun_rad = math.radians(az_local)
@@ -5425,7 +5448,7 @@ def render_solar_snapshot(
     draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(26, 43, 72, 220))
     display_label = label or f"{date_str} kl. {hour_str}"
     draw.text((24, lbl_y + 10), display_label, fill=(245, 247, 251, 255), font=font_title)
-    draw.text((24, lbl_y + 38), f"Solhoyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font_small)
+    draw.text((24, lbl_y + 38), f"Solhøyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font_small)
 
     return img.convert('RGB')
 
@@ -5436,12 +5459,12 @@ def render_solar_snapshot_grid(
 ) -> Image.Image:
     """
     Rendrer en 3x2 rutenett med 5 sol/skygge-snapshots:
-      Rad 1: Varjevndogn 12:00, 15:00, Sommersolverv 12:00
+      Rad 1: Vårjevndøgn 12:00, 15:00, Sommersolverv 12:00
       Rad 2: Sommersolverv 15:00, 18:00, (infopanel)
     """
     snapshots = [
-        (80, 12.0, "Varjevndogn - 21. mars kl. 12:00"),
-        (80, 15.0, "Varjevndogn - 21. mars kl. 15:00"),
+        (80, 12.0, "Vårjevndøgn - 21. mars kl. 12:00"),
+        (80, 15.0, "Vårjevndøgn - 21. mars kl. 15:00"),
         (172, 12.0, "Sommersolverv - 21. juni kl. 12:00"),
         (172, 15.0, "Sommersolverv - 21. juni kl. 15:00"),
         (172, 18.0, "Sommersolverv - 21. juni kl. 18:00"),
@@ -5475,13 +5498,13 @@ def render_solar_snapshot_grid(
     draw.text((ix + 60, iy + 80), "SOL/SKYGGE-ANALYSE", fill=(56, 189, 248), font=font_title)
     draw.text((ix + 60, iy + 150), f"Breddegrad: {site.latitude_deg:.2f} N", fill=(200, 211, 223), font=font_body)
     draw.text((ix + 60, iy + 190), f"Typologi: {option.typology}", fill=(200, 211, 223), font=font_body)
-    draw.text((ix + 60, iy + 230), f"Hoyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 230), f"Høyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font_body)
     draw.text((ix + 60, iy + 270), f"Etasjer: {option.floors}", fill=(200, 211, 223), font=font_body)
     draw.text((ix + 60, iy + 340), "Skygger er vist som", fill=(160, 175, 195), font=font_small)
     draw.text((ix + 60, iy + 370), "semitransparente felt.", fill=(160, 175, 195), font=font_small)
     draw.text((ix + 60, iy + 430), "Gul sirkel = solretning", fill=(255, 210, 60), font=font_legend)
-    draw.text((ix + 60, iy + 470), "Morkeblaa = bygningsskygge", fill=(100, 130, 170), font=font_legend)
-    draw.text((ix + 60, iy + 510), "Lysegraa = naboskygge", fill=(160, 170, 185), font=font_legend)
+    draw.text((ix + 60, iy + 470), "Mørkeblå = bygningsskygge", fill=(100, 130, 170), font=font_legend)
+    draw.text((ix + 60, iy + 510), "Lysegrå = naboskygge", fill=(160, 170, 185), font=font_legend)
     draw.text((ix + 60, iy + cell_h - 100), "Generert av Builtly ARK Motor", fill=(80, 100, 130), font=font_small)
 
     return grid
@@ -5545,7 +5568,7 @@ def _render_executive_summary(
     site_cards = [
         ("TOMTEAREAL", f"{site.site_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
         ("BYGGEFELT", f"{best.buildable_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
-        ("MAKS HOYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", builtly_blue),
+        ("MAKS HØYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", builtly_blue),
         ("NABOBYGG", f"{site.neighbor_count} stk", builtly_blue),
     ]
     card_y2 = card_y + card_h + 30
@@ -5559,7 +5582,7 @@ def _render_executive_summary(
     # Miljo-rad
     env = environment_data or {}
     env_y = card_y2 + 150
-    draw.text((60, env_y), "MILJOFORHOLD", fill=navy, font=font_heading)
+    draw.text((60, env_y), "MILJØFORHOLD", fill=navy, font=font_heading)
     env_y += 44
 
     env_items = []
@@ -5570,9 +5593,9 @@ def _render_executive_summary(
         worst = max(noise["zones"], key=lambda z: z.get("db", 0))
         db = worst.get("db", 0)
         color = accent_red if db > 65 else accent_amber if db > 55 else accent_green
-        env_items.append(("STOY", f"{db:.0f} dB", color))
+        env_items.append(("STØY", f"{db:.0f} dB", color))
     else:
-        env_items.append(("STOY", "Ingen data", (150, 160, 175)))
+        env_items.append(("STØY", "Ingen data", (150, 160, 175)))
 
     if daylight.get("available"):
         dl = daylight.get("overall_score", 0)
@@ -5625,7 +5648,7 @@ def create_full_report_pdf(
       Page 1:  Cover
       Page 2:  Table of Contents
       Page 3:  Executive Summary (KPI boxes)
-      Page 4:  Nokkeltall + sol/BRA-chart + kontekst
+      Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
       Page 5+: Volumskisser (top 3)
       Page N:  Sol/skygge-grid
       Page N+: Rapport tekst
@@ -5684,8 +5707,8 @@ def create_full_report_pdf(
 
     toc_items = [
         ("1.", "Executive Summary"),
-        ("2.", "Nokkeltall fra motor"),
-        ("3.", "Volumskisser - topp 3 alternativer"),
+        ("2.", "Nøkkeltall fra motor"),
+        ("3.", "Volumskisser — topp 3 alternativer"),
     ]
     toc_idx = 4
     if solar_grid_image is not None:
@@ -5695,7 +5718,9 @@ def create_full_report_pdf(
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
         if re.match(r"^\d+\.\s[A-Z]", line):
-            toc_items.append((f"{toc_idx}.", line.strip()))
+            # Strip existing number prefix: "1. OPPSUMMERING" → "Oppsummering"
+            title_clean = re.sub(r"^\d+\.\s*", "", line).strip()
+            toc_items.append((f"{toc_idx}.", title_clean))
             toc_idx += 1
         elif line.startswith("# "):
             toc_items.append((f"{toc_idx}.", line.replace("#", "").strip()))
@@ -5728,24 +5753,126 @@ def create_full_report_pdf(
     if options and site is not None:
         pdf.add_page()
         pdf.section_title("EXECUTIVE SUMMARY", 18)
-        try:
-            exec_img = _render_executive_summary(options, site, environment_data)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                exec_img.convert("RGB").save(tmp.name, format="JPEG", quality=94)
-                img_w = 160
-                img_h = img_w * (exec_img.height / max(exec_img.width, 1))
-                pdf.check_space(img_h + 5)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
-                pdf.ln(img_h + 4)
-        except Exception:
-            pass
+
+        best = options[0]
+        bra_best = best.gross_bta_m2 * best.efficiency_ratio
+
+        # Anbefalt alternativ
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "", 11)
+        pdf.set_text_color(*_BUILTLY_BLUE)
+        pdf.cell(0, 7, clean_pdf_text(f"Anbefalt: {best.name} ({best.typology})"), 0, 1)
+        pdf.ln(4)
+
+        # --- KPI-kort rad 1 (native PDF rects) ---
+        def _draw_kpi_card(px, py, pw, ph, title_str, value_str, sub_str, accent_color):
+            pdf.set_fill_color(*accent_color)
+            pdf.rect(px, py, pw, 2, 'F')
+            pdf.set_draw_color(226, 232, 240)
+            pdf.rect(px, py, pw, ph, 'D')
+            pdf.set_fill_color(248, 250, 252)
+            pdf.rect(px + 0.3, py + 2.3, pw - 0.6, ph - 2.6, 'F')
+            pdf.set_xy(px + 3, py + 5)
+            pdf.set_font(PDF_FONT, "", 7)
+            pdf.set_text_color(*_MUTED)
+            pdf.cell(pw - 6, 4, clean_pdf_text(title_str), 0, 0)
+            pdf.set_xy(px + 3, py + 11)
+            pdf.set_font(PDF_FONT, "B", 14)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(pw - 6, 8, clean_pdf_text(value_str), 0, 0)
+            if sub_str:
+                pdf.set_xy(px + 3, py + 21)
+                pdf.set_font(PDF_FONT, "", 7)
+                pdf.set_text_color(150, 160, 175)
+                pdf.cell(pw - 6, 4, clean_pdf_text(sub_str), 0, 0)
+
+        cw = 38  # card width
+        ch = 28  # card height
+        cx = 25  # start x
+        cy = pdf.get_y()
+        gap = 2.5
+
+        sol_color = (16, 185, 129) if best.solar_score >= 50 else (245, 158, 11)
+        score_color = (16, 185, 129) if best.score >= 60 else (245, 158, 11)
+
+        _draw_kpi_card(cx, cy, cw, ch, "BRA", f"{bra_best:,.0f} m2".replace(",", " "), "Salgbart areal", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + cw + gap, cy, cw, ch, "ENHETER", f"{best.unit_count}", "Boliger", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 2 * (cw + gap), cy, cw, ch, "SOL", f"{best.solar_score:.0f}/100", "Solscore", sol_color)
+        _draw_kpi_card(cx + 3 * (cw + gap), cy, cw, ch, "SCORE", f"{best.score:.0f}/100", "Totalscore", score_color)
+        pdf.set_y(cy + ch + 4)
+
+        # --- KPI-kort rad 2: Tomt ---
+        cy2 = pdf.get_y()
+        _draw_kpi_card(cx, cy2, cw, 22, "TOMTEAREAL", f"{site.site_area_m2:,.0f} m2".replace(",", " "), "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + cw + gap, cy2, cw, 22, "BYGGEFELT", f"{best.buildable_area_m2:,.0f} m2".replace(",", " "), "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 2 * (cw + gap), cy2, cw, 22, "MAKS HØYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 3 * (cw + gap), cy2, cw, 22, "NABOBYGG", f"{site.neighbor_count} stk", "", _BUILTLY_BLUE)
+        pdf.set_y(cy2 + 26)
+
+        # --- Miljo-rad ---
+        env = environment_data or {}
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(0, 7, clean_pdf_text("MILJØFORHOLD"), 0, 1)
+        pdf.ln(1)
+
+        cy3 = pdf.get_y()
+        noise = env.get("noise", {}) if env.get("available") else {}
+        daylight = env.get("daylight", {}) if env.get("available") else {}
+
+        if noise.get("available") and noise.get("zones"):
+            worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+            db = worst.get("db", 0)
+            nc = (239, 68, 68) if db > 65 else (245, 158, 11) if db > 55 else (16, 185, 129)
+            _draw_kpi_card(cx, cy3, cw, 22, "STØY", f"{db:.0f} dB", "", nc)
+        else:
+            _draw_kpi_card(cx, cy3, cw, 22, "STØY", "Ingen data", "", _MUTED)
+
+        if daylight.get("available"):
+            dl = daylight.get("overall_score", 0)
+            dc = (16, 185, 129) if dl >= 70 else (245, 158, 11) if dl >= 50 else (239, 68, 68)
+            _draw_kpi_card(cx + cw + gap, cy3, cw, 22, "DAGSLYS", f"{dl:.0f}/100", "", dc)
+        else:
+            _draw_kpi_card(cx + cw + gap, cy3, cw, 22, "DAGSLYS", "Ikke vurdert", "", _MUTED)
+
+        bra_pct = f"{site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else "Ikke satt"
+        _draw_kpi_card(cx + 2 * (cw + gap), cy3, cw, 22, "%-BRA MAL", bra_pct, "", _BUILTLY_BLUE)
+        pdf.set_y(cy3 + 26)
+
+        # --- Ranking-barer ---
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(0, 7, clean_pdf_text("ALTERNATIV-RANKING (SCORE)"), 0, 1)
+        pdf.ln(2)
+
+        max_score = max((o.score for o in options), default=100)
+        bar_max_w = 110  # mm
+        sorted_opts = sorted(options, key=lambda o: o.score, reverse=True)
+        for opt in sorted_opts:
+            bar_w = max(2, opt.score / max(max_score, 1) * bar_max_w)
+            bar_color = (16, 185, 129) if opt.score >= 60 else (245, 158, 11) if opt.score >= 40 else (239, 68, 68)
+            y_bar = pdf.get_y()
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "", 9)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(30, 6, clean_pdf_text(opt.typology), 0, 0)
+            pdf.set_fill_color(*bar_color)
+            pdf.rect(56, y_bar + 0.5, bar_w, 5, 'F')
+            pdf.set_xy(57 + bar_w, y_bar)
+            pdf.set_font(PDF_FONT, "B", 9)
+            pdf.cell(10, 6, clean_pdf_text(f"{opt.score:.0f}"), 0, 1)
+            pdf.ln(1)
 
     # ================================================================
-    # PAGE 4: NOKKELTALL + CHARTS
+    # PAGE 4: NØKKELTALL + CHARTS
     # ================================================================
     if options:
         pdf.add_page()
-        pdf.section_title("NOKKELTALL FRA MOTOR", 16)
+        pdf.section_title("NØKKELTALL FRA MOTOR", 16)
 
         rows = []
         for option in options:
@@ -5832,9 +5959,9 @@ def create_full_report_pdf(
         pdf.add_page()
         pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
         pdf.body_text(
-            "Diagrammene viser beregnede skyggeforhold for varjevndogn (21. mars) "
+            "Diagrammene viser beregnede skyggeforhold for vårjevndøgn (21. mars) "
             "og sommersolverv (21. juni) ved utvalgte klokkeslett. "
-            "Skygger fra foreslatte volumer og nabobygg er inkludert."
+            "Skygger fra foreslåtte volumer og nabobygg er inkludert."
         )
         pdf.ln(4)
         try:
