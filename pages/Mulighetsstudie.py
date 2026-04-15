@@ -2385,16 +2385,103 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
             else:
-                # Typologi-bevisst fallback: bruk create_typology_footprint igjen med økt target
-                try:
-                    fb_fp, fb_info = create_typology_footprint(placement_polygon, typology, target_footprint * 1.1)
-                    if fb_fp is not None and not fb_fp.is_empty and fb_fp.area > footprint_area * 1.05:
-                        footprint_polygon = fb_fp
-                        footprint_area = float(footprint_polygon.area)
-                        placement.update(fb_info)
-                        placement["source"] = "typology-fallback"
-                except Exception:
-                    pass
+                # SISTE UTVEI: Skaler polygon til å matche target, deretter
+                # form om til typologisk karakter via post-processing
+                scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
+                max_scale = 0.98 if site.utnyttelsesgrad_bra_pct > 200 else 0.95
+                scale_ratio = min(scale_ratio, max_scale)
+                scaled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
+                                           origin=placement_polygon.centroid).buffer(0)
+                if scaled_fp is not None and not scaled_fp.is_empty and scaled_fp.area > footprint_area * 1.05:
+                    # Typologi-differensiering via post-processing av skalert polygon
+                    shape = _analyze_polygon(scaled_fp)
+                    fp_major, fp_minor = shape['major_m'], shape['minor_m']
+                    fp_angle = shape['orientation_deg']
+                    rad = math.radians(fp_angle)
+                    pcx, pcy = scaled_fp.centroid.x, scaled_fp.centroid.y
+
+                    if typology == "Lamell":
+                        # Kutt i 2-3 parallelle strips med 8m gap
+                        strip_d = min(13.0, fp_minor * 0.35)
+                        strip_d = max(10.0, strip_d)
+                        gap = max(6.0, fp_minor * 0.12)
+                        n_strips = max(2, min(3, int(fp_minor / (strip_d + gap))))
+                        perp = rad + math.pi / 2.0
+                        total_span = (n_strips - 1) * (strip_d + gap)
+                        strips = []
+                        for si in range(n_strips):
+                            off = -total_span / 2.0 + si * (strip_d + gap)
+                            sx = pcx + off * math.cos(perp)
+                            sy = pcy + off * math.sin(perp)
+                            strip = _make_oriented_rect(sx, sy, fp_major * 0.92, strip_d, rad)
+                            clipped = strip.intersection(scaled_fp).buffer(0)
+                            if not clipped.is_empty and clipped.area > 30:
+                                strips.append(clipped)
+                        if strips and sum(s.area for s in strips) > footprint_area:
+                            footprint_polygon = unary_union(strips).buffer(0)
+                            placement["n_buildings"] = len(strips)
+                        else:
+                            footprint_polygon = scaled_fp
+                            placement["n_buildings"] = 1
+
+                    elif typology == "Punkthus":
+                        # 3-5 separate kvadratiske bygninger innenfor skalert polygon
+                        side = min(18.0, fp_minor * 0.38)
+                        side = max(14.0, side)
+                        sp = max(10.0, fp_minor * 0.15)
+                        n_pts = max(3, min(5, math.ceil(scaled_fp.area / max(side * side, 1.0))))
+                        buildings = _place_grid_buildings(
+                            scaled_fp, side, side, fp_angle,
+                            spacing_along=sp, spacing_across=sp,
+                            max_buildings=n_pts,
+                            max_footprint_m2=scaled_fp.area,
+                        )
+                        if buildings and len(buildings) >= 2:
+                            footprint_polygon = unary_union(buildings).buffer(0)
+                            placement["n_buildings"] = len(buildings)
+                        else:
+                            footprint_polygon = scaled_fp
+                            placement["n_buildings"] = 1
+
+                    elif typology == "Karré":
+                        # Ring-form med gårdsrom
+                        ring_d = min(12.0, fp_minor * 0.20)
+                        ring_d = max(8.0, ring_d)
+                        inner = scaled_fp.buffer(-ring_d)
+                        if inner.is_valid and not inner.is_empty and inner.area > 30:
+                            ring = scaled_fp.difference(inner).buffer(0)
+                            if not ring.is_empty and ring.area > footprint_area:
+                                footprint_polygon = ring
+                                placement["n_buildings"] = 1
+                                placement["courtyard_count"] = 1
+                            else:
+                                footprint_polygon = scaled_fp
+                        else:
+                            footprint_polygon = scaled_fp
+
+                    elif typology == "Tun":
+                        # L/U-form: hovedkropp + vinkelrett fløy
+                        main_d = min(12.0, fp_minor * 0.35)
+                        main_d = max(10.0, main_d)
+                        main = _find_inscribed_rect(scaled_fp, main_d, fp_angle, max_width_m=fp_major * 0.85)
+                        if main is not None:
+                            remaining = scaled_fp.difference(main.buffer(3.0))
+                            wing = _find_inscribed_rect(remaining, main_d, fp_angle + 90, max_width_m=fp_major * 0.5)
+                            if wing is not None and wing.area > 40:
+                                footprint_polygon = unary_union([main, wing]).buffer(0)
+                                placement["n_buildings"] = 2
+                            else:
+                                footprint_polygon = main
+                                placement["n_buildings"] = 1
+                        else:
+                            footprint_polygon = scaled_fp
+
+                    else:
+                        footprint_polygon = scaled_fp
+
+                    footprint_area = float(footprint_polygon.area)
+                    placement["source"] = f"polygon-fill-{typology.lower().replace(' ', '_')}"
+                    placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
 
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
@@ -5746,7 +5833,7 @@ def create_full_report_pdf(
     ]
     toc_idx = 4
     if scene_images:
-        toc_items.append((f"{toc_idx}.", "3D-terrengscene"))
+        toc_items.append((f"{toc_idx}.", "Planvisning og volumkontroll"))
         toc_idx += 1
     if solar_grid_image is not None:
         toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
@@ -5994,22 +6081,22 @@ def create_full_report_pdf(
     # ================================================================
     if scene_images:
         pdf.add_page()
-        pdf.section_title("3D-TERRENGSCENE", 16)
+        pdf.section_title("PLANVISNING OG VOLUMKONTROLL", 16)
         pdf.body_text(
-            "Perspektivbilder fra 3D-terrengmodellen viser foreslåtte volumer "
-            "i kontekst med eksisterende bebyggelse, terreng og omgivelser. "
+            "Planvisninger viser foreslåtte volumer sett ovenfra med "
+            "tomtegrense, byggefelt og nabobebyggelse. "
             "Høyder på foreslåtte bygg og nabobygg er angitt."
         )
         pdf.ln(4)
-        scene_labels = [
-            "Perspektiv — hovedvisning",
-            "Perspektiv — alternativ vinkel",
-            "Fugleperspektiv",
-            "Terrengsnitt",
-        ]
+        # Bruk typologi-labels fra options hvis tilgjengelig
         for i, image in enumerate(scene_images):
             pdf.check_space(100)
-            lbl = scene_labels[i] if i < len(scene_labels) else f"3D-visning {i + 1}"
+            if i < len(options):
+                opt = options[i]
+                bra = opt.gross_bta_m2 * opt.efficiency_ratio
+                lbl = f"{opt.name} — {opt.typology} | Planvisning"
+            else:
+                lbl = f"Planvisning {i + 1}"
             pdf.subtitle(lbl)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
@@ -6921,6 +7008,14 @@ if run_analysis:
                 environment_data = {"available": False, "error": str(exc)[:120]}
 
     option_images = [render_plan_diagram(site, option) for option in options]
+
+    # Auto-generer planvisninger som 3D-scene fallback
+    auto_scene_images = []
+    try:
+        for opt in options[:3]:
+            auto_scene_images.append(render_plan_view(site, opt))
+    except Exception:
+        pass
     deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
@@ -7029,7 +7124,7 @@ KRAV:
             site=site,
             environment_data=environment_data,
             solar_grid_image=solar_grid_img,
-            scene_images=st.session_state.get("ark_scene_images"),
+            scene_images=st.session_state.get("ark_scene_images") or auto_scene_images or None,
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
