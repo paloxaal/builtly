@@ -241,54 +241,7 @@ def geo_runtime_notes() -> List[str]:
     if not HAS_RASTERIO:
         notes.append("rasterio mangler: GeoTIFF/ASC terreng er deaktivert, men CSV/TXT med x,y,z virker fortsatt.")
     return notes
-def generer_arkitekt_render(base_image: Image.Image, option: OptionResult, api_key: str) -> Optional[Image.Image]:
-    """
-    Bruker Stability AI ControlNet Structure til å male en fotorealistisk 
-    norsk bygning over de grønne 3D-boksene.
-    """
-    if not api_key:
-        st.error("Mangler STABILITY_API_KEY i Render Secrets.")
-        return None
 
-    img_byte_arr = io.BytesIO()
-    safe_image = base_image.copy()
-    safe_image.thumbnail((1024, 1024)) 
-    safe_image.save(img_byte_arr, format='PNG')
-    img_bytes = img_byte_arr.getvalue()
-
-    typologi_engelsk = {
-        "Lamell": "linear apartment block",
-        "Punkthus": "point block residential tower",
-        "Karré": "perimeter block courtyard building",
-        "Tun": "cluster of townhouses",
-        "Tårn": "high-rise residential tower",
-        "Rekke": "row of modern townhouses"
-    }.get(option.typology, "residential building")
-
-    prompt = (
-        f"Photorealistic architectural aerial rendering of a modern {typologi_engelsk} in Norway. "
-        "Facade: tasteful combination of warm wood panels, light grey stucco, and warm brickwork. "
-        "Large windows, glass balconies, dark metal frames. Clean roofline, no solar panels. "
-        "Afternoon sunlight, soft shadows, photorealistic architectural photography, 8k."
-    )
-    
-    negative_prompt = "solar panels, photovoltaic cells, roof panels, ugly, blurry, sci-fi, cartoon"
-
-    url = "https://api.stability.ai/v2beta/stable-image/control/structure"
-    try:
-        response = requests.post(
-            url,
-            headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
-            files={"image": img_bytes},
-            data={"prompt": prompt, "negative_prompt": negative_prompt, "control_strength": 0.75, "output_format": "jpeg"},
-            timeout=45
-        )
-        if response.status_code == 200:
-            return Image.open(io.BytesIO(response.content))
-        st.error(f"AI-feil: {response.text}")
-    except Exception as e:
-        st.error(f"Tilkoblingsfeil: {e}")
-    return None
 
 # --- 3. GEODATA / KART (SKUDDSIKKER VERSJON) ---
 
@@ -5982,11 +5935,8 @@ def create_full_report_pdf(
     solar_grid_image: Optional[Image.Image] = None,
     scene_images: Optional[List[Image.Image]] = None,
     plan_view_analyses: Optional[List[str]] = None,
-    cover_image: Optional[Image.Image] = None, # NY PARAMETER
+    cover_image: Optional[Image.Image] = None, 
 ) -> bytes:
-    """
-    Oppdatert PDF-motor v14 med støtte for AI-generert forsidebilde.
-    """
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
     pdf.p_name = name.upper()
@@ -5994,26 +5944,21 @@ def create_full_report_pdf(
     pdf.set_auto_page_break(True, 22)
 
     # ================================================================
-    # PAGE 1: COVER (Oppdatert med AI-bilde)
+    # PAGE 1: COVER
     # ================================================================
     pdf.add_page()
     
     if cover_image:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
             cover_image.convert("RGB").save(tmp.name, format="JPEG", quality=95)
-            # Legger bildet helt ut i toppen
             pdf.image(tmp.name, x=0, y=0, w=210) 
-            
-        # Hvit boks bak teksten nederst på siden for lesbarhet
         pdf.set_fill_color(255, 255, 255)
         pdf.rect(0, 140, 210, 160, 'F') 
     else:
-        # Blå stripe øverst hvis vi ikke har bilde
         pdf.set_fill_color(*_BUILTLY_BLUE)
         pdf.rect(0, 0, 210, 6, 'F')
 
     if os.path.exists("logo.png"):
-        # Flytter logoen ned hvis vi har bilde
         pdf.image("logo.png", x=25, y=150 if cover_image else 20, w=50)
 
     pdf.set_y(180 if cover_image else 90)
@@ -9021,7 +8966,8 @@ render();
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Feil ved PDF-oppdatering: {exc}")
-st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
     # --- NY SEKSJON: AI-VISUALISERING ---
