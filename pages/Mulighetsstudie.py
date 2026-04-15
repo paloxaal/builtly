@@ -248,12 +248,14 @@ def generer_arkitekt_render(
         st.error("Mangler STABILITY_API_KEY i Render Secrets.")
         return None
 
+    # 1. Sikre at bildet er RGB og lagre det i en buffer
     img_byte_arr = io.BytesIO()
-    safe_image = base_image.copy()
+    safe_image = base_image.convert("RGB")
     safe_image.thumbnail((1024, 1024))
     safe_image.save(img_byte_arr, format='PNG')
     img_bytes = img_byte_arr.getvalue()
 
+    # 2. Den arkitektoniske prompten
     typologi_map = {
         "Lamell": "linear apartment block",
         "Punkthus": "point block residential tower",
@@ -265,37 +267,45 @@ def generer_arkitekt_render(
     typology_eng = typologi_map.get(option.typology, "residential building")
 
     prompt = (
-        f"Photorealistic architectural rendering of a modern {typology_eng} in Norway. "
-        "The facade is a tasteful combination of vertical wooden panels, light grey stucco/plaster, and warm brickwork (tegl). "
-        "Large floor-to-ceiling windows, glass balconies with thin dark metal frames. "
-        "Clean roofline, strictly NO solar panels. "
-        "Soft afternoon sunlight, realistic shadows, architectural photography style, 8k resolution."
+        f"Photorealistic architectural aerial rendering of a modern {typology_eng} in Norway. "
+        "Facade: tasteful combination of warm wood panels, light grey stucco, and warm brickwork. "
+        "Large windows, glass balconies, dark metal frames. Clean roofline, no solar panels. "
+        "Afternoon sunlight, soft shadows, photorealistic architectural photography, 8k."
     )
 
-    negative_prompt = "solar panels, photovoltaic cells, solar collectors, ugly, blurry, sci-fi, cartoon, distorted"
+    negative_prompt = "solar panels, photovoltaic cells, roof panels, ugly, blurry, sci-fi, cartoon"
 
     url = "https://api.stability.ai/v2beta/stable-image/control/structure"
+
+    # FIX 1: Fiktivt filnavn + eksplisitt MIME-type — Stability krever dette
+    files = {
+        "image": ("image.png", img_bytes, "image/png"),
+    }
+
+    # FIX 2: Alle verdier som rene strenger — multipart/form-data er text-basert
+    data = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "control_strength": str(control_strength),
+        "output_format": "jpeg",
+    }
+
     try:
         response = requests.post(
             url,
             headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
-            files={"image": ("scene.png", img_bytes, "image/png")},
-            data={
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "control_strength": control_strength,
-                "output_format": "jpeg",
-            },
+            files=files,
+            data=data,
             timeout=60,
         )
         if response.status_code == 200:
             return Image.open(io.BytesIO(response.content))
         err_text = response.text[:200] if response.text else str(response.status_code)
-        st.error(f"Stability AI returnerte feil ({response.status_code}): {err_text}")
+        st.error(f"Stability AI avviste forespørselen (Kode {response.status_code}): {err_text}")
     except requests.exceptions.Timeout:
         st.error("Stability AI svarte ikke innen tidsfristen (60s). Prøv igjen.")
     except Exception as e:
-        st.error(f"Tilkoblingsfeil: {e}")
+        st.error(f"Tilkoblingsfeil mot Stability AI: {e}")
     return None
 
 
@@ -9081,22 +9091,30 @@ render();
     st.markdown(result["report_text"])
 
     # --- AI Visualisering (Stability AI) ---
-    st.markdown("<div class='section-header'>✨ AI Visualisering</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
     stability_key = os.environ.get("STABILITY_API_KEY", "")
     scene_imgs = st.session_state.get("ark_scene_images")
     if scene_imgs and stability_key:
+        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+        opt_names = [opt.name for opt in motor_options] if motor_options else []
+        sel_render_name = st.selectbox(
+            "Velg alternativ for visualisering",
+            opt_names,
+            index=0,
+            key="stability_render_select",
+        ) if opt_names else None
         ctrl_strength = st.slider(
-            "ControlNet-styrke (lav = mer kreativt, høy = tettere på 3D-formen)",
+            "Strukturstyrke (lav = friere tolkning, høy = tettere på volummodellen)",
             min_value=0.3, max_value=1.0, value=0.75, step=0.05,
             key="stability_ctrl_strength",
         )
-        if st.button("🪄 Tryll frem fotorealistisk render", use_container_width=True, key="stability_render_btn"):
-            base_img = scene_imgs[0]
-            motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
-            first_option = motor_options[0] if motor_options else None
-            if first_option is not None:
-                with st.spinner("Genererer fotorealistisk render med Stability AI..."):
-                    rendered = generer_arkitekt_render(base_img, first_option, stability_key, control_strength=ctrl_strength)
+        if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="stability_render_btn"):
+            sel_idx = opt_names.index(sel_render_name) if sel_render_name and sel_render_name in opt_names else 0
+            base_img = scene_imgs[min(sel_idx, len(scene_imgs) - 1)]
+            selected_option = motor_options[sel_idx] if motor_options else None
+            if selected_option is not None:
+                with st.spinner("Genererer fotorealistisk skisse — dette tar ca. 15–30 sekunder..."):
+                    rendered = generer_arkitekt_render(base_img, selected_option, stability_key, control_strength=ctrl_strength)
                 if rendered is not None:
                     st.session_state["stability_render_image"] = rendered
                     # Regenerer PDF med cover_image — gjenbruk cachet sol/AI-analyse
@@ -9136,19 +9154,19 @@ render();
                         )
                         st.session_state.generated_ark_pdf = new_pdf_sr
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
-                        st.success("PDF oppdatert med fotorealistisk forside!")
+                        st.success("PDF oppdatert med fotorealistisk forside.")
                     except Exception as exc:
-                        st.warning(f"Render lagret, men PDF-oppdatering feilet: {exc}")
+                        st.warning(f"Skisse generert, men PDF-oppdatering feilet: {exc}")
             else:
-                st.warning("Ingen alternativer tilgjengelig for rendering.")
+                st.warning("Ingen alternativer tilgjengelig for visualisering.")
     elif not stability_key:
-        st.caption("Legg til STABILITY_API_KEY i Render Secrets for å aktivere fotorealistisk rendering.")
+        st.caption("Legg til STABILITY_API_KEY i Render Secrets for å aktivere fotorealistisk visualisering.")
     elif not scene_imgs:
-        st.caption("Fang 3D-scener først (se seksjonen ovenfor) for å aktivere AI-rendering.")
+        st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
 
     # Vis cachet render fra session (uten duplikat ved knapp-klikk)
     if "stability_render_image" in st.session_state:
-        st.image(st.session_state["stability_render_image"], caption="Fotorealistisk AI-render (Stability AI ControlNet)", use_container_width=True)
+        st.image(st.session_state["stability_render_image"], caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
 
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     cdl, cqa = st.columns(2)
