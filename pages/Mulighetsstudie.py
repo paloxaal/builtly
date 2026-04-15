@@ -16,9 +16,6 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from pathlib import Path
-st.write("Scene component path:", Path(__file__).parent / "scene_capture_component")
-st.write("Exists:", (Path(__file__).parent / "scene_capture_component").exists())
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 from shapely import affinity
@@ -8806,14 +8803,14 @@ render();
 
             # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
             if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
-                st.caption("Fanger 3D-scener automatisk for alle alternativer...")
+                st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
                 captured = auto_capture_3d_scenes(
                     SiteInputs(**site_result), options, scene_config,
                     height_px=500, capture_width=1280, capture_height=720,
                 )
                 if captured:
                     st.session_state.ark_scene_images = captured
-                    st.success(f"✓ {len(captured)} 3D-scener fanget automatisk — inkludert i rapporten.")
+                    st.success(f"✓ {len(captured)} 3D-scener fanget og analysert — PDF oppdatert automatisk.")
                     # Auto-regenerer PDF med 3D-bilder og AI-analyse
                     try:
                         pd_state = st.session_state.get("project_data", {})
@@ -8849,9 +8846,11 @@ render();
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
                     except Exception:
                         pass
+                else:
+                    st.caption("Komponenten rendrer 3D-scener — bildene overføres ved neste sidelasting.")
 
-            # --- AUTO BATCH CAPTURE (fallback: laster ned bilder automatisk) ---
-            if not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+            # --- BATCH CAPTURE fallback: KUN når custom component IKKE er tilgjengelig ---
+            elif _scene_capture_component is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
                 st.session_state._batch_auto_triggered = True
                 st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
                 all_payloads = []
