@@ -4088,11 +4088,13 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
 # --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
 _SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
 _scene_capture_component = None
+_scene_capture_error = ""
 if _SCENE_CAPTURE_DIR.exists():
     try:
         _scene_capture_component = components.declare_component("scene_capture", path=str(_SCENE_CAPTURE_DIR))
-    except Exception:
+    except Exception as _comp_exc:
         _scene_capture_component = None
+        _scene_capture_error = str(_comp_exc)
 
 
 def auto_capture_3d_scenes(
@@ -8802,6 +8804,8 @@ render();
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
 
             # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
+            # DEBUG: vis komponent-status
+            st.caption(f"🔧 Component: {'OK' if _scene_capture_component else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
             if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
                 st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
                 captured = auto_capture_3d_scenes(
