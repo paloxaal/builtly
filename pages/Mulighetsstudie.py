@@ -1319,15 +1319,16 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     sp_factor = 0.5 if high_utilization else 1.0
 
     if typology == "Punkthus":
-        # Punkthus: tilnærmet kvadratisk, tilpasset tomtestørrelse
-        # Maks 22×21m, skaleres ned for mindre tomter
-        char_dim = math.sqrt(max(buildable_polygon.area, 100.0))  # ekvivalent bredde
-        bld_w = clamp(char_dim * 0.35, 14.0, 22.0)
-        bld_d = clamp(bld_w * 0.95, 13.0, 21.0)  # Alltid tilnærmet kvadratisk
+        # Punkthus: tilnærmet kvadratisk, dimensjonert for å nå target med 3-5 bygg
+        desired_count = clamp(math.ceil(target_footprint_m2 / 400.0), 3, 6)  # 400m²/bygg er ideelt
+        ideal_area = target_footprint_m2 / desired_count
+        ideal_side = math.sqrt(ideal_area)
+        bld_w = clamp(ideal_side, 14.0, 22.0)
+        bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
     elif typology == "Tårn":
-        # Tårn: kompakt fotavtrykk, skalert til tomt
-        char_dim = math.sqrt(max(buildable_polygon.area, 100.0))
-        bld_w = clamp(char_dim * 0.28, 14.0, 22.0)
+        # Tårn: kompakt fotavtrykk, dimensjonert fra target (1 bygg)
+        ideal_side = math.sqrt(target_footprint_m2)
+        bld_w = clamp(ideal_side, 14.0, 22.0)
         bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
     elif typology == "Rekke":
         # Fallback til Lamell-oppførsel
@@ -1346,10 +1347,11 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         bld_w = max(15.0, bld_w)
         bld_d = max(8.0, bld_d)
     elif typology == "Lamell":
-        # Lamell: lang og grunn, tilpasset tomtestørrelse
-        # Bredde: strekkes langs major-aksen, dybde 11-14m
-        bld_w = clamp(major * 0.70, 18.0, 60.0)
-        bld_d = clamp(minor * 0.25, 11.0, 14.0)
+        # Lamell: lang og grunn, dimensjonert for å nå target med 2-3 bygg
+        bld_d = clamp(minor * 0.25, 11.0, 14.0)  # Dybde: alltid 11-14m
+        desired_bars = clamp(math.ceil(target_footprint_m2 / (major * 0.6 * bld_d)), 2, 4)
+        bld_w = clamp(target_footprint_m2 / (desired_bars * bld_d), 18.0, 65.0)
+        bld_w = min(bld_w, major * 0.85)  # Aldri bredere enn tomten
     else:
         # Podium+Tårn: standard
         bld_w = min(limits["bld_w"], major * 0.7)
@@ -2059,11 +2061,12 @@ def _typology_polygon_fill(
             info["n_buildings"] = len(bars)
 
     elif typology == "Punkthus":
-        # Punkthus: tilnærmet kvadratisk, tilpasset tomten
-        char_dim = math.sqrt(max(poly_area, 100.0))
-        bld_w = clamp(char_dim * 0.35, 14.0, 22.0)
+        # Punkthus: dimensjonert fra target med 3-5 bygg
+        desired_count = clamp(math.ceil(target_footprint_m2 / 400.0), 3, 6)
+        ideal_area = target_footprint_m2 / desired_count
+        bld_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
         bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
-        spacing = max(14.0, bld_w * 0.7)
+        spacing = max(10.0, bld_w * 0.6)
         n_pts = max(3, min(8, math.ceil(target_footprint_m2 / max(bld_w * bld_d, 1.0))))
         n_along = max(1, min(n_pts, int(major / (bld_d + spacing)) + 1))
         n_across = max(1, math.ceil(n_pts / n_along))
@@ -2083,7 +2086,7 @@ def _typology_polygon_fill(
                 by = pcy + oa * math.sin(rad) + oc * math.sin(perp_rad)
                 bx_box = _make_oriented_rect(bx, by, bld_w, bld_d, rad)
                 clipped = bx_box.intersection(placement_polygon).buffer(0)
-                if not clipped.is_empty and clipped.area >= bld_w * bld_d * 0.50:
+                if not clipped.is_empty and clipped.area >= bld_w * bld_d * 0.45:
                     boxes.append(clipped)
         if boxes:
             result = unary_union(boxes).buffer(0)
@@ -2404,14 +2407,16 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 new_fp = None
 
                 if typology == "Lamell":
-                    # Lamell: lange grunne bygninger tilpasset tomten
-                    bld_d = clamp(fp_minor * 0.25, 11.0, 14.0)
-                    bld_w = clamp(fp_major * 0.70, 18.0, 60.0)
-                    n_needed = max(2, math.ceil(target_footprint / max(bld_w * bld_d, 1.0)))
+                    # Lamell: lange grunne bygninger, dimensjonert fra target
+                    bld_d_fb = clamp(fp_minor * 0.25, 11.0, 14.0)
+                    desired_bars = clamp(math.ceil(target_footprint / (fp_major * 0.6 * bld_d_fb)), 2, 4)
+                    bld_w_fb = clamp(target_footprint / (desired_bars * bld_d_fb), 18.0, 65.0)
+                    bld_w_fb = min(bld_w_fb, fp_major * 0.85)
+                    n_needed = max(2, math.ceil(target_footprint / max(bld_w_fb * bld_d_fb, 1.0)))
                     buildings = _place_grid_buildings(
-                        placement_polygon, bld_w, bld_d, fp_angle,
+                        placement_polygon, bld_w_fb, bld_d_fb, fp_angle,
                         spacing_along=6.0, spacing_across=6.0,
-                        max_buildings=min(n_needed + 2, 8),
+                        max_buildings=min(n_needed + 3, 10),
                         max_footprint_m2=target_footprint * 1.15,
                     )
                     if buildings:
@@ -2419,15 +2424,16 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                         placement["n_buildings"] = len(buildings)
 
                 elif typology == "Punkthus":
-                    # Punkthus: tilnærmet kvadratisk, tilpasset tomten
-                    char_dim = math.sqrt(max(placement_polygon.area, 100.0))
-                    side_w = clamp(char_dim * 0.35, 14.0, 22.0)
+                    # Punkthus: tilnærmet kvadratisk, dimensjonert fra target
+                    desired_count = clamp(math.ceil(target_footprint / 400.0), 3, 6)
+                    ideal_area = target_footprint / desired_count
+                    side_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
                     side_d = clamp(side_w * 0.95, 13.0, 21.0)
                     n_needed = max(4, math.ceil(target_footprint / max(side_w * side_d, 1.0)))
+                    sp = max(10.0, side_w * 0.6)
                     buildings = _place_grid_buildings(
                         placement_polygon, side_w, side_d, fp_angle,
-                        spacing_along=max(14.0, side_w * 0.7),
-                        spacing_across=max(14.0, side_w * 0.7),
+                        spacing_along=sp, spacing_across=sp,
                         max_buildings=min(n_needed + 3, 10),
                         max_footprint_m2=target_footprint * 1.15,
                     )
