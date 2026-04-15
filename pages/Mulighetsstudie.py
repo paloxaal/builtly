@@ -3130,6 +3130,10 @@ def _parse_single_noise_feature(attrs: Dict[str, Any], layer_name: str, result: 
     stoykildenavn = str(attrs.get("stoykildenavn", "")).strip()
     if stoykilde:
         source_type = stoykilde.lower()
+        # Mapp enkeltbokstav-koder til lesbare navn
+        _stoykilde_map = {"b": "bane", "v": "veg", "j": "jernbane", "f": "flyplass", "s": "sammensatt", "i": "industri"}
+        if source_type in _stoykilde_map:
+            source_type = _stoykilde_map[source_type]
     else:
         ln = layer_name.lower()
         if any(k in ln for k in ["veg", "vei", "road"]):
@@ -5642,17 +5646,19 @@ def create_full_report_pdf(
     site: Optional["SiteInputs"] = None,
     environment_data: Optional[Dict[str, Any]] = None,
     solar_grid_image: Optional[Image.Image] = None,
+    scene_images: Optional[List[Image.Image]] = None,
 ) -> bytes:
     """
-    McKinsey-quality PDF v11:
+    McKinsey-quality PDF v12:
       Page 1:  Cover
       Page 2:  Table of Contents
-      Page 3:  Executive Summary (KPI boxes)
+      Page 3:  Executive Summary (KPI-kort vektor)
       Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
       Page 5+: Volumskisser (top 3)
+      Page N:  3D-terrengscene (hvis scene_images)
       Page N:  Sol/skygge-grid
       Page N+: Rapport tekst
-      Last:    Vedlegg (flyfoto, 3D-scene)
+      Last:    Vedlegg (flyfoto, støykart)
     """
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
@@ -5711,13 +5717,16 @@ def create_full_report_pdf(
         ("3.", "Volumskisser — topp 3 alternativer"),
     ]
     toc_idx = 4
+    if scene_images:
+        toc_items.append((f"{toc_idx}.", "3D-terrengscene"))
+        toc_idx += 1
     if solar_grid_image is not None:
         toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
         toc_idx += 1
 
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
-        if re.match(r"^\d+\.\s[A-Z]", line):
+        if re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
             # Strip existing number prefix: "1. OPPSUMMERING" → "Oppsummering"
             title_clean = re.sub(r"^\d+\.\s*", "", line).strip()
             toc_items.append((f"{toc_idx}.", title_clean))
@@ -5953,6 +5962,36 @@ def create_full_report_pdf(
                 pdf.ln(92)
 
     # ================================================================
+    # 3D-TERRENGSCENE (scene images from batch capture)
+    # ================================================================
+    if scene_images:
+        pdf.add_page()
+        pdf.section_title("3D-TERRENGSCENE", 16)
+        pdf.body_text(
+            "Perspektivbilder fra 3D-terrengmodellen viser foreslåtte volumer "
+            "i kontekst med eksisterende bebyggelse, terreng og omgivelser. "
+            "Høyder på foreslåtte bygg og nabobygg er angitt."
+        )
+        pdf.ln(4)
+        scene_labels = [
+            "Perspektiv — hovedvisning",
+            "Perspektiv — alternativ vinkel",
+            "Fugleperspektiv",
+            "Terrengsnitt",
+        ]
+        for i, image in enumerate(scene_images):
+            pdf.check_space(100)
+            lbl = scene_labels[i] if i < len(scene_labels) else f"3D-visning {i + 1}"
+            pdf.subtitle(lbl)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
+                ratio_h = 160 * (image.height / max(image.width, 1))
+                if ratio_h > 200:
+                    ratio_h = 200
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(ratio_h + 6)
+
+    # ================================================================
     # SOL/SKYGGE GRID PAGE
     # ================================================================
     if solar_grid_image is not None:
@@ -5986,7 +6025,7 @@ def create_full_report_pdf(
         if not line:
             pdf.ln(3)
             continue
-        if line.startswith("# ") or re.match(r"^\d+\.\s[A-Z]", line):
+        if line.startswith("# ") or re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
             pdf.section_title(line.replace("#", "").strip(), 14)
         elif line.startswith("##"):
             pdf.subtitle(line.replace("#", "").strip())
@@ -6859,6 +6898,39 @@ if run_analysis:
         si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
         # Rekke er slått sammen med Lamell — erstatt i output
         si_markdown = si_markdown.replace("Rekke:", "Lamell (tidl. Rekke):").replace("favoriserer mest Rekke", "favoriserer mest Lamell")
+        # Slå sammen Lamell (tidl. Rekke) og Lamell til én post
+        def _merge_lamell_entries(md: str) -> str:
+            lines = md.split("\n")
+            lamell_total = 0.0
+            lamell_indices = []
+            # Samle alle typologi-scores for å finne riktig vinner
+            all_scores: Dict[str, float] = {}
+            for i, line in enumerate(lines):
+                m = re.match(r"^-\s*Lamell[^:]*:\s*([+-]?\d+(?:\.\d+)?)\s*poeng", line)
+                if m:
+                    lamell_total += float(m.group(1))
+                    lamell_indices.append(i)
+                else:
+                    m2 = re.match(r"^-\s*(\w[^:]+):\s*([+-]?\d+(?:\.\d+)?)\s*poeng", line)
+                    if m2:
+                        all_scores[m2.group(1).strip()] = float(m2.group(2))
+            if len(lamell_indices) >= 2:
+                sign = "+" if lamell_total >= 0 else ""
+                lines[lamell_indices[0]] = f"- Lamell: {sign}{lamell_total:.1f} poeng (inkl. rekke)"
+                for idx in reversed(lamell_indices[1:]):
+                    lines.pop(idx)
+            # Oppdater samlet score-map og fiks «favoriserer mest»-linjen
+            all_scores["Lamell"] = lamell_total
+            if all_scores:
+                best_typo = max(all_scores, key=lambda k: all_scores[k])
+                best_val = all_scores[best_typo]
+                sign_b = "+" if best_val >= 0 else ""
+                for i, line in enumerate(lines):
+                    if "favoriserer mest" in line:
+                        lines[i] = f"Stedsdata favoriserer mest {best_typo} i denne runden ({sign_b}{best_val:.1f} poeng)."
+                        break
+            return "\n".join(lines)
+        si_markdown = _merge_lamell_entries(si_markdown)
         deterministic_report = deterministic_report + "\n\n" + si_markdown
     final_report_text = deterministic_report
 
@@ -8331,11 +8403,12 @@ render();
                             report_text=updated_report,
                             options=motor_options,
                             option_images=all_images,
-                            visual_attachments=scene_images_for_pdf,
+                            visual_attachments=result.get("visual_attachments", []),
                             manual_sketch_images=manual_views if manual_views else None,
                             site=_site_obj_3d,
                             environment_data=result.get("environment"),
                             solar_grid_image=_solar_grid_3d,
+                            scene_images=scene_images_for_pdf,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
