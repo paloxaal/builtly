@@ -2729,6 +2729,95 @@ def _call_claude_text(system_prompt: str, user_prompt: str, max_tokens: int = 60
         return None
 
 
+def _call_claude_vision(
+    system_prompt: str,
+    user_text: str,
+    images: List[Image.Image],
+    max_tokens: int = 4000,
+) -> Optional[str]:
+    """Kall Claude API med bilder (vision) og returner ren tekst."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        content_blocks: List[Dict[str, Any]] = []
+        for img in images[:5]:
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=85)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            content_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            })
+        content_blocks.append({"type": "text", "text": user_text})
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": content_blocks}],
+            },
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        return text.strip() if text.strip() else None
+    except Exception:
+        return None
+
+
+def analyze_plan_views_with_ai(
+    plan_images: List[Image.Image],
+    options: List["OptionResult"],
+    site: "SiteInputs",
+    environment_data: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """
+    Sender planvisninger til Claude for arkitektonisk vurdering.
+    Returnerer en liste med korte kommentarer (1 per alternativ).
+    """
+    if not ANTHROPIC_API_KEY or not plan_images or not options:
+        return []
+    analyses: List[str] = []
+    env = environment_data or {}
+    noise = env.get("noise", {})
+    noise_text = ""
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        noise_text = f"Støy: {worst.get('zone', '')} — {worst.get('db', 0):.0f} dB fra {worst.get('source_type', 'ukjent')}."
+
+    system = (
+        "Du er en erfaren norsk arkitekt som vurderer planvisninger fra en mulighetsstudie. "
+        "Skriv konsist på norsk bokmål. Maks 80 ord per vurdering. "
+        "Kommenter: volumvirkning mot nabobebyggelse, siktlinjer og mellomrom, "
+        "solforhold basert på orientering, og eventuelle støykonsekvenser for planløsning."
+    )
+    for i, (img, opt) in enumerate(zip(plan_images[:3], options[:3])):
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        user_text = (
+            f"Planvisning for {opt.name} ({opt.typology}).\n"
+            f"Tomteareal: {site.site_area_m2:.0f} m², Byggefelt: {opt.buildable_area_m2:.0f} m², "
+            f"BTA: {opt.gross_bta_m2:.0f} m², BRA: {bra:.0f} m², {opt.floors} etasjer, "
+            f"{opt.unit_count} boliger, solscore {opt.solar_score:.0f}/100.\n"
+            f"Nabobygg i modell: {opt.neighbor_count}.\n"
+            f"{noise_text}\n"
+            f"Gi en kort arkitektonisk vurdering av volumplasseringen vist i bildet."
+        )
+        result = _call_claude_vision(system, user_text, [img], max_tokens=600)
+        analyses.append(result or "")
+    return analyses
+
+
 def generate_ai_report_for_locked_sketch(
     sketch_option: "OptionResult",
     motor_options: List["OptionResult"],
@@ -2797,7 +2886,8 @@ Regler:
 - Bruk BRA (salgbart/bruksareal) som primærtall, BTA som sekundærtall
 - Vær konkret om styrker og svakheter ved den valgte løsningen
 - Kommenter sol/skygge basert på solscore og plassering
-- Hvis støydata finnes, kommenter konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering)
+- OBLIGATORISK: Hvis støydata finnes, SKAL du i seksjon 6 kommentere: støynivå i dB, kildetype, konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
+- Referer til visuelt materiale der det er relevant: «Se volumskisser (side X)», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger og sol/skygge-diagrammer som leseren kan slå opp.
 - Nevn kort motorens alternativer som referanse, men fokuser på den valgte løsningen
 - Skriv 600-900 ord totalt. Ikke bruk bullet points med - i rapporten, skriv sammenhengende tekst.
 - Ikke dikter opp tall — bruk KUN tallene du får i konteksten
@@ -3993,6 +4083,67 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
             'fotavtrykk_m2': round(option.footprint_area_m2, 0),
         },
     }
+
+
+# --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
+_SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
+_scene_capture_component = None
+if _SCENE_CAPTURE_DIR.exists():
+    try:
+        _scene_capture_component = components.declare_component("scene_capture", path=str(_SCENE_CAPTURE_DIR))
+    except Exception:
+        _scene_capture_component = None
+
+
+def auto_capture_3d_scenes(
+    site: SiteInputs,
+    options: List[OptionResult],
+    scene_config: Dict[str, Any],
+    height_px: int = 620,
+    capture_width: int = 1280,
+    capture_height: int = 720,
+) -> Optional[List[Image.Image]]:
+    """
+    Rendrer ArcGIS 3D-scene for topp 3 alternativer og returnerer screenshots som PIL-bilder.
+    Bruker en custom Streamlit-komponent med bi-directional kommunikasjon.
+    Returnerer None hvis komponenten ikke er tilgjengelig.
+    """
+    if _scene_capture_component is None:
+        return None
+
+    all_payloads = []
+    for opt in options[:3]:
+        p = build_geodata_scene_payload(site, opt, scene_config)
+        all_payloads.append(p)
+
+    if not all_payloads:
+        return None
+
+    result = _scene_capture_component(
+        payloads=all_payloads,
+        height=height_px,
+        capture_width=capture_width,
+        capture_height=capture_height,
+        show_neighbor_labels=True,
+        key="scene_auto_capture",
+    )
+
+    if result and isinstance(result, dict) and result.get("captures"):
+        images = []
+        for cap in result["captures"]:
+            try:
+                data_url = cap.get("dataUrl", "")
+                if "," in data_url:
+                    b64_data = data_url.split(",", 1)[1]
+                else:
+                    b64_data = data_url
+                img_bytes = base64.b64decode(b64_data)
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                images.append(img)
+            except Exception:
+                pass
+        return images if images else None
+    return None
 
 
 def _build_batch_capture_html(all_payloads_json: str, height_px: int = 620) -> str:
@@ -5759,16 +5910,17 @@ def create_full_report_pdf(
     environment_data: Optional[Dict[str, Any]] = None,
     solar_grid_image: Optional[Image.Image] = None,
     scene_images: Optional[List[Image.Image]] = None,
+    plan_view_analyses: Optional[List[str]] = None,
 ) -> bytes:
     """
-    McKinsey-quality PDF v12:
+    McKinsey-quality PDF v13:
       Page 1:  Cover
       Page 2:  Table of Contents
       Page 3:  Executive Summary (KPI-kort vektor)
       Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
       Page 5+: Volumskisser (top 3)
-      Page N:  3D-terrengscene (hvis scene_images)
-      Page N:  Sol/skygge-grid
+      Page N:  Planvisning og volumkontroll (med AI-analyse)
+      Page N:  Sol/skygge individuelle snapshots
       Page N+: Rapport tekst
       Last:    Vedlegg (flyfoto, støykart)
     """
@@ -6074,7 +6226,7 @@ def create_full_report_pdf(
                 pdf.ln(92)
 
     # ================================================================
-    # 3D-TERRENGSCENE (scene images from batch capture)
+    # PLANVISNING OG VOLUMKONTROLL (v13: med AI-analyse)
     # ================================================================
     if scene_images:
         pdf.add_page()
@@ -6085,15 +6237,21 @@ def create_full_report_pdf(
             "Høyder på foreslåtte bygg og nabobygg er angitt."
         )
         pdf.ln(4)
-        # Bruk typologi-labels fra options hvis tilgjengelig
+        pv_analyses = plan_view_analyses or []
         for i, image in enumerate(scene_images):
             pdf.check_space(100)
             if i < len(options):
                 opt = options[i]
                 bra = opt.gross_bta_m2 * opt.efficiency_ratio
                 lbl = f"{opt.name} — {opt.typology} | Planvisning"
+                caption = (
+                    f"BTA {opt.gross_bta_m2:.0f} m\u00b2 | BRA ~{bra:.0f} m\u00b2 | "
+                    f"{opt.unit_count} boliger | {opt.floors} etg | "
+                    f"Fotavtrykk {opt.footprint_area_m2:.0f} m\u00b2"
+                )
             else:
                 lbl = f"Planvisning {i + 1}"
+                caption = ""
             pdf.subtitle(lbl)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
@@ -6101,12 +6259,39 @@ def create_full_report_pdf(
                 if ratio_h > 200:
                     ratio_h = 200
                 pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(ratio_h + 6)
+                pdf.ln(ratio_h + 4)
+            # Caption under bildet
+            if caption:
+                pdf.set_font(PDF_FONT, "I", 8)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                pdf.cell(160, 4, clean_pdf_text(caption), 0, 1)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.ln(2)
+            # AI-analyse under bildet
+            if i < len(pv_analyses) and pv_analyses[i]:
+                pdf.check_space(25)
+                pdf.set_font(PDF_FONT, "B", 9)
+                pdf.set_text_color(*_BUILTLY_BLUE)
+                pdf.set_x(25)
+                pdf.cell(0, 5, clean_pdf_text("Arkitektonisk vurdering"), 0, 1)
+                pdf.set_font(PDF_FONT, "", 9)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.set_x(25)
+                pdf.multi_cell(160, 4.5, ironclad_text_formatter(pv_analyses[i]))
+                pdf.ln(4)
 
     # ================================================================
-    # SOL/SKYGGE GRID PAGE
+    # SOL/SKYGGE — INDIVIDUELLE BILDER (erstatter komprimert 3x2 grid)
     # ================================================================
-    if solar_grid_image is not None:
+    if solar_grid_image is not None and site is not None and options:
+        solar_snapshots = [
+            (80, 12.0, "Vårjevndøgn — 21. mars kl. 12:00"),
+            (80, 15.0, "Vårjevndøgn — 21. mars kl. 15:00"),
+            (172, 12.0, "Sommersolverv — 21. juni kl. 12:00"),
+            (172, 15.0, "Sommersolverv — 21. juni kl. 15:00"),
+            (172, 18.0, "Sommersolverv — 21. juni kl. 18:00"),
+        ]
         pdf.add_page()
         pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
         pdf.body_text(
@@ -6115,27 +6300,70 @@ def create_full_report_pdf(
             "Skygger fra foreslåtte volumer og nabobygg er inkludert."
         )
         pdf.ln(4)
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                solar_grid_image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
-                img_w = 160
-                img_h = img_w * (solar_grid_image.height / max(solar_grid_image.width, 1))
-                if img_h > 190:
-                    img_h = 190
-                    img_w = img_h * (solar_grid_image.width / max(solar_grid_image.height, 1))
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
-                pdf.ln(img_h + 4)
-        except Exception:
-            pass
+        for s_idx, (doy, hour, lbl) in enumerate(solar_snapshots):
+            try:
+                snap = render_solar_snapshot(site, options[0], doy, hour, lbl)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                    snap.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                    img_w = 160
+                    img_h = img_w * (snap.height / max(snap.width, 1))
+                    if img_h > 110:
+                        img_h = 110
+                        img_w = img_h * (snap.width / max(snap.height, 1))
+                    pdf.check_space(int(img_h) + 20)
+                    pdf.subtitle(lbl)
+                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                    pdf.ln(img_h + 6)
+            except Exception:
+                pass
 
     # ================================================================
-    # RAPPORT TEKST
+    # RAPPORT TEKST (v13: tabeller for ALTERNATIVER)
     # ================================================================
     pdf.add_page()
-    for raw_line in report_text.split("\n"):
+    report_lines = report_text.split("\n")
+    i_line = 0
+    while i_line < len(report_lines):
+        raw_line = report_lines[i_line]
         line = raw_line.strip()
+
+        # Detect ALTERNATIVER section → render as tables
+        if re.match(r"^#?\s*\d*\.?\s*ALTERNATIVER", line) or "# 8. ALTERNATIVER" in raw_line:
+            pdf.section_title(line.replace("#", "").strip(), 14)
+            i_line += 1
+            # Render each alternative as a compact table
+            for option in options:
+                bra_est = option.gross_bta_m2 * option.efficiency_ratio
+                pdf.check_space(80)
+                pdf.subtitle(option.name)
+                alt_headers = ["Parameter", "Verdi"]
+                alt_rows = [
+                    ["Typologi", option.typology],
+                    ["Fotavtrykk", f"{option.footprint_area_m2:.0f} m\u00b2"],
+                    ["BTA", f"{option.gross_bta_m2:.0f} m\u00b2"],
+                    ["BRA (salgbart)", f"~{bra_est:.0f} m\u00b2"],
+                    ["Leiligheter", f"{option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})"],
+                    ["Parkering", f"{option.parking_spaces} plasser"],
+                    ["Solbelyst uteareal", f"ca. {option.sunlit_open_space_pct:.0f}%"],
+                    ["Vinterskygge kl 12", f"ca. {option.winter_noon_shadow_m:.0f} m"],
+                ]
+                add_pdf_table(pdf, alt_headers, alt_rows, [50, 110])
+                # Render notes as body text below table
+                for note in option.notes:
+                    pdf.check_space(7)
+                    pdf.body_text(ironclad_text_formatter(note))
+                pdf.ln(4)
+            # Skip bullet lines in report_text until next # section
+            while i_line < len(report_lines):
+                peek = report_lines[i_line].strip()
+                if peek.startswith("# ") or re.match(r"^\d+\.\s[A-ZÆØÅ]", peek):
+                    break
+                i_line += 1
+            continue
+
         if not line:
             pdf.ln(3)
+            i_line += 1
             continue
         if line.startswith("# ") or re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
             pdf.section_title(line.replace("#", "").strip(), 14)
@@ -6151,6 +6379,7 @@ def create_full_report_pdf(
         else:
             pdf.check_space(7)
             pdf.body_text(line)
+        i_line += 1
 
     # ================================================================
     # VEDLEGG
@@ -6468,8 +6697,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if llm_available:
-    st.success("AI-tekst er tilgjengelig. Tallsiden beregnes alltid deterministisk først.")
+if ANTHROPIC_API_KEY:
+    st.success("AI-tekst er tilgjengelig (Claude). Tallsiden beregnes alltid deterministisk først.")
+elif llm_available:
+    st.success("AI-tekst er tilgjengelig (Gemini fallback). Tallsiden beregnes alltid deterministisk først.")
 else:
     st.info("AI-tekst er ikke tilgjengelig akkurat nå. Modulen kjører fortsatt hele feasibility-motoren deterministisk.")
 
@@ -7006,13 +7237,13 @@ if run_analysis:
 
     option_images = [render_plan_diagram(site, option) for option in options]
 
-    # Auto-generer planvisninger som 3D-scene fallback
+    # Auto-generer planvisninger som 3D-scene fallback (v13: per-option error handling)
     auto_scene_images = []
-    try:
-        for opt in options[:3]:
+    for opt in options[:3]:
+        try:
             auto_scene_images.append(render_plan_view(site, opt))
-    except Exception:
-        pass
+        except Exception:
+            pass  # Skip individual failures, keep other plan views
     deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
@@ -7054,54 +7285,75 @@ if run_analysis:
         deterministic_report = deterministic_report + "\n\n" + si_markdown
     final_report_text = deterministic_report
 
-    if llm_available:
-        model_name = pick_model_name()
-        if model_name:
-            try:
-                model = genai.GenerativeModel(model_name)
-                analysis_payload = {
-                    "site": asdict(site),
-                    "alternatives": [asdict(option) | {"geometry": None} for option in options],
-                    "parsed_regulation_hints": parsed,
-                    "visual_input_count": len(images_for_context),
-                    "geocoding_source": geo_source,
-                    "polygon_meta": polygon_meta,
-                    "neighbor_meta": neighbor_meta,
-                    "terrain_meta": terrain_meta,
-                    "site_intelligence": site_intelligence_bundle,
-                }
-                prompt = f"""
-Du er senior arkitekt og utviklingsradgiver. Du far et ferdig, deterministisk analysegrunnlag i JSON.
-Du skal forklare, prioritere og skrive rapporten for bruk i Builtly. Du MA IKKE endre tallene.
-Hvis det finnes svakheter i grunnlaget, skal du si det tydelig.
+    # --- AI-rapport via Claude (v13: migrert fra Gemini) ---
+    if ANTHROPIC_API_KEY:
+        try:
+            # Build compact environment summary for AI (v13: støydata + dagslys)
+            env_summary = {}
+            if environment_data and isinstance(environment_data, dict):
+                noise_d = environment_data.get("noise", {})
+                if noise_d.get("available") and noise_d.get("zones"):
+                    env_summary["noise"] = {
+                        "zones": noise_d["zones"],
+                        "source": noise_d.get("source", ""),
+                    }
+                dl_d = environment_data.get("daylight", {})
+                if dl_d.get("available") and dl_d.get("overall_score", 0) > 0:
+                    env_summary["daylight"] = {"overall_score": dl_d["overall_score"]}
+                wc_d = environment_data.get("wind_comfort", {})
+                if wc_d.get("available"):
+                    env_summary["wind_comfort"] = {
+                        "lawson_class": wc_d.get("lawson_class"),
+                        "overall": wc_d.get("overall"),
+                    }
+            analysis_payload = {
+                "site": asdict(site),
+                "alternatives": [asdict(option) | {"geometry": None} for option in options],
+                "parsed_regulation_hints": parsed,
+                "visual_input_count": len(images_for_context),
+                "geocoding_source": geo_source,
+                "polygon_meta": polygon_meta,
+                "neighbor_meta": neighbor_meta,
+                "terrain_meta": terrain_meta,
+                "site_intelligence": site_intelligence_bundle,
+                "environment": env_summary,
+            }
+            _report_system = (
+                "Du er senior arkitekt og utviklingsrådgiver. Du får et ferdig, deterministisk analysegrunnlag i JSON. "
+                "Du skal forklare, prioritere og skrive rapporten for bruk i Builtly. Du MÅ IKKE endre tallene. "
+                "Hvis det finnes svakheter i grunnlaget, skal du si det tydelig."
+            )
+            _report_user = f"""Skriv en profesjonell mulighetsstudie-rapport basert på dette grunnlaget.
 
 JSON-GRUNNLAG:
 {json.dumps(analysis_payload, ensure_ascii=False, indent=2)}
 
 KRAV:
-- Bruk nøyaktig disse overskriftene:
-1. OPPSUMMERING
-2. GRUNNLAG
-3. VIKTIGSTE FORUTSETNINGER
-4. TOMT OG KONTEKST
-5. REGULERINGSMESSIGE FORHOLD
-6. ARKITEKTONISK VURDERING
-7. MULIGE UTVIKLINGSGREP
-8. ALTERNATIVER
-9. RISIKO OG AVKLARINGSPUNKTER
-10. ANBEFALING / NESTE STEG
+- Bruk nøyaktig disse overskriftene (med # foran):
+# 1. OPPSUMMERING
+# 2. GRUNNLAG
+# 3. VIKTIGSTE FORUTSETNINGER
+# 4. TOMT OG KONTEKST
+# 5. REGULERINGSMESSIGE FORHOLD
+# 6. ARKITEKTONISK VURDERING
+# 7. MULIGE UTVIKLINGSGREP
+# 8. ALTERNATIVER
+# 9. RISIKO OG AVKLARINGSPUNKTER
+# 10. ANBEFALING / NESTE STEG
 
-- Tallene i JSON er kilde til sannhet.
+- Tallene i JSON er kilde til sannhet. Ikke dikter opp tall.
 - Sol/skygge skal omtales som indikativ 2.5D, ikke full detaljsimulering.
 - Leilighetsmiks skal beskrives som kapasitetsestimat.
 - Ikke skriv om noe du ikke vet.
+- OBLIGATORISK: Hvis støydata finnes i JSON (environment.noise), SKAL du kommentere støynivå i dB, kildetype og konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
+- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger og sol/skygge-diagrammer.
+- Skriv sammenhengende norsk tekst, ikke bullet points. Bruk riktig norsk (æ, ø, å).
 """
-                parts = [prompt] + images_for_context[:6]
-                response = model.generate_content(parts)
-                if getattr(response, "text", "").strip():
-                    final_report_text = response.text.strip()
-            except Exception:
-                final_report_text = deterministic_report
+            ai_report = _call_claude_text(_report_system, _report_user, max_tokens=6000)
+            if ai_report:
+                final_report_text = ai_report
+        except Exception:
+            final_report_text = deterministic_report
 
     try:
         solar_grid_img = None
@@ -7110,6 +7362,17 @@ KRAV:
                 solar_grid_img = render_solar_snapshot_grid(site, options[0])
             except Exception:
                 pass
+        # AI-analyse av planvisninger (v13)
+        pv_analyses: List[str] = []
+        scene_imgs_for_pdf = st.session_state.get("ark_scene_images") or auto_scene_images or []
+        if scene_imgs_for_pdf and ANTHROPIC_API_KEY:
+            with st.spinner("Arkitektonisk vurdering av planvisninger (Claude)..."):
+                try:
+                    pv_analyses = analyze_plan_views_with_ai(
+                        scene_imgs_for_pdf, options, site, environment_data
+                    )
+                except Exception:
+                    pv_analyses = []
         pdf_bytes = create_full_report_pdf(
             name=p_name,
             client=pd_state.get("c_name", "Ukjent"),
@@ -7121,7 +7384,8 @@ KRAV:
             site=site,
             environment_data=environment_data,
             solar_grid_image=solar_grid_img,
-            scene_images=st.session_state.get("ark_scene_images") or auto_scene_images or None,
+            scene_images=scene_imgs_for_pdf or None,
+            plan_view_analyses=pv_analyses or None,
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
@@ -7241,7 +7505,11 @@ if "analysis_results" in st.session_state:
         with s3:
             st.markdown("<div class='kpi-card'><div class='metric-title'>Plan-/stedsrisiko</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('risk_score', 0.0))), unsafe_allow_html=True)
         with s4:
-            favored = sorted((site_intelligence_bundle.get('typology_score_adjustments') or {}).items(), key=lambda item: item[1], reverse=True)
+            # Merge Rekke into Lamell before picking top typology
+            raw_adj = dict(site_intelligence_bundle.get('typology_score_adjustments') or {})
+            if "Rekke" in raw_adj:
+                raw_adj["Lamell"] = raw_adj.get("Lamell", 0.0) + raw_adj.pop("Rekke")
+            favored = sorted(raw_adj.items(), key=lambda item: item[1], reverse=True)
             favored_text = favored[0][0] if favored else '-'
             st.markdown("<div class='kpi-card'><div class='metric-title'>Favorisert grep</div><div class='metric-value'>{}</div></div>".format(favored_text), unsafe_allow_html=True)
 
@@ -8462,8 +8730,55 @@ render();
             scene_config = gdo.fetch_scene_config()
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
 
-            # --- BATCH CAPTURE: ta bilder av alle alternativer ---
-            if st.button("📸 Ta bilder av alle alternativer", use_container_width=True, key="batch_capture_btn"):
+            # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
+            if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
+                st.caption("Fanger 3D-scener automatisk for alle alternativer...")
+                captured = auto_capture_3d_scenes(
+                    SiteInputs(**site_result), options, scene_config,
+                    height_px=500, capture_width=1280, capture_height=720,
+                )
+                if captured:
+                    st.session_state.ark_scene_images = captured
+                    st.success(f"✓ {len(captured)} 3D-scener fanget automatisk — inkludert i rapporten.")
+                    # Auto-regenerer PDF med 3D-bilder og AI-analyse
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+                        _site_obj_ac = SiteInputs(**site_result)
+                        # AI-analyse av 3D-scener
+                        pv_analyses_3d: List[str] = []
+                        if ANTHROPIC_API_KEY:
+                            with st.spinner("Claude analyserer 3D-scenene..."):
+                                try:
+                                    pv_analyses_3d = analyze_plan_views_with_ai(captured, motor_options, _site_obj_ac, result.get("environment"))
+                                except Exception:
+                                    pass
+                        _solar_ac = None
+                        try:
+                            _solar_ac = render_solar_snapshot_grid(_site_obj_ac, motor_options[0])
+                        except Exception:
+                            pass
+                        new_pdf = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=result.get("report_text", ""),
+                            options=motor_options,
+                            option_images=result.get("option_images", []),
+                            visual_attachments=result.get("visual_attachments", []),
+                            site=_site_obj_ac,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_ac,
+                            scene_images=captured,
+                            plan_view_analyses=pv_analyses_3d or None,
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
+                    except Exception:
+                        pass  # Behold eksisterende PDF ved feil
+
+            # --- BATCH CAPTURE fallback: manuell nedlasting ---
+            if st.button("📸 Ta bilder av alle alternativer (nedlasting)", use_container_width=True, key="batch_capture_btn"):
                 all_payloads = []
                 for opt in options:
                     p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
