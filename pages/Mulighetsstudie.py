@@ -5368,17 +5368,18 @@ class BuiltlyProPDF(FPDF):
             self.set_x(25)
 
     def section_title(self, text: str, size: int = 16) -> None:
-        """Navy section header with accent underline."""
+        """Navy section header with accent underline matching text width."""
         self.check_space(20)
         self.ln(4)
         self.set_x(25)
         self.set_font(PDF_FONT, "B", size)
         self.set_text_color(*_NAVY)
+        text_w = min(self.get_string_width(clean_pdf_text(text)) + 2, 155)
         self.multi_cell(155, 8, clean_pdf_text(text), 0, "L")
         y = self.get_y()
         self.set_draw_color(*_BUILTLY_BLUE)
         self.set_line_width(0.6)
-        self.line(25, y + 1, 80, y + 1)
+        self.line(25, y + 1, 25 + text_w, y + 1)
         self.set_line_width(0.2)
         self.ln(5)
 
@@ -5439,91 +5440,101 @@ def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]],
 
 
 def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
-    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ."""
-    w, h = 1600, max(500, 100 + len(options) * 80)
-    img = Image.new('RGB', (w, h), (6, 17, 26))
+    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ. Lys bakgrunn for PDF."""
+    w, h = 1600, max(440, 100 + len(options) * 90)
+    img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    font_title = _pil_font(28, bold=True)
+    font_title = _pil_font(26, bold=True)
     font_label = _pil_font(20)
-    font_value = _pil_font(18, bold=True)
+    font_value = _pil_font(17, bold=True)
     font_small = _pil_font(16)
 
-    draw.text((40, 20), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(56, 189, 248), font=font_title)
+    # Header med accent-linje
+    draw.text((40, 16), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(26, 43, 72), font=font_title)
+    draw.rectangle([(40, 52), (480, 54)], fill=(0, 96, 155))
 
-    bar_h = 40
-    y_start = 90
-    max_sol = max((o.solar_score for o in options), default=100)
+    bar_h = 36
+    y_start = 80
     max_bra = max((o.gross_bta_m2 * o.efficiency_ratio for o in options), default=1)
 
     for i, opt in enumerate(options):
-        y = y_start + i * 80
+        y = y_start + i * 90
         bra = opt.gross_bta_m2 * opt.efficiency_ratio
         sol = opt.solar_score
 
-        draw.text((40, y + 6), f"{opt.typology}", fill=(200, 211, 223), font=font_label)
+        # Bakgrunnsrad
+        if i % 2 == 0:
+            draw.rectangle([(30, y - 8), (w - 30, y + bar_h + 28)], fill=(247, 249, 252))
 
-        sol_w = max(8, int(sol / max(max_sol, 1) * 560))
-        draw.rectangle([(320, y), (320 + sol_w, y + bar_h // 2 - 2)], fill=(56, 189, 248))
-        draw.text((330 + sol_w, y - 2), f"Sol {sol:.0f}", fill=(56, 189, 248), font=font_value)
+        draw.text((40, y + 6), f"{opt.typology}", fill=(26, 43, 72), font=font_label)
 
-        bra_w = max(8, int(bra / max(max_bra, 1) * 560))
-        draw.rectangle([(320, y + bar_h // 2 + 2), (320 + bra_w, y + bar_h)], fill=(34, 197, 94))
-        draw.text((330 + bra_w, y + bar_h // 2 + 2), f"BRA {bra:.0f} m2", fill=(34, 197, 94), font=font_value)
+        # Sol-bar (blå, skalert til 100)
+        sol_w = max(8, int(sol / 100 * 500))
+        draw.rectangle([(300, y), (300 + sol_w, y + bar_h // 2 - 2)], fill=(0, 96, 155))
+        draw.text((310 + sol_w, y - 3), f"Sol {sol:.0f}", fill=(0, 96, 155), font=font_value)
 
-        draw.text((1240, y + 8), f"{opt.unit_count} bol.", fill=(159, 176, 195), font=font_label)
-        draw.text((1400, y + 8), f"{opt.floors} et.", fill=(130, 145, 165), font=font_label)
+        # BRA-bar (grønn, skalert til maks)
+        bra_w = max(8, int(bra / max(max_bra, 1) * 500))
+        draw.rectangle([(300, y + bar_h // 2 + 2), (300 + bra_w, y + bar_h)], fill=(16, 150, 100))
+        draw.text((310 + bra_w, y + bar_h // 2 + 1), f"BRA {bra:.0f} m\u00b2", fill=(16, 150, 100), font=font_value)
 
-    ly = h - 50
-    draw.rectangle([(40, ly), (60, ly + 20)], fill=(56, 189, 248))
-    draw.text((70, ly - 2), "Solscore", fill=(159, 176, 195), font=font_small)
-    draw.rectangle([(240, ly), (260, ly + 20)], fill=(34, 197, 94))
-    draw.text((270, ly - 2), "BRA (salgbart areal)", fill=(159, 176, 195), font=font_small)
+        draw.text((1200, y + 8), f"{opt.unit_count} bol.", fill=(80, 95, 115), font=font_label)
+        draw.text((1380, y + 8), f"{opt.floors} et.", fill=(120, 130, 145), font=font_label)
+
+    ly = h - 45
+    draw.rectangle([(40, ly), (58, ly + 16)], fill=(0, 96, 155))
+    draw.text((66, ly - 2), "Solscore", fill=(80, 95, 115), font=font_small)
+    draw.rectangle([(240, ly), (258, ly + 16)], fill=(16, 150, 100))
+    draw.text((266, ly - 2), "BRA (salgbart areal)", fill=(80, 95, 115), font=font_small)
 
     return img
 
 
 def _render_context_summary(options: List[OptionResult], site: "SiteInputs", environment_data: Optional[Dict[str, Any]] = None) -> Image.Image:
-    """Rendrer en kompakt stedskontekst-oppsummering med nokkeltall og miljodata."""
+    """Rendrer en kompakt stedskontekst-oppsummering. Lys bakgrunn for PDF."""
     env = environment_data or {}
     has_env = bool(env.get("available"))
-    h = 400 if not has_env else 540
+    h = 380 if not has_env else 510
     w = 1600
-    img = Image.new('RGB', (w, h), (6, 17, 26))
+    img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    font_title = _pil_font(28, bold=True)
-    font_label = _pil_font(18)
+    font_title = _pil_font(24, bold=True)
+    font_label = _pil_font(16)
     font_value = _pil_font(22, bold=True)
 
-    draw.text((40, 20), "TOMTE- OG STEDSKONTEKST", fill=(56, 189, 248), font=font_title)
+    draw.text((40, 16), "TOMTE- OG STEDSKONTEKST", fill=(26, 43, 72), font=font_title)
+    draw.rectangle([(40, 48), (340, 50)], fill=(0, 96, 155))
 
     best = options[0] if options else None
     if best is None:
         return img
 
     items = [
-        ("TOMTEAREAL", f"{site.site_area_m2:.0f} m2"),
-        ("BYGGEFELT", f"{best.buildable_area_m2:.0f} m2"),
+        ("TOMTEAREAL", f"{site.site_area_m2:.0f} m\u00b2"),
+        ("BYGGEFELT", f"{best.buildable_area_m2:.0f} m\u00b2"),
         ("NABOBYGG", f"{site.neighbor_count} stk"),
         ("MAKS ETASJER", f"{site.max_floors}"),
         ("MAKS HØYDE", f"{site.max_height_m:.0f} m"),
         ("MAKS BYA", f"{site.max_bya_pct:.0f}%"),
     ]
     if site.utnyttelsesgrad_bra_pct > 0:
-        items.append(("%-BRA MAL", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
+        items.append(("%-BRA MÅL", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
 
-    col_w = 380
+    col_w = 370
     for i, (label, value) in enumerate(items):
         col = i % 4
         row = i // 4
         x = 40 + col * col_w
-        y = 80 + row * 120
-        draw.rectangle([(x, y), (x + col_w - 20, y + 95)], outline=(56, 189, 248, 80), width=2)
-        draw.text((x + 16, y + 12), label, fill=(130, 145, 165), font=font_label)
-        draw.text((x + 16, y + 44), value, fill=(245, 247, 251), font=font_value)
+        y = 70 + row * 105
+        # Lys boks med subtil border
+        draw.rectangle([(x, y), (x + col_w - 24, y + 85)], fill=(247, 249, 252), outline=(200, 210, 225), width=1)
+        draw.text((x + 14, y + 10), label, fill=(120, 130, 145), font=font_label)
+        draw.text((x + 14, y + 38), value, fill=(26, 43, 72), font=font_value)
 
     if has_env:
-        env_y = 320
-        draw.text((40, env_y - 15), "MILJØFORHOLD", fill=(56, 189, 248), font=font_title)
+        env_y = 290
+        draw.text((40, env_y - 12), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
+        draw.rectangle([(40, env_y + 16), (220, env_y + 18)], fill=(0, 96, 155))
 
         noise = env.get("noise", {})
         daylight = env.get("daylight", {})
@@ -5533,26 +5544,26 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
         if noise.get("available") and noise.get("zones"):
             worst = max(noise["zones"], key=lambda z: z.get("db", 0))
             db = worst.get("db", 0)
-            color = (248, 113, 113) if db > 65 else (245, 158, 11) if db > 55 else (52, 211, 153)
+            color = (200, 40, 40) if db > 65 else (180, 120, 0) if db > 55 else (16, 150, 100)
             env_items.append(("STØY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
         else:
-            env_items.append(("STØY", "Ingen data", (130, 145, 165)))
+            env_items.append(("STØY", "Ingen data", (150, 160, 175)))
 
         if daylight.get("available"):
             dl = daylight.get("overall_score", 0)
-            color = (52, 211, 153) if dl >= 70 else (245, 158, 11) if dl >= 50 else (248, 113, 113)
+            color = (16, 150, 100) if dl >= 70 else (180, 120, 0) if dl >= 50 else (200, 40, 40)
             env_items.append(("DAGSLYS", f"{dl:.0f}/100", color))
 
         if wind_c.get("available"):
             wclass = wind_c.get("lawson_class", "?")
-            color = (52, 211, 153) if wclass in ["A", "B"] else (245, 158, 11) if wclass == "C" else (248, 113, 113)
+            color = (16, 150, 100) if wclass in ["A", "B"] else (180, 120, 0) if wclass == "C" else (200, 40, 40)
             env_items.append(("VIND", f"Klasse {wclass}", color))
 
         for i, (label, value, color) in enumerate(env_items):
             x = 40 + i * col_w
-            draw.rectangle([(x, env_y + 10), (x + col_w - 20, env_y + 105)], outline=(56, 189, 248, 80), width=2)
-            draw.text((x + 16, env_y + 22), label, fill=(130, 145, 165), font=font_label)
-            draw.text((x + 16, env_y + 54), value, fill=color, font=font_value)
+            draw.rectangle([(x, env_y + 28), (x + col_w - 24, env_y + 113)], fill=(247, 249, 252), outline=(200, 210, 225), width=1)
+            draw.text((x + 14, env_y + 38), label, fill=(120, 130, 145), font=font_label)
+            draw.text((x + 14, env_y + 66), value, fill=color, font=font_value)
 
     return img
 
@@ -8956,7 +8967,7 @@ render();
                 file_name=pdf_name,
                 mime="application/pdf",
                 type="primary",
-                use_container_width=True
+                use_container_width=True,
             )
         else:
             st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
