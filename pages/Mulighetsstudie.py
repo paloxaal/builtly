@@ -238,18 +238,22 @@ def generer_arkitekt_render(
     base_image: Image.Image,
     option: "OptionResult",
     api_key: str,
-    strength: float = 0.55,
+    ai_strength: float = 0.75,
 ) -> Optional[Image.Image]:
     """
-    Bruker Stability AI SD3 image-to-image til å transformere 3D-volummodellen
-    til en fotorealistisk arkitekturskisse. ``strength`` styrer hvor mye AI-en
-    endrer bildet: lav = tett på 3D-formen, høy = friere tolkning.
+    Bruker Stability AI SD3 Image-to-Image til å transformere de fargekodede
+    3D-volumene i en ortofoto-scene til fotorealistisk arkitektur.
+
+    Prompten forklarer fargesemantikken til AI-en:
+      - Grønne blokker  → det nye bygget (detaljert fasade)
+      - Grå blokker     → eksisterende nabobebyggelse
+      - Ortofoto-bakgrunn → bevar som realistisk nabolag
     """
     if not api_key:
         st.error("Mangler STABILITY_API_KEY i miljøvariablene.")
         return None
 
-    # 1. Sikre RGB, maks 1024x1024 (API-krav), lagre som PNG
+    # 1. Konverter bildet sikkert
     safe_image = base_image.convert("RGB")
     safe_image.thumbnail((1024, 1024))
     img_byte_arr = io.BytesIO()
@@ -268,17 +272,27 @@ def generer_arkitekt_render(
     }
     typology_eng = typologi_map.get(option.typology, "residential building")
 
-    # 3. Prompt
+    # 3. Fargekode-prompt: forklarer hva hver farge i scenen representerer
     prompt = (
-        f"Photorealistic architectural aerial rendering of a modern {typology_eng} in Norway. "
-        "The facade is a tasteful combination of vertical wooden panels, light grey stucco, and warm brickwork (tegl). "
-        "Large floor-to-ceiling windows, glass balconies with thin dark metal frames. "
-        "Clean roofline, strictly NO solar panels. "
-        "Soft afternoon sunlight, realistic shadows, architectural photography style."
+        f"Photorealistic aerial drone photography of a modern {typology_eng} in Norway. "
+        "SCENE TRANSFORMATION: "
+        "1. The bright GREEN blocks are the new building — replace with a highly detailed "
+        "modern residential building featuring vertical wooden panels, light grey stucco, "
+        "and warm brickwork. Large windows, glass balconies with dark metal frames, clean roofline. "
+        "2. The GREY transparent blocks are existing neighborhood houses — render as realistic "
+        "residential buildings with pitched roofs and varied facades. "
+        "3. Keep the aerial photograph background as a realistic suburban landscape with "
+        "green trees, lawns, and asphalt streets. "
+        "4. Any YELLOW area is a landscaped courtyard with paving, grass, and small trees. "
+        "Soft afternoon sunlight, realistic shadows, 8k resolution, architectural visualization."
     )
-    negative_prompt = "solar panels, photovoltaic cells, solar collectors, ugly, blurry, sci-fi, cartoon, distorted"
 
-    # 4. SD3 image-to-image — bruker 3D-scenen som utgangspunkt
+    negative_prompt = (
+        "abstract 3d scene, untextured grey blocks, green glowing boxes, yellow flat ground, "
+        "solar panels, floating buildings, cartoon, blurry, low quality, sci-fi, distorted"
+    )
+
+    # 4. SD3 image-to-image
     url = "https://api.stability.ai/v2beta/stable-image/generate/sd3"
 
     files = {
@@ -287,9 +301,9 @@ def generer_arkitekt_render(
     data = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
-        "model": "sd3-large",
         "mode": "image-to-image",
-        "strength": str(strength),
+        "model": "sd3-medium",
+        "strength": str(ai_strength),
         "output_format": "jpeg",
     }
 
@@ -303,16 +317,16 @@ def generer_arkitekt_render(
         )
         if response.status_code == 200:
             return Image.open(io.BytesIO(response.content))
-        # Prøv å parse JSON-feil hvis tilgjengelig
+        # Prøv å parse JSON-feil
         ct = response.headers.get("Content-Type", "")
         if "application/json" in ct:
             try:
                 err_detail = response.json()
-                err_msg = err_detail.get("message", str(err_detail))[:200]
+                err_msg = err_detail.get("message", str(err_detail))[:300]
             except Exception:
-                err_msg = response.text[:200]
+                err_msg = response.text[:300]
         else:
-            err_msg = response.text[:200]
+            err_msg = response.text[:300]
         st.error(f"Stability AI avviste forespørselen (Kode {response.status_code}): {err_msg}")
     except requests.exceptions.Timeout:
         st.error("Stability AI svarte ikke innen tidsfristen (90s). Prøv igjen.")
@@ -9117,7 +9131,7 @@ render();
         ) if opt_names else None
         render_strength = st.slider(
             "Transformasjonsgrad (lav = tett på volummodellen, høy = friere tolkning)",
-            min_value=0.35, max_value=0.85, value=0.55, step=0.05,
+            min_value=0.50, max_value=0.90, value=0.75, step=0.05,
             key="stability_render_strength",
         )
         if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="stability_render_btn"):
@@ -9126,7 +9140,7 @@ render();
             selected_option = motor_options[sel_idx] if motor_options else None
             if selected_option is not None:
                 with st.spinner("Genererer fotorealistisk skisse — dette tar ca. 30–60 sekunder..."):
-                    rendered = generer_arkitekt_render(base_img, selected_option, stability_key, strength=render_strength)
+                    rendered = generer_arkitekt_render(base_img, selected_option, stability_key, ai_strength=render_strength)
                 if rendered is not None:
                     st.session_state["stability_render_image"] = rendered
                     # Regenerer PDF med cover_image — gjenbruk cachet sol/AI-analyse
