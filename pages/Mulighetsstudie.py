@@ -6189,13 +6189,14 @@ def create_full_report_pdf(
             pass
 
     # ================================================================
-    # PAGE 5+: VOLUMSKISSER - TOPP 3
+    # PAGE 5+: VOLUMSKISSER - TOPP 3 (v13: ett alternativ per side)
     # ================================================================
     if option_images and not manual_sketch_images:
-        pdf.add_page()
-        pdf.section_title("VOLUMSKISSER - TOPP 3 ALTERNATIVER", 16)
         for i, image in enumerate(option_images[:3]):
-            pdf.check_space(92)
+            pdf.add_page()
+            if i == 0:
+                pdf.section_title("VOLUMSKISSER - TOPP 3 ALTERNATIVER", 16)
+                pdf.ln(2)
             if i < len(options):
                 opt = options[i]
                 bra = opt.gross_bta_m2 * opt.efficiency_ratio
@@ -6203,9 +6204,33 @@ def create_full_report_pdf(
                     f"{opt.name} - {opt.typology} | ~{bra:.0f} m2 BRA | {opt.unit_count} bol. | Sol {opt.solar_score:.0f}/100"
                 )
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(84)
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                img_w = 160
+                img_h = img_w * (image.height / max(image.width, 1))
+                if img_h > 180:
+                    img_h = 180
+                    img_w = img_h * (image.width / max(image.height, 1))
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
+            # Nøkkeltall caption under bildet
+            if i < len(options):
+                opt = options[i]
+                parts_count = len((opt.geometry or {}).get('massing_parts', []))
+                caption = (
+                    f"{opt.name} | {opt.typology} | {parts_count or '?'} deler\n"
+                    f"BTA {opt.gross_bta_m2:.0f} m\u00b2 | {opt.unit_count} boliger | {opt.floors} et. | "
+                    f"H\u00f8yde {opt.building_height_m:.1f} m | Sol {opt.solar_score:.0f}/100\n"
+                    f"Fotavtrykk {opt.footprint_area_m2:.0f} m\u00b2 | "
+                    f"Uteareal sol {opt.sunlit_open_space_pct:.0f}% | Naboer {opt.neighbor_count} | "
+                    f"Byggefelt {opt.buildable_area_m2:.0f} m\u00b2\n"
+                    f"Vinterskygge {opt.winter_noon_shadow_m:.0f} m | Score {opt.score}/100 | "
+                    f"{'Eksakt polygon' if 'Eksakt' in (opt.geometry or {}).get('placement', {}).get('source', '') else 'Beregnet'}"
+                )
+                pdf.set_font(PDF_FONT, "", 7)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                pdf.multi_cell(160, 3.5, clean_pdf_text(caption))
+                pdf.set_text_color(*_BODY_BLACK)
 
     if manual_sketch_images:
         pdf.add_page()
@@ -6226,20 +6251,20 @@ def create_full_report_pdf(
                 pdf.ln(92)
 
     # ================================================================
-    # PLANVISNING OG VOLUMKONTROLL (v13: med AI-analyse)
+    # PLANVISNING OG VOLUMKONTROLL (v13: én per side med AI-analyse)
     # ================================================================
     if scene_images:
-        pdf.add_page()
-        pdf.section_title("PLANVISNING OG VOLUMKONTROLL", 16)
-        pdf.body_text(
-            "Planvisninger viser foreslåtte volumer sett ovenfra med "
-            "tomtegrense, byggefelt og nabobebyggelse. "
-            "Høyder på foreslåtte bygg og nabobygg er angitt."
-        )
-        pdf.ln(4)
         pv_analyses = plan_view_analyses or []
         for i, image in enumerate(scene_images):
-            pdf.check_space(100)
+            pdf.add_page()
+            if i == 0:
+                pdf.section_title("PLANVISNING OG VOLUMKONTROLL", 16)
+                pdf.body_text(
+                    "Planvisninger viser foreslåtte volumer sett ovenfra med "
+                    "tomtegrense, byggefelt og nabobebyggelse. "
+                    "Høyder på foreslåtte bygg og nabobygg er angitt."
+                )
+                pdf.ln(4)
             if i < len(options):
                 opt = options[i]
                 bra = opt.gross_bta_m2 * opt.efficiency_ratio
@@ -6254,12 +6279,14 @@ def create_full_report_pdf(
                 caption = ""
             pdf.subtitle(lbl)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
-                ratio_h = 160 * (image.height / max(image.width, 1))
-                if ratio_h > 200:
-                    ratio_h = 200
-                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.ln(ratio_h + 4)
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                img_w = 160
+                img_h = img_w * (image.height / max(image.width, 1))
+                if img_h > 160:
+                    img_h = 160
+                    img_w = img_h * (image.width / max(image.height, 1))
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
             # Caption under bildet
             if caption:
                 pdf.set_font(PDF_FONT, "I", 8)
@@ -6327,32 +6354,65 @@ def create_full_report_pdf(
         raw_line = report_lines[i_line]
         line = raw_line.strip()
 
-        # Detect ALTERNATIVER section → render as tables
+        # Detect ALTERNATIVER section → render as professional comparison
         if re.match(r"^#?\s*\d*\.?\s*ALTERNATIVER", line) or "# 8. ALTERNATIVER" in raw_line:
             pdf.section_title(line.replace("#", "").strip(), 14)
             i_line += 1
-            # Render each alternative as a compact table
+
+            # --- Sammenligningstabellen: alle alternativer i én tabell ---
+            cmp_headers = ["Alt", "Typologi", "BTA m\u00b2", "BRA m\u00b2", "Enheter", "Fotavtrykk", "Sol", "Score"]
+            cmp_widths = [28, 25, 20, 20, 16, 22, 14, 15]
+            cmp_rows = []
+            for opt in options:
+                bra_est = opt.gross_bta_m2 * opt.efficiency_ratio
+                cmp_rows.append([
+                    opt.name.replace("Alt ", ""),
+                    opt.typology,
+                    f"{opt.gross_bta_m2:.0f}",
+                    f"~{bra_est:.0f}",
+                    str(opt.unit_count),
+                    f"{opt.footprint_area_m2:.0f}",
+                    f"{opt.solar_score:.0f}",
+                    f"{opt.score}",
+                ])
+            add_pdf_table(pdf, cmp_headers, cmp_rows, cmp_widths, score_col=7)
+
+            # --- Detaljkort per alternativ ---
             for option in options:
                 bra_est = option.gross_bta_m2 * option.efficiency_ratio
-                pdf.check_space(80)
-                pdf.subtitle(option.name)
-                alt_headers = ["Parameter", "Verdi"]
-                alt_rows = [
-                    ["Typologi", option.typology],
-                    ["Fotavtrykk", f"{option.footprint_area_m2:.0f} m\u00b2"],
-                    ["BTA", f"{option.gross_bta_m2:.0f} m\u00b2"],
-                    ["BRA (salgbart)", f"~{bra_est:.0f} m\u00b2"],
-                    ["Leiligheter", f"{option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})"],
-                    ["Parkering", f"{option.parking_spaces} plasser"],
-                    ["Solbelyst uteareal", f"ca. {option.sunlit_open_space_pct:.0f}%"],
-                    ["Vinterskygge kl 12", f"ca. {option.winter_noon_shadow_m:.0f} m"],
-                ]
-                add_pdf_table(pdf, alt_headers, alt_rows, [50, 110])
-                # Render notes as body text below table
+                pdf.check_space(45)
+                # Alternativnavn med accent-linje
+                pdf.set_draw_color(*_BUILTLY_BLUE)
+                pdf.set_line_width(0.5)
+                pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+                pdf.set_line_width(0.2)
+                pdf.ln(3)
+                pdf.set_font(PDF_FONT, "B", 11)
+                pdf.set_text_color(*_NAVY)
+                pdf.set_x(25)
+                pdf.cell(0, 6, clean_pdf_text(option.name), 0, 1)
+                # Kompakt nøkkeltall-linje
+                pdf.set_font(PDF_FONT, "", 8)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                mix_str = ", ".join(f"{k}: {v}" for k, v in (option.mix_counts or {}).items())
+                kpi_line = (
+                    f"{option.typology}  |  BTA {option.gross_bta_m2:.0f}  |  BRA ~{bra_est:.0f}  |  "
+                    f"{option.unit_count} boliger ({mix_str})  |  "
+                    f"P: {option.parking_spaces}  |  Sol {option.solar_score:.0f}/100  |  "
+                    f"Uteareal {option.sunlit_open_space_pct:.0f}%  |  Skygge {option.winter_noon_shadow_m:.0f} m"
+                )
+                pdf.multi_cell(160, 4, clean_pdf_text(kpi_line))
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.ln(1)
+                # Notes
                 for note in option.notes:
                     pdf.check_space(7)
-                    pdf.body_text(ironclad_text_formatter(note))
-                pdf.ln(4)
+                    pdf.set_font(PDF_FONT, "", 9)
+                    pdf.set_x(25)
+                    pdf.multi_cell(160, 4.5, ironclad_text_formatter(note))
+                pdf.ln(3)
+
             # Skip bullet lines in report_text until next # section
             while i_line < len(report_lines):
                 peek = report_lines[i_line].strip()
@@ -8745,7 +8805,6 @@ render();
                         pd_state = st.session_state.get("project_data", {})
                         motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
                         _site_obj_ac = SiteInputs(**site_result)
-                        # AI-analyse av 3D-scener
                         pv_analyses_3d: List[str] = []
                         if ANTHROPIC_API_KEY:
                             with st.spinner("Claude analyserer 3D-scenene..."):
@@ -8775,10 +8834,22 @@ render();
                         st.session_state.generated_ark_pdf = new_pdf
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
                     except Exception:
-                        pass  # Behold eksisterende PDF ved feil
+                        pass
 
-            # --- BATCH CAPTURE fallback: manuell nedlasting ---
-            if st.button("📸 Ta bilder av alle alternativer (nedlasting)", use_container_width=True, key="batch_capture_btn"):
+            # --- AUTO BATCH CAPTURE (fallback: laster ned bilder automatisk) ---
+            if not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+                st.session_state._batch_auto_triggered = True
+                st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
+                all_payloads = []
+                for opt in options[:3]:
+                    p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
+                    all_payloads.append(p)
+                batch_json = json.dumps(all_payloads, ensure_ascii=False)
+                batch_html = _build_batch_capture_html(batch_json, height_px=480)
+                components.html(batch_html, height=520, scrolling=False)
+
+            # Manuell batch-capture knapp
+            if st.button("📸 Ta bilder av alle alternativer (manuell)", use_container_width=True, key="batch_capture_btn"):
                 all_payloads = []
                 for opt in options:
                     p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
@@ -8799,9 +8870,14 @@ render();
         st.caption(f'3D-modell kunne ikke rendres: {exc}')
 
     # --- 3D-scene bilder til rapport ---
-    with st.expander("Legg til 3D-scenebilder i rapporten", expanded=False):
-        st.caption("Bruk «📸 Last ned bilde» i 3D-terrengscenen for å ta bilder fra ønsket vinkel, "
-                   "og last dem opp her for å inkludere dem i PDF-rapporten.")
+    # Auto-expand when batch capture has run but images not yet in PDF
+    _expand_upload = bool(st.session_state.get("_batch_auto_triggered") and not st.session_state.get("ark_scene_images"))
+    with st.expander("Legg til 3D-scenebilder i rapporten", expanded=_expand_upload):
+        if _expand_upload:
+            st.warning("⬇️ 3D-scener er lastet ned til din nedlastingsmappe. Dra filene (terreng_*.png) hit for å inkludere dem i rapporten med AI-analyse.")
+        else:
+            st.caption("Bruk «📸 Last ned bilde» i 3D-terrengscenen for å ta bilder fra ønsket vinkel, "
+                       "og last dem opp her for å inkludere dem i PDF-rapporten.")
         scene_uploads = st.file_uploader(
             "Last opp 3D-scenebilder (PNG/JPG)",
             type=["png", "jpg", "jpeg"],
@@ -8834,6 +8910,16 @@ render();
                                 _solar_grid_3d = render_solar_snapshot_grid(_site_obj_3d, motor_options[0])
                             except Exception:
                                 pass
+                        # AI-analyse av opplastede 3D-scener (v13)
+                        pv_analyses_upload: List[str] = []
+                        if ANTHROPIC_API_KEY and _site_obj_3d:
+                            with st.spinner("Claude analyserer 3D-scenene..."):
+                                try:
+                                    pv_analyses_upload = analyze_plan_views_with_ai(
+                                        scene_images_for_pdf, motor_options, _site_obj_3d, result.get("environment")
+                                    )
+                                except Exception:
+                                    pass
                         new_pdf_bytes = create_full_report_pdf(
                             name=pd_state.get("p_name", "Prosjekt"),
                             client=pd_state.get("c_name", "Ukjent"),
@@ -8847,6 +8933,7 @@ render();
                             environment_data=result.get("environment"),
                             solar_grid_image=_solar_grid_3d,
                             scene_images=scene_images_for_pdf,
+                            plan_view_analyses=pv_analyses_upload or None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
