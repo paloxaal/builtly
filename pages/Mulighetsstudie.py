@@ -1174,72 +1174,66 @@ def _place_grid_buildings(
     max_footprint_m2: float = 99999.0,
 ) -> List[Polygon]:
     """
-    2D-grid plassering: fordeler bygninger over HELE tomten i et rutenett
-    langs og paa tvers av hovedaksen. Bygninger clippes mot tomtegrensen
-    og godtas hvis minst 50% av arealet er innenfor.
+    Plasser bygninger INNENFOR polygonet ved å sample kandidatposisjoner
+    direkte fra polygonens bounding box, filtrert til punkter som er inne i polygonet.
+    Bygninger clippes mot tomtegrensen og godtas hvis nok areal er innenfor.
     """
     rad = math.radians(angle_deg)
-    perp_rad = rad + math.pi / 2.0
-    cx, cy = poly.centroid.x, poly.centroid.y
     major, minor, _ = minimum_rotated_dims(poly)
+    minx, miny, maxx, maxy = poly.bounds
 
-    # Beregn antall rader og kolonner
-    step_along = building_depth_m + spacing_along
-    step_across = building_width_m + spacing_across
+    # Step-størrelse for sampling: bruk bygningsdimensjon + spacing
+    step_x = building_depth_m + spacing_along
+    step_y = building_width_m + spacing_across
 
-    n_along = max(1, int((major - building_depth_m) / max(step_along, 1.0)) + 1)
-    n_across = max(1, int((minor - building_width_m) / max(step_across, 1.0)) + 1)
+    # Samle alle kandidatposisjoner INNENFOR polygonet
+    candidates: List[Tuple[float, float]] = []
+    x = minx + building_depth_m / 2.0
+    while x < maxx:
+        y = miny + building_width_m / 2.0
+        while y < maxy:
+            if poly.contains(Point(x, y)):
+                candidates.append((x, y))
+            y += step_y
+        x += step_x
 
-    # Begrens totalt antall
-    total_slots = n_along * n_across
-    if total_slots > max_buildings * 2:
-        ratio = math.sqrt(max_buildings / max(total_slots, 1))
-        n_along = max(1, int(n_along * ratio))
-        n_across = max(1, int(n_across * ratio))
-
-    # Sentrer rutenettet
-    span_along = (n_along - 1) * step_along
-    span_across = (n_across - 1) * step_across
-    start_along = -span_along / 2.0
-    start_across = -span_across / 2.0
+    # Sorter etter avstand fra sentrum (plasser nærme sentrum først)
+    if candidates:
+        cx, cy = poly.centroid.x, poly.centroid.y
+        candidates.sort(key=lambda p: math.hypot(p[0] - cx, p[1] - cy))
 
     buildings: List[Polygon] = []
     total_area = 0.0
-    min_overlap = 0.50  # Godta bygninger med minst 50% innenfor tomten
+    min_overlap = 0.45
+    occupied = Polygon()  # Track plasserte bygninger for å unngå overlapp
 
-    for row in range(n_along):
-        for col in range(n_across):
-            if len(buildings) >= max_buildings or total_area >= max_footprint_m2:
-                break
-            offset_along = start_along + row * step_along
-            offset_across = start_across + col * step_across
-
-            bx = cx + offset_along * math.cos(perp_rad) + offset_across * math.cos(rad)
-            by = cy + offset_along * math.sin(perp_rad) + offset_across * math.sin(rad)
-
-            remaining = max_footprint_m2 - total_area
-            eff_w = min(building_width_m, remaining / max(building_depth_m, 1.0))
-
-            # Lag full bygning og clip mot polygon
-            candidate = _make_oriented_rect(bx, by, eff_w, building_depth_m, rad)
-            full_area = candidate.area
-
-            if poly.contains(candidate):
-                # Perfekt — hel bygning innenfor
-                buildings.append(candidate)
-                total_area += candidate.area
-            else:
-                # Clip mot polygon og sjekk om nok overlap
-                try:
-                    clipped = candidate.intersection(poly).buffer(0)
-                    if not clipped.is_empty and clipped.area >= full_area * min_overlap and clipped.area >= 40:
-                        buildings.append(clipped)
-                        total_area += clipped.area
-                except Exception:
-                    pass
-
-        if total_area >= max_footprint_m2:
+    for bx, by in candidates:
+        if len(buildings) >= max_buildings or total_area >= max_footprint_m2:
             break
+
+        candidate = _make_oriented_rect(bx, by, building_width_m, building_depth_m, rad)
+
+        # Sjekk overlapp med allerede plasserte bygninger
+        if not occupied.is_empty:
+            overlap_with_existing = candidate.intersection(occupied).area
+            if overlap_with_existing > candidate.area * 0.1:
+                continue  # For mye overlapp, hopp over
+
+        # Clip mot polygon
+        if poly.contains(candidate):
+            buildings.append(candidate)
+            total_area += candidate.area
+            occupied = occupied.union(candidate)
+        else:
+            try:
+                clipped = candidate.intersection(poly).buffer(0)
+                full_area = building_width_m * building_depth_m
+                if not clipped.is_empty and clipped.area >= full_area * min_overlap and clipped.area >= 30:
+                    buildings.append(clipped)
+                    total_area += clipped.area
+                    occupied = occupied.union(clipped)
+            except Exception:
+                pass
 
     return buildings
 
