@@ -4087,24 +4087,14 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
 
 # --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
 _SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
+_scene_capture_component = None
 _scene_capture_error = ""
-
-
-def _get_scene_capture_component():
-    """Lazy-init for declare_component — unngår Streamlit pages/ module-bug."""
-    global _scene_capture_error
-    if not _SCENE_CAPTURE_DIR.exists():
-        return None
-    if "_scene_comp_cache" not in st.session_state:
-        try:
-            st.session_state._scene_comp_cache = components.declare_component(
-                "scene_capture", path=str(_SCENE_CAPTURE_DIR)
-            )
-            _scene_capture_error = ""
-        except Exception as exc:
-            st.session_state._scene_comp_cache = None
-            _scene_capture_error = str(exc)
-    return st.session_state.get("_scene_comp_cache")
+if _SCENE_CAPTURE_DIR.exists():
+    try:
+        _scene_capture_component = components.declare_component("scene_capture", path=str(_SCENE_CAPTURE_DIR))
+    except Exception as _comp_exc:
+        _scene_capture_component = None
+        _scene_capture_error = str(_comp_exc)
 
 
 def auto_capture_3d_scenes(
@@ -4120,7 +4110,7 @@ def auto_capture_3d_scenes(
     Bruker en custom Streamlit-komponent med bi-directional kommunikasjon.
     Returnerer None hvis komponenten ikke er tilgjengelig.
     """
-    if _get_scene_capture_component() is None:
+    if _scene_capture_component is None:
         return None
 
     all_payloads = []
@@ -4131,8 +4121,7 @@ def auto_capture_3d_scenes(
     if not all_payloads:
         return None
 
-    comp = _get_scene_capture_component()
-    result = comp(
+    result = _scene_capture_component(
         payloads=all_payloads,
         height=height_px,
         capture_width=capture_width,
@@ -5935,8 +5924,19 @@ def create_full_report_pdf(
     solar_grid_image: Optional[Image.Image] = None,
     scene_images: Optional[List[Image.Image]] = None,
     plan_view_analyses: Optional[List[str]] = None,
-    cover_image: Optional[Image.Image] = None, 
 ) -> bytes:
+    """
+    McKinsey-quality PDF v13:
+      Page 1:  Cover
+      Page 2:  Table of Contents
+      Page 3:  Executive Summary (KPI-kort vektor)
+      Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
+      Page 5+: Volumskisser (top 3)
+      Page N:  Planvisning og volumkontroll (med AI-analyse)
+      Page N:  Sol/skygge individuelle snapshots
+      Page N+: Rapport tekst
+      Last:    Vedlegg (flyfoto, støykart)
+    """
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
     pdf.p_name = name.upper()
@@ -5947,21 +5947,13 @@ def create_full_report_pdf(
     # PAGE 1: COVER
     # ================================================================
     pdf.add_page()
-    
-    if cover_image:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-            cover_image.convert("RGB").save(tmp.name, format="JPEG", quality=95)
-            pdf.image(tmp.name, x=0, y=0, w=210) 
-        pdf.set_fill_color(255, 255, 255)
-        pdf.rect(0, 140, 210, 160, 'F') 
-    else:
-        pdf.set_fill_color(*_BUILTLY_BLUE)
-        pdf.rect(0, 0, 210, 6, 'F')
+    pdf.set_fill_color(*_BUILTLY_BLUE)
+    pdf.rect(0, 0, 210, 6, 'F')
 
     if os.path.exists("logo.png"):
-        pdf.image("logo.png", x=25, y=150 if cover_image else 20, w=50)
+        pdf.image("logo.png", x=25, y=20, w=50)
 
-    pdf.set_y(180 if cover_image else 90)
+    pdf.set_y(90)
     pdf.set_font(PDF_FONT, "B", 24)
     pdf.set_text_color(*_NAVY)
     pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
@@ -8812,10 +8804,9 @@ render();
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
 
             # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
-            _comp = _get_scene_capture_component()
             # DEBUG: vis komponent-status
-            st.caption(f"🔧 Component: {'OK' if _comp else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
-            if _comp is not None and not st.session_state.get("ark_scene_images"):
+            st.caption(f"🔧 Component: {'OK' if _scene_capture_component else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
+            if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
                 st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
                 captured = auto_capture_3d_scenes(
                     SiteInputs(**site_result), options, scene_config,
@@ -8863,7 +8854,7 @@ render();
                     st.caption("Komponenten rendrer 3D-scener — bildene overføres ved neste sidelasting.")
 
             # --- BATCH CAPTURE fallback: KUN når custom component IKKE er tilgjengelig ---
-            elif _comp is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+            elif _scene_capture_component is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
                 st.session_state._batch_auto_triggered = True
                 st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
                 all_payloads = []
@@ -8970,43 +8961,6 @@ render();
     st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
-    # --- NY SEKSJON: AI-VISUALISERING ---
-    st.markdown("<div class='section-header'>✨ AI Visualisering</div>", unsafe_allow_html=True)
-    
-    stability_key = os.environ.get("STABILITY_API_KEY")
-    scene_imgs = st.session_state.get("ark_scene_images")
-    
-    if scene_imgs and len(scene_imgs) > 0:
-        if st.button("🪄 Tryll frem fotorealistisk render", type="primary", use_container_width=True):
-            with st.spinner("AI-arkitekten tegner treverk og tegl... (Tar ca. 15 sek)"):
-                ferdig_render = generer_arkitekt_render(scene_imgs[0], best, stability_key)
-                
-                if ferdig_render:
-                    st.session_state.ai_render_image = ferdig_render
-                    st.image(ferdig_render, caption="AI-generert forslag", use_container_width=True)
-                    
-                    with st.spinner("Oppdaterer rapporten med ny forside..."):
-                        res = st.session_state.analysis_results
-                        motor_opts = [OptionResult(**opt) for opt in res["options"]]
-                        
-                        pdf_data = create_full_report_pdf(
-                            name=pd_state.get("p_name", "Prosjekt"),
-                            client=pd_state.get("c_name", "Ukjent"),
-                            land=pd_state.get("land", "Norge"),
-                            report_text=res["report_text"],
-                            options=motor_opts,
-                            option_images=res["option_images"],
-                            visual_attachments=res["visual_attachments"],
-                            site=SiteInputs(**res["site"]),
-                            environment_data=res["environment"],
-                            cover_image=ferdig_render
-                        )
-                        st.session_state.generated_ark_pdf = pdf_data
-                        st.rerun()
-    else:
-        st.info("Kjør studien først for å generere 3D-grunnlaget AI-en trenger.")
-
-    # --- NEDLASTING OG QA ---
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     cdl, cqa = st.columns(2)
     with cdl:
