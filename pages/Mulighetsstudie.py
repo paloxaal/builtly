@@ -1175,7 +1175,8 @@ def _place_grid_buildings(
 ) -> List[Polygon]:
     """
     2D-grid plassering: fordeler bygninger over HELE tomten i et rutenett
-    langs og paa tvers av hovedaksen, ikke bare langs en linje.
+    langs og paa tvers av hovedaksen. Bygninger clippes mot tomtegrensen
+    og godtas hvis minst 50% av arealet er innenfor.
     """
     rad = math.radians(angle_deg)
     perp_rad = rad + math.pi / 2.0
@@ -1183,16 +1184,15 @@ def _place_grid_buildings(
     major, minor, _ = minimum_rotated_dims(poly)
 
     # Beregn antall rader og kolonner
-    step_along = building_depth_m + spacing_along    # langs hovedaksen
-    step_across = building_width_m + spacing_across  # paa tvers
+    step_along = building_depth_m + spacing_along
+    step_across = building_width_m + spacing_across
 
     n_along = max(1, int((major - building_depth_m) / max(step_along, 1.0)) + 1)
     n_across = max(1, int((minor - building_width_m) / max(step_across, 1.0)) + 1)
 
     # Begrens totalt antall
     total_slots = n_along * n_across
-    if total_slots > max_buildings:
-        # Reduser symmetrisk
+    if total_slots > max_buildings * 2:
         ratio = math.sqrt(max_buildings / max(total_slots, 1))
         n_along = max(1, int(n_along * ratio))
         n_across = max(1, int(n_across * ratio))
@@ -1205,6 +1205,7 @@ def _place_grid_buildings(
 
     buildings: List[Polygon] = []
     total_area = 0.0
+    min_overlap = 0.50  # Godta bygninger med minst 50% innenfor tomten
 
     for row in range(n_along):
         for col in range(n_across):
@@ -1216,25 +1217,26 @@ def _place_grid_buildings(
             bx = cx + offset_along * math.cos(perp_rad) + offset_across * math.cos(rad)
             by = cy + offset_along * math.sin(perp_rad) + offset_across * math.sin(rad)
 
-            # Proev aa plassere bygning her — tilpass bredde til hva som passer
             remaining = max_footprint_m2 - total_area
-            max_w = min(building_width_m, remaining / max(building_depth_m, 1.0))
+            eff_w = min(building_width_m, remaining / max(building_depth_m, 1.0))
 
-            lo, hi = 6.0, max_w
-            best_w = 0.0
-            for _ in range(16):
-                mid = (lo + hi) / 2.0
-                candidate = _make_oriented_rect(bx, by, mid, building_depth_m, rad)
-                if poly.contains(candidate):
-                    best_w = mid
-                    lo = mid
-                else:
-                    hi = mid
+            # Lag full bygning og clip mot polygon
+            candidate = _make_oriented_rect(bx, by, eff_w, building_depth_m, rad)
+            full_area = candidate.area
 
-            if best_w >= 6.0:
-                bld = _make_oriented_rect(bx, by, best_w, building_depth_m, rad)
-                buildings.append(bld)
-                total_area += bld.area
+            if poly.contains(candidate):
+                # Perfekt — hel bygning innenfor
+                buildings.append(candidate)
+                total_area += candidate.area
+            else:
+                # Clip mot polygon og sjekk om nok overlap
+                try:
+                    clipped = candidate.intersection(poly).buffer(0)
+                    if not clipped.is_empty and clipped.area >= full_area * min_overlap and clipped.area >= 40:
+                        buildings.append(clipped)
+                        total_area += clipped.area
+                except Exception:
+                    pass
 
         if total_area >= max_footprint_m2:
             break
