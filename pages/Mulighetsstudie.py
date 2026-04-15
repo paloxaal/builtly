@@ -2223,25 +2223,30 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
     site_major = shape_info['major_m']
     site_minor = shape_info['minor_m']
     aspect_ratio = site_major / max(site_minor, 1.0)
+    rectangularity = shape_info.get('rectangularity', 1.0)
+    compactness = shape_info.get('compactness', 1.0)
+    # Effektiv bredde: for irregulære tomter (lav rectangularity) er brukbar bredde mye mindre enn MRR minor
+    effective_minor = site_minor * rectangularity
+    effective_aspect = site_major / max(effective_minor, 1.0)
     feasible_templates = []
     for t in templates:
         typo = t["typology"]
         skip = False
         reason = ""
-        # Karré krever tilnærmet kvadratisk tomt (aspekt < 2.5) og minst 28m bredde
-        if typo == "Karré" and (aspect_ratio > 2.5 or site_minor < 28):
+        # Karré krever kompakt, tilnærmet kvadratisk tomt med god fylling
+        if typo == "Karré" and (effective_aspect > 2.5 or effective_minor < 28 or rectangularity < 0.55):
             skip = True
-            reason = f"for smal tomt (aspekt {aspect_ratio:.1f}, bredde {site_minor:.0f}m)"
-        # Tun krever bredde for fløyer — minst 25m og aspekt < 3.0
-        elif typo == "Tun" and (aspect_ratio > 3.0 or site_minor < 25):
+            reason = f"tomt for smal/irregulær for kvartalsstruktur (effektiv aspekt {effective_aspect:.1f}, bredde {effective_minor:.0f}m, rekt. {rectangularity:.2f})"
+        # Tun krever bredde for fløyer
+        elif typo == "Tun" and (effective_aspect > 3.0 or effective_minor < 25 or rectangularity < 0.45):
             skip = True
-            reason = f"for smal for U-form (aspekt {aspect_ratio:.1f}, bredde {site_minor:.0f}m)"
-        # Tårn krever høyde (allerede sjekket lenger ned)
+            reason = f"for smal/irregulær for U-form (effektiv aspekt {effective_aspect:.1f}, bredde {effective_minor:.0f}m)"
+        # Tårn krever høyde
         elif typo == "Tårn" and allowed_floors < 10:
             skip = True
             reason = "krever min 10 etasjer"
-        # Podium + Tårn krever minst 5 etasjer og 20m bredde
-        elif typo == "Podium + Tårn" and (allowed_floors < 5 or site_minor < 20):
+        # Podium + Tårn krever minst 5 etasjer og bredde
+        elif typo == "Podium + Tårn" and (allowed_floors < 5 or effective_minor < 20):
             skip = True
             reason = f"krever min 5 etasjer og 20m bredde"
         if not skip:
@@ -2380,105 +2385,100 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             filled_fp, fill_info = _typology_polygon_fill(
                 placement_polygon, typology, target_footprint, fill_angle,
             )
-            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.05:
+            # Godta KUN hvis resultatet er >= 70% av target — ellers bruk skalering
+            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area >= target_footprint * 0.70:
                 footprint_polygon = filled_fp
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
             else:
-                # SISTE UTVEI: Skaler polygon til å matche target, deretter
-                # form om til typologisk karakter via post-processing
-                scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
-                max_scale = 0.98 if site.utnyttelsesgrad_bra_pct > 200 else 0.95
-                scale_ratio = min(scale_ratio, max_scale)
-                scaled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
+                # SMART FALLBACK: Plasser typologi-spesifikke former direkte i placement_polygon
+                # uten å skalere polygon først — unngår tap ved clipping av irregulære tomter
+                shape = _analyze_polygon(placement_polygon)
+                fp_major, fp_minor = shape['major_m'], shape['minor_m']
+                fp_angle = shape['orientation_deg']
+                rad = math.radians(fp_angle)
+                perp = rad + math.pi / 2.0
+                pcx, pcy = placement_polygon.centroid.x, placement_polygon.centroid.y
+                new_fp = None
+
+                if typology == "Lamell":
+                    # 2-3 parallelle lamellblokker langs major-aksen, 12m dype, 8m gap
+                    strip_d = 12.5
+                    gap = 8.0
+                    n_strips = max(2, min(3, int(fp_minor / (strip_d + gap))))
+                    strip_w = min(fp_major * 0.90, target_footprint / max(n_strips * strip_d, 1.0))
+                    strip_w = max(25.0, strip_w)
+                    total_span = (n_strips - 1) * (strip_d + gap)
+                    strips = []
+                    for si in range(n_strips):
+                        off = -total_span / 2.0 + si * (strip_d + gap)
+                        sx = pcx + off * math.cos(perp)
+                        sy = pcy + off * math.sin(perp)
+                        strip = _make_oriented_rect(sx, sy, strip_w, strip_d, rad)
+                        clipped = strip.intersection(placement_polygon).buffer(0)
+                        if not clipped.is_empty and clipped.area > 50:
+                            strips.append(clipped)
+                    if strips:
+                        new_fp = unary_union(strips).buffer(0)
+                        placement["n_buildings"] = len(strips)
+
+                elif typology == "Punkthus":
+                    # 3-5 frittstående kvadratiske bygninger i grid
+                    side = min(18.0, fp_minor * 0.35)
+                    side = max(14.0, side)
+                    sp = max(12.0, side * 0.8)
+                    n_pts = max(3, min(6, math.ceil(target_footprint / max(side * side, 1.0))))
+                    buildings = _place_grid_buildings(
+                        placement_polygon, side, side, fp_angle,
+                        spacing_along=sp, spacing_across=sp,
+                        max_buildings=n_pts,
+                        max_footprint_m2=target_footprint * 1.1,
+                    )
+                    if buildings and len(buildings) >= 2:
+                        new_fp = unary_union(buildings).buffer(0)
+                        placement["n_buildings"] = len(buildings)
+
+                elif typology == "Karré":
+                    # Ring med gårdsrom — bruk buffer-difference på placement_polygon
+                    ring_d = min(12.0, fp_minor * 0.18)
+                    ring_d = max(8.0, ring_d)
+                    sf = math.sqrt(min(target_footprint * 1.8, placement_polygon.area * 0.88) / max(placement_polygon.area, 1.0))
+                    sf = min(sf, 0.95)
+                    outer = affinity.scale(placement_polygon, xfact=sf, yfact=sf,
                                            origin=placement_polygon.centroid).buffer(0)
-                if scaled_fp is not None and not scaled_fp.is_empty and scaled_fp.area > footprint_area * 1.05:
-                    # Typologi-differensiering via post-processing av skalert polygon
-                    shape = _analyze_polygon(scaled_fp)
-                    fp_major, fp_minor = shape['major_m'], shape['minor_m']
-                    fp_angle = shape['orientation_deg']
-                    rad = math.radians(fp_angle)
-                    pcx, pcy = scaled_fp.centroid.x, scaled_fp.centroid.y
+                    inner = outer.buffer(-ring_d)
+                    if inner.is_valid and not inner.is_empty and inner.area > 30:
+                        ring = outer.difference(inner).buffer(0)
+                        if not ring.is_empty and ring.area > 100:
+                            new_fp = ring
+                            placement["courtyard_count"] = 1
 
-                    if typology == "Lamell":
-                        # Kutt i 2-3 parallelle strips med 8m gap
-                        strip_d = min(13.0, fp_minor * 0.35)
-                        strip_d = max(10.0, strip_d)
-                        gap = max(6.0, fp_minor * 0.12)
-                        n_strips = max(2, min(3, int(fp_minor / (strip_d + gap))))
-                        perp = rad + math.pi / 2.0
-                        total_span = (n_strips - 1) * (strip_d + gap)
-                        strips = []
-                        for si in range(n_strips):
-                            off = -total_span / 2.0 + si * (strip_d + gap)
-                            sx = pcx + off * math.cos(perp)
-                            sy = pcy + off * math.sin(perp)
-                            strip = _make_oriented_rect(sx, sy, fp_major * 0.92, strip_d, rad)
-                            clipped = strip.intersection(scaled_fp).buffer(0)
-                            if not clipped.is_empty and clipped.area > 30:
-                                strips.append(clipped)
-                        if strips and sum(s.area for s in strips) > footprint_area:
-                            footprint_polygon = unary_union(strips).buffer(0)
-                            placement["n_buildings"] = len(strips)
+                elif typology == "Tun":
+                    # L/U-form: lang hovedkropp + vinkelrett fløy
+                    main_d = 12.0
+                    main_w = min(fp_major * 0.80, target_footprint * 0.55 / max(main_d, 1.0))
+                    main_w = max(20.0, main_w)
+                    main = _find_inscribed_rect(placement_polygon, main_d, fp_angle, max_width_m=main_w)
+                    if main is not None:
+                        remaining = placement_polygon.difference(main.buffer(3.0))
+                        wing_w = min(fp_major * 0.45, target_footprint * 0.35 / max(main_d, 1.0))
+                        wing = _find_inscribed_rect(remaining, main_d, fp_angle + 90, max_width_m=wing_w)
+                        if wing is not None and wing.area > 60:
+                            new_fp = unary_union([main, wing]).buffer(0)
+                            placement["n_buildings"] = 2
                         else:
-                            footprint_polygon = scaled_fp
+                            new_fp = main
                             placement["n_buildings"] = 1
 
-                    elif typology == "Punkthus":
-                        # 3-5 separate kvadratiske bygninger innenfor skalert polygon
-                        side = min(18.0, fp_minor * 0.38)
-                        side = max(14.0, side)
-                        sp = max(10.0, fp_minor * 0.15)
-                        n_pts = max(3, min(5, math.ceil(scaled_fp.area / max(side * side, 1.0))))
-                        buildings = _place_grid_buildings(
-                            scaled_fp, side, side, fp_angle,
-                            spacing_along=sp, spacing_across=sp,
-                            max_buildings=n_pts,
-                            max_footprint_m2=scaled_fp.area,
-                        )
-                        if buildings and len(buildings) >= 2:
-                            footprint_polygon = unary_union(buildings).buffer(0)
-                            placement["n_buildings"] = len(buildings)
-                        else:
-                            footprint_polygon = scaled_fp
-                            placement["n_buildings"] = 1
+                else:
+                    # Podium+Tårn og andre: bruk skalering som fallback
+                    scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
+                    scale_ratio = min(scale_ratio, 0.96)
+                    new_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
+                                            origin=placement_polygon.centroid).buffer(0)
 
-                    elif typology == "Karré":
-                        # Ring-form med gårdsrom
-                        ring_d = min(12.0, fp_minor * 0.20)
-                        ring_d = max(8.0, ring_d)
-                        inner = scaled_fp.buffer(-ring_d)
-                        if inner.is_valid and not inner.is_empty and inner.area > 30:
-                            ring = scaled_fp.difference(inner).buffer(0)
-                            if not ring.is_empty and ring.area > footprint_area:
-                                footprint_polygon = ring
-                                placement["n_buildings"] = 1
-                                placement["courtyard_count"] = 1
-                            else:
-                                footprint_polygon = scaled_fp
-                        else:
-                            footprint_polygon = scaled_fp
-
-                    elif typology == "Tun":
-                        # L/U-form: hovedkropp + vinkelrett fløy
-                        main_d = min(12.0, fp_minor * 0.35)
-                        main_d = max(10.0, main_d)
-                        main = _find_inscribed_rect(scaled_fp, main_d, fp_angle, max_width_m=fp_major * 0.85)
-                        if main is not None:
-                            remaining = scaled_fp.difference(main.buffer(3.0))
-                            wing = _find_inscribed_rect(remaining, main_d, fp_angle + 90, max_width_m=fp_major * 0.5)
-                            if wing is not None and wing.area > 40:
-                                footprint_polygon = unary_union([main, wing]).buffer(0)
-                                placement["n_buildings"] = 2
-                            else:
-                                footprint_polygon = main
-                                placement["n_buildings"] = 1
-                        else:
-                            footprint_polygon = scaled_fp
-
-                    else:
-                        footprint_polygon = scaled_fp
-
+                if new_fp is not None and not new_fp.is_empty and new_fp.area > footprint_area:
+                    footprint_polygon = new_fp
                     footprint_area = float(footprint_polygon.area)
                     placement["source"] = f"polygon-fill-{typology.lower().replace(' ', '_')}"
                     placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
