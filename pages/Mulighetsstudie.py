@@ -2217,6 +2217,40 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.70, "floor_range": (3, 5), "eff_adj": -0.02},
     ]
 
+    # --- TYPOLOGI-FEASIBILITY FILTER ---
+    # Fjern typologier som er geometrisk umulige for tomten
+    shape_info = _analyze_polygon(placement_polygon)
+    site_major = shape_info['major_m']
+    site_minor = shape_info['minor_m']
+    aspect_ratio = site_major / max(site_minor, 1.0)
+    feasible_templates = []
+    for t in templates:
+        typo = t["typology"]
+        skip = False
+        reason = ""
+        # Karré krever tilnærmet kvadratisk tomt (aspekt < 2.5) og minst 28m bredde
+        if typo == "Karré" and (aspect_ratio > 2.5 or site_minor < 28):
+            skip = True
+            reason = f"for smal tomt (aspekt {aspect_ratio:.1f}, bredde {site_minor:.0f}m)"
+        # Tun krever bredde for fløyer — minst 25m og aspekt < 3.0
+        elif typo == "Tun" and (aspect_ratio > 3.0 or site_minor < 25):
+            skip = True
+            reason = f"for smal for U-form (aspekt {aspect_ratio:.1f}, bredde {site_minor:.0f}m)"
+        # Tårn krever høyde (allerede sjekket lenger ned)
+        elif typo == "Tårn" and allowed_floors < 10:
+            skip = True
+            reason = "krever min 10 etasjer"
+        # Podium + Tårn krever minst 5 etasjer og 20m bredde
+        elif typo == "Podium + Tårn" and (allowed_floors < 5 or site_minor < 20):
+            skip = True
+            reason = f"krever min 5 etasjer og 20m bredde"
+        if not skip:
+            feasible_templates.append(t)
+    # Alltid behold minst Lamell + Punkthus som fallback
+    if len(feasible_templates) < 2:
+        feasible_templates = [t for t in templates if t["typology"] in ("Lamell", "Punkthus")]
+    templates = feasible_templates
+
     options: List[OptionResult] = []
     # Mål-BTA: bruk %-BRA hvis satt, ellers desired_bta_m2
     if site.utnyttelsesgrad_bra_pct > 0:
@@ -2237,10 +2271,6 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
     for template in templates:
         typology = template["typology"]
-
-        # Tårn krever minimum 10 etasjer — hopp over hvis ikke mulig
-        if typology == "Tårn" and allowed_floors < 10:
-            continue
 
         # Når %-BRA overstyrer: beregn target_footprint direkte fra BTA-mål
         if site.utnyttelsesgrad_bra_pct > 0:
@@ -2355,18 +2385,16 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
             else:
-                # Siste utvei: generisk skalert polygon (gammel oppførsel)
-                scale_ratio = math.sqrt(target_footprint / max(placement_polygon.area, 1.0))
-                max_scale = 0.98 if site.utnyttelsesgrad_bra_pct > 200 else 0.95
-                scale_ratio = min(scale_ratio, max_scale)
-                filled_fp = affinity.scale(placement_polygon, xfact=scale_ratio, yfact=scale_ratio,
-                                           origin=placement_polygon.centroid).buffer(0)
-                if filled_fp is not None and not filled_fp.is_empty and filled_fp.area > footprint_area * 1.05:
-                    footprint_polygon = filled_fp
-                    footprint_area = float(footprint_polygon.area)
-                    placement["source"] = "polygon-fill-generic"
-                    placement["n_buildings"] = 1
-                    placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
+                # Typologi-bevisst fallback: bruk create_typology_footprint igjen med økt target
+                try:
+                    fb_fp, fb_info = create_typology_footprint(placement_polygon, typology, target_footprint * 1.1)
+                    if fb_fp is not None and not fb_fp.is_empty and fb_fp.area > footprint_area * 1.05:
+                        footprint_polygon = fb_fp
+                        footprint_area = float(footprint_polygon.area)
+                        placement.update(fb_info)
+                        placement["source"] = "typology-fallback"
+                except Exception:
+                    pass
 
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
@@ -7001,6 +7029,7 @@ KRAV:
             site=site,
             environment_data=environment_data,
             solar_grid_image=solar_grid_img,
+            scene_images=st.session_state.get("ark_scene_images"),
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
@@ -7037,6 +7066,7 @@ KRAV:
         "terrain_ctx": terrain_ctx,
         "site_intelligence": site_intelligence_bundle,
         "environment": environment_data,
+        "visual_attachments": images_for_context,
     }
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
@@ -8380,6 +8410,7 @@ render();
                 except Exception:
                     pass
             if scene_images_for_pdf:
+                st.session_state.ark_scene_images = scene_images_for_pdf
                 st.success(f"{len(scene_images_for_pdf)} bilde(r) lastet opp — klikk «Oppdater PDF» for å inkludere i rapporten.")
                 if st.button("Oppdater PDF med 3D-bilder", type="primary", use_container_width=True, key="regen_pdf_3d"):
                     try:
