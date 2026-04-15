@@ -1454,11 +1454,17 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         else:
             n_needed = max(min_buildings, n_needed)
 
+        # For irregulære tomter: forsøk FLERE posisjoner enn n_needed
+        # fordi mange vil bli clipset bort. max_footprint_m2 stopper når target er nådd.
+        shape_rect = _analyze_polygon(buildable_polygon).get('rectangularity', 1.0)
+        clip_factor = max(1.0, 1.0 / max(shape_rect, 0.15))  # 1.0 for rekt., 6.7 for L-form
+        max_attempts = min(limits["max_n"], max(n_needed, int(n_needed * clip_factor)))
+
         buildings = _place_grid_buildings(
             buildable_polygon, bld_w, bld_d, angle,
             spacing_along=effective_sp_along,
             spacing_across=effective_sp_across,
-            max_buildings=n_needed,
+            max_buildings=max_attempts,
             max_footprint_m2=target_footprint_m2,
         )
         if buildings:
