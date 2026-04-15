@@ -238,7 +238,7 @@ def generer_arkitekt_render(
     base_image: Image.Image,
     option: "OptionResult",
     api_key: str,
-    ai_strength: float = 0.75,
+    ai_strength: float = 0.65,
 ) -> Optional[Image.Image]:
     """
     Bruker Stability AI SD3 Image-to-Image til å transformere de fargekodede
@@ -272,24 +272,23 @@ def generer_arkitekt_render(
     }
     typology_eng = typologi_map.get(option.typology, "residential building")
 
-    # 3. Fargekode-prompt: forklarer hva hver farge i scenen representerer
+    # 3. Fargekode-prompt: eksplisitt bevaring av ortofoto, kun bygg transformeres
     prompt = (
-        f"Photorealistic aerial drone photography of a modern {typology_eng} in Norway. "
-        "SCENE TRANSFORMATION: "
-        "1. The bright GREEN blocks are the new building — replace with a highly detailed "
-        "modern residential building featuring vertical wooden panels, light grey stucco, "
-        "and warm brickwork. Large windows, glass balconies with dark metal frames, clean roofline. "
-        "2. The GREY transparent blocks are existing neighborhood houses — render as realistic "
-        "residential buildings with pitched roofs and varied facades. "
-        "3. Keep the aerial photograph background as a realistic suburban landscape with "
-        "green trees, lawns, and asphalt streets. "
-        "4. Any YELLOW area is a landscaped courtyard with paving, grass, and small trees. "
-        "Soft afternoon sunlight, realistic shadows, 8k resolution, architectural visualization."
+        f"Photorealistic aerial drone photograph of a Norwegian suburban neighborhood. "
+        "CRITICAL: The background is a REAL aerial photograph — do NOT alter the existing "
+        "roads, trees, grass, rooftops, or any part of the real landscape. Keep it exactly as-is. "
+        f"ONLY transform the bright GREEN 3D blocks into a detailed modern {typology_eng} with "
+        "vertical wooden panels, light grey stucco, warm brickwork (tegl), large windows, "
+        "glass balconies with dark metal frames, and a clean roofline. "
+        "The semi-transparent GREY blocks are existing buildings — refine them subtly into "
+        "realistic houses with pitched roofs, but do not move or reshape them. "
+        "Soft afternoon sunlight, realistic shadows consistent with the aerial photo lighting."
     )
 
     negative_prompt = (
-        "abstract 3d scene, untextured grey blocks, green glowing boxes, yellow flat ground, "
-        "solar panels, floating buildings, cartoon, blurry, low quality, sci-fi, distorted"
+        "changed background, altered landscape, different roads, modified trees, "
+        "abstract 3d scene, untextured blocks, green glowing boxes, solar panels, "
+        "floating buildings, cartoon, blurry, low quality, sci-fi, distorted"
     )
 
     # 4. SD3 image-to-image
@@ -9131,7 +9130,7 @@ render();
         ) if opt_names else None
         render_strength = st.slider(
             "Transformasjonsgrad (lav = tett på volummodellen, høy = friere tolkning)",
-            min_value=0.50, max_value=0.90, value=0.75, step=0.05,
+            min_value=0.50, max_value=0.90, value=0.65, step=0.05,
             key="stability_render_strength",
         )
         if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="stability_render_btn"):
