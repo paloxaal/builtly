@@ -1174,64 +1174,53 @@ def _place_grid_buildings(
     max_footprint_m2: float = 99999.0,
 ) -> List[Polygon]:
     """
-    Plasser bygninger INNENFOR polygonet ved å sample kandidatposisjoner
-    direkte fra polygonens bounding box, filtrert til punkter som er inne i polygonet.
-    Bygninger clippes mot tomtegrensen og godtas hvis nok areal er innenfor.
+    Plasser bygninger innenfor polygonet. Sampler kandidatpunkter direkte
+    innenfor polygonet og plasserer orienterte rektangler ved hvert punkt.
     """
     rad = math.radians(angle_deg)
-    major, minor, _ = minimum_rotated_dims(poly)
-    minx, miny, maxx, maxy = poly.bounds
+    bld_area = building_width_m * building_depth_m
 
-    # Step-størrelse for sampling: bruk bygningsdimensjon + spacing
-    step_x = building_depth_m + spacing_along
-    step_y = building_width_m + spacing_across
+    # Sample kandidatpunkter — bruk TETT grid for å finne mange kandidater
+    # min_dist-sjekken under håndterer faktisk avstand mellom bygninger
+    sample_spacing = max(6.0, min(building_width_m, building_depth_m) * 0.8)
+    pts = sample_points_in_polygon(poly, spacing_m=sample_spacing, max_points=max_buildings * 8)
 
-    # Samle alle kandidatposisjoner INNENFOR polygonet
-    candidates: List[Tuple[float, float]] = []
-    x = minx + building_depth_m / 2.0
-    while x < maxx:
-        y = miny + building_width_m / 2.0
-        while y < maxy:
-            if poly.contains(Point(x, y)):
-                candidates.append((x, y))
-            y += step_y
-        x += step_x
-
-    # Sorter etter avstand fra sentrum (plasser nærme sentrum først)
-    if candidates:
-        cx, cy = poly.centroid.x, poly.centroid.y
-        candidates.sort(key=lambda p: math.hypot(p[0] - cx, p[1] - cy))
+    if not pts:
+        pts = [poly.representative_point()]
 
     buildings: List[Polygon] = []
     total_area = 0.0
-    min_overlap = 0.45
-    occupied = Polygon()  # Track plasserte bygninger for å unngå overlapp
+    used_centers: List[Tuple[float, float]] = []
+    min_dist = min(building_width_m, building_depth_m) + min(spacing_along, spacing_across)  # Gap mellom nærmeste kanter
 
-    for bx, by in candidates:
+    for pt in pts:
         if len(buildings) >= max_buildings or total_area >= max_footprint_m2:
             break
 
+        bx, by = pt.x, pt.y
+
+        # Sjekk avstand fra allerede plasserte bygninger
+        too_close = False
+        for cx, cy in used_centers:
+            if math.hypot(bx - cx, by - cy) < min_dist:
+                too_close = True
+                break
+        if too_close:
+            continue
+
         candidate = _make_oriented_rect(bx, by, building_width_m, building_depth_m, rad)
 
-        # Sjekk overlapp med allerede plasserte bygninger
-        if not occupied.is_empty:
-            overlap_with_existing = candidate.intersection(occupied).area
-            if overlap_with_existing > candidate.area * 0.1:
-                continue  # For mye overlapp, hopp over
-
-        # Clip mot polygon
         if poly.contains(candidate):
             buildings.append(candidate)
             total_area += candidate.area
-            occupied = occupied.union(candidate)
+            used_centers.append((bx, by))
         else:
             try:
                 clipped = candidate.intersection(poly).buffer(0)
-                full_area = building_width_m * building_depth_m
-                if not clipped.is_empty and clipped.area >= full_area * min_overlap and clipped.area >= 30:
+                if not clipped.is_empty and clipped.area >= bld_area * 0.40 and clipped.area >= 30:
                     buildings.append(clipped)
                     total_area += clipped.area
-                    occupied = occupied.union(clipped)
+                    used_centers.append((bx, by))
             except Exception:
                 pass
 
@@ -1320,7 +1309,7 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
 
     if typology == "Punkthus":
         # Punkthus: tilnærmet kvadratisk, dimensjonert for å nå target med 3-5 bygg
-        desired_count = clamp(math.ceil(target_footprint_m2 / 400.0), 3, 6)  # 400m²/bygg er ideelt
+        desired_count = clamp(round(target_footprint_m2 / 462.0), 2, 6)  # 400m²/bygg er ideelt
         ideal_area = target_footprint_m2 / desired_count
         ideal_side = math.sqrt(ideal_area)
         bld_w = clamp(ideal_side, 14.0, 22.0)
@@ -2062,7 +2051,7 @@ def _typology_polygon_fill(
 
     elif typology == "Punkthus":
         # Punkthus: dimensjonert fra target med 3-5 bygg
-        desired_count = clamp(math.ceil(target_footprint_m2 / 400.0), 3, 6)
+        desired_count = clamp(round(target_footprint_m2 / 462.0), 2, 6)
         ideal_area = target_footprint_m2 / desired_count
         bld_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
         bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
@@ -2425,7 +2414,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
 
                 elif typology == "Punkthus":
                     # Punkthus: tilnærmet kvadratisk, dimensjonert fra target
-                    desired_count = clamp(math.ceil(target_footprint / 400.0), 3, 6)
+                    desired_count = clamp(round(target_footprint / 462.0), 2, 6)
                     ideal_area = target_footprint / desired_count
                     side_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
                     side_d = clamp(side_w * 0.95, 13.0, 21.0)
