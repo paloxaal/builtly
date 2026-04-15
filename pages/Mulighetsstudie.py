@@ -150,6 +150,18 @@ def _find_dejavu_font(style: str = "") -> Optional[str]:
 HAS_DEJAVU = _find_dejavu_font("") is not None
 
 
+def _pil_font(size: int = 14, bold: bool = False) -> "ImageFont.FreeTypeFont":
+    """Load DejaVuSans TTF at given size, fallback to default."""
+    style = "B" if bold else ""
+    path = _find_dejavu_font(style)
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
 def clean_pdf_text(text: Any) -> str:
     if text is None:
         return ""
@@ -3500,7 +3512,10 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     canvas_w, canvas_h = 1100, 900
     img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
-    font = ImageFont.load_default()
+    font = _pil_font(16)
+    font_bold = _pil_font(16, bold=True)
+    font_info = _pil_font(14)
+    font_north = _pil_font(18, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
     buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
@@ -3643,13 +3658,13 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             avg_y = sum(p[1] for p in coords) / len(coords)
             lx, ly = iso_project(avg_x, avg_y, h * 1.08)
             floors = vol.get('floors', 0)
-            draw.text((lx - 22, ly - 10), f"{floors}et / {h:.0f}m", fill=(255,255,255,240), font=font)
+            draw.text((lx - 22, ly - 10), f"{floors}et / {h:.0f}m", fill=(255,255,255,240), font=font_bold)
 
     # Nordpil
     ax, ay = canvas_w - 55, 50
     draw.line((ax, ay+22, ax, ay-16), fill=(245,247,251,200), width=3)
     draw.polygon([(ax, ay-25), (ax-7, ay-7), (ax+7, ay-7)], fill=(245,247,251,200))
-    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font)
+    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font_north)
 
     # Infopanel
     yt = canvas_h - 75
@@ -3658,10 +3673,10 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     title = f"{option.name} | {option.typology}"
     if n_parts > 1:
         title += f" | {n_parts} deler"
-    draw.text((30, yt), title, fill=(245,247,251,255), font=font)
-    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Hoyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font)
-    draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font)
-    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font)
+    draw.text((30, yt), title, fill=(245,247,251,255), font=font_bold)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Hoyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
+    draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font_info)
+    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font_info)
 
     return img.convert('RGB')
 
@@ -3674,7 +3689,9 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     canvas_w, canvas_h = 1100, 780
     img = Image.new('RGBA', (canvas_w, canvas_h), (240, 243, 248, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
-    font = ImageFont.load_default()
+    font = _pil_font(14)
+    font_bold = _pil_font(14, bold=True)
+    font_north = _pil_font(16, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
     buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
@@ -3748,7 +3765,7 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     ax, ay = canvas_w - 55, 50
     draw.line((ax, ay + 22, ax, ay - 16), fill=(60, 70, 90, 200), width=3)
     draw.polygon([(ax, ay - 25), (ax - 7, ay - 7), (ax + 7, ay - 7)], fill=(60, 70, 90, 200))
-    draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font)
+    draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font_north)
 
     # Målestokk
     scale_bar_m = 10.0
@@ -3767,7 +3784,7 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     yt = canvas_h - 35
     draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(240, 243, 248, 240))
     title = f"PLANVISNING | {option.name} | {option.typology}"
-    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font)
+    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font_bold)
     draw.text((30, yt + 14), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(80, 90, 110, 220), font=font)
 
     return img.convert('RGB')
@@ -5150,94 +5167,90 @@ def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]],
 
 def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
     """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ."""
-    w, h = 800, max(280, 50 + len(options) * 40)
+    w, h = 1600, max(500, 100 + len(options) * 80)
     img = Image.new('RGB', (w, h), (6, 17, 26))
     draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    font_title = _pil_font(28, bold=True)
+    font_label = _pil_font(20)
+    font_value = _pil_font(18, bold=True)
+    font_small = _pil_font(16)
 
-    draw.text((20, 10), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(56, 189, 248), font=font)
+    draw.text((40, 20), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(56, 189, 248), font=font_title)
 
-    bar_h = 22
-    y_start = 45
+    bar_h = 40
+    y_start = 90
     max_sol = max((o.solar_score for o in options), default=100)
     max_bra = max((o.gross_bta_m2 * o.efficiency_ratio for o in options), default=1)
 
     for i, opt in enumerate(options):
-        y = y_start + i * 40
+        y = y_start + i * 80
         bra = opt.gross_bta_m2 * opt.efficiency_ratio
         sol = opt.solar_score
 
-        # Typologi-label
-        label = f"{opt.typology}"
-        draw.text((20, y + 2), label, fill=(200, 211, 223), font=font)
+        draw.text((40, y + 6), f"{opt.typology}", fill=(200, 211, 223), font=font_label)
 
-        # Sol-bar (cyan)
-        sol_w = max(4, int(sol / max(max_sol, 1) * 280))
-        draw.rectangle([(160, y), (160 + sol_w, y + bar_h // 2 - 1)], fill=(56, 189, 248))
-        draw.text((165 + sol_w, y - 1), f"Sol {sol:.0f}", fill=(56, 189, 248), font=font)
+        sol_w = max(8, int(sol / max(max_sol, 1) * 560))
+        draw.rectangle([(320, y), (320 + sol_w, y + bar_h // 2 - 2)], fill=(56, 189, 248))
+        draw.text((330 + sol_w, y - 2), f"Sol {sol:.0f}", fill=(56, 189, 248), font=font_value)
 
-        # BRA-bar (grønn)
-        bra_w = max(4, int(bra / max(max_bra, 1) * 280))
-        draw.rectangle([(160, y + bar_h // 2 + 1), (160 + bra_w, y + bar_h)], fill=(34, 197, 94))
-        draw.text((165 + bra_w, y + bar_h // 2 + 1), f"BRA {bra:.0f} m²", fill=(34, 197, 94), font=font)
+        bra_w = max(8, int(bra / max(max_bra, 1) * 560))
+        draw.rectangle([(320, y + bar_h // 2 + 2), (320 + bra_w, y + bar_h)], fill=(34, 197, 94))
+        draw.text((330 + bra_w, y + bar_h // 2 + 2), f"BRA {bra:.0f} m2", fill=(34, 197, 94), font=font_value)
 
-        # Boliger (høyre side)
-        draw.text((620, y + 4), f"{opt.unit_count} bol.", fill=(159, 176, 195), font=font)
-        draw.text((700, y + 4), f"{opt.floors} et.", fill=(130, 145, 165), font=font)
+        draw.text((1240, y + 8), f"{opt.unit_count} bol.", fill=(159, 176, 195), font=font_label)
+        draw.text((1400, y + 8), f"{opt.floors} et.", fill=(130, 145, 165), font=font_label)
 
-    # Legende
-    ly = h - 25
-    draw.rectangle([(20, ly), (32, ly + 10)], fill=(56, 189, 248))
-    draw.text((38, ly - 1), "Solscore", fill=(159, 176, 195), font=font)
-    draw.rectangle([(120, ly), (132, ly + 10)], fill=(34, 197, 94))
-    draw.text((138, ly - 1), "BRA (salgbart areal)", fill=(159, 176, 195), font=font)
+    ly = h - 50
+    draw.rectangle([(40, ly), (60, ly + 20)], fill=(56, 189, 248))
+    draw.text((70, ly - 2), "Solscore", fill=(159, 176, 195), font=font_small)
+    draw.rectangle([(240, ly), (260, ly + 20)], fill=(34, 197, 94))
+    draw.text((270, ly - 2), "BRA (salgbart areal)", fill=(159, 176, 195), font=font_small)
 
     return img
 
 
 def _render_context_summary(options: List[OptionResult], site: "SiteInputs", environment_data: Optional[Dict[str, Any]] = None) -> Image.Image:
-    """Rendrer en kompakt stedskontekst-oppsummering med nøkkeltall og miljødata."""
+    """Rendrer en kompakt stedskontekst-oppsummering med nokkeltall og miljodata."""
     env = environment_data or {}
     has_env = bool(env.get("available"))
-    h = 200 if not has_env else 270
-    w = 800
+    h = 400 if not has_env else 540
+    w = 1600
     img = Image.new('RGB', (w, h), (6, 17, 26))
     draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    font_title = _pil_font(28, bold=True)
+    font_label = _pil_font(18)
+    font_value = _pil_font(22, bold=True)
 
-    draw.text((20, 10), "TOMTE- OG STEDSKONTEKST", fill=(56, 189, 248), font=font)
+    draw.text((40, 20), "TOMTE- OG STEDSKONTEKST", fill=(56, 189, 248), font=font_title)
 
     best = options[0] if options else None
     if best is None:
         return img
 
-    # Nøkkeltall i rutenett
     items = [
-        ("Tomteareal", f"{site.site_area_m2:.0f} m²"),
-        ("Byggefelt", f"{best.buildable_area_m2:.0f} m²"),
-        ("Nabobygg", f"{site.neighbor_count} stk"),
-        ("Maks etasjer", f"{site.max_floors}"),
-        ("Maks høyde", f"{site.max_height_m:.0f} m"),
-        ("Maks BYA", f"{site.max_bya_pct:.0f}%"),
+        ("TOMTEAREAL", f"{site.site_area_m2:.0f} m2"),
+        ("BYGGEFELT", f"{best.buildable_area_m2:.0f} m2"),
+        ("NABOBYGG", f"{site.neighbor_count} stk"),
+        ("MAKS ETASJER", f"{site.max_floors}"),
+        ("MAKS HOYDE", f"{site.max_height_m:.0f} m"),
+        ("MAKS BYA", f"{site.max_bya_pct:.0f}%"),
     ]
     if site.utnyttelsesgrad_bra_pct > 0:
-        items.append(("%-BRA mål", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
+        items.append(("%-BRA MAL", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
 
-    col_w = 190
+    col_w = 380
     for i, (label, value) in enumerate(items):
         col = i % 4
         row = i // 4
-        x = 20 + col * col_w
-        y = 45 + row * 65
+        x = 40 + col * col_w
+        y = 80 + row * 120
+        draw.rectangle([(x, y), (x + col_w - 20, y + 95)], outline=(56, 189, 248, 80), width=2)
+        draw.text((x + 16, y + 12), label, fill=(130, 145, 165), font=font_label)
+        draw.text((x + 16, y + 44), value, fill=(245, 247, 251), font=font_value)
 
-        draw.rectangle([(x, y), (x + col_w - 10, y + 50)], outline=(56, 189, 248, 80))
-        draw.text((x + 8, y + 6), label.upper(), fill=(130, 145, 165), font=font)
-        draw.text((x + 8, y + 24), value, fill=(245, 247, 251), font=font)
-
-    # Miljødata-rad
     if has_env:
-        env_y = 175
-        draw.text((20, env_y - 10), "MILJØFORHOLD", fill=(56, 189, 248), font=font)
+        env_y = 320
+        draw.text((40, env_y - 15), "MILJOFORHOLD", fill=(56, 189, 248), font=font_title)
 
         noise = env.get("noise", {})
         daylight = env.get("daylight", {})
@@ -5248,9 +5261,9 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
             worst = max(noise["zones"], key=lambda z: z.get("db", 0))
             db = worst.get("db", 0)
             color = (248, 113, 113) if db > 65 else (245, 158, 11) if db > 55 else (52, 211, 153)
-            env_items.append(("STØY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
+            env_items.append(("STOY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
         else:
-            env_items.append(("STØY", "Ingen data", (130, 145, 165)))
+            env_items.append(("STOY", "Ingen data", (130, 145, 165)))
 
         if daylight.get("available"):
             dl = daylight.get("overall_score", 0)
@@ -5263,10 +5276,10 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
             env_items.append(("VIND", f"Klasse {wclass}", color))
 
         for i, (label, value, color) in enumerate(env_items):
-            x = 20 + i * col_w
-            draw.rectangle([(x, env_y + 5), (x + col_w - 10, env_y + 55)], outline=(56, 189, 248, 80))
-            draw.text((x + 8, env_y + 11), label, fill=(130, 145, 165), font=font)
-            draw.text((x + 8, env_y + 29), value, fill=color, font=font)
+            x = 40 + i * col_w
+            draw.rectangle([(x, env_y + 10), (x + col_w - 20, env_y + 105)], outline=(56, 189, 248, 80), width=2)
+            draw.text((x + 16, env_y + 22), label, fill=(130, 145, 165), font=font_label)
+            draw.text((x + 16, env_y + 54), value, fill=color, font=font_value)
 
     return img
 
@@ -5284,11 +5297,14 @@ def render_solar_snapshot(
     Plan-view sol/skygge-snapshot for en gitt dag og klokkeslett.
     Viser tomtegrense, bygningsvolumer, skyggepolygoner og solretning.
     """
-    canvas_w, canvas_h = 560, 420
+    canvas_w, canvas_h = 1120, 840
     bg = (248, 250, 252, 255)
     img = Image.new('RGBA', (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img, 'RGBA')
-    font = ImageFont.load_default()
+    font_label = _pil_font(20)
+    font_title = _pil_font(22, bold=True)
+    font_small = _pil_font(16)
+    font_north = _pil_font(18, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or []
     massing_parts = option.geometry.get('massing_parts', []) or []
@@ -5303,7 +5319,7 @@ def render_solar_snapshot(
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    margin = 55
+    margin = 100
     target_span = min(canvas_w, canvas_h) - 2 * margin
     scale = target_span / site_span
     ox = canvas_w / 2.0
@@ -5384,32 +5400,32 @@ def render_solar_snapshot(
     # Solretning-pil
     if sun_above:
         sun_rad = math.radians(az_local)
-        arrow_len = 45
-        arr_cx, arr_cy = canvas_w - 70, 55
+        arrow_len = 80
+        arr_cx, arr_cy = canvas_w - 120, 80
         dx = math.sin(sun_rad) * arrow_len
         dy = -math.cos(sun_rad) * arrow_len
         ax1, ay1 = arr_cx - dx * 0.5, arr_cy - dy * 0.5
         ax2, ay2 = arr_cx + dx * 0.5, arr_cy + dy * 0.5
-        draw.line([(ax1, ay1), (ax2, ay2)], fill=(245, 180, 30, 220), width=3)
-        draw.ellipse([(ax1 - 8, ay1 - 8), (ax1 + 8, ay1 + 8)], fill=(255, 210, 60, 200))
-        draw.text((ax1 - 3, ay1 - 5), "S", fill=(80, 50, 0, 255), font=font)
+        draw.line([(ax1, ay1), (ax2, ay2)], fill=(245, 180, 30, 220), width=4)
+        draw.ellipse([(ax1 - 14, ay1 - 14), (ax1 + 14, ay1 + 14)], fill=(255, 210, 60, 200))
+        draw.text((ax1 - 5, ay1 - 8), "S", fill=(80, 50, 0, 255), font=font_north)
 
     # Nordpil
-    nx, ny = 35, 40
-    draw.line((nx, ny + 18, nx, ny - 12), fill=(26, 43, 72, 200), width=2)
-    draw.polygon([(nx, ny - 18), (nx - 5, ny - 5), (nx + 5, ny - 5)], fill=(26, 43, 72, 200))
-    draw.text((nx - 3, ny + 22), 'N', fill=(26, 43, 72, 200), font=font)
+    nx, ny = 55, 55
+    draw.line((nx, ny + 30, nx, ny - 20), fill=(26, 43, 72, 200), width=3)
+    draw.polygon([(nx, ny - 30), (nx - 9, ny - 10), (nx + 9, ny - 10)], fill=(26, 43, 72, 200))
+    draw.text((nx - 5, ny + 34), 'N', fill=(26, 43, 72, 200), font=font_north)
 
     # Label
     month_names = {80: "21. mars", 172: "21. juni", 355: "21. des"}
     date_str = month_names.get(day_of_year, f"dag {day_of_year}")
     hour_str = f"{int(solar_hour):02d}:{int((solar_hour % 1) * 60):02d}"
     alt_str = f"h={alt_deg:.1f}\u00b0" if sun_above else "sol under horisont"
-    lbl_y = canvas_h - 38
+    lbl_y = canvas_h - 70
     draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(26, 43, 72, 220))
     display_label = label or f"{date_str} kl. {hour_str}"
-    draw.text((12, lbl_y + 5), display_label, fill=(245, 247, 251, 255), font=font)
-    draw.text((12, lbl_y + 19), f"Solhoyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font)
+    draw.text((24, lbl_y + 10), display_label, fill=(245, 247, 251, 255), font=font_title)
+    draw.text((24, lbl_y + 38), f"Solhoyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font_small)
 
     return img.convert('RGB')
 
@@ -5430,14 +5446,17 @@ def render_solar_snapshot_grid(
         (172, 15.0, "Sommersolverv - 21. juni kl. 15:00"),
         (172, 18.0, "Sommersolverv - 21. juni kl. 18:00"),
     ]
-    cell_w, cell_h = 560, 420
+    cell_w, cell_h = 1120, 840
     cols, rows = 3, 2
     grid_w = cols * cell_w
     grid_h = rows * cell_h
 
     grid = Image.new('RGB', (grid_w, grid_h), (248, 250, 252))
     draw = ImageDraw.Draw(grid)
-    font = ImageFont.load_default()
+    font_title = _pil_font(32, bold=True)
+    font_body = _pil_font(24)
+    font_small = _pil_font(20)
+    font_legend = _pil_font(22)
 
     for idx, (doy, hour, lbl) in enumerate(snapshots):
         col = idx % cols
@@ -5448,22 +5467,22 @@ def render_solar_snapshot_grid(
         except Exception as e:
             x0, y0 = col * cell_w, row * cell_h
             draw.rectangle([(x0, y0), (x0 + cell_w, y0 + cell_h)], fill=(240, 243, 248))
-            draw.text((x0 + 20, y0 + 200), f"Feil: {str(e)[:60]}", fill=(200, 50, 50))
+            draw.text((x0 + 40, y0 + 400), f"Feil: {str(e)[:60]}", fill=(200, 50, 50), font=font_body)
 
     # Siste celle: infopanel
     ix, iy = 2 * cell_w, 1 * cell_h
     draw.rectangle([(ix, iy), (ix + cell_w, iy + cell_h)], fill=(26, 43, 72))
-    draw.text((ix + 30, iy + 40), "SOL/SKYGGE-ANALYSE", fill=(56, 189, 248), font=font)
-    draw.text((ix + 30, iy + 70), f"Breddegrad: {site.latitude_deg:.2f} N", fill=(200, 211, 223), font=font)
-    draw.text((ix + 30, iy + 90), f"Typologi: {option.typology}", fill=(200, 211, 223), font=font)
-    draw.text((ix + 30, iy + 110), f"Hoyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font)
-    draw.text((ix + 30, iy + 130), f"Etasjer: {option.floors}", fill=(200, 211, 223), font=font)
-    draw.text((ix + 30, iy + 160), "Skygger er vist som", fill=(160, 175, 195), font=font)
-    draw.text((ix + 30, iy + 176), "semitransparente felt.", fill=(160, 175, 195), font=font)
-    draw.text((ix + 30, iy + 210), "Gul sirkel = solretning", fill=(255, 210, 60), font=font)
-    draw.text((ix + 30, iy + 236), "Morkeblaa = bygningsskygge", fill=(100, 130, 170), font=font)
-    draw.text((ix + 30, iy + 262), "Lysegraa = naboskygge", fill=(160, 170, 185), font=font)
-    draw.text((ix + 30, iy + cell_h - 50), "Generert av Builtly ARK Motor", fill=(80, 100, 130), font=font)
+    draw.text((ix + 60, iy + 80), "SOL/SKYGGE-ANALYSE", fill=(56, 189, 248), font=font_title)
+    draw.text((ix + 60, iy + 150), f"Breddegrad: {site.latitude_deg:.2f} N", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 190), f"Typologi: {option.typology}", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 230), f"Hoyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 270), f"Etasjer: {option.floors}", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 340), "Skygger er vist som", fill=(160, 175, 195), font=font_small)
+    draw.text((ix + 60, iy + 370), "semitransparente felt.", fill=(160, 175, 195), font=font_small)
+    draw.text((ix + 60, iy + 430), "Gul sirkel = solretning", fill=(255, 210, 60), font=font_legend)
+    draw.text((ix + 60, iy + 470), "Morkeblaa = bygningsskygge", fill=(100, 130, 170), font=font_legend)
+    draw.text((ix + 60, iy + 510), "Lysegraa = naboskygge", fill=(160, 170, 185), font=font_legend)
+    draw.text((ix + 60, iy + cell_h - 100), "Generert av Builtly ARK Motor", fill=(80, 100, 130), font=font_small)
 
     return grid
 
@@ -5476,10 +5495,16 @@ def _render_executive_summary(
     environment_data: Optional[Dict[str, Any]] = None,
 ) -> Image.Image:
     """McKinsey-style executive summary med fargede KPI-bokser."""
-    w, h = 900, 520
+    w, h = 1800, 1200
     img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    font_heading = _pil_font(32, bold=True)
+    font_subtitle = _pil_font(24)
+    font_kpi_label = _pil_font(20)
+    font_kpi_value = _pil_font(36, bold=True)
+    font_kpi_sub = _pil_font(18)
+    font_bar_label = _pil_font(22)
+    font_bar_value = _pil_font(20, bold=True)
 
     navy = (26, 43, 72)
     builtly_blue = (0, 96, 155)
@@ -5495,9 +5520,9 @@ def _render_executive_summary(
     bra_best = best.gross_bta_m2 * best.efficiency_ratio
 
     # Header stripe
-    draw.rectangle([(0, 0), (w, 6)], fill=builtly_blue)
-    draw.text((30, 20), "EXECUTIVE SUMMARY", fill=navy, font=font)
-    draw.text((30, 38), f"Anbefalt: {best.name} ({best.typology})", fill=builtly_blue, font=font)
+    draw.rectangle([(0, 0), (w, 10)], fill=builtly_blue)
+    draw.text((60, 36), "EXECUTIVE SUMMARY", fill=navy, font=font_heading)
+    draw.text((60, 76), f"Anbefalt: {best.name} ({best.typology})", fill=builtly_blue, font=font_subtitle)
 
     # KPI Cards row 1
     kpi_cards = [
@@ -5506,15 +5531,15 @@ def _render_executive_summary(
         ("SOL", f"{best.solar_score:.0f}/100", "Solscore", accent_green if best.solar_score >= 50 else accent_amber),
         ("SCORE", f"{best.score:.0f}/100", "Totalscore", accent_green if best.score >= 60 else accent_amber),
     ]
-    card_w, card_h = 195, 90
-    card_y = 65
+    card_w, card_h = 390, 170
+    card_y = 130
     for i, (title, value, subtitle, color) in enumerate(kpi_cards):
-        x = 30 + i * (card_w + 12)
-        draw.rectangle([(x, card_y), (x + card_w, card_y + card_h)], fill=light_bg, outline=card_border)
-        draw.rectangle([(x, card_y), (x + card_w, card_y + 4)], fill=color)
-        draw.text((x + 12, card_y + 14), title, fill=(120, 130, 145), font=font)
-        draw.text((x + 12, card_y + 34), value, fill=navy, font=font)
-        draw.text((x + 12, card_y + 58), subtitle, fill=(150, 160, 175), font=font)
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + card_h)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + 7)], fill=color)
+        draw.text((x + 24, card_y + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, card_y + 60), value, fill=navy, font=font_kpi_value)
+        draw.text((x + 24, card_y + 115), subtitle, fill=(150, 160, 175), font=font_kpi_sub)
 
     # KPI Cards row 2 — Tomt
     site_cards = [
@@ -5523,19 +5548,19 @@ def _render_executive_summary(
         ("MAKS HOYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", builtly_blue),
         ("NABOBYGG", f"{site.neighbor_count} stk", builtly_blue),
     ]
-    card_y2 = card_y + card_h + 20
+    card_y2 = card_y + card_h + 30
     for i, (title, value, color) in enumerate(site_cards):
-        x = 30 + i * (card_w + 12)
-        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 65)], fill=light_bg, outline=card_border)
-        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 3)], fill=color)
-        draw.text((x + 12, card_y2 + 12), title, fill=(120, 130, 145), font=font)
-        draw.text((x + 12, card_y2 + 32), value, fill=navy, font=font)
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 130)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 6)], fill=color)
+        draw.text((x + 24, card_y2 + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, card_y2 + 60), value, fill=navy, font=font_kpi_value)
 
     # Miljo-rad
     env = environment_data or {}
-    env_y = card_y2 + 85
-    draw.text((30, env_y), "MILJOFORHOLD", fill=navy, font=font)
-    env_y += 22
+    env_y = card_y2 + 150
+    draw.text((60, env_y), "MILJOFORHOLD", fill=navy, font=font_heading)
+    env_y += 44
 
     env_items = []
     noise = env.get("noise", {}) if env.get("available") else {}
@@ -5559,25 +5584,25 @@ def _render_executive_summary(
     env_items.append(("%-BRA MAL", f"{site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else "Ikke satt", builtly_blue))
 
     for i, (title, value, color) in enumerate(env_items):
-        x = 30 + i * (card_w + 12)
-        draw.rectangle([(x, env_y), (x + card_w, env_y + 65)], fill=light_bg, outline=card_border)
-        draw.rectangle([(x, env_y), (x + card_w, env_y + 3)], fill=color)
-        draw.text((x + 12, env_y + 12), title, fill=(120, 130, 145), font=font)
-        draw.text((x + 12, env_y + 32), value, fill=navy, font=font)
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 130)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 6)], fill=color)
+        draw.text((x + 24, env_y + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, env_y + 60), value, fill=navy, font=font_kpi_value)
 
     # Ranking bar
-    rank_y = env_y + 85
-    draw.text((30, rank_y), "ALTERNATIV-RANKING (SCORE)", fill=navy, font=font)
-    rank_y += 22
+    rank_y = env_y + 170
+    draw.text((60, rank_y), "ALTERNATIV-RANKING (SCORE)", fill=navy, font=font_heading)
+    rank_y += 44
     max_score = max((o.score for o in options), default=100)
-    bar_max_w = 650
+    bar_max_w = 1300
     for i, opt in enumerate(sorted(options, key=lambda o: o.score, reverse=True)):
-        y = rank_y + i * 28
-        bar_w = max(8, int(opt.score / max(max_score, 1) * bar_max_w))
+        y = rank_y + i * 56
+        bar_w = max(16, int(opt.score / max(max_score, 1) * bar_max_w))
         bar_color = accent_green if opt.score >= 60 else accent_amber if opt.score >= 40 else accent_red
-        draw.rectangle([(150, y), (150 + bar_w, y + 18)], fill=bar_color)
-        draw.text((30, y + 2), f"{opt.typology}", fill=navy, font=font)
-        draw.text((155 + bar_w, y + 2), f"{opt.score:.0f}", fill=navy, font=font)
+        draw.rectangle([(300, y), (300 + bar_w, y + 36)], fill=bar_color)
+        draw.text((60, y + 4), f"{opt.typology}", fill=navy, font=font_bar_label)
+        draw.text((310 + bar_w, y + 6), f"{opt.score:.0f}", fill=navy, font=font_bar_value)
 
     return img
 
