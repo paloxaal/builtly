@@ -6004,6 +6004,52 @@ def create_full_report_pdf(
             # Legger bildet helt ut i toppen
             pdf.image(tmp.name, x=0, y=0, w=210) 
             
+        # Hvit boks bak teksten nederst på siden for lesbarhet
+        pdf.set_fill_color(255, 255, 255)
+        pdf.rect(0, 140, 210, 160, 'F') 
+    else:
+        # Blå stripe øverst hvis vi ikke har bilde
+        pdf.set_fill_color(*_BUILTLY_BLUE)
+        pdf.rect(0, 0, 210, 6, 'F')
+
+    if os.path.exists("logo.png"):
+        # Flytter logoen ned hvis vi har bilde
+        pdf.image("logo.png", x=25, y=150 if cover_image else 20, w=50)
+
+    pdf.set_y(180 if cover_image else 90)
+    pdf.set_font(PDF_FONT, "B", 24)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
+    pdf.ln(3)
+    pdf.set_font(PDF_FONT, "", 14)
+    pdf.set_text_color(*_BUILTLY_BLUE)
+    pdf.multi_cell(0, 9, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
+    pdf.ln(20)
+
+    for label, value in [
+        ("OPPDRAGSGIVER", client or "Ukjent"),
+        ("DATO", datetime.now().strftime("%d.%m.%Y")),
+        ("UTARBEIDET AV", "Builtly ARK Motor + AI"),
+        ("REGELVERK", land),
+    ]:
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(42, 9, clean_pdf_text(label), 0, 0)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 9, clean_pdf_text(value), 0, 1)
+
+    pdf.set_y(280)
+    pdf.set_fill_color(*_BUILTLY_BLUE)
+    pdf.rect(0, 290, 210, 7, 'F')
+    
+    if cover_image:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            cover_image.convert("RGB").save(tmp.name, format="JPEG", quality=95)
+            # Legger bildet helt ut i toppen
+            pdf.image(tmp.name, x=0, y=0, w=210) 
+            
         # Hvit boks bak teksten nederst på siden
         pdf.set_fill_color(255, 255, 255)
         pdf.rect(0, 140, 210, 160, 'F') 
@@ -9073,17 +9119,10 @@ render();
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Feil ved PDF-oppdatering: {exc}")
-
-    st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
-    st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
-    cdl, cqa = st.columns(2)
-    with cdl:
-        pdf_data = st.session_state.get("generated_ark_pdf")
-        pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
-        if pdf_data:
-            # --- NY SEKSJON: AI-VISUALISERING ---
+    # --- NY SEKSJON: AI-VISUALISERING ---
     st.markdown("<div class='section-header'>✨ AI Visualisering</div>", unsafe_allow_html=True)
     
     stability_key = os.environ.get("STABILITY_API_KEY")
@@ -9091,15 +9130,13 @@ render();
     
     if scene_imgs and len(scene_imgs) > 0:
         if st.button("🪄 Tryll frem fotorealistisk render", type="primary", use_container_width=True):
-            with st.spinner("AI-arkitekten tegner treverk og tegl..."):
-                # Bruker det første bildet (vinner-alternativet) som grunnlag
+            with st.spinner("AI-arkitekten tegner treverk og tegl... (Tar ca. 15 sek)"):
                 ferdig_render = generer_arkitekt_render(scene_imgs[0], best, stability_key)
                 
                 if ferdig_render:
                     st.session_state.ai_render_image = ferdig_render
                     st.image(ferdig_render, caption="AI-generert forslag", use_container_width=True)
                     
-                    # REGENERER PDF AUTOMATISK
                     with st.spinner("Oppdaterer rapporten med ny forside..."):
                         res = st.session_state.analysis_results
                         motor_opts = [OptionResult(**opt) for opt in res["options"]]
@@ -9114,12 +9151,20 @@ render();
                             visual_attachments=res["visual_attachments"],
                             site=SiteInputs(**res["site"]),
                             environment_data=res["environment"],
-                            cover_image=ferdig_render # Legger inn bildet her!
+                            cover_image=ferdig_render
                         )
                         st.session_state.generated_ark_pdf = pdf_data
                         st.rerun()
     else:
         st.info("Kjør studien først for å generere 3D-grunnlaget AI-en trenger.")
+
+    # --- NEDLASTING OG QA ---
+    st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
+    cdl, cqa = st.columns(2)
+    with cdl:
+        pdf_data = st.session_state.get("generated_ark_pdf")
+        pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+        if pdf_data:
             st.download_button(
                 "Last ned mulighetsstudie (PDF)",
                 data=pdf_data,
