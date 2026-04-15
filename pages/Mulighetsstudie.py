@@ -241,7 +241,54 @@ def geo_runtime_notes() -> List[str]:
     if not HAS_RASTERIO:
         notes.append("rasterio mangler: GeoTIFF/ASC terreng er deaktivert, men CSV/TXT med x,y,z virker fortsatt.")
     return notes
+def generer_arkitekt_render(base_image: Image.Image, option: OptionResult, api_key: str) -> Optional[Image.Image]:
+    """
+    Bruker Stability AI ControlNet Structure til å male en fotorealistisk 
+    norsk bygning over de grønne 3D-boksene.
+    """
+    if not api_key:
+        st.error("Mangler STABILITY_API_KEY i Render Secrets.")
+        return None
 
+    img_byte_arr = io.BytesIO()
+    safe_image = base_image.copy()
+    safe_image.thumbnail((1024, 1024)) 
+    safe_image.save(img_byte_arr, format='PNG')
+    img_bytes = img_byte_arr.getvalue()
+
+    typologi_engelsk = {
+        "Lamell": "linear apartment block",
+        "Punkthus": "point block residential tower",
+        "Karré": "perimeter block courtyard building",
+        "Tun": "cluster of townhouses",
+        "Tårn": "high-rise residential tower",
+        "Rekke": "row of modern townhouses"
+    }.get(option.typology, "residential building")
+
+    prompt = (
+        f"Photorealistic architectural aerial rendering of a modern {typologi_engelsk} in Norway. "
+        "Facade: tasteful combination of warm wood panels, light grey stucco, and warm brickwork. "
+        "Large windows, glass balconies, dark metal frames. Clean roofline, no solar panels. "
+        "Afternoon sunlight, soft shadows, photorealistic architectural photography, 8k."
+    )
+    
+    negative_prompt = "solar panels, photovoltaic cells, roof panels, ugly, blurry, sci-fi, cartoon"
+
+    url = "https://api.stability.ai/v2beta/stable-image/control/structure"
+    try:
+        response = requests.post(
+            url,
+            headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
+            files={"image": img_bytes},
+            data={"prompt": prompt, "negative_prompt": negative_prompt, "control_strength": 0.75, "output_format": "jpeg"},
+            timeout=45
+        )
+        if response.status_code == 200:
+            return Image.open(io.BytesIO(response.content))
+        st.error(f"AI-feil: {response.text}")
+    except Exception as e:
+        st.error(f"Tilkoblingsfeil: {e}")
+    return None
 
 # --- 3. GEODATA / KART (SKUDDSIKKER VERSJON) ---
 
@@ -4087,14 +4134,24 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
 
 # --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
 _SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
-_scene_capture_component = None
 _scene_capture_error = ""
-if _SCENE_CAPTURE_DIR.exists():
-    try:
-        _scene_capture_component = components.declare_component("scene_capture", path=str(_SCENE_CAPTURE_DIR))
-    except Exception as _comp_exc:
-        _scene_capture_component = None
-        _scene_capture_error = str(_comp_exc)
+
+
+def _get_scene_capture_component():
+    """Lazy-init for declare_component — unngår Streamlit pages/ module-bug."""
+    global _scene_capture_error
+    if not _SCENE_CAPTURE_DIR.exists():
+        return None
+    if "_scene_comp_cache" not in st.session_state:
+        try:
+            st.session_state._scene_comp_cache = components.declare_component(
+                "scene_capture", path=str(_SCENE_CAPTURE_DIR)
+            )
+            _scene_capture_error = ""
+        except Exception as exc:
+            st.session_state._scene_comp_cache = None
+            _scene_capture_error = str(exc)
+    return st.session_state.get("_scene_comp_cache")
 
 
 def auto_capture_3d_scenes(
@@ -4110,7 +4167,7 @@ def auto_capture_3d_scenes(
     Bruker en custom Streamlit-komponent med bi-directional kommunikasjon.
     Returnerer None hvis komponenten ikke er tilgjengelig.
     """
-    if _scene_capture_component is None:
+    if _get_scene_capture_component() is None:
         return None
 
     all_payloads = []
@@ -4121,7 +4178,8 @@ def auto_capture_3d_scenes(
     if not all_payloads:
         return None
 
-    result = _scene_capture_component(
+    comp = _get_scene_capture_component()
+    result = comp(
         payloads=all_payloads,
         height=height_px,
         capture_width=capture_width,
@@ -5924,10 +5982,67 @@ def create_full_report_pdf(
     solar_grid_image: Optional[Image.Image] = None,
     scene_images: Optional[List[Image.Image]] = None,
     plan_view_analyses: Optional[List[str]] = None,
+    cover_image: Optional[Image.Image] = None, # NY PARAMETER
 ) -> bytes:
     """
-    McKinsey-quality PDF v13:
-      Page 1:  Cover
+    Oppdatert PDF-motor v14 med støtte for AI-generert forsidebilde.
+    """
+    pdf = BuiltlyProPDF()
+    _register_fonts(pdf)
+    pdf.p_name = name.upper()
+    pdf.set_margins(25, 25, 20)
+    pdf.set_auto_page_break(True, 22)
+
+    # ================================================================
+    # PAGE 1: COVER (Oppdatert med AI-bilde)
+    # ================================================================
+    pdf.add_page()
+    
+    if cover_image:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            cover_image.convert("RGB").save(tmp.name, format="JPEG", quality=95)
+            # Legger bildet helt ut i toppen
+            pdf.image(tmp.name, x=0, y=0, w=210) 
+            
+        # Hvit boks bak teksten nederst på siden
+        pdf.set_fill_color(255, 255, 255)
+        pdf.rect(0, 140, 210, 160, 'F') 
+    else:
+        # Blå stripe øverst hvis vi ikke har bilde
+        pdf.set_fill_color(*_BUILTLY_BLUE)
+        pdf.rect(0, 0, 210, 6, 'F')
+
+    if os.path.exists("logo.png"):
+        # Flytter logoen ned hvis vi har bilde
+        pdf.image("logo.png", x=25, y=150 if cover_image else 20, w=50)
+
+    pdf.set_y(180 if cover_image else 90)
+    pdf.set_font(PDF_FONT, "B", 24)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
+    pdf.ln(3)
+    pdf.set_font(PDF_FONT, "", 14)
+    pdf.set_text_color(*_BUILTLY_BLUE)
+    pdf.multi_cell(0, 9, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
+    pdf.ln(20)
+
+    for label, value in [
+        ("OPPDRAGSGIVER", client or "Ukjent"),
+        ("DATO", datetime.now().strftime("%d.%m.%Y")),
+        ("UTARBEIDET AV", "Builtly ARK Motor + AI"),
+        ("REGELVERK", land),
+    ]:
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(42, 9, clean_pdf_text(label), 0, 0)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 9, clean_pdf_text(value), 0, 1)
+
+    pdf.set_y(280)
+    pdf.set_fill_color(*_BUILTLY_BLUE)
+    pdf.rect(0, 290, 210, 7, 'F')
       Page 2:  Table of Contents
       Page 3:  Executive Summary (KPI-kort vektor)
       Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
@@ -8804,9 +8919,10 @@ render();
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
 
             # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
+            _comp = _get_scene_capture_component()
             # DEBUG: vis komponent-status
-            st.caption(f"🔧 Component: {'OK' if _scene_capture_component else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
-            if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
+            st.caption(f"🔧 Component: {'OK' if _comp else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
+            if _comp is not None and not st.session_state.get("ark_scene_images"):
                 st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
                 captured = auto_capture_3d_scenes(
                     SiteInputs(**site_result), options, scene_config,
@@ -8854,7 +8970,7 @@ render();
                     st.caption("Komponenten rendrer 3D-scener — bildene overføres ved neste sidelasting.")
 
             # --- BATCH CAPTURE fallback: KUN når custom component IKKE er tilgjengelig ---
-            elif _scene_capture_component is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+            elif _comp is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
                 st.session_state._batch_auto_triggered = True
                 st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
                 all_payloads = []
@@ -8967,6 +9083,43 @@ render();
         pdf_data = st.session_state.get("generated_ark_pdf")
         pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
         if pdf_data:
+            # --- NY SEKSJON: AI-VISUALISERING ---
+    st.markdown("<div class='section-header'>✨ AI Visualisering</div>", unsafe_allow_html=True)
+    
+    stability_key = os.environ.get("STABILITY_API_KEY")
+    scene_imgs = st.session_state.get("ark_scene_images")
+    
+    if scene_imgs and len(scene_imgs) > 0:
+        if st.button("🪄 Tryll frem fotorealistisk render", type="primary", use_container_width=True):
+            with st.spinner("AI-arkitekten tegner treverk og tegl..."):
+                # Bruker det første bildet (vinner-alternativet) som grunnlag
+                ferdig_render = generer_arkitekt_render(scene_imgs[0], best, stability_key)
+                
+                if ferdig_render:
+                    st.session_state.ai_render_image = ferdig_render
+                    st.image(ferdig_render, caption="AI-generert forslag", use_container_width=True)
+                    
+                    # REGENERER PDF AUTOMATISK
+                    with st.spinner("Oppdaterer rapporten med ny forside..."):
+                        res = st.session_state.analysis_results
+                        motor_opts = [OptionResult(**opt) for opt in res["options"]]
+                        
+                        pdf_data = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=res["report_text"],
+                            options=motor_opts,
+                            option_images=res["option_images"],
+                            visual_attachments=res["visual_attachments"],
+                            site=SiteInputs(**res["site"]),
+                            environment_data=res["environment"],
+                            cover_image=ferdig_render # Legger inn bildet her!
+                        )
+                        st.session_state.generated_ark_pdf = pdf_data
+                        st.rerun()
+    else:
+        st.info("Kjør studien først for å generere 3D-grunnlaget AI-en trenger.")
             st.download_button(
                 "Last ned mulighetsstudie (PDF)",
                 data=pdf_data,
