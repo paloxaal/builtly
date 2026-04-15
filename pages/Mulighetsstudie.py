@@ -234,6 +234,71 @@ def pick_model_name() -> Optional[str]:
     return valid_models[0] if valid_models else None
 
 
+def generer_arkitekt_render(
+    base_image: Image.Image,
+    option: "OptionResult",
+    api_key: str,
+    control_strength: float = 0.75,
+) -> Optional[Image.Image]:
+    """
+    Bruker Stability AI ControlNet Structure til å male en fotorealistisk
+    norsk bygning over de grønne 3D-boksene.
+    """
+    if not api_key:
+        st.error("Mangler STABILITY_API_KEY i Render Secrets.")
+        return None
+
+    img_byte_arr = io.BytesIO()
+    safe_image = base_image.copy()
+    safe_image.thumbnail((1024, 1024))
+    safe_image.save(img_byte_arr, format='PNG')
+    img_bytes = img_byte_arr.getvalue()
+
+    typologi_map = {
+        "Lamell": "linear apartment block",
+        "Punkthus": "point block residential tower",
+        "Karré": "perimeter block courtyard building",
+        "Tun": "cluster of townhouses",
+        "Tårn": "high-rise residential tower",
+        "Rekke": "row of modern townhouses",
+    }
+    typology_eng = typologi_map.get(option.typology, "residential building")
+
+    prompt = (
+        f"Photorealistic architectural rendering of a modern {typology_eng} in Norway. "
+        "The facade is a tasteful combination of vertical wooden panels, light grey stucco/plaster, and warm brickwork (tegl). "
+        "Large floor-to-ceiling windows, glass balconies with thin dark metal frames. "
+        "Clean roofline, strictly NO solar panels. "
+        "Soft afternoon sunlight, realistic shadows, architectural photography style, 8k resolution."
+    )
+
+    negative_prompt = "solar panels, photovoltaic cells, solar collectors, ugly, blurry, sci-fi, cartoon, distorted"
+
+    url = "https://api.stability.ai/v2beta/stable-image/control/structure"
+    try:
+        response = requests.post(
+            url,
+            headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
+            files={"image": ("scene.png", img_bytes, "image/png")},
+            data={
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "control_strength": control_strength,
+                "output_format": "jpeg",
+            },
+            timeout=60,
+        )
+        if response.status_code == 200:
+            return Image.open(io.BytesIO(response.content))
+        err_text = response.text[:200] if response.text else str(response.status_code)
+        st.error(f"Stability AI returnerte feil ({response.status_code}): {err_text}")
+    except requests.exceptions.Timeout:
+        st.error("Stability AI svarte ikke innen tidsfristen (60s). Prøv igjen.")
+    except Exception as e:
+        st.error(f"Tilkoblingsfeil: {e}")
+    return None
+
+
 def geo_runtime_notes() -> List[str]:
     notes: List[str] = []
     if not HAS_PYPROJ:
@@ -4087,14 +4152,24 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
 
 # --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
 _SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
-_scene_capture_component = None
 _scene_capture_error = ""
-if _SCENE_CAPTURE_DIR.exists():
-    try:
-        _scene_capture_component = components.declare_component("scene_capture", path=str(_SCENE_CAPTURE_DIR))
-    except Exception as _comp_exc:
-        _scene_capture_component = None
-        _scene_capture_error = str(_comp_exc)
+
+
+def _get_scene_capture_component():
+    """Lazy-init for declare_component — unngår Streamlit pages/ module-bug."""
+    global _scene_capture_error
+    if not _SCENE_CAPTURE_DIR.exists():
+        return None
+    if "_scene_comp_cache" not in st.session_state:
+        try:
+            st.session_state._scene_comp_cache = components.declare_component(
+                "scene_capture", path=str(_SCENE_CAPTURE_DIR)
+            )
+            _scene_capture_error = ""
+        except Exception as exc:
+            st.session_state._scene_comp_cache = None
+            _scene_capture_error = str(exc)
+    return st.session_state.get("_scene_comp_cache")
 
 
 def auto_capture_3d_scenes(
@@ -4110,7 +4185,7 @@ def auto_capture_3d_scenes(
     Bruker en custom Streamlit-komponent med bi-directional kommunikasjon.
     Returnerer None hvis komponenten ikke er tilgjengelig.
     """
-    if _scene_capture_component is None:
+    if _get_scene_capture_component() is None:
         return None
 
     all_payloads = []
@@ -4121,7 +4196,8 @@ def auto_capture_3d_scenes(
     if not all_payloads:
         return None
 
-    result = _scene_capture_component(
+    comp = _get_scene_capture_component()
+    result = comp(
         payloads=all_payloads,
         height=height_px,
         capture_width=capture_width,
@@ -5924,6 +6000,7 @@ def create_full_report_pdf(
     solar_grid_image: Optional[Image.Image] = None,
     scene_images: Optional[List[Image.Image]] = None,
     plan_view_analyses: Optional[List[str]] = None,
+    cover_image: Optional[Image.Image] = None,
 ) -> bytes:
     """
     McKinsey-quality PDF v13:
@@ -5950,10 +6027,43 @@ def create_full_report_pdf(
     pdf.set_fill_color(*_BUILTLY_BLUE)
     pdf.rect(0, 0, 210, 6, 'F')
 
-    if os.path.exists("logo.png"):
-        pdf.image("logo.png", x=25, y=20, w=50)
+    cover_y_offset = 0  # How far down to push logo/text when cover image present
+    _cover_tmp_path: Optional[str] = None  # Defer cleanup until after pdf.output()
 
-    pdf.set_y(90)
+    if cover_image is not None:
+        # Save cover image to temp file for fpdf (must survive until pdf.output())
+        _cover_fd = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        _cover_tmp_path = _cover_fd.name
+        _cover_fd.close()
+        try:
+            _cover_rgb = cover_image.convert("RGB")
+            _cover_rgb.save(_cover_tmp_path, format="JPEG", quality=90)
+            # Place image full-width at top (below blue bar)
+            img_w = 160
+            img_h = img_w * _cover_rgb.height / _cover_rgb.width
+            if img_h > 110:
+                img_h = 110
+                img_w = img_h * _cover_rgb.width / _cover_rgb.height
+            x_img = (210 - img_w) / 2
+            pdf.image(_cover_tmp_path, x=x_img, y=10, w=img_w, h=img_h)
+            cover_y_offset = img_h - 5
+        except Exception:
+            cover_y_offset = 0
+
+    logo_y = 20 + cover_y_offset if cover_image is not None else 20
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=25, y=logo_y, w=50)
+
+    text_start_y = max(90, logo_y + 40) if cover_image is not None else 90
+
+    if cover_image is not None:
+        # White box behind text for readability — dynamic height to bottom margin
+        box_h = min(100, 285 - text_start_y)
+        pdf.set_fill_color(255, 255, 255)
+        pdf.set_draw_color(255, 255, 255)
+        pdf.rect(20, text_start_y - 5, 170, box_h, 'F')
+
+    pdf.set_y(text_start_y)
     pdf.set_font(PDF_FONT, "B", 24)
     pdf.set_text_color(*_NAVY)
     pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
@@ -6479,6 +6589,14 @@ def create_full_report_pdf(
                 pdf.cell(0, 8, clean_pdf_text(f"Figur V-{idx}: visuelt grunnlag brukt i analysen."), 0, 1)
 
     output = pdf.output(dest="S")
+
+    # Cleanup deferred cover image temp file
+    if _cover_tmp_path is not None:
+        try:
+            os.unlink(_cover_tmp_path)
+        except Exception:
+            pass
+
     if isinstance(output, bytes):
         return output
     elif isinstance(output, str):
@@ -8804,9 +8922,10 @@ render();
             render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
 
             # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
+            _comp = _get_scene_capture_component()
             # DEBUG: vis komponent-status
-            st.caption(f"🔧 Component: {'OK' if _scene_capture_component else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
-            if _scene_capture_component is not None and not st.session_state.get("ark_scene_images"):
+            st.caption(f"🔧 Component: {'OK' if _comp else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
+            if _comp is not None and not st.session_state.get("ark_scene_images"):
                 st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
                 captured = auto_capture_3d_scenes(
                     SiteInputs(**site_result), options, scene_config,
@@ -8854,7 +8973,7 @@ render();
                     st.caption("Komponenten rendrer 3D-scener — bildene overføres ved neste sidelasting.")
 
             # --- BATCH CAPTURE fallback: KUN når custom component IKKE er tilgjengelig ---
-            elif _scene_capture_component is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+            elif _comp is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
                 st.session_state._batch_auto_triggered = True
                 st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
                 all_payloads = []
@@ -8960,6 +9079,76 @@ render();
 
     st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
+
+    # --- AI Visualisering (Stability AI) ---
+    st.markdown("<div class='section-header'>✨ AI Visualisering</div>", unsafe_allow_html=True)
+    stability_key = os.environ.get("STABILITY_API_KEY", "")
+    scene_imgs = st.session_state.get("ark_scene_images")
+    if scene_imgs and stability_key:
+        ctrl_strength = st.slider(
+            "ControlNet-styrke (lav = mer kreativt, høy = tettere på 3D-formen)",
+            min_value=0.3, max_value=1.0, value=0.75, step=0.05,
+            key="stability_ctrl_strength",
+        )
+        if st.button("🪄 Tryll frem fotorealistisk render", use_container_width=True, key="stability_render_btn"):
+            base_img = scene_imgs[0]
+            motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+            first_option = motor_options[0] if motor_options else None
+            if first_option is not None:
+                with st.spinner("Genererer fotorealistisk render med Stability AI..."):
+                    rendered = generer_arkitekt_render(base_img, first_option, stability_key, control_strength=ctrl_strength)
+                if rendered is not None:
+                    st.session_state["stability_render_image"] = rendered
+                    # Regenerer PDF med cover_image — gjenbruk cachet sol/AI-analyse
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        _site_obj_sr = SiteInputs(**site_result) if site_result else None
+                        # Gjenbruk cachet solar grid hvis tilgjengelig, ellers generer
+                        _solar_sr = st.session_state.get("_cached_solar_grid")
+                        if _solar_sr is None and motor_options and _site_obj_sr is not None:
+                            try:
+                                _solar_sr = render_solar_snapshot_grid(_site_obj_sr, motor_options[0])
+                                st.session_state["_cached_solar_grid"] = _solar_sr
+                            except Exception:
+                                pass
+                        # Gjenbruk cachet AI-analyser
+                        pv_analyses_sr: List[str] = st.session_state.get("_cached_pv_analyses", [])
+                        if not pv_analyses_sr and ANTHROPIC_API_KEY and scene_imgs and _site_obj_sr:
+                            try:
+                                pv_analyses_sr = analyze_plan_views_with_ai(scene_imgs, motor_options, _site_obj_sr, result.get("environment"))
+                                st.session_state["_cached_pv_analyses"] = pv_analyses_sr
+                            except Exception:
+                                pass
+                        new_pdf_sr = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=result.get("report_text", ""),
+                            options=motor_options,
+                            option_images=result.get("option_images", []),
+                            visual_attachments=result.get("visual_attachments", []),
+                            site=_site_obj_sr,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_sr,
+                            scene_images=scene_imgs,
+                            plan_view_analyses=pv_analyses_sr or None,
+                            cover_image=rendered,
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf_sr
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
+                        st.success("PDF oppdatert med fotorealistisk forside!")
+                    except Exception as exc:
+                        st.warning(f"Render lagret, men PDF-oppdatering feilet: {exc}")
+            else:
+                st.warning("Ingen alternativer tilgjengelig for rendering.")
+    elif not stability_key:
+        st.caption("Legg til STABILITY_API_KEY i Render Secrets for å aktivere fotorealistisk rendering.")
+    elif not scene_imgs:
+        st.caption("Fang 3D-scener først (se seksjonen ovenfor) for å aktivere AI-rendering.")
+
+    # Vis cachet render fra session (uten duplikat ved knapp-klikk)
+    if "stability_render_image" in st.session_state:
+        st.image(st.session_state["stability_render_image"], caption="Fotorealistisk AI-render (Stability AI ControlNet)", use_container_width=True)
 
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     cdl, cqa = st.columns(2)
