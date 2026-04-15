@@ -16,6 +16,9 @@ import pandas as pd
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from pathlib import Path
+st.write("Scene component path:", Path(__file__).parent / "scene_capture_component")
+st.write("Exists:", (Path(__file__).parent / "scene_capture_component").exists())
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 from shapely import affinity
