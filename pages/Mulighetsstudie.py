@@ -8956,7 +8956,7 @@ render();
                 file_name=pdf_name,
                 mime="application/pdf",
                 type="primary",
-                use_container_width=True,
+                use_container_width=True
             )
         else:
             st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
