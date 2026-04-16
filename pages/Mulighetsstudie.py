@@ -5317,10 +5317,15 @@ def render_view_from_building(
         st.warning(f"Koordinatkonvertering feilet: {exc}")
         return
 
-    # Kamera-altitude
-    base_elev = float(terrain_ctx.get('min_elev_m', 0)) if terrain_ctx else 0.0
+    # Kamera-høyde OVER BAKKEN (viewer bruker RELATIVE_TO_GROUND)
+    # Dette fjerner avhengighet av at terrain_ctx har korrekt min_elev_m.
+    # Google 3D Maps håndterer selv høyde over terreng når altitudeMode=RELATIVE_TO_GROUND.
     floor_h = float(option.building_height_m) / max(int(option.floors), 1)
-    cam_alt = base_elev + (floor - 1) * floor_h + 1.6
+    cam_height_above_ground = (floor - 1) * floor_h + 1.6
+
+    # base_elev beholdes for logging/debug
+    base_elev = float(terrain_ctx.get('min_elev_m', 0)) if terrain_ctx else 0.0
+    cam_alt = base_elev + cam_height_above_ground  # kun for debug-visning
 
     # --- Bygg volumer som lat/lng for vieweren ---
     typology_color = {
@@ -5347,9 +5352,10 @@ def render_view_from_building(
             if ring and (ring[0]["lat"] != ring[-1]["lat"] or ring[0]["lng"] != ring[-1]["lng"]):
                 ring.append(ring[0])
             if len(ring) >= 4:
+                # top_altitude er nå HØYDE OVER BAKKEN — viewer bruker RELATIVE_TO_GROUND
                 volumes_data.append({
                     "ring": ring,
-                    "top_altitude": base_elev + float(part.get('height_m', option.building_height_m)),
+                    "top_altitude": float(part.get('height_m', option.building_height_m)),
                 })
         except Exception:
             continue
@@ -5362,18 +5368,38 @@ def render_view_from_building(
         "lng": f"{cam_lng:.7f}",
         "alt": f"{cam_alt:.1f}",
         "heading": str(heading_deg),
-        "tilt": "85",
-        "range": "0.1",
+        "tilt": "78",
+        "range": "5",
         "color": typology_color,
         "label": f"{option.name} · {floor}. etasje mot {direction}",
     }
     if volumes_data:
         url_params["volumes"] = json.dumps(volumes_data, ensure_ascii=False)
 
-    viewer_url = f"{_VIEW_3D_BASE_URL}?{urllib.parse.urlencode(url_params)}"
+    viewer_url = f"{_VIEW_3D_BASE_URL}/?{urllib.parse.urlencode(url_params)}"
 
     # --- Render via iframe ---
-    st.components.iframe(viewer_url, height=height_px, scrolling=False)
+    # NB: Streamlit har ikke st.components.iframe — riktig API er components.iframe
+    components.iframe(viewer_url, height=height_px, scrolling=False)
+
+    # Debug-info (kollapset) for å feilsøke posisjonering
+    with st.expander("Debug · kameraposisjon og volumer", expanded=False):
+        st.caption(
+            f"**Kamera:** lat={cam_lat:.6f}, lng={cam_lng:.6f}, alt={cam_alt:.1f} m · "
+            f"heading={heading_deg}°, tilt=78°, range=5 m"
+        )
+        st.caption(
+            f"**Terreng:** base_elev={base_elev:.1f} m, etasjehøyde={floor_h:.1f} m, "
+            f"etasje={floor}, øyehøyde=1.6 m"
+        )
+        st.caption(f"**Volumer sendt til viewer:** {len(volumes_data)} bygg")
+        if not volumes_data:
+            st.warning(
+                "Ingen volumer ble sendt til vieweren. Dette er trolig fordi "
+                "massing_parts og footprint_polygon_coords begge er tomme."
+            )
+        url_preview = viewer_url[:120] + "..." if len(viewer_url) > 120 else viewer_url
+        st.code(url_preview, language="text")
 
 
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
