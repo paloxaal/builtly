@@ -2572,9 +2572,16 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
         footprint_area = float(footprint_polygon.area)
 
         # --- HØY UTNYTTELSE FALLBACK (typologi-differensiert) ---
-        # Når %-BRA er aktiv og fotavtrykket er under 85% av mål:
+        # Når %-BRA er aktiv og fotavtrykket er under terskelen av mål:
         # lager ULIKE former per typologi i stedet for generisk skalert polygon
-        pct_bra_fill_threshold = 0.85 if site.utnyttelsesgrad_bra_pct > 150 else 0.50
+        # Ambisiøse mål (>150%) krever høyere terskel (95%) for å sikre at
+        # AI-planneren eller geometrisk motor som ikke traff nok, blir overstyrt
+        if site.utnyttelsesgrad_bra_pct > 250:
+            pct_bra_fill_threshold = 0.95  # Meget ambisiøs: krev nær-perfekt fit
+        elif site.utnyttelsesgrad_bra_pct > 150:
+            pct_bra_fill_threshold = 0.90
+        else:
+            pct_bra_fill_threshold = 0.50
         if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * pct_bra_fill_threshold:
             fill_angle = placement.get("orientation_deg", 0.0)
             filled_fp, fill_info = _typology_polygon_fill(
@@ -2585,6 +2592,9 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                 footprint_polygon = filled_fp
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
+                # Fallback overstyrte footprint — nuller ai_massing slik at
+                # massing_parts bygges fra nytt footprint i stedet for gamle AI-bygg
+                ai_massing = None
             else:
                 # SMART FALLBACK: Fyll placement_polygon med typologi-riktige bygninger
                 # Bruk _place_grid_buildings med tett spacing for å treffe target
@@ -2597,8 +2607,10 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                     # Lamell: lange grunne bygninger, dimensjonert fra target
                     bld_d_fb = clamp(fp_minor * 0.25, 11.0, 14.0)
                     desired_bars = clamp(math.ceil(target_footprint / (fp_major * 0.6 * bld_d_fb)), 2, 4)
-                    bld_w_fb = clamp(target_footprint / (desired_bars * bld_d_fb), 18.0, 65.0)
-                    bld_w_fb = min(bld_w_fb, fp_major * 0.85)
+                    # Utvidet max-bredde til 75m (fra 65) og 92% av major (fra 85%)
+                    # for å tillate lengre lameller som faktisk treffer ambisiøse %-BRA mål
+                    bld_w_fb = clamp(target_footprint / (desired_bars * bld_d_fb), 18.0, 75.0)
+                    bld_w_fb = min(bld_w_fb, fp_major * 0.92)
                     n_needed = max(2, math.ceil(target_footprint / max(bld_w_fb * bld_d_fb, 1.0)))
                     buildings = _place_grid_buildings(
                         placement_polygon, bld_w_fb, bld_d_fb, fp_angle,
@@ -2677,6 +2689,8 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                     footprint_area = float(footprint_polygon.area)
                     placement["source"] = f"grid-fill-{typology.lower().replace(' ', '_')}"
                     placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
+                    # Smart fallback overstyrte footprint — nuller ai_massing
+                    ai_massing = None
 
         # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
         fl_min, fl_max = template.get("floor_range", (3, 5))
