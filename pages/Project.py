@@ -73,28 +73,66 @@ def go_home():
         pass
     st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
 
-# --- 2. LOKAL DATABASE (PER-BRUKER LAGRING) ---
+# --- 2. LOKAL DATABASE (PER-BRUKER + PER-PROSJEKT LAGRING) ---
+# Struktur:
+#   qa_database/<uid>/                        <- scratch (bruker uten aktivt prosjekt)
+#   qa_database/<uid>/projects/<slug>/        <- navngitt prosjekt
+#     ├── ssot.json                           <- cache av Supabase-versjonen
+#     ├── project_images/                     <- bilder
+#     └── project_files/                      <- andre vedlegg
 _BASE_DB_DIR = Path("qa_database")
 
 def _get_user_dir():
+    """Hent basemappen for nåværende bruker (ikke prosjekt-spesifikk)."""
     uid = st.session_state.get("user_id", "")
     if uid:
         return _BASE_DB_DIR / uid
-    # Fallback til _default KUN i dev-modus. I produksjon indikerer tom uid
-    # at auth-guarden har feilet, og vi skal ikke risikere at flere brukere
-    # havner i samme delte mappe.
     if _DEV_MODE:
         return _BASE_DB_DIR / "_default"
-    # I prod: la kallstedene håndtere None
     return None
 
+def _get_project_dir():
+    """Hent mappen for det aktive prosjektet, eller brukerens scratch-mappe."""
+    user_dir = _get_user_dir()
+    if user_dir is None:
+        return None
+    slug = st.session_state.get("active_project_slug", "")
+    if slug:
+        return user_dir / "projects" / slug
+    # Ingen aktivt prosjekt → scratch-mappe direkte under bruker-dir
+    return user_dir
+
 def init_db():
-    d = _get_user_dir()
+    d = _get_project_dir()
     if d is None:
-        return  # Ingen uid + ikke dev-modus → ikke opprett noe
+        return
     d.mkdir(parents=True, exist_ok=True)
     (d / "project_images").mkdir(exist_ok=True)
     (d / "project_files").mkdir(exist_ok=True)
+
+
+def _sync_file_to_storage(filename: str, data: bytes, subfolder: str = "files",
+                          content_type: str = None) -> bool:
+    """Synk en fil til Supabase Storage hvis aktivt prosjekt.
+
+    Hvis det ikke er et aktivt prosjekt (scratch-modus) eller Supabase ikke er
+    tilgjengelig, returnerer False stille — filen er allerede lagret lokalt.
+    """
+    slug = st.session_state.get("active_project_slug", "")
+    if not slug:
+        return False  # Scratch-modus — ingen storage-sync
+    try:
+        from builtly_projects import upload_project_file
+        ok, _ = upload_project_file(
+            project_slug=slug,
+            filename=filename,
+            data=data,
+            subfolder=subfolder,
+            content_type=content_type,
+        )
+        return ok
+    except Exception:
+        return False
 
 # Dirs are set after user detection below (section 5)
 
@@ -294,17 +332,19 @@ default_data = {
     "last_sync": "Ikke synket enda"
 }
 
-# Detect user change → reload project data from correct user folder
+# Detect user OR project change → reload project data from correct folder
 _current_uid = st.session_state.get("user_id", "_default")
-_loaded_uid = st.session_state.get("_project_loaded_for_uid", "")
-if _current_uid != _loaded_uid:
+_current_slug = st.session_state.get("active_project_slug", "")
+_loaded_key = f"{_current_uid}::{_current_slug}"
+_prev_loaded_key = st.session_state.get("_project_loaded_for_uid", "")
+if _loaded_key != _prev_loaded_key:
     st.session_state.pop("project_data", None)
     st.session_state.pop("ai_drawing_analysis", None)
     st.session_state.pop("analyzed_file_names", None)
-    st.session_state["_project_loaded_for_uid"] = _current_uid
+    st.session_state["_project_loaded_for_uid"] = _loaded_key
 
-# Always resolve paths for current user
-DB_DIR = _get_user_dir()
+# Always resolve paths for current user + active project
+DB_DIR = _get_project_dir()
 if DB_DIR is None:
     # Dette skal aldri skje fordi auth-guarden over stopper uautentiserte,
     # men hvis vi kommer hit er det en alvorlig feil. Stopp umiddelbart
@@ -319,12 +359,34 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 IMG_DIR.mkdir(exist_ok=True)
 FILES_DIR.mkdir(exist_ok=True)
 
+# Last inn project_data:
+#   1. Hvis aktivt prosjekt er satt, last SSOT fra Supabase (autoritativ kilde)
+#   2. Hvis Supabase ikke tilgjengelig, fall tilbake til lokal ssot.json
+#   3. Hvis ingen av disse, bruk default_data
 if "project_data" not in st.session_state:
-    if SSOT_FILE.exists():
-        with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            st.session_state.project_data = json.load(f)
-    else:
-        st.session_state.project_data = default_data.copy()
+    _loaded_from_db = False
+    _active_pid = st.session_state.get("active_project_id", "")
+    if _active_pid:
+        try:
+            from builtly_projects import get_project as _get_project
+            _proj = _get_project(_active_pid)
+            if _proj and _proj.get("ssot"):
+                st.session_state.project_data = dict(_proj["ssot"])
+                _loaded_from_db = True
+                # Oppdater lokal cache
+                try:
+                    with open(SSOT_FILE, "w", encoding="utf-8") as _f:
+                        json.dump(st.session_state.project_data, _f, ensure_ascii=False, indent=4)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if not _loaded_from_db:
+        if SSOT_FILE.exists():
+            with open(SSOT_FILE, "r", encoding="utf-8") as f:
+                st.session_state.project_data = json.load(f)
+        else:
+            st.session_state.project_data = default_data.copy()
 
 for k, v in default_data.items():
     if k not in st.session_state.project_data:
@@ -381,7 +443,13 @@ def fetch_from_kartverket(adresse, kommune, gnr, bnr):
 
 
 def fetch_parcel_from_wfs(kommune: str, gnr: str, bnr: str):
-    """Fetch parcel polygon from Kartverket WFS (same as Mulighetsstudie)."""
+    """Fetch parcel polygon from Kartverket WFS (same as Mulighetsstudie).
+
+    Returns dict with 'area_m2', 'bounds', 'source' on success.
+    On failure, returns None and sets st.session_state['_parcel_debug'] with
+    diagnostic info so brukeren kan se hva som feilet.
+    """
+    debug = []
     # Resolve kommunenummer
     knr = None
     s = kommune.strip()
@@ -395,10 +463,13 @@ def fetch_parcel_from_wfs(kommune: str, gnr: str, bnr: str):
                     if k.get("kommunenavn", "").lower() == s.lower():
                         knr = k.get("kommunenummer")
                         break
-        except Exception:
-            pass
+        except Exception as e:
+            debug.append(f"kommuneinfo feilet: {e}")
     if not knr:
+        debug.append(f"Fant ikke kommunenummer for '{kommune}'")
+        st.session_state["_parcel_debug"] = "; ".join(debug)
         return None
+    debug.append(f"knr={knr}")
 
     gnr_clean = str(gnr).strip()
     bnr_clean = str(bnr).strip()
@@ -420,48 +491,78 @@ def fetch_parcel_from_wfs(kommune: str, gnr: str, bnr: str):
             if resp.status_code != 200:
                 params["outputFormat"] = "json"
                 resp = requests.get(url, params=params, timeout=12)
-            if resp.status_code == 200:
-                data = resp.json()
-                features = data.get("features", [])
-                if features:
-                    geom = features[0].get("geometry", {})
-                    coords = geom.get("coordinates", [])
-                    # Calculate bounds and area from polygon coordinates
-                    if geom.get("type") == "Polygon" and coords:
-                        ring = coords[0]
-                        xs = [p[0] for p in ring]
-                        ys = [p[1] for p in ring]
-                        # Shoelace formula for area
-                        n = len(ring)
-                        area = 0.0
-                        for i in range(n - 1):
-                            area += ring[i][0] * ring[i + 1][1]
-                            area -= ring[i + 1][0] * ring[i][1]
-                        area = abs(area) / 2.0
-                        return {
-                            "area_m2": round(area, 1),
-                            "bounds": (min(xs), min(ys), max(xs), max(ys)),
-                            "source": f"Kartverket WFS ({layer})",
-                        }
-                    elif geom.get("type") == "MultiPolygon" and coords:
-                        all_xs, all_ys, total_area = [], [], 0.0
-                        for polygon in coords:
-                            ring = polygon[0]
-                            all_xs.extend(p[0] for p in ring)
-                            all_ys.extend(p[1] for p in ring)
-                            n = len(ring)
-                            a = 0.0
-                            for i in range(n - 1):
-                                a += ring[i][0] * ring[i + 1][1]
-                                a -= ring[i + 1][0] * ring[i][1]
-                            total_area += abs(a) / 2.0
-                        return {
-                            "area_m2": round(total_area, 1),
-                            "bounds": (min(all_xs), min(all_ys), max(all_xs), max(all_ys)),
-                            "source": f"Kartverket WFS ({layer})",
-                        }
-        except Exception:
+            if resp.status_code != 200:
+                debug.append(f"{layer}: HTTP {resp.status_code}")
+                continue
+            data = resp.json()
+            features = data.get("features", [])
+            if not features:
+                debug.append(f"{layer}: ingen treff")
+                continue
+            geom = features[0].get("geometry", {})
+            coords = geom.get("coordinates", [])
+            if geom.get("type") == "Polygon" and coords:
+                ring = coords[0]
+                xs = [p[0] for p in ring]
+                ys = [p[1] for p in ring]
+                n = len(ring)
+                area = 0.0
+                for i in range(n - 1):
+                    area += ring[i][0] * ring[i + 1][1]
+                    area -= ring[i + 1][0] * ring[i][1]
+                area = abs(area) / 2.0
+                return {
+                    "area_m2": round(area, 1),
+                    "bounds": (min(xs), min(ys), max(xs), max(ys)),
+                    "source": f"Kartverket WFS ({layer})",
+                }
+            elif geom.get("type") == "MultiPolygon" and coords:
+                all_xs, all_ys, total_area = [], [], 0.0
+                for polygon in coords:
+                    ring = polygon[0]
+                    all_xs.extend(p[0] for p in ring)
+                    all_ys.extend(p[1] for p in ring)
+                    n = len(ring)
+                    a = 0.0
+                    for i in range(n - 1):
+                        a += ring[i][0] * ring[i + 1][1]
+                        a -= ring[i + 1][0] * ring[i][1]
+                    total_area += abs(a) / 2.0
+                return {
+                    "area_m2": round(total_area, 1),
+                    "bounds": (min(all_xs), min(all_ys), max(all_xs), max(all_ys)),
+                    "source": f"Kartverket WFS ({layer})",
+                }
+        except Exception as e:
+            debug.append(f"{layer} exception: {str(e)[:80]}")
             continue
+
+    # Fallback: Matrikkel REST-API (bare areal, ingen geometri — dekker hvis WFS er nede)
+    try:
+        rest_url = f"https://ws.geonorge.no/eiendom/v1/matrikkelenhet?knr={knr}&gnr={gnr_clean}&bnr={bnr_clean}"
+        resp = requests.get(rest_url, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("matrikkelenheter", [])
+            if items:
+                area = items[0].get("areal") or items[0].get("beregnet_areal")
+                if area:
+                    debug.append(f"REST-fallback ga areal={area}")
+                    return {
+                        "area_m2": round(float(area), 1),
+                        "bounds": None,  # Ingen polygon tilgjengelig
+                        "source": "Kartverket REST (matrikkelenhet)",
+                    }
+                else:
+                    debug.append("REST-fallback: ingen areal i respons")
+            else:
+                debug.append("REST-fallback: ingen matrikkelenheter")
+        else:
+            debug.append(f"REST-fallback: HTTP {resp.status_code}")
+    except Exception as e:
+        debug.append(f"REST-fallback exception: {str(e)[:80]}")
+
+    st.session_state["_parcel_debug"] = "; ".join(debug)
     return None
 
 
@@ -540,6 +641,109 @@ render_html(f"""
 </div>
 """)
 
+# --- 6b. PROSJEKT-VELGER ---
+# Viser brukerens lagrede prosjekter + mulighet for å opprette nytt eller
+# åpne scratch-modus (jobbe uten å knytte til et spesifikt prosjekt).
+try:
+    from builtly_projects import (
+        list_projects as _list_projects,
+        set_active_project as _set_active_project,
+        clear_active_project as _clear_active_project,
+        create_project as _create_project,
+        rename_project as _rename_project,
+        delete_project as _delete_project,
+        get_active_project_id as _get_active_pid,
+    )
+    _projects_available = True
+except ImportError:
+    _projects_available = False
+
+if _projects_available and st.session_state.get("user_authenticated"):
+    _projects = _list_projects()
+    _active_pid = _get_active_pid()
+    _active_name = st.session_state.get("active_project_name", "")
+
+    st.markdown(f"""<div class="card" style="padding: 1.2rem 1.5rem; margin-top: 1.5rem;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.8rem;">
+            <div>
+                <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; color:#9fb0c3;">Aktivt prosjekt</div>
+                <div style="font-size:1.3rem; font-weight:700; color:#f5f7fb;">{_active_name or '— Ingen aktiv (scratch-modus)'}</div>
+            </div>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    _pc1, _pc2, _pc3 = st.columns([3, 1.2, 1])
+    with _pc1:
+        _options = ["— Scratch (ikke lagre som prosjekt) —"] + [f"{p['name']}" for p in _projects]
+        _ids = [""] + [p["id"] for p in _projects]
+        _current_idx = 0
+        if _active_pid and _active_pid in _ids:
+            _current_idx = _ids.index(_active_pid)
+        _selected_idx = st.selectbox(
+            "Velg prosjekt",
+            options=list(range(len(_options))),
+            format_func=lambda i: _options[i],
+            index=_current_idx,
+            key="project_selector",
+            label_visibility="collapsed",
+        )
+        if _ids[_selected_idx] != _active_pid:
+            if _ids[_selected_idx]:
+                _set_active_project(_ids[_selected_idx])
+            else:
+                _clear_active_project()
+            st.rerun()
+
+    with _pc2:
+        if st.button("＋ Nytt prosjekt", use_container_width=True, key="btn_new_proj"):
+            st.session_state["_show_new_proj_form"] = True
+
+    with _pc3:
+        if _active_pid and st.button("🗑 Slett", use_container_width=True, key="btn_del_proj"):
+            st.session_state["_confirm_del_proj"] = _active_pid
+
+    # Ny prosjekt-form
+    if st.session_state.get("_show_new_proj_form"):
+        with st.form("new_project_form", clear_on_submit=True):
+            _new_name = st.text_input("Prosjektnavn", placeholder="F.eks. Saga Park")
+            _fc1, _fc2 = st.columns(2)
+            _submit = _fc1.form_submit_button("Opprett", type="primary", use_container_width=True)
+            _cancel = _fc2.form_submit_button("Avbryt", use_container_width=True)
+            if _submit and _new_name.strip():
+                _ok, _err, _pid = _create_project(_new_name.strip(), ssot={})
+                if _ok and _pid:
+                    _set_active_project(_pid)
+                    st.session_state["_show_new_proj_form"] = False
+                    st.success(f"Prosjekt «{_new_name}» opprettet")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(f"Kunne ikke opprette: {_err}")
+            elif _cancel:
+                st.session_state["_show_new_proj_form"] = False
+                st.rerun()
+
+    # Bekreft sletting
+    if st.session_state.get("_confirm_del_proj"):
+        _del_pid = st.session_state["_confirm_del_proj"]
+        _del_name = _active_name or "prosjektet"
+        st.warning(f"Sikker på at du vil slette «{_del_name}»? Alle tilhørende filer fjernes.")
+        _dc1, _dc2 = st.columns(2)
+        if _dc1.button("Ja, slett", type="primary", use_container_width=True, key="btn_confirm_del"):
+            _ok, _err = _delete_project(_del_pid)
+            if _ok:
+                _clear_active_project()
+                st.session_state.pop("_confirm_del_proj", None)
+                st.success("Prosjekt slettet")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.error(f"Sletting feilet: {_err}")
+        if _dc2.button("Avbryt", use_container_width=True, key="btn_cancel_del"):
+            st.session_state.pop("_confirm_del_proj", None)
+            st.rerun()
+
+
 # --- 7. INPUT SEKSJON ---
 st.markdown(f"<h3 style='margin-top: 1rem; margin-bottom: 0.2rem;'>{T['update_title']}</h3>", unsafe_allow_html=True)
 st.markdown(f"<p style='color:#9fb0c3; margin-bottom: 1.5rem;'>{T['update_sub']}</p>", unsafe_allow_html=True)
@@ -611,6 +815,9 @@ with input_col:
                                 st.info(T["ortofoto_fail"])
                     else:
                         st.warning(T["parcel_fail"])
+                        _dbg = st.session_state.get("_parcel_debug", "")
+                        if _dbg:
+                            st.caption(f"Debug: {_dbg}")
 
             time.sleep(0.5)
             st.rerun()
@@ -744,26 +951,37 @@ with input_col:
                         if f.name.lower().endswith('pdf'):
                             # Save original PDF to project_files
                             f.seek(0)
-                            (FILES_DIR / f.name).write_bytes(f.read())
+                            _pdf_bytes = f.read()
+                            (FILES_DIR / f.name).write_bytes(_pdf_bytes)
+                            _sync_file_to_storage(f.name, _pdf_bytes, "files", "application/pdf")
                             # Also convert to JPG previews
                             if fitz is not None: 
-                                f.seek(0)
-                                doc = fitz.open(stream=f.read(), filetype="pdf")
+                                doc = fitz.open(stream=_pdf_bytes, filetype="pdf")
                                 for page_num in range(min(4, len(doc))):
                                     pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.0, 1.0))
                                     img = Image.open(io.BytesIO(pix.tobytes("jpeg"))).convert("RGB")
                                     img.thumbnail((1200, 1200))
-                                    img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                                    _preview_name = f"tegning_{img_count}.jpg"
+                                    _preview_path = IMG_DIR / _preview_name
+                                    img.save(_preview_path, "JPEG", quality=85)
+                                    with open(_preview_path, "rb") as _pf:
+                                        _sync_file_to_storage(_preview_name, _pf.read(), "images", "image/jpeg")
                                     img_count += 1
                                 doc.close() 
                         else:
                             img = Image.open(f).convert("RGB")
                             img.thumbnail((1200, 1200))
-                            img.save(IMG_DIR / f"tegning_{img_count}.jpg", "JPEG", quality=85)
+                            _img_name = f"tegning_{img_count}.jpg"
+                            _img_path = IMG_DIR / _img_name
+                            img.save(_img_path, "JPEG", quality=85)
+                            with open(_img_path, "rb") as _pf:
+                                _sync_file_to_storage(_img_name, _pf.read(), "images", "image/jpeg")
                             img_count += 1
                             # Also save original image to project_files
                             f.seek(0)
-                            (FILES_DIR / f.name).write_bytes(f.read())
+                            _orig_bytes = f.read()
+                            (FILES_DIR / f.name).write_bytes(_orig_bytes)
+                            _sync_file_to_storage(f.name, _orig_bytes, "files")
                 except Exception as e:
                     st.warning(f"Kunne ikke lagre alle filer: {e}")
 
@@ -773,7 +991,9 @@ with input_col:
                 try:
                     for f in extra_files:
                         f.seek(0)
-                        (FILES_DIR / f.name).write_bytes(f.read())
+                        _extra_bytes = f.read()
+                        (FILES_DIR / f.name).write_bytes(_extra_bytes)
+                        _sync_file_to_storage(f.name, _extra_bytes, "files")
                 except Exception as e:
                     st.warning(f"Kunne ikke lagre tilleggsfiler: {e}")
                 
@@ -783,10 +1003,52 @@ with input_col:
                 "b_type": new_b_type, "etasjer": new_etasjer, "bta": new_bta, "tomteareal": new_tomteareal,
                 "last_sync": datetime.now().strftime("%d. %b %Y kl %H:%M")
             })
-            
+
+            # 1) Lokal cache
             with open(SSOT_FILE, "w", encoding="utf-8") as f:
                 json.dump(st.session_state.project_data, f, ensure_ascii=False, indent=4)
-                
+
+            # 2) Push til Supabase (opprett prosjekt hvis ingen er aktivt)
+            try:
+                from builtly_projects import (
+                    get_active_project_id, update_project_ssot,
+                    create_project, set_active_project,
+                )
+                _active_pid = get_active_project_id()
+                if _active_pid:
+                    # Oppdater eksisterende
+                    _ok, _err = update_project_ssot(_active_pid, st.session_state.project_data)
+                    if not _ok and _err:
+                        st.caption(f"Synk-advarsel: {_err}")
+                else:
+                    # Opprett nytt prosjekt ved første lagring — bruk p_name som navn
+                    _pname = (new_p_name or "").strip() or "Nytt prosjekt"
+                    _ok, _err, _pid = create_project(_pname, ssot=st.session_state.project_data)
+                    if _ok and _pid:
+                        set_active_project(_pid)
+                        # Flytt scratch-filer til prosjekt-mappe ved første lagring
+                        try:
+                            _old_dir = _get_user_dir()
+                            _new_dir = _get_project_dir()
+                            if _old_dir and _new_dir and _old_dir != _new_dir:
+                                _new_dir.mkdir(parents=True, exist_ok=True)
+                                for sub in ("project_images", "project_files"):
+                                    _src = _old_dir / sub
+                                    _dst = _new_dir / sub
+                                    if _src.exists() and _src != _dst:
+                                        _dst.mkdir(parents=True, exist_ok=True)
+                                        for item in _src.iterdir():
+                                            if item.is_file():
+                                                _target = _dst / item.name
+                                                if not _target.exists():
+                                                    item.replace(_target)
+                        except Exception:
+                            pass
+                    elif _err:
+                        st.caption(f"Synk-advarsel: {_err}")
+            except ImportError:
+                pass  # builtly_projects ikke tilgjengelig (standalone-kjøring)
+
             st.success(T["save_ok"].format(name=new_p_name))
             time.sleep(1)
             st.rerun()
