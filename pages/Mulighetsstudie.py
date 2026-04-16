@@ -1321,7 +1321,8 @@ def _place_grid_buildings(
         else:
             try:
                 clipped = candidate.intersection(poly).buffer(0)
-                if not clipped.is_empty and clipped.area >= bld_area * 0.40 and clipped.area >= 30:
+                # Senket fra 40% til 30% for å beholde flere bygg på irregulære polygoner
+                if not clipped.is_empty and clipped.area >= bld_area * 0.30 and clipped.area >= 25:
                     buildings.append(clipped)
                     total_area += clipped.area
                     used_centers.append((bx, by))
@@ -1407,9 +1408,15 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     footprint: Any = None
 
     # Tilpass bygningsdybde — men behold typologisk karakter
-    # Reduser spacing ved høy utnyttelse
-    high_utilization = target_footprint_m2 > area * 0.4
-    sp_factor = 0.5 if high_utilization else 1.0
+    # Reduser spacing ved høy utnyttelse — gradert etter hvor ambisiøst mål er
+    util_ratio = target_footprint_m2 / max(area, 1.0)
+    if util_ratio > 0.55:
+        sp_factor = 0.35  # Veldig høy utnyttelse: aggressiv reduksjon
+    elif util_ratio > 0.4:
+        sp_factor = 0.5   # Høy utnyttelse
+    else:
+        sp_factor = 1.0   # Normal
+    high_utilization = util_ratio > 0.4
 
     if typology == "Punkthus":
         # Punkthus: tilnærmet kvadratisk, dimensjonert for å nå target med 3-5 bygg
@@ -5723,9 +5730,16 @@ def render_solar_snapshot(
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
+    # Utvid visningsspennet til å inkludere naboer innenfor view_radius,
+    # slik at omkringliggende bygg med sine skygger blir synlige i snapshoten.
+    # Dette må beregnes før scale settes.
+    view_radius_est = max(site_span * 1.5, 150.0)
+    # Legg til plass for skygger (opp til ~60m lange ved lav sol)
+    display_span = max(site_span + 2 * view_radius_est * 0.6, site_span)
+
     margin = 100
     target_span = min(canvas_w, canvas_h) - 2 * margin
-    scale = target_span / site_span
+    scale = target_span / display_span
     ox = canvas_w / 2.0
     oy = canvas_h / 2.0
 
@@ -5747,8 +5761,9 @@ def render_solar_snapshot(
     if len(sp) >= 3:
         draw.polygon(sp, fill=(232, 237, 243, 200), outline=(120, 135, 155, 200))
 
-    # Nabobygg + naboskygger
-    view_radius = site_span * 0.45
+    # Nabobygg + naboskygger — vis alle innenfor rimelig radius for å fange
+    # skyggepåvirkning fra omkringliggende bebyggelse
+    view_radius = max(site_span * 1.5, 150.0)  # Minst 150m eller 1.5x tomtespennet
     for neighbor in neighbor_polys:
         ncoords = flatten_coord_groups(neighbor.get('coords', []))
         if not ncoords:
@@ -5759,14 +5774,15 @@ def render_solar_snapshot(
             continue
         np_ = pts(ncoords)
         if len(np_) >= 3:
-            draw.polygon(np_, fill=(195, 200, 210, 130), outline=(160, 168, 180, 160))
+            # Tydeligere nabobygg — mørkere fyll og sterkere kontur
+            draw.polygon(np_, fill=(170, 178, 192, 220), outline=(95, 105, 120, 255))
             # Nabohøyde-label (bare for nære naboer)
             nh_label = float(neighbor.get('height_m', 0))
             dist = math.hypot(avg_x - cx, avg_y - cy)
             if nh_label > 0 and dist < view_radius * 0.7:
                 nav_sx = sum(p[0] for p in np_) / len(np_)
                 nav_sy = sum(p[1] for p in np_) / len(np_)
-                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(100, 110, 130, 180), font=font_small)
+                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(60, 70, 85, 220), font=font_small)
         if sun_above:
             nh = float(neighbor.get('height_m', 9.0))
             if nh > 0:
@@ -5778,7 +5794,8 @@ def render_solar_snapshot(
                             ns_coords = geometry_to_coord_groups(n_shadow)
                             ns_pts = pts(flatten_coord_groups(ns_coords))
                             if len(ns_pts) >= 3:
-                                draw.polygon(ns_pts, fill=(40, 50, 70, 35))
+                                # Mye tydeligere naboskygger (alpha 35 → 110)
+                                draw.polygon(ns_pts, fill=(40, 50, 70, 110))
                 except Exception:
                     pass
 
