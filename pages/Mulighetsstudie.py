@@ -5435,11 +5435,13 @@ def _register_fonts(pdf: FPDF) -> None:
 
 
 # --- PDF v11 Color constants ---
-_NAVY = (26, 43, 72)
-_BUILTLY_BLUE = (0, 96, 155)
+_NAVY = (15, 27, 51)           # Mørkere, mer alvorlig navy
+_BUILTLY_BLUE = (31, 55, 95)   # Dempet corporate blå (tidligere lyseblå var for lys)
+_ACCENT_BLUE = (66, 103, 155)  # Brukes kun som subtil aksent
 _BODY_BLACK = (30, 30, 30)
 _MUTED = (120, 130, 145)
-_TABLE_HEADER_BG = (26, 43, 72)
+_DIVIDER = (200, 208, 220)     # Lys grå for skillelinjer
+_TABLE_HEADER_BG = (15, 27, 51)
 _TABLE_HEADER_FG = (255, 255, 255)
 _TABLE_ROW_ALT = (247, 249, 252)
 _TABLE_ROW_WHITE = (255, 255, 255)
@@ -5455,26 +5457,27 @@ class BuiltlyProPDF(FPDF):
         if self.page_no() == 1:
             return
         self.set_y(10)
-        self.set_draw_color(*_BUILTLY_BLUE)
-        self.set_line_width(0.8)
-        self.line(0, 5, 210, 5)
+        # Tynn divider-linje i toppen (subtil grå, ikke tykk blå)
+        self.set_draw_color(*_DIVIDER)
+        self.set_line_width(0.3)
+        self.line(25, 14, 185, 14)
         self.set_line_width(0.2)
         self.set_font(PDF_FONT, "", 8)
         self.set_text_color(*_MUTED)
         self.cell(0, 8, clean_pdf_text(f"PROSJEKT: {self.p_name}"), 0, 0, "L")
         self.cell(0, 8, clean_pdf_text("Dokumentnr: ARK-002"), 0, 1, "R")
-        self.set_draw_color(220, 225, 232)
-        self.line(25, 20, 185, 20)
-        self.set_y(24)
+        self.set_y(22)
 
     def footer(self) -> None:
         self.set_y(-18)
-        self.set_draw_color(220, 225, 232)
+        self.set_draw_color(*_DIVIDER)
+        self.set_line_width(0.3)
         self.line(25, self.get_y(), 185, self.get_y())
-        self.set_y(-15)
+        self.set_line_width(0.2)
+        self.set_y(-14)
         self.set_font(PDF_FONT, "", 7)
         self.set_text_color(*_MUTED)
-        self.cell(85, 8, clean_pdf_text("UTKAST - KREVER FAGLIG KONTROLL"), 0, 0, "L")
+        self.cell(85, 8, clean_pdf_text("UTKAST · KREVER FAGLIG KONTROLL"), 0, 0, "L")
         self.set_font(PDF_FONT, "", 7)
         self.cell(0, 8, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
 
@@ -6042,16 +6045,16 @@ def create_full_report_pdf(
     cover_image: Optional[Image.Image] = None,
 ) -> bytes:
     """
-    McKinsey-quality PDF v13:
-      Page 1:  Cover
+    McKinsey-quality PDF v14:
+      Page 1:  Cover (med eventuelt AI-render)
       Page 2:  Table of Contents
       Page 3:  Executive Summary (KPI-kort vektor)
-      Page 4:  Nøkkeltall + sol/BRA-chart + kontekst
-      Page 5+: Volumskisser (top 3)
+      Page 4:  Tomt og kontekst — flyfoto, støykart (flyttet fra vedlegg)
+      Page 5:  Nøkkeltall + sol/BRA-chart + kontekst
+      Page 6+: Volumskisser (top 3)
       Page N:  Planvisning og volumkontroll (med AI-analyse)
       Page N:  Sol/skygge individuelle snapshots
       Page N+: Rapport tekst
-      Last:    Vedlegg (flyfoto, støykart)
     """
     pdf = BuiltlyProPDF()
     _register_fonts(pdf)
@@ -6063,10 +6066,11 @@ def create_full_report_pdf(
     # PAGE 1: COVER
     # ================================================================
     pdf.add_page()
-    pdf.set_fill_color(*_BUILTLY_BLUE)
-    pdf.rect(0, 0, 210, 6, 'F')
 
-    cover_y_offset = 0  # How far down to push logo/text when cover image present
+    # Tynn topplinje i navy (ikke lyseblå)
+    pdf.set_fill_color(*_NAVY)
+    pdf.rect(0, 0, 210, 3, 'F')
+
     _cover_tmp_path: Optional[str] = None  # Defer cleanup until after pdf.output()
 
     if cover_image is not None:
@@ -6076,59 +6080,70 @@ def create_full_report_pdf(
         _cover_fd.close()
         try:
             _cover_rgb = cover_image.convert("RGB")
-            _cover_rgb.save(_cover_tmp_path, format="JPEG", quality=90)
-            # Place image full-width at top (below blue bar)
-            img_w = 160
-            img_h = img_w * _cover_rgb.height / _cover_rgb.width
-            if img_h > 110:
-                img_h = 110
-                img_w = img_h * _cover_rgb.width / _cover_rgb.height
-            x_img = (210 - img_w) / 2
-            pdf.image(_cover_tmp_path, x=x_img, y=10, w=img_w, h=img_h)
-            cover_y_offset = img_h - 5
+            _cover_rgb.save(_cover_tmp_path, format="JPEG", quality=92)
+            # Midtstilt full-bredde bilde rett under topplinja
+            target_w = 170
+            img_h = target_w * _cover_rgb.height / _cover_rgb.width
+            if img_h > 105:
+                img_h = 105
+                target_w = img_h * _cover_rgb.width / _cover_rgb.height
+            x_img = (210 - target_w) / 2
+            pdf.image(_cover_tmp_path, x=x_img, y=15, w=target_w, h=img_h)
+            # Subtil linje under bildet for elegant overgang
+            pdf.set_draw_color(*_DIVIDER)
+            pdf.set_line_width(0.3)
+            pdf.line(25, 15 + img_h + 6, 185, 15 + img_h + 6)
         except Exception:
-            cover_y_offset = 0
+            pass
 
-    logo_y = 20 + cover_y_offset if cover_image is not None else 20
+    # Logo — plasseres alltid nede mot midten, uavhengig av om cover finnes
     if os.path.exists("logo.png"):
-        pdf.image("logo.png", x=25, y=logo_y, w=50)
+        pdf.image("logo.png", x=25, y=145, w=42)
 
-    text_start_y = max(90, logo_y + 40) if cover_image is not None else 90
-
-    if cover_image is not None:
-        # White box behind text for readability — dynamic height to bottom margin
-        box_h = min(100, 285 - text_start_y)
-        pdf.set_fill_color(255, 255, 255)
-        pdf.set_draw_color(255, 255, 255)
-        pdf.rect(20, text_start_y - 5, 170, box_h, 'F')
-
-    pdf.set_y(text_start_y)
-    pdf.set_font(PDF_FONT, "B", 24)
+    # Tittelblokk — venstrejustert, stort hierarki
+    pdf.set_y(165)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 26)
     pdf.set_text_color(*_NAVY)
-    pdf.multi_cell(0, 13, clean_pdf_text("MULIGHETSSTUDIE OG\nTOMTEANALYSE (ARK)"), 0, "L")
-    pdf.ln(3)
-    pdf.set_font(PDF_FONT, "", 14)
-    pdf.set_text_color(*_BUILTLY_BLUE)
-    pdf.multi_cell(0, 9, clean_pdf_text(f"KONSEPTVURDERING: {name.upper()}"), 0, "L")
-    pdf.ln(20)
+    pdf.multi_cell(0, 11, clean_pdf_text("Mulighetsstudie"), 0, "L")
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 26)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 11, clean_pdf_text("og tomteanalyse"), 0, "L")
+    pdf.ln(2)
 
+    # Undertittel — dempet grå
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "", 12)
+    pdf.set_text_color(*_MUTED)
+    pdf.cell(0, 7, clean_pdf_text(f"Konseptvurdering · {name}"), 0, 1, "L")
+
+    # Tynn aksent-linje
+    pdf.ln(5)
+    pdf.set_draw_color(*_NAVY)
+    pdf.set_line_width(0.8)
+    pdf.line(25, pdf.get_y(), 60, pdf.get_y())
+    pdf.set_line_width(0.2)
+    pdf.ln(8)
+
+    # Metadata-tabell
     for label, value in [
-        ("OPPDRAGSGIVER", client or "Ukjent"),
-        ("DATO", datetime.now().strftime("%d.%m.%Y")),
-        ("UTARBEIDET AV", "Builtly ARK Motor + AI"),
-        ("REGELVERK", land),
+        ("Oppdragsgiver", client or "Ukjent"),
+        ("Dato", datetime.now().strftime("%d. %B %Y").replace("January", "januar").replace("February", "februar").replace("March", "mars").replace("April", "april").replace("May", "mai").replace("June", "juni").replace("July", "juli").replace("August", "august").replace("September", "september").replace("October", "oktober").replace("November", "november").replace("December", "desember")),
+        ("Utarbeidet av", "Builtly ARK Motor + AI"),
+        ("Regelverk", land),
     ]:
         pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_font(PDF_FONT, "", 8)
         pdf.set_text_color(*_MUTED)
-        pdf.cell(42, 9, clean_pdf_text(label), 0, 0)
+        pdf.cell(45, 7, clean_pdf_text(label.upper()), 0, 0)
         pdf.set_font(PDF_FONT, "", 10)
         pdf.set_text_color(*_BODY_BLACK)
-        pdf.cell(0, 9, clean_pdf_text(value), 0, 1)
+        pdf.cell(0, 7, clean_pdf_text(value), 0, 1)
 
-    pdf.set_y(280)
-    pdf.set_fill_color(*_BUILTLY_BLUE)
-    pdf.rect(0, 290, 210, 7, 'F')
+    # Bunnlinje — tynn navy, ikke tykk lyseblå
+    pdf.set_fill_color(*_NAVY)
+    pdf.rect(0, 294, 210, 3, 'F')
 
     # ================================================================
     # PAGE 2: TABLE OF CONTENTS
@@ -6139,10 +6154,15 @@ def create_full_report_pdf(
 
     toc_items = [
         ("1.", "Executive Summary"),
-        ("2.", "Nøkkeltall fra motor"),
-        ("3.", "Volumskisser — topp 3 alternativer"),
     ]
-    toc_idx = 4
+    toc_idx = 2
+    if visual_attachments:
+        toc_items.append((f"{toc_idx}.", "Tomt og kontekst — flyfoto og støykart"))
+        toc_idx += 1
+    toc_items.append((f"{toc_idx}.", "Nøkkeltall fra motor"))
+    toc_idx += 1
+    toc_items.append((f"{toc_idx}.", "Volumskisser — topp 3 alternativer"))
+    toc_idx += 1
     if scene_images:
         toc_items.append((f"{toc_idx}.", "Planvisning og volumkontroll"))
         toc_idx += 1
@@ -6161,13 +6181,10 @@ def create_full_report_pdf(
             toc_items.append((f"{toc_idx}.", line.replace("#", "").strip()))
             toc_idx += 1
 
-    if visual_attachments:
-        toc_items.append((f"{toc_idx}.", "Vedlegg: Flyfoto, 3D-scene og referanser"))
-
     for num, title in toc_items:
         pdf.set_x(30)
         pdf.set_font(PDF_FONT, "B", 10)
-        pdf.set_text_color(*_BUILTLY_BLUE)
+        pdf.set_text_color(*_NAVY)
         pdf.cell(10, 8, clean_pdf_text(num), 0, 0)
         pdf.set_font(PDF_FONT, "", 10)
         pdf.set_text_color(*_BODY_BLACK)
@@ -6301,6 +6318,36 @@ def create_full_report_pdf(
             pdf.set_font(PDF_FONT, "B", 9)
             pdf.cell(10, 6, clean_pdf_text(f"{opt.score:.0f}"), 0, 1)
             pdf.ln(1)
+
+    # ================================================================
+    # TOMT OG KONTEKST (flyfoto, støykart — flyttet fra vedlegg)
+    # ================================================================
+    if visual_attachments:
+        pdf.add_page()
+        pdf.section_title("TOMT OG KONTEKST", 16)
+        pdf.body_text(
+            "Flyfoto og støykart gir det visuelle grunnlaget for analysen "
+            "og dokumenterer tomtens plassering, bebyggelsestetthet og "
+            "miljøforhold."
+        )
+        pdf.ln(4)
+
+        attachment_labels = ["Flyfoto — tomt og omkringliggende bebyggelse", "Støykart — Dovrebanen"]
+        for idx, image in enumerate(visual_attachments):
+            if idx > 0:
+                pdf.add_page()
+            label = attachment_labels[idx] if idx < len(attachment_labels) else f"Figur {idx + 1}"
+            pdf.subtitle(label)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
+                ratio_h = 160 * (image.height / max(image.width, 1))
+                if ratio_h > 200:
+                    ratio_h = 200
+                    ratio_w = ratio_h * (image.width / max(image.height, 1))
+                    pdf.image(tmp.name, x=105 - (ratio_w / 2), y=pdf.get_y(), w=ratio_w)
+                else:
+                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.set_y(pdf.get_y() + ratio_h + 4)
 
     # ================================================================
     # PAGE 4: NØKKELTALL + CHARTS
@@ -6603,29 +6650,8 @@ def create_full_report_pdf(
             pdf.body_text(line)
         i_line += 1
 
-    # ================================================================
-    # VEDLEGG
-    # ================================================================
-    if visual_attachments:
-        pdf.add_page()
-        pdf.section_title("VEDLEGG: FLYFOTO, 3D-SCENE OG REFERANSER", 16)
-        for idx, image in enumerate(visual_attachments, start=1):
-            if idx > 1:
-                pdf.add_page()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                image.convert("RGB").save(tmp.name, format="JPEG", quality=86)
-                ratio_h = 160 * (image.height / max(image.width, 1))
-                if ratio_h > 220:
-                    ratio_h = 220
-                    ratio_w = ratio_h * (image.width / max(image.height, 1))
-                    pdf.image(tmp.name, x=105 - (ratio_w / 2), y=pdf.get_y(), w=ratio_w)
-                else:
-                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
-                pdf.set_y(pdf.get_y() + ratio_h + 4)
-                pdf.set_x(25)
-                pdf.set_font(PDF_FONT, "I", 8)
-                pdf.set_text_color(*_MUTED)
-                pdf.cell(0, 8, clean_pdf_text(f"Figur V-{idx}: visuelt grunnlag brukt i analysen."), 0, 1)
+    # Note: Flyfoto og støykart er flyttet til "TOMT OG KONTEKST" tidlig i rapporten
+    # (før Nøkkeltall fra motor). Ingen separat vedlegg-seksjon her.
 
     output = pdf.output(dest="S")
 
@@ -9195,22 +9221,16 @@ render();
         st.image(st.session_state["stability_render_image"], caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
 
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
-    cdl, cqa = st.columns(2)
-    with cdl:
-        pdf_data = st.session_state.get("generated_ark_pdf")
-        pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
-        if pdf_data:
-            st.download_button(
-                "Last ned mulighetsstudie (PDF)",
-                data=pdf_data,
-                file_name=pdf_name,
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True,
-            )
-        else:
-            st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
-    with cqa:
-        if find_page("Review"):
-            if st.button("Gå til QA for godkjenning", type="secondary", use_container_width=True):
-                st.switch_page(find_page("Review"))
+    pdf_data = st.session_state.get("generated_ark_pdf")
+    pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+    if pdf_data:
+        st.download_button(
+            "Last ned mulighetsstudie (PDF)",
+            data=pdf_data,
+            file_name=pdf_name,
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
+    else:
+        st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
