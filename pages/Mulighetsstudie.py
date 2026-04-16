@@ -5248,9 +5248,9 @@ def render_view_from_building(
     Denne tilnærmingen omgår Streamlits iframe-sandbox som blokkerer
     Google Maps JavaScript API ved direkte bruk av components.html().
     """
-    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    api_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
     if not api_key:
-        st.warning("Utsiktsvisningen krever GOOGLE_API_KEY med Maps JavaScript API aktivert.")
+        st.warning("Utsiktsvisningen krever GOOGLE_MAPS_KEY (Maps JavaScript API).")
         return
 
     geometry = option.geometry or {}
