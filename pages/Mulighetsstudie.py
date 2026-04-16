@@ -276,24 +276,37 @@ def generer_arkitekt_render(
     # 3. Presis prompt med strenge grenser for det grønne fotavtrykket
     prompt = (
         "You are an architectural visualization artist performing a precise, localized edit on "
-        "an aerial photograph of a real Norwegian neighborhood. The image contains solid bright "
-        "green 3D volume blocks that represent a proposed new building. Every other pixel in the "
-        "image is a real aerial photograph that must be preserved pixel-perfect.\n\n"
-        "STRICT PIXEL BOUNDARY RULE: Only pixels that are currently bright green may be modified. "
-        "Every pixel that is NOT green must remain absolutely identical to the input — same colors, "
-        "same details, same shadows. This includes the asphalt directly next to the green blocks, "
-        "the parking lots, the existing building rooftops, the trees, the roads, and every other "
-        "part of the aerial photo. Do not extend the new building outward, do not add landscaping "
-        "on the surrounding ground, do not add new plazas, sidewalks, or entrance zones beyond the "
-        "green footprint. The shadow of the new building may fall naturally on the preserved ground, "
-        "but no other ground-level changes are permitted.\n\n"
-        f"WITHIN THE GREEN VOLUME ONLY: Render a photorealistic modern Norwegian {typology_eng} "
-        f"with exactly {floors} floors and a total height of approximately {height_m:.0f} meters. "
+        "an aerial photograph of a real Norwegian neighborhood.\n\n"
+        "=== IMAGE LEGEND — READ CAREFULLY ===\n"
+        "The image contains three distinct types of content:\n"
+        "1. BRIGHT GREEN solid 3D volume blocks: these represent the NEW PROPOSED BUILDING. "
+        "These are the ONLY pixels you may modify. The green blocks define the EXACT footprint, "
+        "height, and number of building volumes for the new building.\n"
+        "2. GREY / DARK-BLUE / SEMI-TRANSPARENT box silhouettes: these are EXISTING NEIGHBOR "
+        "BUILDINGS drawn on top of the aerial photo to show context. They are NOT part of the new "
+        "proposal. Do NOT render them as solid new construction. Do NOT invent new buildings where "
+        "a grey box is drawn. Preserve them as they are — they represent real existing houses that "
+        "are already visible in the underlying aerial photo below the grey overlay.\n"
+        "3. The aerial photograph itself (roads, parking lots, trees, existing roofs, ground): "
+        "must remain pixel-perfect identical to the input.\n\n"
+        "=== STRICT PIXEL BOUNDARY RULE ===\n"
+        "Only pixels that are currently BRIGHT GREEN may be modified into new building surfaces. "
+        "Every other pixel — including grey neighbor boxes, aerial photo, shadows, roads — must "
+        "remain absolutely identical to the input. Do not extend the new building outward. Do not "
+        "add landscaping, plazas, or sidewalks beyond the green footprint. Do not merge the new "
+        "building with neighbor silhouettes. The new building's footprint, number of separate "
+        "volumes, and overall massing must EXACTLY match the green shapes — if there are two "
+        "separate green lamellas, render two separate lamellas. If the green shape is curved or "
+        "L-shaped, render exactly that curve or L-shape.\n\n"
+        f"=== WITHIN THE GREEN VOLUME ONLY ===\n"
+        f"Render a photorealistic modern Norwegian {typology_eng} with exactly {floors} floors "
+        f"and a total height of approximately {height_m:.0f} meters. The building must stay "
+        "strictly within the exact footprint outline defined by the green blocks — do not widen, "
+        "lengthen, or extend the building beyond those boundaries in any direction. The roofline "
+        "must align with the top of the green blocks.\n\n"
         "Architectural style: vertical wood cladding (natural or dark stained), light grey stucco, "
         "and warm brickwork (tegl). Large floor-to-ceiling windows, glass balconies with thin dark "
-        "metal frames, clean flat or low-pitched roofline. No solar panels. The building must stay "
-        "strictly within the exact footprint outline defined by the green blocks — do not widen, "
-        "lengthen, or extend the building beyond those boundaries in any direction.\n\n"
+        "metal frames, clean flat or low-pitched roofline. No solar panels.\n\n"
         "Lighting on the new building must match the sun direction and shadow angles already "
         "visible in the aerial photograph. Output a single photorealistic aerial photograph."
     )
@@ -2225,12 +2238,20 @@ def _typology_polygon_fill(
     info: Dict[str, Any] = {"source": "polygon-fill"}
 
     if typology == "Lamell":
-        # 2-3 parallelle rektangler langs major-aksen, 8-12m gap
+        # 2-4 parallelle rektangler langs major-aksen, 6-10m gap
+        # Øker max bars fra 3 til 4 og reduserer min gap — nødvendig for
+        # å nå høye %-BRA-mål (>250%) på trange tomter.
         bld_depth = min(13.0, minor * 0.28)
         bld_depth = max(11.0, bld_depth)
-        gap = min(12.0, max(8.0, minor * 0.15))
-        n_bars = max(2, min(3, int(minor / (bld_depth + gap))))
-        bld_width = min(major * 0.85, target_footprint_m2 / max(n_bars * bld_depth, 1.0))
+        # Bruk mindre gap når utnyttelsen er ambisiøs (target > 60% av tomt)
+        aggressive = target_footprint_m2 > poly_area * 0.60
+        gap_min = 6.0 if aggressive else 8.0
+        gap_max = 10.0 if aggressive else 12.0
+        gap = min(gap_max, max(gap_min, minor * 0.13))
+        n_bars = max(2, min(4, int(minor / (bld_depth + gap))))
+        # Bruk inntil 92% av major (i stedet for 85%) ved høy utnyttelse
+        width_share = 0.92 if aggressive else 0.85
+        bld_width = min(major * width_share, target_footprint_m2 / max(n_bars * bld_depth, 1.0))
         bld_width = max(20.0, bld_width)
 
         bars: List[Polygon] = []
@@ -2587,8 +2608,19 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
             filled_fp, fill_info = _typology_polygon_fill(
                 placement_polygon, typology, target_footprint, fill_angle,
             )
-            # Godta KUN hvis resultatet er >= 70% av target — ellers bruk skalering
-            if filled_fp is not None and not filled_fp.is_empty and filled_fp.area >= target_footprint * 0.70:
+            # Godta hvis fill-resultat er større enn forrige, ELLER >= 70% av target.
+            # Tidligere kastet vi fill-resultater som var mindre enn 70% av target,
+            # selv om de var større enn AI-planner-resultatet. Det førte til at
+            # vi beholdt et dårligere footprint. Nå: ta det største.
+            accept_fill = (
+                filled_fp is not None
+                and not filled_fp.is_empty
+                and (
+                    filled_fp.area > footprint_area  # større enn forrige → alltid bedre
+                    or filled_fp.area >= target_footprint * 0.70  # eller rimelig treff av target
+                )
+            )
+            if accept_fill:
                 footprint_polygon = filled_fp
                 footprint_area = float(footprint_polygon.area)
                 placement.update(fill_info)
@@ -5987,10 +6019,12 @@ def render_solar_snapshot(
     bg = (248, 250, 252, 255)
     img = Image.new('RGBA', (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img, 'RGBA')
-    font_label = _pil_font(20)
-    font_title = _pil_font(22, bold=True)
-    font_small = _pil_font(16)
-    font_north = _pil_font(18, bold=True)
+    # Font-størrelser økt for å overleve PDF-komprimering (1120 → ~605px):
+    # 16pt ved 1120px blir ~8.6pt i PDF. 24pt blir ~13pt — lesbart.
+    font_label = _pil_font(26)
+    font_title = _pil_font(28, bold=True)
+    font_small = _pil_font(24, bold=True)
+    font_north = _pil_font(24, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or []
     massing_parts = option.geometry.get('massing_parts', []) or []
@@ -6087,6 +6121,14 @@ def render_solar_snapshot(
     default_building_rgb = TYPOLOGY_COLOR_MAP.get(option.typology, (34, 197, 94))
 
     # Bygningsvolumer + skygger
+    # Tell bygg per typologi for å gi indeks-navn (Lamell 1, Lamell 2, ...)
+    _typology_counter: Dict[str, int] = {}
+    for _p in massing_parts:
+        _t = _p.get('typology', option.typology)
+        _typology_counter[_t] = _typology_counter.get(_t, 0) + 1
+    _typology_total = dict(_typology_counter)
+    _typology_idx: Dict[str, int] = {t: 0 for t in _typology_counter}
+
     for part in massing_parts:
         pcoords = flatten_coord_groups(part.get('coords', []))
         if not pcoords or len(pcoords) < 3:
@@ -6112,20 +6154,28 @@ def render_solar_snapshot(
             raw_c = part.get('color')
             if raw_c and len(raw_c) >= 3:
                 base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
-                base_c = (base_c[0], base_c[1], base_c[2], 230)
+                # Fullmettet fyll (alpha 255 i stedet for 230) — bedre kontrast ved PDF-scaling
+                base_c = (base_c[0], base_c[1], base_c[2], 255)
             else:
-                base_c = (default_building_rgb[0], default_building_rgb[1], default_building_rgb[2], 230)
-            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 250))
+                base_c = (default_building_rgb[0], default_building_rgb[1], default_building_rgb[2], 255)
+            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 255))
 
-            # Bygningslabel: etasjer + hoyde
+            # Bygningslabel: typologi-navn + indeks + etasjer/høyde (matcher Three.js-stil)
+            part_typology = part.get('typology', option.typology)
             floors = int(part.get('floors', option.floors))
+            _typology_idx[part_typology] = _typology_idx.get(part_typology, 0) + 1
+            if _typology_total.get(part_typology, 1) > 1:
+                lbl = f"{part_typology} {_typology_idx[part_typology]}  {floors}et / {h:.0f}m"
+            else:
+                lbl = f"{part_typology}  {floors}et / {h:.0f}m"
             avg_sx = sum(p[0] for p in pp) / len(pp)
             avg_sy = sum(p[1] for p in pp) / len(pp)
-            lbl = f"{floors}et/{h:.0f}m"
-            # Hvit boks bak tekst for lesbarhet
-            tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 8
-            draw.rectangle([(avg_sx - tw/2 - 4, avg_sy - 10), (avg_sx + tw/2 + 4, avg_sy + 10)], fill=(255, 255, 255, 220))
-            draw.text((avg_sx - tw/2, avg_sy - 8), lbl, fill=(26, 43, 72, 255), font=font_small)
+            # Mørk boks bak lys tekst — matcher skjermversjonen (Three.js)
+            tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 11
+            th = 34
+            box = [(avg_sx - tw/2 - 10, avg_sy - th/2), (avg_sx + tw/2 + 10, avg_sy + th/2)]
+            draw.rectangle(box, fill=(20, 30, 50, 230), outline=(255, 255, 255, 220), width=1)
+            draw.text((avg_sx - tw/2, avg_sy - th/2 + 5), lbl, fill=(245, 247, 251, 255), font=font_small)
 
     # Solretning-pil
     if sun_above:
@@ -6845,14 +6895,14 @@ def create_full_report_pdf(
                 snap = render_solar_snapshot(site, options[0], doy, hour, lbl)
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                     snap.convert("RGB").save(tmp.name, format="JPEG", quality=92)
-                    img_w = 160
+                    img_w = 170
                     img_h = img_w * (snap.height / max(snap.width, 1))
-                    if img_h > 110:
-                        img_h = 110
+                    if img_h > 130:
+                        img_h = 130
                         img_w = img_h * (snap.width / max(snap.height, 1))
                     pdf.check_space(int(img_h) + 20)
                     pdf.subtitle(lbl)
-                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                    pdf.image(tmp.name, x=20, y=pdf.get_y(), w=img_w)
                     pdf.ln(img_h + 6)
             except Exception:
                 pass
@@ -7286,9 +7336,19 @@ with st.expander("1. Prosjekt og lokasjon (SSOT)", expanded=True):
     c5.text_input("Land", value=pd_state.get("land", "Norge"), disabled=True)
 
 with st.expander("2. Tomtegeometri og regulering", expanded=True):
-    st.info(
-        "Dere kan bruke rektangulære fallback-tall, men modulen støtter også faktisk tomtepolygon, naboer og terreng."
-    )
+    # Sjekk om polygon er hentet — påvirker hvordan vi viser fallback-feltene
+    _polygon_loaded = st.session_state.get("auto_site_polygon") is not None
+    _polygon_area = float(st.session_state.auto_site_polygon.area) if _polygon_loaded else 0.0
+
+    if _polygon_loaded:
+        st.success(
+            f"✅ Bruker faktisk tomtepolygon ({_polygon_area:,.0f} m²). "
+            "Fallback-tallene under (areal, bredde, dybde) blir **ikke brukt** av motoren så lenge polygon er hentet."
+        )
+    else:
+        st.info(
+            "Dere kan bruke rektangulære fallback-tall, men modulen støtter også faktisk tomtepolygon, naboer og terreng."
+        )
     regulation_text = st.text_area(
         "Fritekst fra reguleringsplan (valgfritt, motoren henter ut BYA/BRA/høyde hvis den finner noe)",
         placeholder="Lim inn planbestemmelser, f.eks. %-BYA 35, maks gesimshøyde 12 m, 4 etasjer ...",
@@ -7300,9 +7360,26 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
 
     d1, d2, d3 = st.columns(3)
     default_site_area = max(1500.0, float(pd_state.get("bta", 0)) * 1.25) if pd_state.get("bta", 0) else 2500.0
-    site_area_m2 = d1.number_input("Tomteareal fallback (m²)", min_value=100.0, value=float(default_site_area), step=50.0)
-    site_width_m = d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0)
-    site_depth_m = d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0)
+    # Når polygon er lastet: vis faktisk areal som (disabled) info, men behold variabelen
+    # slik at all nedstrøms logikk som leser site_area_m2 fortsatt fungerer.
+    if _polygon_loaded:
+        d1.number_input(
+            "Tomteareal (fra polygon, m²)",
+            min_value=100.0,
+            value=round(_polygon_area, 0),
+            step=50.0,
+            disabled=True,
+            help="Dette er det faktiske arealet fra den hentede tomtepolygonen. Fallback-tallet under brukes kun hvis polygon fjernes.",
+        )
+        site_area_m2 = _polygon_area  # motoren skal uansett bruke polygon-areal
+        d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0, disabled=True)
+        d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0, disabled=True)
+        site_width_m = 45.0
+        site_depth_m = 55.0
+    else:
+        site_area_m2 = d1.number_input("Tomteareal fallback (m²)", min_value=100.0, value=float(default_site_area), step=50.0)
+        site_width_m = d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0)
+        site_depth_m = d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0)
 
     s1, s2, s3, s4 = st.columns(4)
     front_setback_m = s1.number_input("Byggegrense mot gate / front (m)", min_value=0.0, value=4.0, step=0.5)
