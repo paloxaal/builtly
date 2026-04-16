@@ -274,36 +274,54 @@ def generer_arkitekt_render(
     height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
 
     # 3. Presis prompt med strenge grenser for det grønne fotavtrykket
+    # Tell antall massing_parts (sammenhengende grønne volumer) — dette forteller Gemini
+    # hvor mange bygg som skal rendres, og hindrer den i å dele ETT volum i flere bygg.
+    try:
+        n_parts = len(option.geometry.get('massing_parts', []) or [])
+    except Exception:
+        n_parts = 1
+    n_parts = max(1, n_parts)
+    parts_phrase = (
+        f"exactly ONE single connected building" if n_parts == 1
+        else f"exactly {n_parts} separate building volumes"
+    )
+
     prompt = (
         "You are an architectural visualization artist performing a precise, localized edit on "
         "an aerial photograph of a real Norwegian neighborhood.\n\n"
-        "=== IMAGE LEGEND — READ CAREFULLY ===\n"
-        "The image contains three distinct types of content:\n"
-        "1. BRIGHT GREEN solid 3D volume blocks: these represent the NEW PROPOSED BUILDING. "
-        "These are the ONLY pixels you may modify. The green blocks define the EXACT footprint, "
-        "height, and number of building volumes for the new building.\n"
-        "2. GREY / DARK-BLUE / SEMI-TRANSPARENT box silhouettes: these are EXISTING NEIGHBOR "
-        "BUILDINGS drawn on top of the aerial photo to show context. They are NOT part of the new "
-        "proposal. Do NOT render them as solid new construction. Do NOT invent new buildings where "
-        "a grey box is drawn. Preserve them as they are — they represent real existing houses that "
-        "are already visible in the underlying aerial photo below the grey overlay.\n"
-        "3. The aerial photograph itself (roads, parking lots, trees, existing roofs, ground): "
-        "must remain pixel-perfect identical to the input.\n\n"
+        "=== IMAGE LEGEND — READ CAREFULLY BEFORE EDITING ===\n"
+        "The image contains THREE visually distinct layers:\n\n"
+        "LAYER 1 — BRIGHT SOLID GREEN 3D volume blocks: these are the ONLY pixels you may modify. "
+        "They mark the EXACT footprint, massing, and height of the NEW proposed building.\n\n"
+        "LAYER 2 — SEMI-TRANSPARENT GREY / DARK-BLUE WIREFRAME BOXES: these are overlays drawn on "
+        "top of EXISTING buildings in the aerial photo. You can see the real rooftops of these "
+        "existing buildings showing through the transparent grey. CRITICAL: even though you can "
+        "see rooftops under the grey boxes, these are EXISTING buildings that are already there in "
+        "reality — do NOT render them as new construction, do NOT replace them, do NOT modify them. "
+        "Leave them exactly as they appear in the input (transparent grey box on top of existing "
+        "aerial roof).\n\n"
+        "LAYER 3 — the aerial photograph itself (roads, parking, trees, existing roofs visible "
+        "between the grey boxes): must remain pixel-perfect identical to the input.\n\n"
+        "=== HOW TO INTERPRET THE GREEN VOLUMES ===\n"
+        f"This image shows {parts_phrase}. Count the connected green shapes — where green pixels "
+        "touch, that is ONE building; where they are separated by non-green pixels, those are "
+        "SEPARATE buildings. Render the new construction to match this count and geometry "
+        "precisely. Do NOT split one connected green shape into multiple buildings. Do NOT merge "
+        "separate green shapes into one building. Do NOT place any new building where there is "
+        "no green volume — even if the aerial photo shows empty space, asphalt, or an existing "
+        "grey-boxed building.\n\n"
         "=== STRICT PIXEL BOUNDARY RULE ===\n"
-        "Only pixels that are currently BRIGHT GREEN may be modified into new building surfaces. "
-        "Every other pixel — including grey neighbor boxes, aerial photo, shadows, roads — must "
-        "remain absolutely identical to the input. Do not extend the new building outward. Do not "
-        "add landscaping, plazas, or sidewalks beyond the green footprint. Do not merge the new "
-        "building with neighbor silhouettes. The new building's footprint, number of separate "
-        "volumes, and overall massing must EXACTLY match the green shapes — if there are two "
-        "separate green lamellas, render two separate lamellas. If the green shape is curved or "
-        "L-shaped, render exactly that curve or L-shape.\n\n"
+        "Only pixels that are currently BRIGHT GREEN may be transformed into new building "
+        "surfaces. Every other pixel — grey neighbor boxes, aerial photo, shadows, roads — must "
+        "remain absolutely identical to the input. Do NOT extend the new building outward beyond "
+        "the green shape. Do NOT add landscaping, plazas, or sidewalks around the new building. "
+        "The new building's footprint, number of volumes, and overall massing must EXACTLY match "
+        "the green shapes.\n\n"
         f"=== WITHIN THE GREEN VOLUME ONLY ===\n"
-        f"Render a photorealistic modern Norwegian {typology_eng} with exactly {floors} floors "
-        f"and a total height of approximately {height_m:.0f} meters. The building must stay "
-        "strictly within the exact footprint outline defined by the green blocks — do not widen, "
-        "lengthen, or extend the building beyond those boundaries in any direction. The roofline "
-        "must align with the top of the green blocks.\n\n"
+        f"Render {parts_phrase} as a photorealistic modern Norwegian {typology_eng} with exactly "
+        f"{floors} floors and a total height of approximately {height_m:.0f} meters. The roofline "
+        "must align with the top of the green volume. The building must fit precisely inside the "
+        "green footprint — no wider, no longer, no taller.\n\n"
         "Architectural style: vertical wood cladding (natural or dark stained), light grey stucco, "
         "and warm brickwork (tegl). Large floor-to-ceiling windows, glass balconies with thin dark "
         "metal frames, clean flat or low-pitched roofline. No solar panels.\n\n"
@@ -6014,9 +6032,13 @@ def render_solar_snapshot(
     """
     Plan-view sol/skygge-snapshot for en gitt dag og klokkeslett.
     Viser tomtegrense, bygningsvolumer, skyggepolygoner og solretning.
+
+    Fargepalett matcher Three.js-dashboard: mørk navy bakgrunn, lyse tekster,
+    grønne typologi-volumer med glow, tydelige label-bokser.
     """
     canvas_w, canvas_h = 1120, 840
-    bg = (248, 250, 252, 255)
+    # Mørk navy bakgrunn som matcher Three.js 3D-scenen
+    bg = (11, 20, 38, 255)  # #0b1426
     img = Image.new('RGBA', (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img, 'RGBA')
     # Font-størrelser økt for å overleve PDF-komprimering (1120 → ~605px):
@@ -6065,10 +6087,10 @@ def render_solar_snapshot(
     az_local = (az_deg - site.north_rotation_deg) % 360.0
     sun_above = alt_deg > 0.5
 
-    # Tomtegrense
+    # Tomtegrense — svakt lysere mot mørk bakgrunn, tynn lys kontur
     sp = pts(flatten_coord_groups(site_coords))
     if len(sp) >= 3:
-        draw.polygon(sp, fill=(232, 237, 243, 200), outline=(120, 135, 155, 200))
+        draw.polygon(sp, fill=(30, 44, 70, 180), outline=(120, 160, 210, 180))
 
     # Nabobygg + naboskygger — vis alle innenfor rimelig radius for å fange
     # skyggepåvirkning fra omkringliggende bebyggelse
@@ -6083,15 +6105,17 @@ def render_solar_snapshot(
             continue
         np_ = pts(ncoords)
         if len(np_) >= 3:
-            # Tydeligere nabobygg — mørkere fyll og sterkere kontur
-            draw.polygon(np_, fill=(170, 178, 192, 220), outline=(95, 105, 120, 255))
+            # Nabobygg på mørk bakgrunn: lys grå-blå fyll med lysere kontur,
+            # semi-transparent slik at de ser ut som wireframe-bokser (matcher Three.js)
+            draw.polygon(np_, fill=(170, 185, 210, 130), outline=(210, 225, 245, 220))
             # Nabohøyde-label (bare for nære naboer)
             nh_label = float(neighbor.get('height_m', 0))
             dist = math.hypot(avg_x - cx, avg_y - cy)
             if nh_label > 0 and dist < view_radius * 0.7:
                 nav_sx = sum(p[0] for p in np_) / len(np_)
                 nav_sy = sum(p[1] for p in np_) / len(np_)
-                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(60, 70, 85, 220), font=font_small)
+                # Lys tekst på mørk bakgrunn
+                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(190, 205, 225, 220), font=font_small)
         if sun_above:
             nh = float(neighbor.get('height_m', 9.0))
             if nh > 0:
@@ -6103,8 +6127,8 @@ def render_solar_snapshot(
                             ns_coords = geometry_to_coord_groups(n_shadow)
                             ns_pts = pts(flatten_coord_groups(ns_coords))
                             if len(ns_pts) >= 3:
-                                # Mye tydeligere naboskygger (alpha 35 → 110)
-                                draw.polygon(ns_pts, fill=(40, 50, 70, 110))
+                                # Naboskygger: mørkere enn bakgrunn (nesten svart)
+                                draw.polygon(ns_pts, fill=(3, 8, 16, 180))
                 except Exception:
                     pass
 
@@ -6143,9 +6167,8 @@ def render_solar_snapshot(
                         s_coords = geometry_to_coord_groups(shadow)
                         s_pts = pts(flatten_coord_groups(s_coords))
                         if len(s_pts) >= 3:
-                            # Mye tydeligere hovedbygg-skygge (alpha 55 → 130) og
-                            # mørk nøytral skyggefarge — ikke samme som bygget
-                            draw.polygon(s_pts, fill=(35, 45, 60, 130))
+                            # Bygnings-skygge: mørkere enn bakgrunn (nesten svart) — synlig på navy
+                            draw.polygon(s_pts, fill=(0, 4, 10, 200))
             except Exception:
                 pass
         pp = pts(pcoords)
@@ -6154,11 +6177,11 @@ def render_solar_snapshot(
             raw_c = part.get('color')
             if raw_c and len(raw_c) >= 3:
                 base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
-                # Fullmettet fyll (alpha 255 i stedet for 230) — bedre kontrast ved PDF-scaling
                 base_c = (base_c[0], base_c[1], base_c[2], 255)
             else:
                 base_c = (default_building_rgb[0], default_building_rgb[1], default_building_rgb[2], 255)
-            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 255))
+            # Lys kontur for tydelighet mot mørk bakgrunn
+            draw.polygon(pp, fill=base_c, outline=(245, 255, 250, 255))
 
             # Bygningslabel: typologi-navn + indeks + etasjer/høyde (matcher Three.js-stil)
             part_typology = part.get('typology', option.typology)
@@ -6177,7 +6200,7 @@ def render_solar_snapshot(
             draw.rectangle(box, fill=(20, 30, 50, 230), outline=(255, 255, 255, 220), width=1)
             draw.text((avg_sx - tw/2, avg_sy - th/2 + 5), lbl, fill=(245, 247, 251, 255), font=font_small)
 
-    # Solretning-pil
+    # Solretning-pil — gul glow (matcher Three.js sol)
     if sun_above:
         sun_rad = math.radians(az_local)
         arrow_len = 80
@@ -6186,26 +6209,31 @@ def render_solar_snapshot(
         dy = -math.cos(sun_rad) * arrow_len
         ax1, ay1 = arr_cx - dx * 0.5, arr_cy - dy * 0.5
         ax2, ay2 = arr_cx + dx * 0.5, arr_cy + dy * 0.5
-        draw.line([(ax1, ay1), (ax2, ay2)], fill=(245, 180, 30, 220), width=4)
-        draw.ellipse([(ax1 - 14, ay1 - 14), (ax1 + 14, ay1 + 14)], fill=(255, 210, 60, 200))
-        draw.text((ax1 - 5, ay1 - 8), "S", fill=(80, 50, 0, 255), font=font_north)
+        draw.line([(ax1, ay1), (ax2, ay2)], fill=(255, 200, 40, 255), width=5)
+        # Glow-effekt: myk ytre ring + solid kjerne
+        draw.ellipse([(ax1 - 20, ay1 - 20), (ax1 + 20, ay1 + 20)], fill=(255, 200, 40, 80))
+        draw.ellipse([(ax1 - 14, ay1 - 14), (ax1 + 14, ay1 + 14)], fill=(255, 220, 70, 255))
+        draw.text((ax1 - 6, ay1 - 10), "S", fill=(60, 40, 0, 255), font=font_north)
 
-    # Nordpil
+    # Nordpil — lys farge for synlighet på mørk bakgrunn
     nx, ny = 55, 55
-    draw.line((nx, ny + 30, nx, ny - 20), fill=(26, 43, 72, 200), width=3)
-    draw.polygon([(nx, ny - 30), (nx - 9, ny - 10), (nx + 9, ny - 10)], fill=(26, 43, 72, 200))
-    draw.text((nx - 5, ny + 34), 'N', fill=(26, 43, 72, 200), font=font_north)
+    nav_color = (200, 215, 235, 230)
+    draw.line((nx, ny + 30, nx, ny - 20), fill=nav_color, width=3)
+    draw.polygon([(nx, ny - 30), (nx - 9, ny - 10), (nx + 9, ny - 10)], fill=nav_color)
+    draw.text((nx - 7, ny + 34), 'N', fill=nav_color, font=font_north)
 
-    # Label
+    # Label-stripe nederst — mørk med lys kant
     month_names = {80: "21. mars", 172: "21. juni", 355: "21. des"}
     date_str = month_names.get(day_of_year, f"dag {day_of_year}")
     hour_str = f"{int(solar_hour):02d}:{int((solar_hour % 1) * 60):02d}"
     alt_str = f"h={alt_deg:.1f}\u00b0" if sun_above else "sol under horisont"
-    lbl_y = canvas_h - 70
-    draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(26, 43, 72, 220))
+    lbl_y = canvas_h - 80
+    draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(6, 12, 24, 255))
+    # Tynn lys separator på toppen av label-stripen
+    draw.line([(0, lbl_y), (canvas_w, lbl_y)], fill=(100, 130, 170, 200), width=2)
     display_label = label or f"{date_str} kl. {hour_str}"
-    draw.text((24, lbl_y + 10), display_label, fill=(245, 247, 251, 255), font=font_title)
-    draw.text((24, lbl_y + 38), f"Solhøyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 220), font=font_small)
+    draw.text((28, lbl_y + 14), display_label, fill=(245, 247, 251, 255), font=font_title)
+    draw.text((28, lbl_y + 48), f"Solhøyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 230), font=font_small)
 
     return img.convert('RGB')
 
