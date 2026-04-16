@@ -274,10 +274,11 @@ def generer_arkitekt_render(
     height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
 
     # 3. Enkel, direkte prompt — brukerens egen manuelle formulering som
-    # har fungert konsistent godt.
+    # har fungert konsistent godt. "Flatt tak" er nødvendig fordi Gemini
+    # ellers defaulter til saltak, som er uvanlig på moderne leilighetsbygg.
     prompt = (
         f"Kan du gjøre om det skraverte volumet i grønt her til et "
-        f"leilighetsbygg i {floors} etasjer? Alt annet uendret."
+        f"leilighetsbygg i {floors} etasjer med flatt tak? Alt annet uendret."
     )
 
     try:
@@ -5897,19 +5898,25 @@ def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
 
 
 def _render_context_summary(options: List[OptionResult], site: "SiteInputs", environment_data: Optional[Dict[str, Any]] = None) -> Image.Image:
-    """Rendrer en kompakt stedskontekst-oppsummering. Lys bakgrunn for PDF."""
+    """Rendrer en kompakt stedskontekst-oppsummering. Lys bakgrunn for PDF.
+
+    Font-størrelser og kontrast er designet for at tekst skal være lesbar
+    etter PDF-komprimering (1600 → ~600px). Tidligere var 16pt labels
+    ulesbar (~6pt i PDF); nå er de 28pt (~10pt i PDF) med sterk kontrast.
+    """
     env = environment_data or {}
     has_env = bool(env.get("available"))
-    h = 380 if not has_env else 510
+    h = 420 if not has_env else 570
     w = 1600
     img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    font_title = _pil_font(24, bold=True)
-    font_label = _pil_font(16)
-    font_value = _pil_font(22, bold=True)
+    # Font-størrelser betydelig økt for PDF-lesbarhet
+    font_title = _pil_font(36, bold=True)
+    font_label = _pil_font(22, bold=True)
+    font_value = _pil_font(34, bold=True)
 
-    draw.text((40, 16), "TOMTE- OG STEDSKONTEKST", fill=(26, 43, 72), font=font_title)
-    draw.rectangle([(40, 48), (340, 50)], fill=(0, 96, 155))
+    draw.text((40, 14), "TOMTE- OG STEDSKONTEKST", fill=(26, 43, 72), font=font_title)
+    draw.rectangle([(40, 60), (500, 64)], fill=(0, 96, 155))
 
     best = options[0] if options else None
     if best is None:
@@ -5927,20 +5934,23 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
         items.append(("%-BRA MÅL", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
 
     col_w = 370
+    card_h = 110
     for i, (label, value) in enumerate(items):
         col = i % 4
         row = i // 4
         x = 40 + col * col_w
-        y = 70 + row * 105
-        # Lys boks med subtil border
-        draw.rectangle([(x, y), (x + col_w - 24, y + 85)], fill=(247, 249, 252), outline=(200, 210, 225), width=1)
-        draw.text((x + 14, y + 10), label, fill=(120, 130, 145), font=font_label)
-        draw.text((x + 14, y + 38), value, fill=(26, 43, 72), font=font_value)
+        y = 90 + row * (card_h + 20)
+        # Tydeligere kort — solid lys bakgrunn med mørkere ramme
+        draw.rectangle([(x, y), (x + col_w - 24, y + card_h)], fill=(240, 244, 250), outline=(150, 170, 195), width=2)
+        # Label: mørkere (var 120,130,145 = for lys), nå blå-navy for kontrast
+        draw.text((x + 18, y + 14), label, fill=(70, 90, 120), font=font_label)
+        # Verdi: full navy
+        draw.text((x + 18, y + 54), value, fill=(26, 43, 72), font=font_value)
 
     if has_env:
-        env_y = 290
-        draw.text((40, env_y - 12), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
-        draw.rectangle([(40, env_y + 16), (220, env_y + 18)], fill=(0, 96, 155))
+        env_y = 330
+        draw.text((40, env_y - 14), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
+        draw.rectangle([(40, env_y + 32), (280, env_y + 36)], fill=(0, 96, 155))
 
         noise = env.get("noise", {})
         daylight = env.get("daylight", {})
@@ -5967,9 +5977,9 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
 
         for i, (label, value, color) in enumerate(env_items):
             x = 40 + i * col_w
-            draw.rectangle([(x, env_y + 28), (x + col_w - 24, env_y + 113)], fill=(247, 249, 252), outline=(200, 210, 225), width=1)
-            draw.text((x + 14, env_y + 38), label, fill=(120, 130, 145), font=font_label)
-            draw.text((x + 14, env_y + 66), value, fill=color, font=font_value)
+            draw.rectangle([(x, env_y + 56), (x + col_w - 24, env_y + 56 + card_h)], fill=(240, 244, 250), outline=(150, 170, 195), width=2)
+            draw.text((x + 18, env_y + 70), label, fill=(70, 90, 120), font=font_label)
+            draw.text((x + 18, env_y + 110), value, fill=color, font=font_value)
 
     return img
 
@@ -5984,23 +5994,21 @@ def render_solar_snapshot(
     label: str = "",
 ) -> Image.Image:
     """
-    Plan-view sol/skygge-snapshot for en gitt dag og klokkeslett.
-    Viser tomtegrense, bygningsvolumer, skyggepolygoner og solretning.
+    Isometrisk 3D sol/skygge-snapshot — matcher Three.js-dashboardets estetikk.
 
-    Fargepalett matcher Three.js-dashboard: mørk navy bakgrunn, lyse tekster,
-    grønne typologi-volumer med glow, tydelige label-bokser.
+    Viser bygningsvolumer, skygger og nabobygg i isometrisk projeksjon med
+    mørk navy bakgrunn, grønne volumer med glow, hvite label-bokser.
+    Erstattet tidligere top-down 2D-plot med 3D-stil for å matche skjermen.
     """
+    import math as _m
     canvas_w, canvas_h = 1120, 840
-    # Mørk navy bakgrunn som matcher Three.js 3D-scenen
-    bg = (11, 20, 38, 255)  # #0b1426
+    bg = (11, 20, 38, 255)
     img = Image.new('RGBA', (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img, 'RGBA')
-    # Font-størrelser økt for å overleve PDF-komprimering (1120 → ~605px):
-    # 16pt ved 1120px blir ~8.6pt i PDF. 24pt blir ~13pt — lesbart.
-    font_label = _pil_font(26)
     font_title = _pil_font(28, bold=True)
     font_small = _pil_font(24, bold=True)
     font_north = _pil_font(24, bold=True)
+    font_info = _pil_font(18)
 
     site_coords = option.geometry.get('site_polygon_coords') or []
     massing_parts = option.geometry.get('massing_parts', []) or []
@@ -6015,24 +6023,59 @@ def render_solar_snapshot(
     cy = (min(sys_) + max(sys_)) / 2.0
     site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    # Utvid visningsspennet til å inkludere naboer innenfor view_radius,
-    # slik at omkringliggende bygg med sine skygger blir synlige i snapshoten.
-    # Dette må beregnes før scale settes.
-    view_radius_est = max(site_span * 1.5, 150.0)
-    # Legg til plass for skygger (opp til ~60m lange ved lav sol)
-    display_span = max(site_span + 2 * view_radius_est * 0.6, site_span)
+    # Isometrisk projeksjon-parametere
+    ISO_ANGLE = _m.radians(30.0)
+    COS_A = _m.cos(ISO_ANGLE)
+    SIN_A = _m.sin(ISO_ANGLE)
+    Z_SCALE = 1.4
 
-    margin = 100
-    target_span = min(canvas_w, canvas_h) - 2 * margin
-    scale = target_span / display_span
-    ox = canvas_w / 2.0
-    oy = canvas_h / 2.0
+    # View-radius: inkluder naboer litt utenfor tomtegrensen for kontekst
+    view_radius = max(site_span * 1.3, 120.0)
+    display_span = site_span + view_radius * 0.8
 
-    def proj(x, y):
-        return ox + (x - cx) * scale, oy - (y - cy) * scale
+    target_screen_span = min(canvas_w, canvas_h) * 0.62
+    pixel_scale = target_screen_span / display_span
 
-    def pts(coords):
-        return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
+    screen_cx = canvas_w * 0.5
+    screen_cy = canvas_h * 0.58  # Litt ned for å gi høyde-rom
+
+    def iso_project(x, y, z=0.0):
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
+        return sx, sy
+
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
+
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), c[3] if len(c) > 3 else 255)
+
+    def lighten(c, a):
+        return (min(255, c[0]+a), min(255, c[1]+a), min(255, c[2]+a), c[3] if len(c) > 3 else 255)
+
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
 
     # Solar beregninger
     lat = site.latitude_deg
@@ -6041,149 +6084,162 @@ def render_solar_snapshot(
     az_local = (az_deg - site.north_rotation_deg) % 360.0
     sun_above = alt_deg > 0.5
 
-    # Tomtegrense — svakt lysere mot mørk bakgrunn, tynn lys kontur
-    sp = pts(flatten_coord_groups(site_coords))
-    if len(sp) >= 3:
-        draw.polygon(sp, fill=(30, 44, 70, 180), outline=(120, 160, 210, 180))
+    # --- Bakkeplan: tomtegrense som subtilt lysere område ---
+    site_iso = iso_pts(flatten_coord_groups(site_coords), 0.0)
+    if len(site_iso) >= 3:
+        draw.polygon(site_iso, fill=(22, 36, 58, 220), outline=(90, 130, 180, 180))
 
-    # Nabobygg + naboskygger — vis alle innenfor rimelig radius for å fange
-    # skyggepåvirkning fra omkringliggende bebyggelse
-    view_radius = max(site_span * 1.5, 150.0)  # Minst 150m eller 1.5x tomtespennet
+    # --- Samle volumer for depth-sorting (bak-til-frem basert på y-koord) ---
+    volumes = []
+
+    # Nabobygg
     for neighbor in neighbor_polys:
         ncoords = flatten_coord_groups(neighbor.get('coords', []))
         if not ncoords:
             continue
         avg_x = sum(p[0] for p in ncoords) / len(ncoords)
         avg_y = sum(p[1] for p in ncoords) / len(ncoords)
-        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+        if _m.hypot(avg_x - cx, avg_y - cy) > view_radius:
             continue
-        np_ = pts(ncoords)
-        if len(np_) >= 3:
-            # Nabobygg på mørk bakgrunn: lys grå-blå fyll med lysere kontur,
-            # semi-transparent slik at de ser ut som wireframe-bokser (matcher Three.js)
-            draw.polygon(np_, fill=(170, 185, 210, 130), outline=(210, 225, 245, 220))
-            # Nabohøyde-label (bare for nære naboer)
-            nh_label = float(neighbor.get('height_m', 0))
-            dist = math.hypot(avg_x - cx, avg_y - cy)
-            if nh_label > 0 and dist < view_radius * 0.7:
-                nav_sx = sum(p[0] for p in np_) / len(np_)
-                nav_sy = sum(p[1] for p in np_) / len(np_)
-                # Lys tekst på mørk bakgrunn
-                draw.text((nav_sx - 8, nav_sy - 6), f"{nh_label:.0f}m", fill=(190, 205, 225, 220), font=font_small)
-        if sun_above:
-            nh = float(neighbor.get('height_m', 9.0))
-            if nh > 0:
-                try:
-                    nfp = Polygon([(p[0], p[1]) for p in ncoords])
-                    if nfp.is_valid and not nfp.is_empty:
-                        n_shadow = build_shadow_polygon(nfp, nh, az_local, alt_deg, None)
-                        if n_shadow and not n_shadow.is_empty:
-                            ns_coords = geometry_to_coord_groups(n_shadow)
-                            ns_pts = pts(flatten_coord_groups(ns_coords))
-                            if len(ns_pts) >= 3:
-                                # Naboskygger: mørkere enn bakgrunn (nesten svart)
-                                draw.polygon(ns_pts, fill=(3, 8, 16, 180))
-                except Exception:
-                    pass
+        h_n = float(neighbor.get('height_m', 9.0))
+        volumes.append({
+            'type': 'neighbor',
+            'coords': ncoords,
+            'height_m': max(h_n, 3.0),
+            'depth_key': avg_x + avg_y,
+            'avg_x': avg_x,
+            'avg_y': avg_y,
+        })
 
-    # Typologi-fargepalett (matcher 3D-dashboard i Three.js)
+    # Nye bygg (massing_parts)
     TYPOLOGY_COLOR_MAP = {
-        "Lamell":        (34, 197, 94),    # grønn
-        "Punkthus":      (56, 189, 248),   # blå
-        "Tun":           (168, 130, 240),  # lilla
-        "Rekke":         (250, 180, 60),   # gul/oransje
-        "Podium + Tårn": (220, 80, 120),   # rosa
-        "Karré":         (100, 200, 180),  # teal
-        "Tårn":          (56, 140, 248),   # mørkere blå
+        "Lamell":        (34, 197, 94),
+        "Punkthus":      (56, 189, 248),
+        "Tun":           (168, 130, 240),
+        "Rekke":         (250, 180, 60),
+        "Podium + Tårn": (220, 80, 120),
+        "Karré":         (100, 200, 180),
+        "Tårn":          (56, 140, 248),
     }
-    default_building_rgb = TYPOLOGY_COLOR_MAP.get(option.typology, (34, 197, 94))
-
-    # Bygningsvolumer + skygger
-    # Tell bygg per typologi for å gi indeks-navn (Lamell 1, Lamell 2, ...)
-    _typology_counter: Dict[str, int] = {}
-    for _p in massing_parts:
-        _t = _p.get('typology', option.typology)
-        _typology_counter[_t] = _typology_counter.get(_t, 0) + 1
-    _typology_total = dict(_typology_counter)
-    _typology_idx: Dict[str, int] = {t: 0 for t in _typology_counter}
+    default_rgb = TYPOLOGY_COLOR_MAP.get(option.typology, (34, 197, 94))
 
     for part in massing_parts:
         pcoords = flatten_coord_groups(part.get('coords', []))
         if not pcoords or len(pcoords) < 3:
             continue
-        h = float(part.get('height_m', option.building_height_m))
-        if sun_above and h > 0:
+        avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+        avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+        h_p = float(part.get('height_m', option.building_height_m))
+        raw_c = part.get('color')
+        if raw_c and len(raw_c) >= 3:
+            base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
+        else:
+            base_c = default_rgb
+        volumes.append({
+            'type': 'main',
+            'coords': pcoords,
+            'height_m': h_p,
+            'color': base_c,
+            'floors': int(part.get('floors', option.floors)),
+            'typology': part.get('typology', option.typology),
+            'depth_key': avg_x + avg_y,
+            'avg_x': avg_x,
+            'avg_y': avg_y,
+        })
+
+    # Sorter: bakerst først
+    volumes.sort(key=lambda v: v['depth_key'])
+
+    # --- Tegn skygger på bakkeplan (før volumer) ---
+    if sun_above:
+        for vol in volumes:
             try:
-                fp = Polygon([(p[0], p[1]) for p in pcoords])
+                fp = Polygon([(p[0], p[1]) for p in vol['coords']])
                 if fp.is_valid and not fp.is_empty:
-                    shadow = build_shadow_polygon(fp, h, az_local, alt_deg, None)
+                    shadow = build_shadow_polygon(fp, vol['height_m'], az_local, alt_deg, None)
                     if shadow and not shadow.is_empty:
                         s_coords = geometry_to_coord_groups(shadow)
-                        s_pts = pts(flatten_coord_groups(s_coords))
+                        s_flat = flatten_coord_groups(s_coords)
+                        s_pts = iso_pts(s_flat, 0.0)
                         if len(s_pts) >= 3:
-                            # Bygnings-skygge: mørkere enn bakgrunn (nesten svart) — synlig på navy
-                            draw.polygon(s_pts, fill=(0, 4, 10, 200))
+                            # Skygge: mørkere enn bakkeplan
+                            shadow_c = (2, 6, 14, 210) if vol['type'] == 'main' else (4, 10, 20, 160)
+                            draw.polygon(s_pts, fill=shadow_c)
             except Exception:
                 pass
-        pp = pts(pcoords)
-        if len(pp) >= 3:
-            # Bruk typologi-basert farge, ikke den gamle _BUILTLY_BLUE-defaulten
-            raw_c = part.get('color')
-            if raw_c and len(raw_c) >= 3:
-                base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
-                base_c = (base_c[0], base_c[1], base_c[2], 255)
-            else:
-                base_c = (default_building_rgb[0], default_building_rgb[1], default_building_rgb[2], 255)
-            # Lys kontur for tydelighet mot mørk bakgrunn
-            draw.polygon(pp, fill=base_c, outline=(245, 255, 250, 255))
 
-            # Bygningslabel: typologi-navn + indeks + etasjer/høyde (matcher Three.js-stil)
-            part_typology = part.get('typology', option.typology)
-            floors = int(part.get('floors', option.floors))
-            _typology_idx[part_typology] = _typology_idx.get(part_typology, 0) + 1
-            if _typology_total.get(part_typology, 1) > 1:
-                lbl = f"{part_typology} {_typology_idx[part_typology]}  {floors}et / {h:.0f}m"
+    # --- Tegn volumer (bak-til-frem) ---
+    # Tell typologier for label-indeks
+    typo_counter = {}
+    for v in volumes:
+        if v['type'] == 'main':
+            typo_counter[v['typology']] = typo_counter.get(v['typology'], 0) + 1
+    typo_total = dict(typo_counter)
+    typo_idx = {k: 0 for k in typo_counter}
+
+    for vol in volumes:
+        h = vol['height_m']
+        coords = vol['coords']
+        if vol['type'] == 'neighbor':
+            # Lyse wireframe-nabobygg (matcher Three.js-stil)
+            alpha = min(130, int(70 + h * 3))
+            top_c = (155, 170, 195, alpha)
+            side_c = (130, 145, 170, alpha)
+            out_c = (200, 215, 235, min(200, alpha + 50))
+            draw_extruded(coords, h, top_c, side_c, out_c, 1)
+            # Høyde-label
+            if h > 5:
+                lx, ly = iso_project(vol['avg_x'], vol['avg_y'], h * 1.08)
+                draw.text((lx - 12, ly - 8), f"{h:.0f}m", fill=(180, 195, 220, 200), font=font_info)
+        else:
+            # Hovedbygg: fullmettet farge, lys kontur
+            base = vol['color']
+            top_c = (base[0], base[1], base[2], 245)
+            side_c = darken((base[0], base[1], base[2], 230), 0.78)
+            out_c = (250, 255, 250, 255)
+            draw_extruded(coords, h, top_c, side_c, out_c, 2)
+            # Label-boks med etasje + høyde
+            typo = vol['typology']
+            typo_idx[typo] = typo_idx.get(typo, 0) + 1
+            if typo_total.get(typo, 1) > 1:
+                lbl = f"{typo} {typo_idx[typo]}  {vol['floors']}et / {h:.0f}m"
             else:
-                lbl = f"{part_typology}  {floors}et / {h:.0f}m"
-            avg_sx = sum(p[0] for p in pp) / len(pp)
-            avg_sy = sum(p[1] for p in pp) / len(pp)
-            # Mørk boks bak lys tekst — matcher skjermversjonen (Three.js)
+                lbl = f"{typo}  {vol['floors']}et / {h:.0f}m"
+            lx, ly = iso_project(vol['avg_x'], vol['avg_y'], h * 1.05)
             tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 11
             th = 34
-            box = [(avg_sx - tw/2 - 10, avg_sy - th/2), (avg_sx + tw/2 + 10, avg_sy + th/2)]
-            draw.rectangle(box, fill=(20, 30, 50, 230), outline=(255, 255, 255, 220), width=1)
-            draw.text((avg_sx - tw/2, avg_sy - th/2 + 5), lbl, fill=(245, 247, 251, 255), font=font_small)
+            box = [(lx - tw/2 - 10, ly - th/2 - 2), (lx + tw/2 + 10, ly + th/2 + 2)]
+            draw.rectangle(box, fill=(20, 30, 50, 235), outline=(255, 255, 255, 220), width=1)
+            draw.text((lx - tw/2, ly - th/2 + 3), lbl, fill=(245, 247, 251, 255), font=font_small)
 
-    # Solretning-pil — gul glow (matcher Three.js sol)
+    # --- Solretning-pil (hjørnet øverst til høyre) ---
     if sun_above:
-        sun_rad = math.radians(az_local)
-        arrow_len = 80
-        arr_cx, arr_cy = canvas_w - 120, 80
-        dx = math.sin(sun_rad) * arrow_len
-        dy = -math.cos(sun_rad) * arrow_len
+        sun_rad = _m.radians(az_local)
+        arrow_len = 85
+        arr_cx, arr_cy = canvas_w - 130, 90
+        dx = _m.sin(sun_rad) * arrow_len
+        dy = -_m.cos(sun_rad) * arrow_len
         ax1, ay1 = arr_cx - dx * 0.5, arr_cy - dy * 0.5
         ax2, ay2 = arr_cx + dx * 0.5, arr_cy + dy * 0.5
         draw.line([(ax1, ay1), (ax2, ay2)], fill=(255, 200, 40, 255), width=5)
-        # Glow-effekt: myk ytre ring + solid kjerne
-        draw.ellipse([(ax1 - 20, ay1 - 20), (ax1 + 20, ay1 + 20)], fill=(255, 200, 40, 80))
+        draw.ellipse([(ax1 - 22, ay1 - 22), (ax1 + 22, ay1 + 22)], fill=(255, 200, 40, 70))
         draw.ellipse([(ax1 - 14, ay1 - 14), (ax1 + 14, ay1 + 14)], fill=(255, 220, 70, 255))
-        draw.text((ax1 - 6, ay1 - 10), "S", fill=(60, 40, 0, 255), font=font_north)
+        draw.text((ax1 - 7, ay1 - 10), "S", fill=(60, 40, 0, 255), font=font_north)
 
-    # Nordpil — lys farge for synlighet på mørk bakgrunn
-    nx, ny = 55, 55
+    # --- Nordpil (hjørnet øverst til venstre) ---
+    nx, ny = 60, 60
     nav_color = (200, 215, 235, 230)
-    draw.line((nx, ny + 30, nx, ny - 20), fill=nav_color, width=3)
-    draw.polygon([(nx, ny - 30), (nx - 9, ny - 10), (nx + 9, ny - 10)], fill=nav_color)
-    draw.text((nx - 7, ny + 34), 'N', fill=nav_color, font=font_north)
+    draw.line((nx, ny + 32, nx, ny - 22), fill=nav_color, width=3)
+    draw.polygon([(nx, ny - 32), (nx - 10, ny - 10), (nx + 10, ny - 10)], fill=nav_color)
+    draw.text((nx - 8, ny + 36), 'N', fill=nav_color, font=font_north)
 
-    # Label-stripe nederst — mørk med lys kant
+    # --- Label-stripe nederst ---
     month_names = {80: "21. mars", 172: "21. juni", 355: "21. des"}
     date_str = month_names.get(day_of_year, f"dag {day_of_year}")
     hour_str = f"{int(solar_hour):02d}:{int((solar_hour % 1) * 60):02d}"
     alt_str = f"h={alt_deg:.1f}\u00b0" if sun_above else "sol under horisont"
     lbl_y = canvas_h - 80
     draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(6, 12, 24, 255))
-    # Tynn lys separator på toppen av label-stripen
     draw.line([(0, lbl_y), (canvas_w, lbl_y)], fill=(100, 130, 170, 200), width=2)
     display_label = label or f"{date_str} kl. {hour_str}"
     draw.text((28, lbl_y + 14), display_label, fill=(245, 247, 251, 255), font=font_title)
