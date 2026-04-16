@@ -174,25 +174,53 @@ def _env(name: str) -> str:
 
 # ── Supabase ─────────────────────────────────────────────────────────────────
 
-@st.cache_resource
+# VIKTIG om multi-bruker-sikkerhet:
+# Tidligere var disse funksjonene dekorert med @st.cache_resource, som deler
+# ÉN enkelt Supabase-client mellom ALLE brukere på serveren. Dette er farlig
+# fordi Supabase-clienten har intern auth-state (access/refresh token). Når
+# Bruker A logger inn muterer sb.auth.sign_in_with_password() clientens
+# token globalt — Bruker B's spørringer ville dermed kunne bruke A's token.
+#
+# Løsning: hver Streamlit-session får sin egen client-instans, lagret i
+# st.session_state. Streamlit garanterer at session_state er isolert per
+# browser-session, så to brukere kan ikke dele client lenger.
+
 def _sb_client():
+    """Anon Supabase-client, isolert per Streamlit-session."""
+    existing = st.session_state.get("_sb_anon_client")
+    if existing is not None:
+        return existing
     url, key = _env("SUPABASE_URL"), _env("SUPABASE_KEY")
     if not url or not key:
         return None
     try:
         from supabase import create_client
-        return create_client(url, key)
+        client = create_client(url, key)
+        st.session_state["_sb_anon_client"] = client
+        return client
     except Exception:
         return None
 
-@st.cache_resource
+
 def _sb_admin():
+    """Service-key (admin) Supabase-client, isolert per Streamlit-session.
+
+    Service-key autentiseres ikke som en bruker (har full DB-tilgang),
+    så den har ikke samme token-mutation-problemet som anon-clienten.
+    Men vi holder den session-isolert uansett for konsistens og for å
+    unngå at admin-client-instansen deles via Streamlits globale cache.
+    """
+    existing = st.session_state.get("_sb_admin_client")
+    if existing is not None:
+        return existing
     url, key = _env("SUPABASE_URL"), _env("SUPABASE_SERVICE_KEY")
     if not url or not key:
         return None
     try:
         from supabase import create_client
-        return create_client(url, key)
+        client = create_client(url, key)
+        st.session_state["_sb_admin_client"] = client
+        return client
     except Exception:
         return None
 
@@ -302,6 +330,11 @@ def logout():
             if isinstance(st.session_state[key], bool): st.session_state[key] = False
             elif isinstance(st.session_state[key], list): st.session_state[key] = []
             else: st.session_state[key] = ""
+    # Fjern client-instansene helt fra session_state slik at neste bruker
+    # (hvis samme browser brukes for login på ny) får en ren, uautentisert client.
+    for client_key in ("_sb_anon_client", "_sb_admin_client"):
+        if client_key in st.session_state:
+            del st.session_state[client_key]
 
 
 def resend_verification(email: str, lang: str = "") -> Tuple[bool, str]:
@@ -526,6 +559,10 @@ def _clear_auth_state():
         "_sb_access_token": "",
         "_sb_refresh_token": "",
     })
+    # Fjern client-instansene så neste bruker får ren, uautentisert client
+    for client_key in ("_sb_anon_client", "_sb_admin_client"):
+        if client_key in st.session_state:
+            del st.session_state[client_key]
 
 # ── STRIPE ───────────────────────────────────────────────────────────────────
 
