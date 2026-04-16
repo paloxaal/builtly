@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-ximport base64
+import base64
 from pathlib import Path
 import requests
 import urllib.parse
