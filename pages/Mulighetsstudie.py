@@ -5237,14 +5237,25 @@ def render_view_from_building(
     terrain_ctx: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    First-person-visning fra en gitt etasje og himmelretning på bygget.
-    Kameraet plasseres på fasaden i øyehøyde, og brukeren kan se seg rundt
-    med muselook. Naboer, terreng og horisont rendres slik at man kan
-    vurdere utsiktsforhold og skjerming fra omkringliggende bebyggelse.
+    First-person-visning fra en gitt etasje og himmelretning på bygget,
+    med ekte Google Photorealistic 3D Maps som bakgrunn (gmp-map-3d Web Component).
+    Egne volumer tegnes som gmp-polygon-3d oppå 3D-bakgrunnen.
+    Kameraet plasseres på fasaden i balkonghøyde og ser utover mot valgt retning.
+
+    Merk: gmp-map-3d er Google's high-level wrapper for Photorealistic 3D Tiles,
+    tilgjengelig i EEA (Norge), i motsetning til det lavnivå Map Tiles API.
     """
+    # Sjekk API-nøkkel
+    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not api_key:
+        st.warning(
+            "Utsiktsvisningen krever GOOGLE_API_KEY med Maps JavaScript API aktivert. "
+            "Legg til nøkkelen i miljøvariablene for å se fotorealistisk 3D-utsikt."
+        )
+        return
+
     geometry = option.geometry or {}
     site_coords = geometry.get('site_polygon_coords') or []
-    neighbor_polys = geometry.get('neighbor_polygons', [])
     massing_parts = geometry.get('massing_parts', []) or []
     footprint_coords = geometry.get('footprint_polygon_coords') or []
 
@@ -5254,23 +5265,8 @@ def render_view_from_building(
         return
     center_x = sum(p[0] for p in flat_site) / len(flat_site)
     center_y = sum(p[1] for p in flat_site) / len(flat_site)
-    site_span = max(
-        max(p[0] for p in flat_site) - min(p[0] for p in flat_site),
-        max(p[1] for p in flat_site) - min(p[1] for p in flat_site),
-        1.0,
-    )
 
-    def to_local(groups):
-        out = []
-        for ring in groups:
-            local_ring = []
-            for pt in ring:
-                local_ring.append([round(pt[0] - center_x, 2), round(pt[1] - center_y, 2)])
-            out.append(local_ring)
-        return out
-
-    # Finn kamerapunkt: midtpunkt av fasaden mot valgt himmelretning
-    # Bruk største massing part som referanse
+    # Finn kamerapunkt: fasaden mot valgt himmelretning på største massing-part
     parts_for_camera = massing_parts if massing_parts else (
         [{"coords": footprint_coords, "height_m": option.building_height_m}]
         if footprint_coords else []
@@ -5279,7 +5275,6 @@ def render_view_from_building(
         st.warning("Ingen bygningsgeometri å plassere kamera i.")
         return
 
-    # Velg den største partien
     def _part_area(part):
         c = flatten_coord_groups(part.get('coords', []))
         if len(c) < 3:
@@ -5288,27 +5283,28 @@ def render_view_from_building(
             return Polygon([(p[0], p[1]) for p in c]).area
         except Exception:
             return 0.0
+
     main_part = max(parts_for_camera, key=_part_area)
     main_coords = flatten_coord_groups(main_part.get('coords', []))
     if len(main_coords) < 3:
         st.warning("Kunne ikke plassere kamera — ugyldig bygningspolygon.")
         return
 
-    # Finn kamerapunkt: ytterkant av fotavtrykket mot valgt retning
-    # Retningsvektor (lokal tomtekoord: +y = nord, +x = øst)
+    # Retningsvektor (UTM-koord: +y = nord, +x = øst)
     dir_map = {
         "N": (0.0, 1.0),
         "Ø": (1.0, 0.0),
         "S": (0.0, -1.0),
         "V": (-1.0, 0.0),
     }
+    # Heading i Google Maps: 0 = nord, 90 = øst, 180 = sør, 270 = vest
+    heading_map = {"N": 0, "Ø": 90, "S": 180, "V": 270}
     dx_dir, dy_dir = dir_map.get(direction, (0.0, -1.0))
+    heading_deg = heading_map.get(direction, 180)
 
-    # Finn kanten av fotavtrykket som ligger lengst mot valgt retning
-    # Projiser alle polygon-punkter på retningen, finn maks
+    # Finn ytterkanten av fotavtrykket mot valgt retning
     projections = [(p[0] * dx_dir + p[1] * dy_dir, p) for p in main_coords]
-    projections.sort(key=lambda x: -x[0])  # Største projeksjon = ytterst
-    # Midtpunkt av de to ytterste punktene (gir midt av fasaden)
+    projections.sort(key=lambda x: -x[0])
     if len(projections) >= 2:
         p_a = projections[0][1]
         p_b = projections[1][1]
@@ -5317,269 +5313,225 @@ def render_view_from_building(
     else:
         edge_cx, edge_cy = projections[0][1][0], projections[0][1][1]
 
-    # Dytt kameraet litt utover fasaden (balkong-avstand ~2m)
-    cam_global_x = edge_cx + dx_dir * 2.0
-    cam_global_y = edge_cy + dy_dir * 2.0
-    cam_local_x = round(cam_global_x - center_x, 2)
-    cam_local_y = round(cam_global_y - center_y, 2)
+    # Dytt kameraet 2m utover fasaden (balkong-avstand)
+    cam_utm_x = edge_cx + dx_dir * 2.0
+    cam_utm_y = edge_cy + dy_dir * 2.0
 
-    # Kamerahøyde: etasjegulv + øyehøyde (1.6m)
+    # Konverter UTM til WGS84 lat/lng
+    if not HAS_PYPROJ:
+        st.warning(
+            "Utsiktsvisningen krever pyproj for å konvertere tomtekoordinater til lat/lng. "
+            "Installer pyproj i miljøet."
+        )
+        return
+
+    try:
+        transformer = Transformer.from_crs(25833, 4326, always_xy=True)
+        cam_lng, cam_lat = transformer.transform(cam_utm_x, cam_utm_y)
+    except Exception as exc:
+        st.warning(f"Kunne ikke projisere kamerakoordinater: {exc}")
+        return
+
+    # Kamera-altitude (over havet): bakkenivå + etasjehøyde + øyehøyde
+    # Henter base-elevasjon fra terrain_ctx hvis tilgjengelig, ellers Google håndterer
+    base_elevation = 0.0
+    if terrain_ctx and terrain_ctx.get('min_elev_m') is not None:
+        base_elevation = float(terrain_ctx.get('min_elev_m', 0.0))
     floor_height = float(option.building_height_m) / max(int(option.floors), 1)
-    cam_z = (floor - 1) * floor_height + 1.6
+    cam_altitude = base_elevation + (floor - 1) * floor_height + 1.6  # 1.6m øyehøyde
 
-    # Scene data (samme struktur som render_interactive_3d)
-    scene_data = {
-        "site_span": round(site_span, 1),
-        "volumes": [],
-        "neighbors": [],
-        "terrain": None,
-        "camera": {
-            "x": cam_local_x,
-            "y": cam_local_y,
-            "z": round(cam_z, 2),
-            "look_dx": dx_dir,
-            "look_dy": dy_dir,
-        },
-    }
+    # Projiser alle bygningsvolumer til lat/lng for gmp-polygon-3d
+    def project_coords_to_latlng(coords_xy):
+        try:
+            tx = Transformer.from_crs(25833, 4326, always_xy=True)
+            return [
+                {"lat": round(tx.transform(float(p[0]), float(p[1]))[1], 7),
+                 "lng": round(tx.transform(float(p[0]), float(p[1]))[0], 7)}
+                for p in coords_xy if len(p) >= 2
+            ]
+        except Exception:
+            return []
 
-    if terrain_ctx and terrain_ctx.get('sample_points'):
-        samples = terrain_ctx['sample_points']
-        min_elev = terrain_ctx.get('min_elev_m', 0.0)
-        scene_data["terrain"] = {
-            "points": [
-                {"x": round(s["x"] - center_x, 2), "y": round(s["y"] - center_y, 2), "z": round(s["z"] - min_elev, 2)}
-                for s in samples
-            ],
-            "min_elev": round(float(min_elev), 2),
-        }
-
-    # Egne bygg
+    volumes_data = []
     for part in massing_parts:
         pc = flatten_coord_groups(part.get('coords', []))
-        if not pc:
+        if len(pc) < 3:
             continue
-        scene_data["volumes"].append({
-            "rings": to_local([pc]),
-            "height": float(part.get('height_m', option.building_height_m)),
+        latlng_ring = project_coords_to_latlng(pc)
+        if len(latlng_ring) < 3:
+            continue
+        height_m = float(part.get('height_m', option.building_height_m))
+        # Sørg for at polygonet lukkes (første = siste)
+        if (latlng_ring[0]["lat"] != latlng_ring[-1]["lat"] or
+                latlng_ring[0]["lng"] != latlng_ring[-1]["lng"]):
+            latlng_ring.append(latlng_ring[0])
+        volumes_data.append({
+            "ring": latlng_ring,
+            "top_altitude": base_elevation + height_m,
+            "base_altitude": base_elevation,
         })
-    if not massing_parts:
+    # Hvis ingen massing_parts, bruk footprint
+    if not volumes_data and footprint_coords:
         fc = flatten_coord_groups(footprint_coords)
-        if fc:
-            scene_data["volumes"].append({
-                "rings": to_local([fc]),
-                "height": float(option.building_height_m),
-            })
+        if len(fc) >= 3:
+            latlng_ring = project_coords_to_latlng(fc)
+            if len(latlng_ring) >= 3:
+                if (latlng_ring[0]["lat"] != latlng_ring[-1]["lat"] or
+                        latlng_ring[0]["lng"] != latlng_ring[-1]["lng"]):
+                    latlng_ring.append(latlng_ring[0])
+                volumes_data.append({
+                    "ring": latlng_ring,
+                    "top_altitude": base_elevation + float(option.building_height_m),
+                    "base_altitude": base_elevation,
+                })
 
-    # Naboer — utvidet radius for utsiktsvurdering (800m er mye mer relevant
-    # fra en balkong enn 0.7x site_span)
-    view_r = max(site_span * 4.0, 800.0)
-    for nb in neighbor_polys:
-        nc = flatten_coord_groups(nb.get('coords', []))
-        if not nc:
-            continue
-        avg_x = sum(p[0] for p in nc) / len(nc) - center_x
-        avg_y = sum(p[1] for p in nc) / len(nc) - center_y
-        if math.hypot(avg_x, avg_y) > view_r:
-            continue
-        scene_data["neighbors"].append({
-            "rings": to_local([nc]),
-            "height": float(nb.get('height_m', 9.0)),
-        })
+    payload = {
+        "camera": {
+            "lat": round(cam_lat, 7),
+            "lng": round(cam_lng, 7),
+            "altitude": round(cam_altitude, 2),
+            "heading": heading_deg,
+        },
+        "volumes": volumes_data,
+        "typology_color": {
+            "Lamell":        "rgba(34, 197, 94, 0.55)",
+            "Punkthus":      "rgba(56, 189, 248, 0.55)",
+            "Tun":           "rgba(168, 130, 240, 0.55)",
+            "Rekke":         "rgba(250, 180, 60, 0.55)",
+            "Podium + Tårn": "rgba(220, 80, 120, 0.55)",
+            "Karré":         "rgba(100, 200, 180, 0.55)",
+            "Tårn":          "rgba(56, 140, 248, 0.55)",
+        }.get(option.typology, "rgba(34, 197, 94, 0.55)"),
+    }
 
-    payload_json = json.dumps(scene_data, ensure_ascii=False)
+    payload_json = json.dumps(payload, ensure_ascii=False)
 
     html = """
 <!DOCTYPE html>
-<html><head><style>
-  body { margin: 0; overflow: hidden; background: #87a8c8; }
-  canvas { display: block; }
+<html><head>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a1628; overflow: hidden; }
+  gmp-map-3d { width: 100%; height: __HEIGHT__px; display: block; }
   #info {
     position: absolute; top: 12px; left: 14px; color: #fff;
     font: 12px/1.4 -apple-system, sans-serif; pointer-events: none;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.7);
-    background: rgba(15, 27, 51, 0.85); padding: 8px 14px; border-radius: 8px;
-    font-weight: 600;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.85);
+    background: rgba(15, 27, 51, 0.9); padding: 8px 14px; border-radius: 8px;
+    font-weight: 600; z-index: 10;
   }
   #help {
     position: absolute; bottom: 12px; left: 14px; color: #fff;
     font: 10px/1.3 -apple-system, sans-serif; pointer-events: none;
-    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.9); z-index: 10;
   }
-  #snapshotBtn {
-    position: absolute; top: 12px; right: 14px;
-    background: rgba(31, 55, 95, 0.95); color: #fff;
-    border: none; padding: 8px 16px; border-radius: 8px;
-    cursor: pointer; font: 600 12px -apple-system, sans-serif;
+  #loading {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #9fb0c3; font: 12px -apple-system, sans-serif;
+    background: rgba(15, 27, 51, 0.85); padding: 10px 20px; border-radius: 8px;
+    z-index: 5;
   }
-  #snapshotBtn:hover { background: rgba(31, 55, 95, 1); }
-</style></head><body>
+  #error-overlay {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: #ffcdd2; font: 12px -apple-system, sans-serif; max-width: 500px;
+    background: rgba(80, 20, 20, 0.95); padding: 16px 24px; border-radius: 8px;
+    z-index: 20; display: none; text-align: center;
+  }
+</style>
+</head><body>
 <div id="info">__INFO__</div>
-<div id="help">Dra musen for å se deg rundt · Scroll for zoom</div>
-<button id="snapshotBtn" onclick="takeSnapshot()">📸 Last ned bilde</button>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<div id="help">Dra for å se rundt · Scroll for zoom · Shift+dra for å justere høyde</div>
+<div id="loading">Laster Google Photorealistic 3D...</div>
+<div id="error-overlay"></div>
+<gmp-map-3d id="map3d" mode="satellite" default-ui-hidden></gmp-map-3d>
 <script>
 const D = __DATA__;
-const W = window.innerWidth, H = __HEIGHT__;
 
-const scene = new THREE.Scene();
+function showError(msg) {
+  const e = document.getElementById('error-overlay');
+  e.innerHTML = msg;
+  e.style.display = 'block';
+  document.getElementById('loading').style.display = 'none';
+}
 
-// Gradient skydome
-const skyGeo = new THREE.SphereGeometry(D.site_span * 8, 32, 16);
-const skyMat = new THREE.ShaderMaterial({
-  uniforms: { topColor: {value: new THREE.Color(0x5a7ea8)}, bottomColor: {value: new THREE.Color(0xc8d4e0)} },
-  vertexShader: `varying vec3 vWorldPosition; void main() {
-    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-    vWorldPosition = worldPosition.xyz;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }`,
-  fragmentShader: `uniform vec3 topColor; uniform vec3 bottomColor;
-    varying vec3 vWorldPosition;
-    void main() {
-      float h = normalize(vWorldPosition).y;
-      gl_FragColor = vec4(mix(bottomColor, topColor, max(h, 0.0)), 1.0);
-    }`,
-  side: THREE.BackSide
-});
-scene.add(new THREE.Mesh(skyGeo, skyMat));
-scene.fog = new THREE.Fog(0xb0c0d0, D.site_span * 2, D.site_span * 6);
+async function init() {
+  try {
+    // Vent til gmp-map-3d custom element er definert
+    await customElements.whenDefined('gmp-map-3d');
+    const { Map3DElement, Polygon3DElement, AltitudeMode } =
+      await google.maps.importLibrary('maps3d');
 
-// Kamera i første person
-const camera = new THREE.PerspectiveCamera(65, W / H, 0.3, D.site_span * 12);
-camera.position.set(D.camera.x, D.camera.z, -D.camera.y);
+    const map3d = document.getElementById('map3d');
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-renderer.setSize(W, H);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.body.appendChild(renderer.domElement);
+    // Sett kameraposisjon: balkongpunkt, se utover mot valgt retning
+    map3d.center = {
+      lat: D.camera.lat,
+      lng: D.camera.lng,
+      altitude: D.camera.altitude
+    };
+    map3d.heading = D.camera.heading;
+    map3d.tilt = 85;  // Nesten horisontal — ser utover, ikke ned
+    map3d.range = 0.1;  // Minimal — vi vil ha first-person perspektiv
+    map3d.roll = 0;
 
-// Lys
-const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-sun.position.set(50, 100, 30);
-sun.castShadow = true;
-sun.shadow.mapSize.width = 1024;
-sun.shadow.mapSize.height = 1024;
-sun.shadow.camera.near = 0.5;
-sun.shadow.camera.far = D.site_span * 5;
-sun.shadow.camera.left = -D.site_span;
-sun.shadow.camera.right = D.site_span;
-sun.shadow.camera.top = D.site_span;
-sun.shadow.camera.bottom = -D.site_span;
-scene.add(sun);
-scene.add(new THREE.HemisphereLight(0xbfd4ea, 0x5a6a5a, 0.45));
-scene.add(new THREE.AmbientLight(0xffffff, 0.25));
-
-// Bakke — stort plan med terrengfarge
-const groundGeo = new THREE.PlaneGeometry(D.site_span * 8, D.site_span * 8);
-const groundMat = new THREE.MeshStandardMaterial({ color: 0x7a8f6b, roughness: 0.95 });
-const ground = new THREE.Mesh(groundGeo, groundMat);
-ground.rotation.x = -Math.PI / 2;
-ground.position.y = -0.05;
-ground.receiveShadow = true;
-scene.add(ground);
-
-// Asfalt-tekstur som subtle grid
-const gridHelper = new THREE.GridHelper(D.site_span * 6, 60, 0x556655, 0x607560);
-gridHelper.position.y = 0.01;
-scene.add(gridHelper);
-
-// Funksjon: lag 3D-boks fra ringer + høyde
-function addBuilding(rings, height, color, opacity) {
-  for (const ring of rings) {
-    if (ring.length < 3) continue;
-    const shape = new THREE.Shape();
-    shape.moveTo(ring[0][0], -ring[0][1]);  // Three.js: +z er sørover, så y inverteres
-    for (let i = 1; i < ring.length; i++) {
-      shape.lineTo(ring[i][0], -ring[i][1]);
+    // Legg til bygningsvolumer som extruded polygoner
+    for (const vol of D.volumes) {
+      const poly = new Polygon3DElement({
+        strokeColor: 'rgba(255, 255, 255, 0.9)',
+        strokeWidth: 2,
+        fillColor: D.typology_color,
+        altitudeMode: AltitudeMode.ABSOLUTE,
+        extruded: true,
+        drawsOccludedSegments: true,
+      });
+      // Sett koordinater med altitude = topp, bunn tegnes ved ground
+      poly.outerCoordinates = vol.ring.map(p => ({
+        lat: p.lat,
+        lng: p.lng,
+        altitude: vol.top_altitude
+      }));
+      map3d.append(poly);
     }
-    shape.closePath();
-    const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
-    geo.rotateX(-Math.PI / 2);
-    const mat = new THREE.MeshStandardMaterial({
-      color: color, roughness: 0.85,
-      transparent: opacity < 1.0, opacity: opacity
+
+    // Skjul loading-indikator når kartet er stabilt
+    map3d.addEventListener('gmp-steadychange', () => {
+      const l = document.getElementById('loading');
+      if (l) l.style.display = 'none';
     });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    scene.add(mesh);
+    // Fallback: skjul etter 8 sek uansett
+    setTimeout(() => {
+      const l = document.getElementById('loading');
+      if (l) l.style.display = 'none';
+    }, 8000);
+
+  } catch (e) {
+    console.error(e);
+    showError('Kunne ikke laste 3D Maps. ' +
+      'Sjekk at Maps JavaScript API er aktivert i Google Cloud Console, ' +
+      'og at API-nøkkelen har tilgang til maps3d-biblioteket.<br><br>' +
+      '<small>' + (e.message || e) + '</small>');
   }
 }
 
-// Eget bygg (det vi står på) — lyst farget
-for (const vol of D.volumes) {
-  addBuilding(vol.rings, vol.height, 0xd4c8a8, 1.0);
-}
-
-// Nabobygg — grå
-for (const nb of D.neighbors) {
-  addBuilding(nb.rings, nb.height, 0x8a909b, 1.0);
-}
-
-// Kameraretning: pek utover fra bygget
-let yaw = Math.atan2(D.camera.look_dx, -D.camera.look_dy);  // horisontal
-let pitch = -0.05;  // litt nedover
-function updateLookDir() {
-  const cx = Math.cos(yaw) * Math.cos(pitch);
-  const cz = Math.sin(yaw) * Math.cos(pitch);
-  const cy = Math.sin(pitch);
-  const target = new THREE.Vector3(
-    camera.position.x + cx,
-    camera.position.y + cy,
-    camera.position.z + cz
-  );
-  camera.lookAt(target);
-}
-updateLookDir();
-
-// Muselook
-let isDown = false, prevX = 0, prevY = 0;
-renderer.domElement.addEventListener('mousedown', e => {
-  isDown = true; prevX = e.clientX; prevY = e.clientY;
-});
-window.addEventListener('mouseup', () => { isDown = false; });
-window.addEventListener('mousemove', e => {
-  if (!isDown) return;
-  const dx = e.clientX - prevX, dy = e.clientY - prevY;
-  prevX = e.clientX; prevY = e.clientY;
-  yaw += dx * 0.005;
-  pitch = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, pitch - dy * 0.005));
-  updateLookDir();
-});
-
-// Zoom (FOV)
-renderer.domElement.addEventListener('wheel', e => {
-  camera.fov = Math.max(35, Math.min(85, camera.fov + e.deltaY * 0.03));
-  camera.updateProjectionMatrix();
-  e.preventDefault();
-}, { passive: false });
-
-// Snapshot-knapp
-function takeSnapshot() {
-  const dataUrl = renderer.domElement.toDataURL('image/png');
-  const a = document.createElement('a');
-  a.href = dataUrl;
-  a.download = 'utsikt_' + Date.now() + '.png';
-  a.click();
-}
-window.takeSnapshot = takeSnapshot;
-
-function animate() {
-  requestAnimationFrame(animate);
-  renderer.render(scene, camera);
-}
-animate();
-
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / H;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, H);
-});
-</script></body></html>
+// Vent på at Google Maps API er lastet
+(function waitForGoogle() {
+  if (window.google && window.google.maps && window.google.maps.importLibrary) {
+    init();
+  } else {
+    setTimeout(waitForGoogle, 100);
+  }
+})();
+</script>
+<script async
+  src="https://maps.googleapis.com/maps/api/js?key=__API_KEY__&v=alpha&libraries=maps3d">
+</script>
+</body></html>
 """
-    info = f"{option.name} · Utsikt fra {floor}. etasje mot {direction} · {option.typology}"
-    html = html.replace("__DATA__", payload_json).replace("__HEIGHT__", str(height_px)).replace("__INFO__", info)
+    info = f"{option.name} · Utsikt fra {floor}. etasje mot {direction}"
+    html = (html
+            .replace("__DATA__", payload_json)
+            .replace("__HEIGHT__", str(height_px))
+            .replace("__INFO__", info)
+            .replace("__API_KEY__", api_key))
     components.html(html, height=height_px + 10, scrolling=False)
 
 
@@ -9558,9 +9510,10 @@ render();
     # --- Utforsk utsikten (first-person fra bygget) ---
     with st.expander("🔭 Utforsk utsikten — se fra en leilighet", expanded=False):
         st.caption(
-            "Plasser deg virtuelt i bygget og se hvordan nabobyggene påvirker sikt og "
-            "lysforhold. Drag musen for å se deg rundt. Kan konverteres til fotorealistisk "
-            "balkongbilde med Gemini."
+            "Fotorealistisk utsikt fra balkongen, basert på Google Photorealistic 3D. "
+            "Dine foreslåtte volumer vises som fargede blokker oppå det faktiske terreng- "
+            "og bygningsdataet. Slik kan du vurdere hvilke nabobygg, trær og landskapsformer "
+            "som faktisk påvirker utsikten fra ulike etasjer og retninger."
         )
         mid_floor = max(1, int(sel3d_opt.floors) // 2)
         top_floor = max(2, int(sel3d_opt.floors))
@@ -9592,51 +9545,6 @@ render();
             )
         except Exception as exc:
             st.caption(f"Utsiktsvisning kunne ikke rendres: {exc}")
-
-        # Gemini fotorealistisk balkongrender
-        st.markdown("**Fotorealistisk balkongvisualisering**")
-        gemini_view_key = os.environ.get("GOOGLE_API_KEY", "")
-        if not gemini_view_key:
-            st.caption("Legg til GOOGLE_API_KEY for å aktivere fotorealistisk utsiktsvisualisering.")
-        else:
-            st.caption(
-                "Bruk «📸 Last ned bilde» over for å ta et snapshot av utsikten, "
-                "og last det opp her for å konvertere til en fotorealistisk balkongvisualisering."
-            )
-            view_snapshot_upload = st.file_uploader(
-                "Last opp utsiktsbilde",
-                type=["png", "jpg", "jpeg"],
-                accept_multiple_files=False,
-                key=f"view_snapshot_upload_{sel3d_opt.name}_{view_floor}_{view_direction}",
-            )
-            if view_snapshot_upload is not None:
-                try:
-                    uploaded_view = Image.open(view_snapshot_upload).convert("RGB")
-                    st.image(uploaded_view, caption="Rå utsikt fra 3D-modellen", use_container_width=True)
-                    if st.button(
-                        "🎨 Gjør fotorealistisk med Gemini",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"view_gemini_btn_{sel3d_opt.name}_{view_floor}_{view_direction}",
-                    ):
-                        with st.spinner("Gemini genererer fotorealistisk balkongvisualisering..."):
-                            realistic_view = generer_utsiktsrender(
-                                uploaded_view, view_floor, view_direction, gemini_view_key
-                            )
-                        if realistic_view is not None:
-                            st.session_state[f"_view_realistic_{sel3d_opt.name}_{view_floor}_{view_direction}"] = realistic_view
-                            st.success("Ferdig!")
-                except Exception as exc:
-                    st.warning(f"Kunne ikke behandle bildet: {exc}")
-
-            # Vis cachet resultat
-            cached_key = f"_view_realistic_{sel3d_opt.name}_{view_floor}_{view_direction}"
-            if cached_key in st.session_state:
-                st.image(
-                    st.session_state[cached_key],
-                    caption=f"Fotorealistisk utsikt fra {view_floor}. etasje mot {view_direction}",
-                    use_container_width=True,
-                )
 
     # --- 3D-scene bilder til rapport ---
     # Auto-expand when batch capture has run but images not yet in PDF
