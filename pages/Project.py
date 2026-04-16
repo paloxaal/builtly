@@ -1,6 +1,6 @@
 import streamlit as st
 import os
-import base64
+ximport base64
 from pathlib import Path
 import requests
 import urllib.parse
@@ -53,18 +53,23 @@ def go_home():
         pass
     st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
 
-# --- 2. LOKAL DATABASE (HARDDISK-LAGRING) ---
-DB_DIR = Path("qa_database")
-IMG_DIR = DB_DIR / "project_images"
-FILES_DIR = DB_DIR / "project_files"
-SSOT_FILE = DB_DIR / "ssot.json"
+# --- 2. LOKAL DATABASE (PER-BRUKER LAGRING) ---
+_BASE_DB_DIR = Path("qa_database")
+
+def _get_user_dir():
+    uid = st.session_state.get("user_id", "")
+    if uid:
+        return _BASE_DB_DIR / uid
+    # Fallback for non-authenticated users (demo/dev)
+    return _BASE_DB_DIR / "_default"
 
 def init_db():
-    DB_DIR.mkdir(exist_ok=True)
-    IMG_DIR.mkdir(exist_ok=True)
-    FILES_DIR.mkdir(exist_ok=True)
+    d = _get_user_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "project_images").mkdir(exist_ok=True)
+    (d / "project_files").mkdir(exist_ok=True)
 
-init_db()
+# Dirs are set after user detection below (section 5)
 
 # --- 3. PREMIUM CSS ---
 st.markdown("""
@@ -261,6 +266,24 @@ default_data = {
     "b_type": "Næring / Kontor", "etasjer": 4, "bta": 2500, "tomteareal": 0, 
     "last_sync": "Ikke synket enda"
 }
+
+# Detect user change → reload project data from correct user folder
+_current_uid = st.session_state.get("user_id", "_default")
+_loaded_uid = st.session_state.get("_project_loaded_for_uid", "")
+if _current_uid != _loaded_uid:
+    st.session_state.pop("project_data", None)
+    st.session_state.pop("ai_drawing_analysis", None)
+    st.session_state.pop("analyzed_file_names", None)
+    st.session_state["_project_loaded_for_uid"] = _current_uid
+
+# Always resolve paths for current user
+DB_DIR = _get_user_dir()
+IMG_DIR = DB_DIR / "project_images"
+FILES_DIR = DB_DIR / "project_files"
+SSOT_FILE = DB_DIR / "ssot.json"
+DB_DIR.mkdir(parents=True, exist_ok=True)
+IMG_DIR.mkdir(exist_ok=True)
+FILES_DIR.mkdir(exist_ok=True)
 
 if "project_data" not in st.session_state:
     if SSOT_FILE.exists():
