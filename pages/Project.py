@@ -20,6 +20,26 @@ except ImportError:
 # --- 1. GRUNNINNSTILLINGER & API ---
 st.set_page_config(page_title="Project Setup | Builtly", page_icon="⚙️", layout="wide", initial_sidebar_state="collapsed")
 
+# --- 1b. AUTH-GUARD ---
+# Må kjøres før alt annet. Uautentiserte brukere redirectes til login-siden.
+# Dette hindrer at noen omgår login ved å åpne /Project direkte.
+try:
+    from builtly_auth import restore_session as _restore_session
+    _restore_session()
+except Exception:
+    # Hvis builtly_auth ikke er tilgjengelig (standalone-kjøring),
+    # la BUILTLY_DEV_MODE avgjøre om vi tillater kjøring uten auth.
+    pass
+
+_DEV_MODE = os.environ.get("BUILTLY_DEV_MODE", "").lower() in ("1", "true", "yes")
+if not st.session_state.get("user_authenticated") and not _DEV_MODE:
+    st.warning("Du må være logget inn for å bruke Project Setup.")
+    try:
+        st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
+    except Exception:
+        st.stop()
+    st.stop()
+
 google_key = os.environ.get("GOOGLE_API_KEY")
 if google_key:
     genai.configure(api_key=google_key)
@@ -60,11 +80,18 @@ def _get_user_dir():
     uid = st.session_state.get("user_id", "")
     if uid:
         return _BASE_DB_DIR / uid
-    # Fallback for non-authenticated users (demo/dev)
-    return _BASE_DB_DIR / "_default"
+    # Fallback til _default KUN i dev-modus. I produksjon indikerer tom uid
+    # at auth-guarden har feilet, og vi skal ikke risikere at flere brukere
+    # havner i samme delte mappe.
+    if _DEV_MODE:
+        return _BASE_DB_DIR / "_default"
+    # I prod: la kallstedene håndtere None
+    return None
 
 def init_db():
     d = _get_user_dir()
+    if d is None:
+        return  # Ingen uid + ikke dev-modus → ikke opprett noe
     d.mkdir(parents=True, exist_ok=True)
     (d / "project_images").mkdir(exist_ok=True)
     (d / "project_files").mkdir(exist_ok=True)
@@ -278,6 +305,13 @@ if _current_uid != _loaded_uid:
 
 # Always resolve paths for current user
 DB_DIR = _get_user_dir()
+if DB_DIR is None:
+    # Dette skal aldri skje fordi auth-guarden over stopper uautentiserte,
+    # men hvis vi kommer hit er det en alvorlig feil. Stopp umiddelbart
+    # i stedet for å risikere at data havner feil sted.
+    st.error("Sesjonsfeil: kan ikke finne brukermappe. Vennligst logg inn på nytt.")
+    st.stop()
+
 IMG_DIR = DB_DIR / "project_images"
 FILES_DIR = DB_DIR / "project_files"
 SSOT_FILE = DB_DIR / "ssot.json"
