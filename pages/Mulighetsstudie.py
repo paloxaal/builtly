@@ -338,6 +338,79 @@ def generer_arkitekt_render(
     return None
 
 
+def generer_utsiktsrender(
+    view_image: Image.Image,
+    floor: int,
+    direction: str,
+    api_key: str,
+) -> Optional[Image.Image]:
+    """
+    Tar en first-person-snapshot fra Three.js-utsikten og ber Gemini om å
+    gjøre den fotorealistisk: legge til balkongrekkverk i forgrunnen,
+    planter, teksturer på nabobygg, samtidig som geometri og siktelinjer
+    bevares.
+    """
+    if not api_key:
+        st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
+        return None
+    if genai is None:
+        st.error("google-generativeai er ikke installert.")
+        return None
+
+    safe_image = view_image.convert("RGB")
+    safe_image.thumbnail((1536, 1536))
+
+    direction_norsk = {"N": "nord", "Ø": "øst", "S": "sør", "V": "vest"}.get(direction, direction)
+
+    prompt = (
+        "You are an architectural visualization artist. I am providing you with a "
+        "first-person 3D scene rendered from inside an apartment building, looking out "
+        f"from the {floor}th floor toward the {direction_norsk}. The scene shows grey "
+        "neighboring buildings, terrain, and sky — but it looks like a raw 3D model "
+        "without textures.\n\n"
+        "YOUR TASK: Transform this into a photorealistic view from an apartment balcony in "
+        "a modern Norwegian residential building. Add these elements naturally:\n"
+        "1. A glass balcony railing with thin dark metal frame in the foreground (bottom "
+        "edge of the image), as if the viewer is standing on the balcony looking out.\n"
+        "2. A few balcony plants or flower boxes on the railing (subtle, not dominating).\n"
+        "3. Realistic textures on the grey neighboring buildings: pitched tile roofs, "
+        "stucco or brick facades, windows with some warm light. Keep them in the exact "
+        "same positions and heights.\n"
+        "4. Natural vegetation — trees, hedges, gardens — around the buildings on the "
+        "ground level. Preserve the terrain shape.\n"
+        "5. Soft afternoon sunlight with realistic shadows. A natural sky with some clouds.\n\n"
+        "CRITICAL: Preserve the exact geometry, sight lines, and positions of all buildings. "
+        "The purpose is to evaluate view quality and how neighboring buildings block sight "
+        "lines — so their positions and heights must be identical to the input. Only add "
+        "photorealistic detail; do not move, resize, or remove any structures.\n\n"
+        "Output a single photorealistic image from the balcony perspective."
+    )
+
+    try:
+        try:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
+        except Exception:
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
+
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+        )
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
+        st.error("Gemini returnerte ikke et bilde for utsiktsvisualiseringen.")
+    except Exception as e:
+        st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
+    return None
+
+
 def geo_runtime_notes() -> List[str]:
     notes: List[str] = []
     if not HAS_PYPROJ:
@@ -1394,7 +1467,19 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     angle = shape_info['orientation_deg']
     area = shape_info['area_m2']
 
-    target_footprint_m2 = min(target_footprint_m2, area * 0.92)
+    # Originalt target (før cap) brukes til å dimensjonere selve bygningene.
+    # Cappet target brukes kun som øvre grense for plasseringen i grid.
+    original_target_m2 = target_footprint_m2
+
+    # Ved ambisiøs %-BRA-utnyttelse tillater vi target å overskride buildable_polygon
+    # (clip-logikken i _place_grid_buildings håndterer bygg som delvis går utenfor).
+    # Hvis target er merkbart større enn area, indikerer det at %-BRA er driver
+    # og motoren skal få forsøke å fylle så mye som mulig.
+    if target_footprint_m2 > area * 0.92:
+        # Behold opp til 130% — lar oss plassere fler/større bygg langs kantene
+        target_footprint_m2 = min(target_footprint_m2, area * 1.30)
+    else:
+        target_footprint_m2 = min(target_footprint_m2, area * 0.92)
     limits = TYPOLOGY_LIMITS.get(typology, TYPOLOGY_LIMITS["Lamell"])
 
     placement_info = {
@@ -1408,8 +1493,9 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     footprint: Any = None
 
     # Tilpass bygningsdybde — men behold typologisk karakter
-    # Reduser spacing ved høy utnyttelse — gradert etter hvor ambisiøst mål er
-    util_ratio = target_footprint_m2 / max(area, 1.0)
+    # Reduser spacing ved høy utnyttelse — gradert etter ORIGINAL target
+    # (ikke capped versjon, ellers ville vi ikke oppdaget ambisiøse mål)
+    util_ratio = original_target_m2 / max(area, 1.0)
     if util_ratio > 0.55:
         sp_factor = 0.35  # Veldig høy utnyttelse: aggressiv reduksjon
     elif util_ratio > 0.4:
@@ -1419,15 +1505,15 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
     high_utilization = util_ratio > 0.4
 
     if typology == "Punkthus":
-        # Punkthus: tilnærmet kvadratisk, dimensjonert for å nå target med 3-5 bygg
-        desired_count = clamp(round(target_footprint_m2 / 462.0), 2, 6)  # 400m²/bygg er ideelt
-        ideal_area = target_footprint_m2 / desired_count
+        # Punkthus: tilnærmet kvadratisk, dimensjonert fra ORIGINAL target
+        desired_count = clamp(round(original_target_m2 / 462.0), 2, 6)  # 400m²/bygg er ideelt
+        ideal_area = original_target_m2 / desired_count
         ideal_side = math.sqrt(ideal_area)
         bld_w = clamp(ideal_side, 14.0, 22.0)
         bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
     elif typology == "Tårn":
-        # Tårn: kompakt fotavtrykk, dimensjonert fra target (1 bygg)
-        ideal_side = math.sqrt(target_footprint_m2)
+        # Tårn: kompakt fotavtrykk, dimensjonert fra ORIGINAL target (1 bygg)
+        ideal_side = math.sqrt(original_target_m2)
         bld_w = clamp(ideal_side, 14.0, 22.0)
         bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
     elif typology == "Rekke":
@@ -1447,11 +1533,12 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
         bld_w = max(15.0, bld_w)
         bld_d = max(8.0, bld_d)
     elif typology == "Lamell":
-        # Lamell: lang og grunn, dimensjonert for å nå target med 2-3 bygg
+        # Lamell: lang og grunn, dimensjonert for å nå ORIGINAL target
+        # (ikke capped) slik at lamellene blir lange nok til å nå ambisiøst %-BRA
         bld_d = clamp(minor * 0.25, 11.0, 14.0)  # Dybde: alltid 11-14m
-        desired_bars = clamp(math.ceil(target_footprint_m2 / (major * 0.6 * bld_d)), 2, 4)
-        bld_w = clamp(target_footprint_m2 / (desired_bars * bld_d), 18.0, 65.0)
-        bld_w = min(bld_w, major * 0.85)  # Aldri bredere enn tomten
+        desired_bars = clamp(math.ceil(original_target_m2 / (major * 0.6 * bld_d)), 2, 4)
+        bld_w = clamp(original_target_m2 / (desired_bars * bld_d), 18.0, 75.0)
+        bld_w = min(bld_w, major * 0.92)  # Aldri bredere enn tomten (litt løsere: 92%)
     else:
         # Podium+Tårn: standard
         bld_w = min(limits["bld_w"], major * 0.7)
@@ -1561,7 +1648,7 @@ def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_
             spacing_along=effective_sp_along,
             spacing_across=effective_sp_across,
             max_buildings=max_attempts,
-            max_footprint_m2=target_footprint_m2,
+            max_footprint_m2=original_target_m2,
         )
         if buildings:
             footprint = unary_union(buildings).buffer(0)
@@ -5127,6 +5214,361 @@ animate();
     components.html(html, height=height_px + 10, scrolling=False)
 
 
+def render_view_from_building(
+    site: "SiteInputs",
+    option: "OptionResult",
+    floor: int,
+    direction: str,
+    height_px: int = 520,
+    terrain_ctx: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    First-person-visning fra en gitt etasje og himmelretning på bygget.
+    Kameraet plasseres på fasaden i øyehøyde, og brukeren kan se seg rundt
+    med muselook. Naboer, terreng og horisont rendres slik at man kan
+    vurdere utsiktsforhold og skjerming fra omkringliggende bebyggelse.
+    """
+    geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or []
+    neighbor_polys = geometry.get('neighbor_polygons', [])
+    massing_parts = geometry.get('massing_parts', []) or []
+    footprint_coords = geometry.get('footprint_polygon_coords') or []
+
+    flat_site = flatten_coord_groups(site_coords)
+    if not flat_site:
+        st.warning("Ingen tomtegeometri tilgjengelig for utsiktsvisning.")
+        return
+    center_x = sum(p[0] for p in flat_site) / len(flat_site)
+    center_y = sum(p[1] for p in flat_site) / len(flat_site)
+    site_span = max(
+        max(p[0] for p in flat_site) - min(p[0] for p in flat_site),
+        max(p[1] for p in flat_site) - min(p[1] for p in flat_site),
+        1.0,
+    )
+
+    def to_local(groups):
+        out = []
+        for ring in groups:
+            local_ring = []
+            for pt in ring:
+                local_ring.append([round(pt[0] - center_x, 2), round(pt[1] - center_y, 2)])
+            out.append(local_ring)
+        return out
+
+    # Finn kamerapunkt: midtpunkt av fasaden mot valgt himmelretning
+    # Bruk største massing part som referanse
+    parts_for_camera = massing_parts if massing_parts else (
+        [{"coords": footprint_coords, "height_m": option.building_height_m}]
+        if footprint_coords else []
+    )
+    if not parts_for_camera:
+        st.warning("Ingen bygningsgeometri å plassere kamera i.")
+        return
+
+    # Velg den største partien
+    def _part_area(part):
+        c = flatten_coord_groups(part.get('coords', []))
+        if len(c) < 3:
+            return 0.0
+        try:
+            return Polygon([(p[0], p[1]) for p in c]).area
+        except Exception:
+            return 0.0
+    main_part = max(parts_for_camera, key=_part_area)
+    main_coords = flatten_coord_groups(main_part.get('coords', []))
+    if len(main_coords) < 3:
+        st.warning("Kunne ikke plassere kamera — ugyldig bygningspolygon.")
+        return
+
+    # Finn kamerapunkt: ytterkant av fotavtrykket mot valgt retning
+    # Retningsvektor (lokal tomtekoord: +y = nord, +x = øst)
+    dir_map = {
+        "N": (0.0, 1.0),
+        "Ø": (1.0, 0.0),
+        "S": (0.0, -1.0),
+        "V": (-1.0, 0.0),
+    }
+    dx_dir, dy_dir = dir_map.get(direction, (0.0, -1.0))
+
+    # Finn kanten av fotavtrykket som ligger lengst mot valgt retning
+    # Projiser alle polygon-punkter på retningen, finn maks
+    projections = [(p[0] * dx_dir + p[1] * dy_dir, p) for p in main_coords]
+    projections.sort(key=lambda x: -x[0])  # Største projeksjon = ytterst
+    # Midtpunkt av de to ytterste punktene (gir midt av fasaden)
+    if len(projections) >= 2:
+        p_a = projections[0][1]
+        p_b = projections[1][1]
+        edge_cx = (p_a[0] + p_b[0]) / 2.0
+        edge_cy = (p_a[1] + p_b[1]) / 2.0
+    else:
+        edge_cx, edge_cy = projections[0][1][0], projections[0][1][1]
+
+    # Dytt kameraet litt utover fasaden (balkong-avstand ~2m)
+    cam_global_x = edge_cx + dx_dir * 2.0
+    cam_global_y = edge_cy + dy_dir * 2.0
+    cam_local_x = round(cam_global_x - center_x, 2)
+    cam_local_y = round(cam_global_y - center_y, 2)
+
+    # Kamerahøyde: etasjegulv + øyehøyde (1.6m)
+    floor_height = float(option.building_height_m) / max(int(option.floors), 1)
+    cam_z = (floor - 1) * floor_height + 1.6
+
+    # Scene data (samme struktur som render_interactive_3d)
+    scene_data = {
+        "site_span": round(site_span, 1),
+        "volumes": [],
+        "neighbors": [],
+        "terrain": None,
+        "camera": {
+            "x": cam_local_x,
+            "y": cam_local_y,
+            "z": round(cam_z, 2),
+            "look_dx": dx_dir,
+            "look_dy": dy_dir,
+        },
+    }
+
+    if terrain_ctx and terrain_ctx.get('sample_points'):
+        samples = terrain_ctx['sample_points']
+        min_elev = terrain_ctx.get('min_elev_m', 0.0)
+        scene_data["terrain"] = {
+            "points": [
+                {"x": round(s["x"] - center_x, 2), "y": round(s["y"] - center_y, 2), "z": round(s["z"] - min_elev, 2)}
+                for s in samples
+            ],
+            "min_elev": round(float(min_elev), 2),
+        }
+
+    # Egne bygg
+    for part in massing_parts:
+        pc = flatten_coord_groups(part.get('coords', []))
+        if not pc:
+            continue
+        scene_data["volumes"].append({
+            "rings": to_local([pc]),
+            "height": float(part.get('height_m', option.building_height_m)),
+        })
+    if not massing_parts:
+        fc = flatten_coord_groups(footprint_coords)
+        if fc:
+            scene_data["volumes"].append({
+                "rings": to_local([fc]),
+                "height": float(option.building_height_m),
+            })
+
+    # Naboer — utvidet radius for utsiktsvurdering (800m er mye mer relevant
+    # fra en balkong enn 0.7x site_span)
+    view_r = max(site_span * 4.0, 800.0)
+    for nb in neighbor_polys:
+        nc = flatten_coord_groups(nb.get('coords', []))
+        if not nc:
+            continue
+        avg_x = sum(p[0] for p in nc) / len(nc) - center_x
+        avg_y = sum(p[1] for p in nc) / len(nc) - center_y
+        if math.hypot(avg_x, avg_y) > view_r:
+            continue
+        scene_data["neighbors"].append({
+            "rings": to_local([nc]),
+            "height": float(nb.get('height_m', 9.0)),
+        })
+
+    payload_json = json.dumps(scene_data, ensure_ascii=False)
+
+    html = """
+<!DOCTYPE html>
+<html><head><style>
+  body { margin: 0; overflow: hidden; background: #87a8c8; }
+  canvas { display: block; }
+  #info {
+    position: absolute; top: 12px; left: 14px; color: #fff;
+    font: 12px/1.4 -apple-system, sans-serif; pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+    background: rgba(15, 27, 51, 0.85); padding: 8px 14px; border-radius: 8px;
+    font-weight: 600;
+  }
+  #help {
+    position: absolute; bottom: 12px; left: 14px; color: #fff;
+    font: 10px/1.3 -apple-system, sans-serif; pointer-events: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+  }
+  #snapshotBtn {
+    position: absolute; top: 12px; right: 14px;
+    background: rgba(31, 55, 95, 0.95); color: #fff;
+    border: none; padding: 8px 16px; border-radius: 8px;
+    cursor: pointer; font: 600 12px -apple-system, sans-serif;
+  }
+  #snapshotBtn:hover { background: rgba(31, 55, 95, 1); }
+</style></head><body>
+<div id="info">__INFO__</div>
+<div id="help">Dra musen for å se deg rundt · Scroll for zoom</div>
+<button id="snapshotBtn" onclick="takeSnapshot()">📸 Last ned bilde</button>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const D = __DATA__;
+const W = window.innerWidth, H = __HEIGHT__;
+
+const scene = new THREE.Scene();
+
+// Gradient skydome
+const skyGeo = new THREE.SphereGeometry(D.site_span * 8, 32, 16);
+const skyMat = new THREE.ShaderMaterial({
+  uniforms: { topColor: {value: new THREE.Color(0x5a7ea8)}, bottomColor: {value: new THREE.Color(0xc8d4e0)} },
+  vertexShader: `varying vec3 vWorldPosition; void main() {
+    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+    vWorldPosition = worldPosition.xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }`,
+  fragmentShader: `uniform vec3 topColor; uniform vec3 bottomColor;
+    varying vec3 vWorldPosition;
+    void main() {
+      float h = normalize(vWorldPosition).y;
+      gl_FragColor = vec4(mix(bottomColor, topColor, max(h, 0.0)), 1.0);
+    }`,
+  side: THREE.BackSide
+});
+scene.add(new THREE.Mesh(skyGeo, skyMat));
+scene.fog = new THREE.Fog(0xb0c0d0, D.site_span * 2, D.site_span * 6);
+
+// Kamera i første person
+const camera = new THREE.PerspectiveCamera(65, W / H, 0.3, D.site_span * 12);
+camera.position.set(D.camera.x, D.camera.z, -D.camera.y);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// Lys
+const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+sun.position.set(50, 100, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 1024;
+sun.shadow.mapSize.height = 1024;
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = D.site_span * 5;
+sun.shadow.camera.left = -D.site_span;
+sun.shadow.camera.right = D.site_span;
+sun.shadow.camera.top = D.site_span;
+sun.shadow.camera.bottom = -D.site_span;
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xbfd4ea, 0x5a6a5a, 0.45));
+scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+
+// Bakke — stort plan med terrengfarge
+const groundGeo = new THREE.PlaneGeometry(D.site_span * 8, D.site_span * 8);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x7a8f6b, roughness: 0.95 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -0.05;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Asfalt-tekstur som subtle grid
+const gridHelper = new THREE.GridHelper(D.site_span * 6, 60, 0x556655, 0x607560);
+gridHelper.position.y = 0.01;
+scene.add(gridHelper);
+
+// Funksjon: lag 3D-boks fra ringer + høyde
+function addBuilding(rings, height, color, opacity) {
+  for (const ring of rings) {
+    if (ring.length < 3) continue;
+    const shape = new THREE.Shape();
+    shape.moveTo(ring[0][0], -ring[0][1]);  // Three.js: +z er sørover, så y inverteres
+    for (let i = 1; i < ring.length; i++) {
+      shape.lineTo(ring[i][0], -ring[i][1]);
+    }
+    shape.closePath();
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshStandardMaterial({
+      color: color, roughness: 0.85,
+      transparent: opacity < 1.0, opacity: opacity
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+  }
+}
+
+// Eget bygg (det vi står på) — lyst farget
+for (const vol of D.volumes) {
+  addBuilding(vol.rings, vol.height, 0xd4c8a8, 1.0);
+}
+
+// Nabobygg — grå
+for (const nb of D.neighbors) {
+  addBuilding(nb.rings, nb.height, 0x8a909b, 1.0);
+}
+
+// Kameraretning: pek utover fra bygget
+let yaw = Math.atan2(D.camera.look_dx, -D.camera.look_dy);  // horisontal
+let pitch = -0.05;  // litt nedover
+function updateLookDir() {
+  const cx = Math.cos(yaw) * Math.cos(pitch);
+  const cz = Math.sin(yaw) * Math.cos(pitch);
+  const cy = Math.sin(pitch);
+  const target = new THREE.Vector3(
+    camera.position.x + cx,
+    camera.position.y + cy,
+    camera.position.z + cz
+  );
+  camera.lookAt(target);
+}
+updateLookDir();
+
+// Muselook
+let isDown = false, prevX = 0, prevY = 0;
+renderer.domElement.addEventListener('mousedown', e => {
+  isDown = true; prevX = e.clientX; prevY = e.clientY;
+});
+window.addEventListener('mouseup', () => { isDown = false; });
+window.addEventListener('mousemove', e => {
+  if (!isDown) return;
+  const dx = e.clientX - prevX, dy = e.clientY - prevY;
+  prevX = e.clientX; prevY = e.clientY;
+  yaw += dx * 0.005;
+  pitch = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, pitch - dy * 0.005));
+  updateLookDir();
+});
+
+// Zoom (FOV)
+renderer.domElement.addEventListener('wheel', e => {
+  camera.fov = Math.max(35, Math.min(85, camera.fov + e.deltaY * 0.03));
+  camera.updateProjectionMatrix();
+  e.preventDefault();
+}, { passive: false });
+
+// Snapshot-knapp
+function takeSnapshot() {
+  const dataUrl = renderer.domElement.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = 'utsikt_' + Date.now() + '.png';
+  a.click();
+}
+window.takeSnapshot = takeSnapshot;
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / H;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, H);
+});
+</script></body></html>
+"""
+    info = f"{option.name} · Utsikt fra {floor}. etasje mot {direction} · {option.typology}"
+    html = html.replace("__DATA__", payload_json).replace("__HEIGHT__", str(height_px)).replace("__INFO__", info)
+    components.html(html, height=height_px + 10, scrolling=False)
+
+
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
     record = asdict(option)
     record["mix_counts"] = json.dumps(option.mix_counts, ensure_ascii=False)
@@ -5799,6 +6241,18 @@ def render_solar_snapshot(
                 except Exception:
                     pass
 
+    # Typologi-fargepalett (matcher 3D-dashboard i Three.js)
+    TYPOLOGY_COLOR_MAP = {
+        "Lamell":        (34, 197, 94),    # grønn
+        "Punkthus":      (56, 189, 248),   # blå
+        "Tun":           (168, 130, 240),  # lilla
+        "Rekke":         (250, 180, 60),   # gul/oransje
+        "Podium + Tårn": (220, 80, 120),   # rosa
+        "Karré":         (100, 200, 180),  # teal
+        "Tårn":          (56, 140, 248),   # mørkere blå
+    }
+    default_building_rgb = TYPOLOGY_COLOR_MAP.get(option.typology, (34, 197, 94))
+
     # Bygningsvolumer + skygger
     for part in massing_parts:
         pcoords = flatten_coord_groups(part.get('coords', []))
@@ -5814,16 +6268,21 @@ def render_solar_snapshot(
                         s_coords = geometry_to_coord_groups(shadow)
                         s_pts = pts(flatten_coord_groups(s_coords))
                         if len(s_pts) >= 3:
-                            draw.polygon(s_pts, fill=(26, 43, 72, 55))
+                            # Mye tydeligere hovedbygg-skygge (alpha 55 → 130) og
+                            # mørk nøytral skyggefarge — ikke samme som bygget
+                            draw.polygon(s_pts, fill=(35, 45, 60, 130))
             except Exception:
                 pass
         pp = pts(pcoords)
         if len(pp) >= 3:
-            base_c = part.get('color', [0, 96, 155, 220])
-            base_c = tuple(int(v) if v > 1 else int(v * 255) for v in base_c)
-            if len(base_c) < 4:
-                base_c = (base_c[0], base_c[1], base_c[2], 220)
-            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 240))
+            # Bruk typologi-basert farge, ikke den gamle _BUILTLY_BLUE-defaulten
+            raw_c = part.get('color')
+            if raw_c and len(raw_c) >= 3:
+                base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
+                base_c = (base_c[0], base_c[1], base_c[2], 230)
+            else:
+                base_c = (default_building_rgb[0], default_building_rgb[1], default_building_rgb[2], 230)
+            draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 250))
 
             # Bygningslabel: etasjer + hoyde
             floors = int(part.get('floors', option.floors))
@@ -5832,7 +6291,7 @@ def render_solar_snapshot(
             lbl = f"{floors}et/{h:.0f}m"
             # Hvit boks bak tekst for lesbarhet
             tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 8
-            draw.rectangle([(avg_sx - tw/2 - 4, avg_sy - 10), (avg_sx + tw/2 + 4, avg_sy + 10)], fill=(255, 255, 255, 200))
+            draw.rectangle([(avg_sx - tw/2 - 4, avg_sy - 10), (avg_sx + tw/2 + 4, avg_sy + 10)], fill=(255, 255, 255, 220))
             draw.text((avg_sx - tw/2, avg_sy - 8), lbl, fill=(26, 43, 72, 255), font=font_small)
 
     # Solretning-pil
@@ -5959,7 +6418,7 @@ def _render_executive_summary(
 
     # Header stripe
     draw.rectangle([(0, 0), (w, 10)], fill=builtly_blue)
-    draw.text((60, 36), "EXECUTIVE SUMMARY", fill=navy, font=font_heading)
+    draw.text((60, 36), "SAMMENDRAG", fill=navy, font=font_heading)
     draw.text((60, 76), f"Anbefalt: {best.name} ({best.typology})", fill=builtly_blue, font=font_subtitle)
 
     # KPI Cards row 1
@@ -6065,7 +6524,7 @@ def create_full_report_pdf(
     McKinsey-quality PDF v14:
       Page 1:  Cover (med eventuelt AI-render)
       Page 2:  Table of Contents
-      Page 3:  Executive Summary (KPI-kort vektor)
+      Page 3:  Sammendrag (KPI-kort vektor)
       Page 4:  Tomt og kontekst — flyfoto, støykart (flyttet fra vedlegg)
       Page 5:  Nøkkeltall + sol/BRA-chart + kontekst
       Page 6+: Volumskisser (top 3)
@@ -6084,66 +6543,61 @@ def create_full_report_pdf(
     # ================================================================
     pdf.add_page()
 
-    # Tynn topplinje i navy (ikke lyseblå)
+    # Tynn topplinje i navy
     pdf.set_fill_color(*_NAVY)
     pdf.rect(0, 0, 210, 3, 'F')
 
     _cover_tmp_path: Optional[str] = None  # Defer cleanup until after pdf.output()
 
+    # --- TOPP: Logo + tittel ---
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=25, y=18, w=38)
+
+    # Tittelblokk
+    pdf.set_y(48)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 28)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 11, clean_pdf_text("Mulighetsstudie"), 0, "L")
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 28)
+    pdf.multi_cell(0, 11, clean_pdf_text("og tomteanalyse"), 0, "L")
+
+    # Undertittel — dempet grå
+    pdf.ln(2)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "", 13)
+    pdf.set_text_color(*_MUTED)
+    pdf.cell(0, 7, clean_pdf_text(f"Konseptvurdering · {name}"), 0, 1, "L")
+
+    # --- MIDT: Hero-bilde ---
+    image_top_y = 100  # Start av bildet
     if cover_image is not None:
-        # Save cover image to temp file for fpdf (must survive until pdf.output())
         _cover_fd = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         _cover_tmp_path = _cover_fd.name
         _cover_fd.close()
         try:
             _cover_rgb = cover_image.convert("RGB")
             _cover_rgb.save(_cover_tmp_path, format="JPEG", quality=92)
-            # Midtstilt full-bredde bilde rett under topplinja
-            target_w = 170
+            # Sentrert, fyller hele bredden mellom marginer
+            target_w = 160
             img_h = target_w * _cover_rgb.height / _cover_rgb.width
-            if img_h > 105:
-                img_h = 105
+            if img_h > 110:
+                img_h = 110
                 target_w = img_h * _cover_rgb.width / _cover_rgb.height
             x_img = (210 - target_w) / 2
-            pdf.image(_cover_tmp_path, x=x_img, y=15, w=target_w, h=img_h)
-            # Subtil linje under bildet for elegant overgang
-            pdf.set_draw_color(*_DIVIDER)
-            pdf.set_line_width(0.3)
-            pdf.line(25, 15 + img_h + 6, 185, 15 + img_h + 6)
+            pdf.image(_cover_tmp_path, x=x_img, y=image_top_y, w=target_w, h=img_h)
         except Exception:
             pass
 
-    # Logo — plasseres alltid nede mot midten, uavhengig av om cover finnes
-    if os.path.exists("logo.png"):
-        pdf.image("logo.png", x=25, y=145, w=42)
-
-    # Tittelblokk — venstrejustert, stort hierarki
-    pdf.set_y(165)
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "B", 26)
-    pdf.set_text_color(*_NAVY)
-    pdf.multi_cell(0, 11, clean_pdf_text("Mulighetsstudie"), 0, "L")
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "B", 26)
-    pdf.set_text_color(*_NAVY)
-    pdf.multi_cell(0, 11, clean_pdf_text("og tomteanalyse"), 0, "L")
-    pdf.ln(2)
-
-    # Undertittel — dempet grå
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "", 12)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(0, 7, clean_pdf_text(f"Konseptvurdering · {name}"), 0, 1, "L")
-
-    # Tynn aksent-linje
-    pdf.ln(5)
-    pdf.set_draw_color(*_NAVY)
-    pdf.set_line_width(0.8)
-    pdf.line(25, pdf.get_y(), 60, pdf.get_y())
+    # --- BUNN: Metadata-tabell (liten skrift, rolig uttrykk) ---
+    pdf.set_y(235)
+    pdf.set_draw_color(*_DIVIDER)
+    pdf.set_line_width(0.3)
+    pdf.line(25, 235, 185, 235)
     pdf.set_line_width(0.2)
-    pdf.ln(8)
+    pdf.ln(6)
 
-    # Metadata-tabell
     for label, value in [
         ("Oppdragsgiver", client or "Ukjent"),
         ("Dato", datetime.now().strftime("%d. %B %Y").replace("January", "januar").replace("February", "februar").replace("March", "mars").replace("April", "april").replace("May", "mai").replace("June", "juni").replace("July", "juli").replace("August", "august").replace("September", "september").replace("October", "oktober").replace("November", "november").replace("December", "desember")),
@@ -6153,12 +6607,12 @@ def create_full_report_pdf(
         pdf.set_x(25)
         pdf.set_font(PDF_FONT, "", 8)
         pdf.set_text_color(*_MUTED)
-        pdf.cell(45, 7, clean_pdf_text(label.upper()), 0, 0)
+        pdf.cell(45, 6, clean_pdf_text(label.upper()), 0, 0)
         pdf.set_font(PDF_FONT, "", 10)
         pdf.set_text_color(*_BODY_BLACK)
-        pdf.cell(0, 7, clean_pdf_text(value), 0, 1)
+        pdf.cell(0, 6, clean_pdf_text(value), 0, 1)
 
-    # Bunnlinje — tynn navy, ikke tykk lyseblå
+    # Tynn bunnlinje i navy
     pdf.set_fill_color(*_NAVY)
     pdf.rect(0, 294, 210, 3, 'F')
 
@@ -6170,7 +6624,7 @@ def create_full_report_pdf(
     pdf.ln(4)
 
     toc_items = [
-        ("1.", "Executive Summary"),
+        ("1.", "Sammendrag"),
     ]
     toc_idx = 2
     if visual_attachments:
@@ -6221,7 +6675,7 @@ def create_full_report_pdf(
     # ================================================================
     if options and site is not None:
         pdf.add_page()
-        pdf.section_title("EXECUTIVE SUMMARY", 18)
+        pdf.section_title("SAMMENDRAG", 18)
 
         best = options[0]
         bra_best = best.gross_bta_m2 * best.efficiency_ratio
@@ -9086,6 +9540,89 @@ render();
         render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
     except Exception as exc:
         st.caption(f'3D-modell kunne ikke rendres: {exc}')
+
+    # --- Utforsk utsikten (first-person fra bygget) ---
+    with st.expander("🔭 Utforsk utsikten — se fra en leilighet", expanded=False):
+        st.caption(
+            "Plasser deg virtuelt i bygget og se hvordan nabobyggene påvirker sikt og "
+            "lysforhold. Drag musen for å se deg rundt. Kan konverteres til fotorealistisk "
+            "balkongbilde med Gemini."
+        )
+        mid_floor = max(1, int(sel3d_opt.floors) // 2)
+        top_floor = max(2, int(sel3d_opt.floors))
+        cv1, cv2 = st.columns(2)
+        with cv1:
+            view_floor_label = st.radio(
+                "Etasje",
+                options=[f"Midt ({mid_floor}. et.)", f"Topp ({top_floor}. et.)"],
+                key="view_floor_sel",
+                horizontal=True,
+            )
+            view_floor = mid_floor if "Midt" in view_floor_label else top_floor
+        with cv2:
+            view_direction = st.radio(
+                "Retning",
+                options=["N", "Ø", "S", "V"],
+                key="view_dir_sel",
+                horizontal=True,
+            )
+
+        try:
+            render_view_from_building(
+                SiteInputs(**site_result),
+                sel3d_opt,
+                floor=view_floor,
+                direction=view_direction,
+                height_px=520,
+                terrain_ctx=result.get('terrain_ctx'),
+            )
+        except Exception as exc:
+            st.caption(f"Utsiktsvisning kunne ikke rendres: {exc}")
+
+        # Gemini fotorealistisk balkongrender
+        st.markdown("**Fotorealistisk balkongvisualisering**")
+        gemini_view_key = os.environ.get("GOOGLE_API_KEY", "")
+        if not gemini_view_key:
+            st.caption("Legg til GOOGLE_API_KEY for å aktivere fotorealistisk utsiktsvisualisering.")
+        else:
+            st.caption(
+                "Bruk «📸 Last ned bilde» over for å ta et snapshot av utsikten, "
+                "og last det opp her for å konvertere til en fotorealistisk balkongvisualisering."
+            )
+            view_snapshot_upload = st.file_uploader(
+                "Last opp utsiktsbilde",
+                type=["png", "jpg", "jpeg"],
+                accept_multiple_files=False,
+                key=f"view_snapshot_upload_{sel3d_opt.name}_{view_floor}_{view_direction}",
+            )
+            if view_snapshot_upload is not None:
+                try:
+                    uploaded_view = Image.open(view_snapshot_upload).convert("RGB")
+                    st.image(uploaded_view, caption="Rå utsikt fra 3D-modellen", use_container_width=True)
+                    if st.button(
+                        "🎨 Gjør fotorealistisk med Gemini",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"view_gemini_btn_{sel3d_opt.name}_{view_floor}_{view_direction}",
+                    ):
+                        with st.spinner("Gemini genererer fotorealistisk balkongvisualisering..."):
+                            realistic_view = generer_utsiktsrender(
+                                uploaded_view, view_floor, view_direction, gemini_view_key
+                            )
+                        if realistic_view is not None:
+                            st.session_state[f"_view_realistic_{sel3d_opt.name}_{view_floor}_{view_direction}"] = realistic_view
+                            st.success("Ferdig!")
+                except Exception as exc:
+                    st.warning(f"Kunne ikke behandle bildet: {exc}")
+
+            # Vis cachet resultat
+            cached_key = f"_view_realistic_{sel3d_opt.name}_{view_floor}_{view_direction}"
+            if cached_key in st.session_state:
+                st.image(
+                    st.session_state[cached_key],
+                    caption=f"Fotorealistisk utsikt fra {view_floor}. etasje mot {view_direction}",
+                    use_container_width=True,
+                )
 
     # --- 3D-scene bilder til rapport ---
     # Auto-expand when batch capture has run but images not yet in PDF
