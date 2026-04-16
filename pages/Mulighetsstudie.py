@@ -238,99 +238,101 @@ def generer_arkitekt_render(
     base_image: Image.Image,
     option: "OptionResult",
     api_key: str,
-    ai_strength: float = 0.65,
 ) -> Optional[Image.Image]:
     """
-    Bruker Stability AI SD3 Image-to-Image til å transformere de fargekodede
-    3D-volumene i en ortofoto-scene til fotorealistisk arkitektur.
+    Bruker Gemini 3.1 Flash Image (Nano Banana 2) til å transformere 3D-volumscenen
+    til en fotorealistisk arkitekturskisse. Gemini forstår scenen semantisk og kan
+    erstatte de fargede boksene med en realistisk bygning mens ortofotoet bevares.
 
-    Prompten forklarer fargesemantikken til AI-en:
-      - Grønne blokker  → det nye bygget (detaljert fasade)
-      - Grå blokker     → eksisterende nabobebyggelse
-      - Ortofoto-bakgrunn → bevar som realistisk nabolag
+    api_key: GOOGLE_API_KEY (samme som appen bruker for Gemini ellers).
     """
     if not api_key:
-        st.error("Mangler STABILITY_API_KEY i miljøvariablene.")
+        st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
 
-    # 1. Konverter bildet sikkert
+    if genai is None:
+        st.error("google-generativeai er ikke installert i miljøet.")
+        return None
+
+    # 1. Sikre RGB og rimelig størrelse
     safe_image = base_image.convert("RGB")
-    safe_image.thumbnail((1024, 1024))
-    img_byte_arr = io.BytesIO()
-    safe_image.save(img_byte_arr, format='PNG')
-    img_bytes = img_byte_arr.getvalue()
+    safe_image.thumbnail((1536, 1536))
 
     # 2. Typologi-mapping
     typologi_map = {
-        "Lamell": "linear apartment block",
-        "Punkthus": "point block residential tower",
-        "Karré": "perimeter block courtyard building",
-        "Tun": "cluster of townhouses",
-        "Tårn": "high-rise residential tower",
-        "Rekke": "row of modern townhouses",
+        "Lamell": "linear apartment block (lamell)",
+        "Punkthus": "point block residential tower (punkthus)",
+        "Karré": "perimeter block courtyard building (karré)",
+        "Tun": "cluster of townhouses around a shared courtyard (tun)",
+        "Tårn": "high-rise residential tower (tårn)",
+        "Rekke": "row of modern townhouses (rekkehus)",
         "Podium + Tårn": "residential tower on a commercial podium",
     }
-    typology_eng = typologi_map.get(option.typology, "residential building")
+    typology_eng = typologi_map.get(option.typology, "residential apartment building")
 
-    # 3. Fargekode-prompt: eksplisitt bevaring av ortofoto, kun bygg transformeres
+    floors = int(getattr(option, "floors", 0) or 0)
+    height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
+
+    # 3. Presis prompt med bygningsfakta fra motoren
     prompt = (
-        f"Photorealistic aerial drone photograph of a Norwegian suburban neighborhood. "
-        "CRITICAL: The background is a REAL aerial photograph — do NOT alter the existing "
-        "roads, trees, grass, rooftops, or any part of the real landscape. Keep it exactly as-is. "
-        f"ONLY transform the bright GREEN 3D blocks into a detailed modern {typology_eng} with "
-        "vertical wooden panels, light grey stucco, warm brickwork (tegl), large windows, "
-        "glass balconies with dark metal frames, and a clean roofline. "
-        "The semi-transparent GREY blocks are existing buildings — refine them subtly into "
-        "realistic houses with pitched roofs, but do not move or reshape them. "
-        "Soft afternoon sunlight, realistic shadows consistent with the aerial photo lighting."
+        "You are an architectural visualization artist. I am providing you with an aerial "
+        "photograph of a real Norwegian neighborhood. On top of the real aerial photo, there "
+        "are simple 3D volume blocks rendered in solid green color. These green blocks represent "
+        "the proposed new building footprint and massing.\n\n"
+        "YOUR TASK: Replace ONLY the green 3D blocks with a photorealistic render of a modern "
+        f"Norwegian residential apartment building — specifically a {typology_eng} with "
+        f"{floors} floors and a total height of approximately {height_m:.0f} meters.\n\n"
+        "The new building must match the exact footprint, position, and volume of the green blocks. "
+        "Use a contemporary Norwegian residential architecture style: a tasteful combination of "
+        "vertical wood cladding (stained dark or natural), light grey stucco/plaster, and warm "
+        "red or dark brickwork (tegl). Large floor-to-ceiling windows, glass balconies with thin "
+        "dark metal frames, clean flat or low-pitched roofline. Ground floor should have entrances "
+        "and some landscaping. No solar panels on the roof.\n\n"
+        "STRICTLY PRESERVE: The rest of the aerial photograph must remain completely unchanged — "
+        "existing neighboring houses, roads, trees, vegetation, terrain, parking areas, shadows, "
+        "and lighting conditions in the real photo must be identical to the input. Do not alter, "
+        "enhance, or regenerate anything outside the green building footprint.\n\n"
+        "Lighting on the new building must match the sun direction and shadow angles already "
+        "visible in the aerial photograph. Output a single photorealistic aerial photograph."
     )
-
-    negative_prompt = (
-        "changed background, altered landscape, different roads, modified trees, "
-        "abstract 3d scene, untextured blocks, green glowing boxes, solar panels, "
-        "floating buildings, cartoon, blurry, low quality, sci-fi, distorted"
-    )
-
-    # 4. SD3 image-to-image
-    url = "https://api.stability.ai/v2beta/stable-image/generate/sd3"
-
-    files = {
-        "image": ("scene.png", img_bytes, "image/png"),
-    }
-    data = {
-        "prompt": prompt,
-        "negative_prompt": negative_prompt,
-        "mode": "image-to-image",
-        "model": "sd3-medium",
-        "strength": str(ai_strength),
-        "output_format": "jpeg",
-    }
 
     try:
-        response = requests.post(
-            url,
-            headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
-            files=files,
-            data=data,
-            timeout=90,
+        # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
+        try:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
+        except Exception:
+            # Fallback til 2.5 hvis 3.1 ikke tilgjengelig
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
+
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
         )
-        if response.status_code == 200:
-            return Image.open(io.BytesIO(response.content))
-        # Prøv å parse JSON-feil
-        ct = response.headers.get("Content-Type", "")
-        if "application/json" in ct:
-            try:
-                err_detail = response.json()
-                err_msg = err_detail.get("message", str(err_detail))[:300]
-            except Exception:
-                err_msg = response.text[:300]
-        else:
-            err_msg = response.text[:300]
-        st.error(f"Stability AI avviste forespørselen (Kode {response.status_code}): {err_msg}")
-    except requests.exceptions.Timeout:
-        st.error("Stability AI svarte ikke innen tidsfristen (90s). Prøv igjen.")
+
+        # Hent ut bildet fra responsen
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
+
+        # Hvis vi kommer hit fikk vi ikke noe bilde tilbake
+        text_parts = []
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if content and getattr(content, "parts", None):
+                    for part in content.parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+        err_msg = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata i respons."
+        st.error(f"Gemini returnerte ikke et bilde: {err_msg}")
     except Exception as e:
-        st.error(f"Tilkoblingsfeil mot Stability AI: {str(e)[:200]}")
+        st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
     return None
 
 
@@ -9115,31 +9117,26 @@ render();
     st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
-    # --- AI Visualisering (Stability AI) ---
+    # --- AI Visualisering (Gemini Nano Banana 2) ---
     st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
-    stability_key = os.environ.get("STABILITY_API_KEY", "")
+    gemini_key = os.environ.get("GOOGLE_API_KEY", "")
     scene_imgs = st.session_state.get("ark_scene_images")
-    if scene_imgs and stability_key:
+    if scene_imgs and gemini_key and genai is not None:
         motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
         opt_names = [opt.name for opt in motor_options] if motor_options else []
         sel_render_name = st.selectbox(
             "Velg alternativ for visualisering",
             opt_names,
             index=0,
-            key="stability_render_select",
+            key="gemini_render_select",
         ) if opt_names else None
-        render_strength = st.slider(
-            "Transformasjonsgrad (lav = tett på volummodellen, høy = friere tolkning)",
-            min_value=0.50, max_value=0.90, value=0.65, step=0.05,
-            key="stability_render_strength",
-        )
-        if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="stability_render_btn"):
+        if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="gemini_render_btn"):
             sel_idx = opt_names.index(sel_render_name) if sel_render_name and sel_render_name in opt_names else 0
             base_img = scene_imgs[min(sel_idx, len(scene_imgs) - 1)]
             selected_option = motor_options[sel_idx] if motor_options else None
             if selected_option is not None:
-                with st.spinner("Genererer fotorealistisk skisse — dette tar ca. 30–60 sekunder..."):
-                    rendered = generer_arkitekt_render(base_img, selected_option, stability_key, ai_strength=render_strength)
+                with st.spinner("Genererer fotorealistisk skisse med Gemini — dette tar ca. 20–40 sekunder..."):
+                    rendered = generer_arkitekt_render(base_img, selected_option, gemini_key)
                 if rendered is not None:
                     st.session_state["stability_render_image"] = rendered
                     # Regenerer PDF med cover_image — gjenbruk cachet sol/AI-analyse
@@ -9184,8 +9181,10 @@ render();
                         st.warning(f"Skisse generert, men PDF-oppdatering feilet: {exc}")
             else:
                 st.warning("Ingen alternativer tilgjengelig for visualisering.")
-    elif not stability_key:
-        st.caption("Legg til STABILITY_API_KEY i Render Secrets for å aktivere fotorealistisk visualisering.")
+    elif not gemini_key:
+        st.caption("Legg til GOOGLE_API_KEY i Render Secrets for å aktivere fotorealistisk visualisering.")
+    elif genai is None:
+        st.caption("google-generativeai-pakken er ikke installert. Legg til i requirements.txt.")
     elif not scene_imgs:
         st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
 
