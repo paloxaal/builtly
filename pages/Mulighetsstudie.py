@@ -273,60 +273,11 @@ def generer_arkitekt_render(
     floors = int(getattr(option, "floors", 0) or 0)
     height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
 
-    # 3. Presis prompt med strenge grenser for det grønne fotavtrykket
-    # Tell antall massing_parts (sammenhengende grønne volumer) — dette forteller Gemini
-    # hvor mange bygg som skal rendres, og hindrer den i å dele ETT volum i flere bygg.
-    try:
-        n_parts = len(option.geometry.get('massing_parts', []) or [])
-    except Exception:
-        n_parts = 1
-    n_parts = max(1, n_parts)
-    parts_phrase = (
-        f"exactly ONE single connected building" if n_parts == 1
-        else f"exactly {n_parts} separate building volumes"
-    )
-
+    # 3. Enkel, direkte prompt — brukerens egen manuelle formulering som
+    # har fungert konsistent godt.
     prompt = (
-        "You are an architectural visualization artist performing a precise, localized edit on "
-        "an aerial photograph of a real Norwegian neighborhood.\n\n"
-        "=== IMAGE LEGEND — READ CAREFULLY BEFORE EDITING ===\n"
-        "The image contains THREE visually distinct layers:\n\n"
-        "LAYER 1 — BRIGHT SOLID GREEN 3D volume blocks: these are the ONLY pixels you may modify. "
-        "They mark the EXACT footprint, massing, and height of the NEW proposed building.\n\n"
-        "LAYER 2 — SEMI-TRANSPARENT GREY / DARK-BLUE WIREFRAME BOXES: these are overlays drawn on "
-        "top of EXISTING buildings in the aerial photo. You can see the real rooftops of these "
-        "existing buildings showing through the transparent grey. CRITICAL: even though you can "
-        "see rooftops under the grey boxes, these are EXISTING buildings that are already there in "
-        "reality — do NOT render them as new construction, do NOT replace them, do NOT modify them. "
-        "Leave them exactly as they appear in the input (transparent grey box on top of existing "
-        "aerial roof).\n\n"
-        "LAYER 3 — the aerial photograph itself (roads, parking, trees, existing roofs visible "
-        "between the grey boxes): must remain pixel-perfect identical to the input.\n\n"
-        "=== HOW TO INTERPRET THE GREEN VOLUMES ===\n"
-        f"This image shows {parts_phrase}. Count the connected green shapes — where green pixels "
-        "touch, that is ONE building; where they are separated by non-green pixels, those are "
-        "SEPARATE buildings. Render the new construction to match this count and geometry "
-        "precisely. Do NOT split one connected green shape into multiple buildings. Do NOT merge "
-        "separate green shapes into one building. Do NOT place any new building where there is "
-        "no green volume — even if the aerial photo shows empty space, asphalt, or an existing "
-        "grey-boxed building.\n\n"
-        "=== STRICT PIXEL BOUNDARY RULE ===\n"
-        "Only pixels that are currently BRIGHT GREEN may be transformed into new building "
-        "surfaces. Every other pixel — grey neighbor boxes, aerial photo, shadows, roads — must "
-        "remain absolutely identical to the input. Do NOT extend the new building outward beyond "
-        "the green shape. Do NOT add landscaping, plazas, or sidewalks around the new building. "
-        "The new building's footprint, number of volumes, and overall massing must EXACTLY match "
-        "the green shapes.\n\n"
-        f"=== WITHIN THE GREEN VOLUME ONLY ===\n"
-        f"Render {parts_phrase} as a photorealistic modern Norwegian {typology_eng} with exactly "
-        f"{floors} floors and a total height of approximately {height_m:.0f} meters. The roofline "
-        "must align with the top of the green volume. The building must fit precisely inside the "
-        "green footprint — no wider, no longer, no taller.\n\n"
-        "Architectural style: vertical wood cladding (natural or dark stained), light grey stucco, "
-        "and warm brickwork (tegl). Large floor-to-ceiling windows, glass balconies with thin dark "
-        "metal frames, clean flat or low-pitched roofline. No solar panels.\n\n"
-        "Lighting on the new building must match the sun direction and shadow angles already "
-        "visible in the aerial photograph. Output a single photorealistic aerial photograph."
+        f"Kan du gjøre om det skraverte volumet i grønt her til et "
+        f"leilighetsbygg i {floors} etasjer? Alt annet uendret."
     )
 
     try:
@@ -4113,8 +4064,11 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     for vol in volumes:
         coords, h = vol['coords'], vol['height_m']
         if vol['type'] == 'neighbor':
-            alpha = min(180, int(80 + h * 6))
-            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(220,alpha+30)), 1)
+            # Dempet naboer: lav alpha så Gemini tolker dem som "kontekst-wireframes"
+            # i stedet for solid grå bygninger. Verdier satt slik at de er synlige for
+            # menneskelig bruker men ikke dominerende for Gemini.
+            alpha = min(95, int(45 + h * 3))
+            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(130,alpha+25)), 1)
             # Nabohøyde-label (grå, over bygget)
             if h > 3:
                 avg_x = sum(p[0] for p in coords) / len(coords)
