@@ -162,6 +162,36 @@ header[data-testid="stHeader"] { visibility: hidden; }
     border: 1px solid rgba(120,145,170,0.25) !important;
     border-radius: 8px !important;
 }
+
+/* Dyp override - alle wrapper-div-er rundt text/number/textarea */
+.stTextInput > div, .stTextInput > div > div,
+.stTextArea > div, .stTextArea > div > div,
+.stNumberInput > div, .stNumberInput > div > div,
+.stNumberInput [data-baseweb="input"],
+.stNumberInput [data-baseweb="input"] > div,
+.stTextInput [data-baseweb="input"],
+.stTextInput [data-baseweb="input"] > div,
+[data-baseweb="input"],
+[data-baseweb="base-input"] {
+    background-color: rgba(10,22,35,0.5) !important;
+    background: rgba(10,22,35,0.5) !important;
+    color: #f5f7fb !important;
+}
+
+/* Textarea trenger ekstra kjærlighet */
+.stTextArea [data-baseweb="textarea"],
+.stTextArea [data-baseweb="textarea"] > div,
+textarea {
+    background-color: rgba(10,22,35,0.5) !important;
+    background: rgba(10,22,35,0.5) !important;
+    color: #f5f7fb !important;
+}
+
+/* Placeholder-tekst */
+input::placeholder, textarea::placeholder {
+    color: rgba(159,176,195,0.5) !important;
+}
+
 .stTextInput label, .stTextArea label, .stNumberInput label,
 .stSelectbox label, .stMultiSelect label, .stSelectSlider label,
 .stFileUploader label, .stToggle label {
@@ -281,10 +311,26 @@ div[role="option"]:hover,
 /* File uploader */
 [data-testid="stFileUploaderDropzone"] {
     background-color: rgba(10,22,35,0.5) !important;
+    background: rgba(10,22,35,0.5) !important;
     border: 1.5px dashed rgba(120,145,170,0.35) !important;
     border-radius: 12px !important;
 }
 [data-testid="stFileUploaderDropzone"] * { color: #c8d3df !important; }
+[data-testid="stFileUploaderDropzone"] button,
+[data-testid="stFileUploaderDropzoneInstructions"] button,
+.stFileUploader button {
+    background-color: rgba(56,189,248,0.12) !important;
+    background: rgba(56,189,248,0.12) !important;
+    color: #f5f7fb !important;
+    border: 1px solid rgba(56,189,248,0.4) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+[data-testid="stFileUploaderDropzone"] button:hover,
+.stFileUploader button:hover {
+    background-color: rgba(56,189,248,0.22) !important;
+    border-color: #38bdf8 !important;
+}
 [data-testid="stFileUploaderFile"] {
     background-color: rgba(56,189,248,0.05) !important;
     border-radius: 8px !important;
@@ -507,6 +553,183 @@ div[role="option"]:hover,
 }
 .panel-box h4 { color: #f5f7fb !important; font-weight: 750 !important; }
 .panel-box p, .panel-box li { color: #9fb0c3 !important; font-size: 0.9rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═════════════════════════════════════════════════════════════════
+# 3b. AGGRESSIVE BASEWEB-OVERRIDES
+# Streamlit bruker BaseWeb-komponenter som har egne lysstilte defaults.
+# Disse overstyrer spesifisert -- må komme ETTER Streamlit's egen CSS.
+# ═════════════════════════════════════════════════════════════════
+st.markdown("""
+<style>
+/* ═══ MULTISELECT PILLER ═══ */
+/* Treffer alle tag-elementer i hele appen */
+.stApp div[data-baseweb="tag"],
+.stApp [data-baseweb="tag"],
+div[data-baseweb="tag"] {
+    background: rgba(56,189,248,0.18) !important;
+    background-color: rgba(56,189,248,0.18) !important;
+    border: 1px solid rgba(56,189,248,0.45) !important;
+    border-radius: 6px !important;
+}
+div[data-baseweb="tag"] span,
+div[data-baseweb="tag"] div,
+div[data-baseweb="tag"] path {
+    color: #f5f7fb !important;
+    fill: #f5f7fb !important;
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+/* ═══ SELECTBOX + MULTISELECT YTRE FELT ═══ */
+.stApp div[data-baseweb="select"],
+.stApp div[data-baseweb="select"] > div,
+div[data-baseweb="select"] > div:first-child {
+    background: rgba(10,22,35,0.6) !important;
+    background-color: rgba(10,22,35,0.6) !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+    color: #f5f7fb !important;
+}
+div[data-baseweb="select"] > div > div {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+}
+div[data-baseweb="select"] input {
+    color: #f5f7fb !important;
+    background: transparent !important;
+    background-color: transparent !important;
+}
+div[data-baseweb="select"] svg,
+div[data-baseweb="select"] path {
+    fill: #c8d3df !important;
+}
+
+/* ═══ DROPDOWN-POPOVER (portal-rendered, utenfor app-rot!) ═══ */
+/* BaseWeb renderer popovers direkte på <body> via React Portal.
+   Derfor må vi bruke maximum-spesifisitet som treffer uansett hvor. */
+body > div[data-baseweb="popover"],
+body > div[data-baseweb="popover"] > div,
+body div[data-baseweb="popover"],
+body div[data-baseweb="popover"] > div,
+body ul[data-baseweb="menu"],
+body [data-baseweb="menu"] {
+    background: #0a1623 !important;
+    background-color: #0a1623 !important;
+    border: 1px solid rgba(120,145,170,0.35) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5) !important;
+}
+
+/* Alle list-items og options inne i popover */
+body div[data-baseweb="popover"] li,
+body div[data-baseweb="popover"] [role="option"],
+body [data-baseweb="menu"] li,
+body [data-baseweb="menu"] [role="option"],
+body ul[role="listbox"] li,
+body div[role="listbox"] [role="option"],
+body [role="option"] {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+}
+
+/* Tvinger tekst i options til hvit */
+body div[data-baseweb="popover"] li *,
+body div[data-baseweb="popover"] [role="option"] *,
+body [data-baseweb="menu"] li *,
+body [role="option"] *,
+body [role="listbox"] * {
+    color: #f5f7fb !important;
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+/* Hover + selected state */
+body [role="option"]:hover,
+body [role="option"][aria-selected="true"],
+body li[aria-selected="true"],
+body div[data-baseweb="popover"] li:hover,
+body [data-baseweb="menu"] li:hover {
+    background: rgba(56,189,248,0.2) !important;
+    background-color: rgba(56,189,248,0.2) !important;
+    color: #f5f7fb !important;
+}
+
+body [role="option"]:hover *,
+body [role="option"][aria-selected="true"] * {
+    color: #f5f7fb !important;
+}
+
+/* ═══ NUMBER INPUT (pluss/minus + felt) ═══ */
+.stNumberInput > div > div,
+.stNumberInput > div > div > input {
+    background: rgba(10,22,35,0.6) !important;
+    background-color: rgba(10,22,35,0.6) !important;
+    color: #f5f7fb !important;
+    border-color: rgba(120,145,170,0.3) !important;
+}
+.stNumberInput button,
+.stNumberInput button[kind="header"],
+.stNumberInput [data-testid="stNumberInputStepUp"],
+.stNumberInput [data-testid="stNumberInputStepDown"] {
+    background: rgba(10,22,35,0.8) !important;
+    background-color: rgba(10,22,35,0.8) !important;
+    color: #f5f7fb !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+}
+.stNumberInput button:hover,
+.stNumberInput [data-testid="stNumberInputStepUp"]:hover,
+.stNumberInput [data-testid="stNumberInputStepDown"]:hover {
+    background: rgba(56,189,248,0.2) !important;
+    background-color: rgba(56,189,248,0.2) !important;
+}
+.stNumberInput svg,
+.stNumberInput button svg path {
+    fill: #f5f7fb !important;
+    color: #f5f7fb !important;
+}
+
+/* ═══ TEXT AREA ═══ */
+.stTextArea textarea,
+.stTextArea > div > div > textarea,
+textarea[data-baseweb="textarea"] {
+    background: rgba(10,22,35,0.6) !important;
+    background-color: rgba(10,22,35,0.6) !important;
+    color: #f5f7fb !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+}
+
+/* ═══ TEXT INPUT ═══ */
+.stTextInput input,
+.stTextInput > div > div > input,
+input[data-baseweb="input"] {
+    background: rgba(10,22,35,0.6) !important;
+    background-color: rgba(10,22,35,0.6) !important;
+    color: #f5f7fb !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+}
+
+/* ═══ FILE UPLOADER ═══ */
+[data-testid="stFileUploaderDropzone"],
+[data-testid="stFileUploader"] section {
+    background: rgba(10,22,35,0.5) !important;
+    background-color: rgba(10,22,35,0.5) !important;
+    border: 1.5px dashed rgba(120,145,170,0.4) !important;
+}
+[data-testid="stFileUploaderDropzone"] *,
+[data-testid="stFileUploader"] section * {
+    color: #c8d3df !important;
+}
+[data-testid="stFileUploaderDropzone"] button,
+[data-testid="stFileUploader"] button {
+    background: rgba(10,22,35,0.8) !important;
+    background-color: rgba(10,22,35,0.8) !important;
+    color: #f5f7fb !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
