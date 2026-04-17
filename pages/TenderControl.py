@@ -24,6 +24,7 @@ import streamlit as st
 # Local modules
 from tender_document_parser import (
     extract_document,
+    expand_zip_to_documents,
     quick_scan_deadlines,
     quick_scan_ns_contract,
     quick_scan_dagmulkt,
@@ -730,6 +731,91 @@ input[data-baseweb="input"] {
     color: #f5f7fb !important;
     border: 1px solid rgba(120,145,170,0.3) !important;
 }
+
+/* ═══ EXPANDER ═══ */
+/* Streamlit-expander har hvit bakgrunn by default — tving mørk */
+[data-testid="stExpander"],
+.streamlit-expanderHeader,
+details[data-testid="stExpander"] {
+    background: rgba(10,22,35,0.5) !important;
+    background-color: rgba(10,22,35,0.5) !important;
+    border: 1px solid rgba(120,145,170,0.2) !important;
+    border-radius: 10px !important;
+}
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] > details > summary,
+details[data-testid="stExpander"] > summary {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+    font-weight: 600 !important;
+    padding: 0.8rem 1rem !important;
+}
+[data-testid="stExpander"] summary:hover {
+    background: rgba(56,189,248,0.08) !important;
+    background-color: rgba(56,189,248,0.08) !important;
+}
+[data-testid="stExpander"] summary *,
+[data-testid="stExpander"] summary p,
+[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p {
+    color: #f5f7fb !important;
+    background: transparent !important;
+    background-color: transparent !important;
+}
+[data-testid="stExpander"] svg,
+[data-testid="stExpander"] summary svg {
+    fill: #c8d3df !important;
+    color: #c8d3df !important;
+}
+[data-testid="stExpander"] > div:not(summary),
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+    padding: 0 1rem 1rem 1rem !important;
+}
+
+/* ═══ ALERT / INFO / WARNING / ERROR / SUCCESS BOXES ═══ */
+[data-testid="stAlert"],
+.stAlert {
+    background-color: rgba(10,22,35,0.6) !important;
+    border: 1px solid rgba(120,145,170,0.2) !important;
+    border-radius: 8px !important;
+}
+[data-testid="stAlert"] * {
+    color: #c8d3df !important;
+}
+/* Success (grønn-tint) */
+[data-baseweb="notification"][kind="success"],
+.stAlert[data-baseweb="notification"][kind="success"] {
+    background-color: rgba(16,185,129,0.12) !important;
+    border-color: rgba(16,185,129,0.35) !important;
+}
+/* Error (rød-tint) */
+[data-baseweb="notification"][kind="negative"] {
+    background-color: rgba(239,68,68,0.12) !important;
+    border-color: rgba(239,68,68,0.35) !important;
+}
+/* Warning (oransj-tint) */
+[data-baseweb="notification"][kind="warning"] {
+    background-color: rgba(245,158,11,0.12) !important;
+    border-color: rgba(245,158,11,0.35) !important;
+}
+/* Info (blå-tint) */
+[data-baseweb="notification"][kind="info"] {
+    background-color: rgba(56,189,248,0.1) !important;
+    border-color: rgba(56,189,248,0.3) !important;
+}
+
+/* ═══ CODE BLOCK (st.code) ═══ */
+.stCode,
+[data-testid="stCode"],
+pre {
+    background-color: rgba(10,22,35,0.8) !important;
+    border: 1px solid rgba(120,145,170,0.2) !important;
+    color: #c8d3df !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1053,7 +1139,11 @@ with left:
             type=ACCEPTED_EXTS,
             accept_multiple_files=True,
             key="tender_files_v9",
-            help="PDF, DOCX, XLSX og IFC leses med strukturert ekstraksjon. DWG/DXF gir blokklayer-oversikt.",
+            help=(
+                "Maks 200 MB per fil. PDF, DOCX, XLSX og IFC leses med strukturert ekstraksjon. "
+                "DWG/DXF gir blokklayer-oversikt. ZIP-filer pakkes ut automatisk — "
+                "alle dokumenter inni behandles individuelt (opptil 150 filer per ZIP)."
+            ),
         )
 
         notes = st.text_area(
@@ -1098,16 +1188,39 @@ config = {
 
 
 def _parse_uploaded_files(uploaded) -> List[Dict[str, Any]]:
-    """Read bytes and extract content from each uploaded file."""
-    results = []
+    """
+    Les bytes og ekstraher innhold fra hver opplastet fil.
+    ZIP-filer pakkes automatisk ut — hver fil inni behandles som
+    et separat dokument.
+    """
+    from pathlib import Path as _P
+    results: List[Dict[str, Any]] = []
     total = len(uploaded)
     progress = st.progress(0.0, text="Leser dokumenter...")
+
     for i, f in enumerate(uploaded, 1):
-        progress.progress(i / max(total, 1), text=f"Leser {f.name} ({i}/{total})...")
+        ext = _P(f.name).suffix.lower()
+        progress.progress((i - 1) / max(total, 1), text=f"Leser {f.name} ({i}/{total})...")
         try:
             data = f.read()
-            parsed = extract_document(f.name, data)
-            results.append(parsed)
+
+            if ext == ".zip":
+                progress.progress(
+                    (i - 1) / max(total, 1),
+                    text=f"Pakker ut {f.name} ({len(data) / 1024 / 1024:.0f} MB)...",
+                )
+                # Pakk ut og behandle hver fil
+                inner_docs = expand_zip_to_documents(
+                    zip_filename=f.name,
+                    zip_data=data,
+                    max_files=150,
+                    max_file_size_mb=100,
+                )
+                results.extend(inner_docs)
+            else:
+                parsed = extract_document(f.name, data)
+                results.append(parsed)
+
         except Exception as e:
             results.append({
                 "filename": f.name,
@@ -1115,6 +1228,8 @@ def _parse_uploaded_files(uploaded) -> List[Dict[str, Any]]:
                 "error": f"{type(e).__name__}: {e}",
                 "text": "", "text_excerpt": "", "size_kb": 0,
             })
+
+    progress.progress(1.0, text="Ferdig lest")
     progress.empty()
     return results
 
@@ -1950,7 +2065,7 @@ with tabs[5]:
 
         manifest_rows = []
         for d in docs:
-            # Bygg merknad-kolonne: OCR, DWG-konvertering, portal-kilde
+            # Bygg merknad-kolonne: OCR, DWG-konvertering, portal-kilde, ZIP-kilde
             flags = []
             if d.get("ocr_pages"):
                 flags.append(f"OCR {d['ocr_pages']}s")
@@ -1958,6 +2073,8 @@ with tabs[5]:
                 flags.append("DWG→DXF")
             if d.get("source") == "doffin":
                 flags.append("Doffin")
+            if d.get("zip_source"):
+                flags.append(f"ZIP: {d['zip_source'][:25]}")
             manifest_rows.append({
                 "Filnavn": d.get("filename"),
                 "Kategori": d.get("category"),
