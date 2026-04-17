@@ -45,6 +45,12 @@ from tender_pricing import (
     log_package_dispatch,
     load_dispatch_history,
 )
+from tender_quote_parser import (
+    parse_and_persist_quote,
+    consolidate_quotes_by_package,
+    load_quotes,
+)
+from tender_portal_fetch import fetch_from_url
 from tender_report import build_pdf_report, build_markdown_report
 
 
@@ -477,10 +483,10 @@ else:
 
 render_html(f"""
 <div class="hero-card">
-    <div class="hero-eyebrow">Tender Control — v9</div>
+    <div class="hero-eyebrow">Tender Control</div>
     <div class="hero-title">Anbudskontroll som finner hullene før markedet gjør det.</div>
     <div class="hero-subtitle">
-        Reell dokumentlesning (PDF, DOCX, XLSX, IFC, DWG). 3-pass AI-analyse: per dokument,
+        Reell dokumentlesning (PDF, DOCX, XLSX, IFC, DXF). 3-pass AI-analyse: per dokument,
         krysskontroll, og strategisk tilbudsvurdering. Genererer forespørselspakker for
         ekstern prising, og gir vektet readiness-score med full revisjonslogg.
     </div>
@@ -492,7 +498,6 @@ render_html(f"""
         <span class="hero-pill">Audit trail</span>
     </div>
     <div style="margin-top: 0.8rem;">{backend_badge}</div>
-    <div class="hero-badge">Horizontal engine</div>
 </div>
 """)
 
@@ -510,6 +515,57 @@ with left:
         <p>Definer anskaffelsen og last opp konkurransegrunnlag, tegninger og tilbudsdokumenter.</p>
     </div>
     """)
+
+    # ── URL-inntak fra Doffin (utenfor form, så knappen fungerer uavhengig) ──
+    with st.expander("📥 Hent fra Doffin-lenke (valgfritt)", expanded=False):
+        st.caption(
+            "Lim inn en lenke til en Doffin-kunngjøring, så henter vi metadata "
+            "og tilgjengelige vedlegg automatisk. For Mercell og andre portaler "
+            "må konkurransegrunnlaget lastes ned manuelt."
+        )
+        url_col1, url_col2 = st.columns([4, 1])
+        with url_col1:
+            portal_url = st.text_input(
+                "URL til Doffin-kunngjøring",
+                value="",
+                key="tender_portal_url",
+                placeholder="https://www.doffin.no/notices/...",
+                label_visibility="collapsed",
+            )
+        with url_col2:
+            fetch_clicked = st.button("Hent", use_container_width=True, key="tender_fetch_btn")
+
+        if fetch_clicked and portal_url.strip():
+            with st.spinner(f"Henter fra {portal_url}..."):
+                fetch_result = fetch_from_url(portal_url.strip())
+            st.session_state.tender_portal_fetch = fetch_result
+
+        fetch_result = st.session_state.get("tender_portal_fetch")
+        if fetch_result:
+            if not fetch_result.get("ok"):
+                st.error(f"Henting feilet: {fetch_result.get('error')}")
+            else:
+                meta = fetch_result.get("metadata", {})
+                fetched_files = fetch_result.get("files", [])
+                st.success(f"Hentet {len(fetched_files)} vedlegg fra {fetch_result.get('portal', 'portal')}")
+                if meta.get("title"):
+                    st.caption(f"**Tittel:** {meta['title']}")
+                if meta.get("buyer"):
+                    st.caption(f"**Oppdragsgiver:** {meta['buyer']}")
+                if meta.get("deadline_raw"):
+                    st.caption(f"**Frist:** {meta['deadline_raw']}")
+                if meta.get("reference"):
+                    st.caption(f"**Referanse:** {meta['reference']}")
+                if fetched_files:
+                    st.caption("Vedlegg som blir inkludert i analysen:")
+                    for name, data in fetched_files[:15]:
+                        st.caption(f"  • {name} ({len(data)/1024:.0f} KB)")
+                    if len(fetched_files) > 15:
+                        st.caption(f"  … og {len(fetched_files) - 15} til")
+                if fetch_result.get("errors"):
+                    with st.expander(f"Advarsler ({len(fetch_result['errors'])})"):
+                        for err in fetch_result["errors"]:
+                            st.caption(f"• {err}")
 
     with st.form("tender_control_form"):
         c1, c2 = st.columns(2)
@@ -572,10 +628,9 @@ with left:
 # 8. DISCLAIMER
 # ═════════════════════════════════════════════════════════════════
 disclaimer_text = {
-    "auto": "Automatisk nivåvurdering — resultatet er et førsteutkast.",
-    "reviewed": "Dette utkastet er ment for fagperson-gjennomgang. Det er ikke signert "
-                "med ansvarsrett og er ikke juridisk bindende.",
-    "attested": "Markert som attestert — krever fortsatt signatur og kontroll for juridisk gyldighet.",
+    "auto": "Automatisk nivåvurdering — beslutningsstøtte for tilbudsteamet.",
+    "reviewed": "Gjennomgått nivå — analyse klar for intern beslutning og go/no-go-vurdering.",
+    "attested": "Attestert nivå — full gjennomgang med tilbudsansvarlig.",
 }
 render_html(f"""
 <div class="disclaimer-banner">
@@ -623,12 +678,38 @@ def _parse_uploaded_files(uploaded) -> List[Dict[str, Any]]:
 
 
 if submitted:
-    if not files:
-        st.error("Last opp minst ett dokument før kjøring.")
+    # Kombiner opplastede filer med portal-hentede filer
+    portal_fetched = st.session_state.get("tender_portal_fetch") or {}
+    portal_files = portal_fetched.get("files") or []  # List[Tuple[str, bytes]]
+
+    total_input_count = (len(files) if files else 0) + len(portal_files)
+
+    if total_input_count == 0:
+        st.error("Last opp minst ett dokument — eller hent fra Doffin — før kjøring.")
     else:
-        # Step 1: Parse documents
-        st.session_state.tender_documents = _parse_uploaded_files(files)
-        st.success(f"Leste {len(st.session_state.tender_documents)} dokument(er).")
+        # Step 1: Parse documents (både opplastede og portal-hentede)
+        parsed_docs = _parse_uploaded_files(files) if files else []
+
+        if portal_files:
+            portal_progress = st.progress(0.0, text="Parser portal-vedlegg...")
+            for i, (pname, pbytes) in enumerate(portal_files, 1):
+                portal_progress.progress(i / len(portal_files), text=f"Parser {pname} ({i}/{len(portal_files)})...")
+                try:
+                    parsed = extract_document(pname, pbytes)
+                    parsed["source"] = "doffin"
+                    parsed_docs.append(parsed)
+                except Exception as e:
+                    parsed_docs.append({
+                        "filename": pname,
+                        "category": "annet",
+                        "error": f"{type(e).__name__}: {e}",
+                        "text": "", "text_excerpt": "", "size_kb": 0,
+                        "source": "doffin",
+                    })
+            portal_progress.empty()
+
+        st.session_state.tender_documents = parsed_docs
+        st.success(f"Leste {len(parsed_docs)} dokument(er).")
 
         # Step 2: Rule-based findings (deterministic, instant)
         st.session_state.tender_rule_findings = build_rule_findings(
@@ -658,9 +739,12 @@ if submitted:
         # Step 4: Readiness score
         p2d = (st.session_state.tender_analysis.get("pass2") or {}).get("data")
         p3d = (st.session_state.tender_analysis.get("pass3") or {}).get("data")
+        # Ny analyse = nullstill RFI-svar (gamle spørsmål er ikke lenger relevante)
+        st.session_state.tender_rfi_state = {}
         st.session_state.tender_readiness = compute_readiness(
             st.session_state.tender_rule_findings, p2d, p3d,
             st.session_state.tender_documents, config,
+            rfi_state=st.session_state.tender_rfi_state,
         )
 
         # Step 5: Persist audit trail
@@ -778,6 +862,7 @@ tab_names = [
     "Risikomatrise",
     "RFI-kø",
     "Prisingspakker",
+    "Tilbudsrespons",
     "Dokumenter",
     "Sjekkliste",
     "Krysskontroll",
@@ -954,18 +1039,117 @@ with tabs[2]:
         pass3 = (analysis.get("pass3") or {}).get("data") or {}
         rfis = pass3.get("rfi_queue") or []
 
+        # Init/keep RFI state dict so svar overlever rerender
+        if "tender_rfi_state" not in st.session_state:
+            st.session_state.tender_rfi_state = {}
+        rfi_state = st.session_state.tender_rfi_state
+
         if rfis:
-            rfi_df = pd.DataFrame(rfis)
+            # Seed state for new RFIs
+            for idx, rfi in enumerate(rfis):
+                key = f"rfi_{idx}"
+                if key not in rfi_state:
+                    rfi_state[key] = {
+                        "status": "open",
+                        "answer": "",
+                        "answered_at": None,
+                    }
+
+            answered_count = sum(1 for v in rfi_state.values() if v.get("status") == "answered")
+            total_count = len(rfis)
+
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("Totalt", total_count)
+            col_m2.metric("Besvart", answered_count)
+            col_m3.metric("Åpne", total_count - answered_count)
+
+            st.markdown("")
+
+            # Sorted by priority
             prio_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
-            if "priority" in rfi_df.columns:
-                rfi_df["_p"] = rfi_df["priority"].map(lambda s: prio_order.get((s or "").upper(), 9))
-                rfi_df = rfi_df.sort_values("_p").drop(columns=["_p"])
+            sorted_rfis = sorted(
+                enumerate(rfis),
+                key=lambda t: prio_order.get((t[1].get("priority") or "").upper(), 9),
+            )
 
-            display_cols = [c for c in ["priority", "question", "why_it_matters", "owner", "deadline_before"]
-                            if c in rfi_df.columns]
-            st.dataframe(rfi_df[display_cols], use_container_width=True, hide_index=True)
+            for idx, rfi in sorted_rfis:
+                key = f"rfi_{idx}"
+                state = rfi_state[key]
+                is_answered = state.get("status") == "answered"
 
-            csv = rfi_df[display_cols].to_csv(index=False).encode("utf-8")
+                priority = (rfi.get("priority") or "MEDIUM").upper()
+                badge_color = {"HIGH": "#ef4444", "MEDIUM": "#f59e0b", "LOW": "#10b981"}.get(priority, "#64748b")
+                status_label = "✓ Besvart" if is_answered else "● Åpen"
+
+                with st.expander(
+                    f"{status_label}  ·  [{priority}]  {rfi.get('question', '(uten spørsmål)')[:120]}",
+                    expanded=not is_answered and priority == "HIGH",
+                ):
+                    if rfi.get("why_it_matters"):
+                        st.caption(f"**Hvorfor det betyr noe:** {rfi['why_it_matters']}")
+                    if rfi.get("owner"):
+                        st.caption(f"**Ansvar:** {rfi['owner']}")
+                    if rfi.get("deadline_before"):
+                        st.caption(f"**Må avklares før:** {rfi['deadline_before']}")
+
+                    answer_val = st.text_area(
+                        "Svar / status",
+                        value=state.get("answer", ""),
+                        key=f"rfi_answer_{idx}",
+                        height=90,
+                        placeholder="Skriv svaret fra byggherre eller egen intern avklaring her...",
+                    )
+
+                    bc1, bc2, bc3 = st.columns([1, 1, 3])
+                    if not is_answered:
+                        if bc1.button("Marker besvart", key=f"rfi_mark_{idx}", type="primary"):
+                            rfi_state[key] = {
+                                "status": "answered",
+                                "answer": answer_val,
+                                "answered_at": datetime.now().isoformat(),
+                            }
+                            # Recompute readiness with RFI boost
+                            p2d = (analysis.get("pass2") or {}).get("data")
+                            p3d = (analysis.get("pass3") or {}).get("data")
+                            new_readiness = compute_readiness(
+                                st.session_state.tender_rule_findings,
+                                p2d, p3d,
+                                st.session_state.tender_documents,
+                                config,
+                                rfi_state=rfi_state,
+                            )
+                            st.session_state.tender_readiness = new_readiness
+                            st.rerun()
+                    else:
+                        if bc1.button("Gjenåpne", key=f"rfi_reopen_{idx}"):
+                            rfi_state[key]["status"] = "open"
+                            p2d = (analysis.get("pass2") or {}).get("data")
+                            p3d = (analysis.get("pass3") or {}).get("data")
+                            new_readiness = compute_readiness(
+                                st.session_state.tender_rule_findings,
+                                p2d, p3d,
+                                st.session_state.tender_documents,
+                                config,
+                                rfi_state=rfi_state,
+                            )
+                            st.session_state.tender_readiness = new_readiness
+                            st.rerun()
+                        if state.get("answered_at"):
+                            bc3.caption(f"Besvart: {state['answered_at'][:16].replace('T', ' ')}")
+
+            st.markdown("---")
+            # CSV-eksport med besvart-status
+            export_rows = []
+            for idx, rfi in enumerate(rfis):
+                state = rfi_state.get(f"rfi_{idx}", {})
+                export_rows.append({
+                    **rfi,
+                    "status": state.get("status", "open"),
+                    "answer": state.get("answer", ""),
+                    "answered_at": state.get("answered_at", ""),
+                })
+            rfi_df = pd.DataFrame(export_rows)
+            csv = rfi_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "Last ned RFI-kø (.csv)",
                 data=csv, file_name="tender_rfi_queue.csv", mime="text/csv",
@@ -1134,8 +1318,191 @@ with tabs[3]:
                 st.caption("Ingen forespørsler er sendt ut for dette prosjektet ennå.")
 
 
-# ── TAB 4: Dokumenter ────────────────────────────────────────────
+# ── TAB 4: Tilbudsrespons (UE-parsing) ───────────────────────────
 with tabs[4]:
+    docs = st.session_state.tender_documents
+    analysis = st.session_state.tender_analysis
+
+    if not analysis:
+        st.info(
+            "Kjør anbudskontroll først. Når prisingspakker er generert og sendt ut, "
+            "laster du opp mottatte UE-tilbud her for automatisk parsing og konsolidering."
+        )
+    else:
+        pass3_data = (analysis.get("pass3") or {}).get("data") or {}
+        pricing_packages_list = pass3_data.get("pricing_packages") or []
+        package_names = [p.get("package_name") or p.get("name") or f"Pakke {i+1}"
+                         for i, p in enumerate(pricing_packages_list)]
+        if not package_names:
+            package_names = ["Uspesifisert pakke"]
+
+        project_name = pd_state.get("p_name", "-")
+        run_id = (st.session_state.tender_run_meta or {}).get("run_id")
+
+        st.markdown("### Last opp mottatte pristilbud fra underentreprenører")
+        st.caption(
+            "Hvert tilbud parses med AI: leverandørnavn, totalpris, gyldighet, "
+            "forbehold, opsjoner og risikoflagg. Tilbudene aggregeres per pakke."
+        )
+
+        qcol1, qcol2 = st.columns([2, 1])
+        with qcol1:
+            quote_files = st.file_uploader(
+                "Pristilbud (PDF, DOCX, XLSX)",
+                type=["pdf", "docx", "xlsx", "xlsm", "xls"],
+                accept_multiple_files=True,
+                key="tender_quote_files",
+            )
+        with qcol2:
+            selected_package = st.selectbox(
+                "Hvilken pakke gjelder tilbudene?",
+                package_names,
+                key="tender_quote_package_sel",
+            )
+
+        if quote_files and st.button("Parse pristilbud", type="primary", key="tender_parse_quotes"):
+            progress = st.progress(0.0, text="Starter parsing...")
+            parsed_new: List[Dict[str, Any]] = []
+            for i, qf in enumerate(quote_files, 1):
+                progress.progress(i / len(quote_files), text=f"Parser {qf.name} ({i}/{len(quote_files)})...")
+                try:
+                    data = qf.read()
+                    record = parse_and_persist_quote(
+                        project_name=project_name,
+                        run_id=run_id,
+                        package_name=selected_package,
+                        filename=qf.name,
+                        file_bytes=data,
+                        qa_level=config.get("qa_level", "Standard"),
+                    )
+                    parsed_new.append(record)
+                except Exception as e:
+                    parsed_new.append({
+                        "filename": qf.name,
+                        "package_name": selected_package,
+                        "parsed": {"ok": False, "error": str(e)},
+                    })
+            progress.empty()
+            st.success(f"Parset {len(parsed_new)} tilbud.")
+
+        # Vis alle lagrede tilbud
+        st.markdown("---")
+        st.markdown("### Konsolidert tilbudsoversikt")
+
+        stored_quotes = load_quotes(project_name)
+
+        if not stored_quotes:
+            st.info("Ingen pristilbud registrert for dette prosjektet ennå.")
+        else:
+            # Normaliser form for consolidate_quotes_by_package
+            quotes_for_agg: List[Dict[str, Any]] = []
+            for sq in stored_quotes:
+                quotes_for_agg.append({
+                    "package_name": sq.get("package_name"),
+                    "filename": sq.get("filename"),
+                    "parsed": {
+                        "ok": sq.get("parsed_data") is not None,
+                        "data": sq.get("parsed_data") or {},
+                        "error": sq.get("parse_error"),
+                    },
+                    "received_at": sq.get("received_at"),
+                    "quote_id": sq.get("quote_id"),
+                })
+
+            consolidated = consolidate_quotes_by_package(quotes_for_agg)
+
+            # Oversiktskort per pakke
+            for pkg in consolidated["packages"]:
+                with st.expander(
+                    f"📦 {pkg['package_name']}  ·  {pkg['num_priced']}/{pkg['num_quotes']} med pris",
+                    expanded=pkg["num_priced"] > 0,
+                ):
+                    if pkg["num_priced"] >= 2:
+                        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+                        mcol1.metric("Laveste", f"{pkg['lowest']['price']:,.0f} kr".replace(",", " "))
+                        mcol2.metric("Høyeste", f"{pkg['highest']['price']:,.0f} kr".replace(",", " "))
+                        mcol3.metric("Snitt", f"{pkg['mean_price']:,.0f} kr".replace(",", " ") if pkg['mean_price'] else "–")
+                        mcol4.metric("Spredning", f"{pkg['spread_pct']:.1f} %")
+
+                        if pkg["lowest"]:
+                            st.caption(f"**Laveste tilbyder:** {pkg['lowest']['supplier']}")
+                    elif pkg["num_priced"] == 1 and pkg["lowest"]:
+                        st.metric("Pris", f"{pkg['lowest']['price']:,.0f} kr".replace(",", " "))
+                        st.caption(f"**Tilbyder:** {pkg['lowest']['supplier']}")
+
+                    # Tabell over alle tilbud i pakken
+                    rows = []
+                    for q in pkg["quotes"]:
+                        data = (q.get("parsed") or {}).get("data") or {}
+                        err = (q.get("parsed") or {}).get("error")
+                        rows.append({
+                            "Fil": q.get("filename", "(uten navn)"),
+                            "Leverandør": data.get("supplier_name") or "–",
+                            "Pris (ex. mva)": (
+                                f"{data['total_price_ex_vat']:,.0f}".replace(",", " ")
+                                if isinstance(data.get("total_price_ex_vat"), (int, float))
+                                else "–"
+                            ),
+                            "Gyldighet": data.get("validity_until") or "–",
+                            "Forbehold": len(data.get("reservations") or []) if data else 0,
+                            "Risiko": len(data.get("risk_flags") or []) if data else 0,
+                            "Status": "OK" if not err else f"Feil: {err[:40]}",
+                        })
+                    if rows:
+                        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                    # Detaljer per tilbud
+                    for q in pkg["quotes"]:
+                        data = (q.get("parsed") or {}).get("data")
+                        if not data:
+                            continue
+                        st.markdown(f"**{data.get('supplier_name', q.get('filename'))}** — detaljer")
+                        if data.get("reservations"):
+                            st.caption("Forbehold:")
+                            for r in data["reservations"][:10]:
+                                st.caption(f"  • {r}")
+                        if data.get("exclusions"):
+                            st.caption("Eksklusjoner:")
+                            for e in data["exclusions"][:10]:
+                                st.caption(f"  • {e}")
+                        if data.get("risk_flags"):
+                            st.caption("Risikoflagg:")
+                            for rf_item in data["risk_flags"][:10]:
+                                sev = (rf_item.get("severity") or "").upper()
+                                st.caption(f"  [{sev}] {rf_item.get('issue', '')} — {rf_item.get('impact', '')}")
+
+            # Total-CSV-eksport
+            st.markdown("---")
+            all_rows = []
+            for pkg in consolidated["packages"]:
+                for q in pkg["quotes"]:
+                    data = (q.get("parsed") or {}).get("data") or {}
+                    all_rows.append({
+                        "package": pkg["package_name"],
+                        "filename": q.get("filename"),
+                        "supplier": data.get("supplier_name"),
+                        "supplier_org_no": data.get("supplier_org_no"),
+                        "total_ex_vat": data.get("total_price_ex_vat"),
+                        "total_inc_vat": data.get("total_price_inc_vat"),
+                        "currency": data.get("currency"),
+                        "validity_until": data.get("validity_until"),
+                        "price_basis": data.get("price_basis"),
+                        "reservations_count": len(data.get("reservations") or []),
+                        "risk_count": len(data.get("risk_flags") or []),
+                        "received_at": q.get("received_at"),
+                    })
+            if all_rows:
+                csv = pd.DataFrame(all_rows).to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Last ned konsolidert tilbudsmatrise (.csv)",
+                    data=csv,
+                    file_name=f"tilbudsmatrise_{project_name}.csv",
+                    mime="text/csv",
+                )
+
+
+# ── TAB 5: Dokumenter ────────────────────────────────────────────
+with tabs[5]:
     docs = st.session_state.tender_documents
     if not docs:
         st.info("Ingen dokumenter lastet opp ennå.")
@@ -1144,12 +1511,21 @@ with tabs[4]:
 
         manifest_rows = []
         for d in docs:
+            # Bygg merknad-kolonne: OCR, DWG-konvertering, portal-kilde
+            flags = []
+            if d.get("ocr_pages"):
+                flags.append(f"OCR {d['ocr_pages']}s")
+            if d.get("converted_from_dwg"):
+                flags.append("DWG→DXF")
+            if d.get("source") == "doffin":
+                flags.append("Doffin")
             manifest_rows.append({
                 "Filnavn": d.get("filename"),
                 "Kategori": d.get("category"),
                 "Størrelse (KB)": d.get("size_kb"),
                 "Sider": d.get("page_count") or "-",
                 "Tabeller": len(d.get("tables", [])),
+                "Merknad": " · ".join(flags) if flags else "",
                 "Feil": d.get("error") or "",
             })
         st.dataframe(pd.DataFrame(manifest_rows), use_container_width=True, hide_index=True)
@@ -1193,8 +1569,8 @@ with tabs[4]:
                 st.markdown("---")
 
 
-# ── TAB 5: Sjekkliste ────────────────────────────────────────────
-with tabs[5]:
+# ── TAB 6: Sjekkliste ────────────────────────────────────────────
+with tabs[6]:
     rf = st.session_state.tender_rule_findings
     if not rf:
         st.info("Kjør anbudskontroll for å generere sjekkliste.")
@@ -1220,8 +1596,8 @@ with tabs[5]:
             st.info("Ingen sjekkpunkter generert.")
 
 
-# ── TAB 6: Krysskontroll ─────────────────────────────────────────
-with tabs[6]:
+# ── TAB 7: Krysskontroll ─────────────────────────────────────────
+with tabs[7]:
     analysis = st.session_state.tender_analysis
     if not analysis:
         st.info("Kjør anbudskontroll for krysskontroll-resultater.")
@@ -1260,8 +1636,8 @@ with tabs[6]:
             st.caption("Ingen konsoliderte kontraktsvilkår identifisert.")
 
 
-# ── TAB 7: Audit trail ───────────────────────────────────────────
-with tabs[7]:
+# ── TAB 8: Audit trail ───────────────────────────────────────────
+with tabs[8]:
     history = load_run_history(pd_state.get("p_name", "-"))
 
     st.markdown("### Denne kjøringen")
@@ -1306,16 +1682,8 @@ with tabs[7]:
 # 12. FOOTER
 # ═════════════════════════════════════════════════════════════════
 render_html("""
-<div class="panel-box gold">
-    <h4>Neste naturlige steg</h4>
-    <p>Denne versjonen lever opp til løftet i hero-overskriften. Neste iterasjon
-       kan knytte modulen tettere til live konkurransegrunnlag:</p>
-    <ul>
-        <li>OCR-fallback for skannede PDF-er (Tesseract).</li>
-        <li>DWG-ekstraksjon via ODA File Converter før DXF-lesing.</li>
-        <li>Automatisk oppdatering av readiness-score når RFI besvares.</li>
-        <li>UE-respons-parsing: les innkomne pristilbud og konsolider i oversikt.</li>
-        <li>Batch/API-laget mot Doffin/Mercell for automatisk inntak.</li>
-    </ul>
+<div class="panel-box" style="margin-top:2rem;text-align:center;opacity:0.7;font-size:0.85rem;">
+    <p style="margin:0;">Builtly Anbudskontroll · AI-assistert analyse av konkurransegrunnlag ·
+       Beslutningsstøtte for tilbudsteam.</p>
 </div>
 """)
