@@ -8507,6 +8507,7 @@ KRAV:
             solar_grid_image=solar_grid_img,
             scene_images=scene_imgs_for_pdf or None,
             plan_view_analyses=pv_analyses or None,
+            cover_image=st.session_state.get("stability_render_image"),
             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
         )
     except Exception as pdf_exc:
@@ -9693,6 +9694,8 @@ render();
                             site=site_obj,
                             environment_data=result.get("environment"),
                             solar_grid_image=_solar_grid,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
@@ -9895,6 +9898,8 @@ render();
                             solar_grid_image=_solar_ac,
                             scene_images=captured,
                             plan_view_analyses=pv_analyses_3d or None,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -10040,6 +10045,8 @@ render();
                             solar_grid_image=_solar_grid_3d,
                             scene_images=scene_images_for_pdf,
                             plan_view_analyses=pv_analyses_upload or None,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -10220,6 +10227,9 @@ render();
                     all_images = result.get("option_images", [])
                     _site_obj_sr = SiteInputs(**site_result) if site_result else None
                     _solar_sr = render_solar_snapshot_grid(_site_obj_sr, motor_options[0]) if _site_obj_sr and motor_options else None
+                    # Bevar eksisterende AI-cover og AI-analyser hvis de finnes
+                    _cached_cover = st.session_state.get("stability_render_image")
+                    _cached_pv = st.session_state.get("_cached_pv_analyses") or None
                     new_pdf_bytes = create_full_report_pdf(
                         name=pd_state.get("p_name", "Prosjekt"),
                         client=pd_state.get("c_name", "Ukjent"),
@@ -10232,10 +10242,15 @@ render();
                         environment_data=result.get("environment"),
                         solar_grid_image=_solar_sr,
                         scene_images=st.session_state.get("ark_scene_images"),
+                        plan_view_analyses=_cached_pv,
+                        cover_image=_cached_cover,
                         solar_3d_snapshots=st.session_state["solar_3d_snapshots"],
                     )
                     st.session_state.generated_ark_pdf = new_pdf_bytes
-                    st.success("✓ PDF oppdatert med 3D-sol/skygge-bilder")
+                    _msg = "✓ PDF oppdatert med 3D-sol/skygge-bilder"
+                    if _cached_cover is not None:
+                        _msg += " (fotorealistisk forside beholdt)"
+                    st.success(_msg)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Kunne ikke regenerere PDF: {e}")
@@ -10296,10 +10311,14 @@ render();
                             scene_images=scene_imgs,
                             plan_view_analyses=pv_analyses_sr or None,
                             cover_image=rendered,
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
                         )
                         st.session_state.generated_ark_pdf = new_pdf_sr
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
-                        st.success("PDF oppdatert med fotorealistisk forside.")
+                        _msg2 = "PDF oppdatert med fotorealistisk forside."
+                        if st.session_state.get("solar_3d_snapshots"):
+                            _msg2 += " (3D-sol/skygge beholdt)"
+                        st.success(_msg2)
                     except Exception as exc:
                         st.warning(f"Skisse generert, men PDF-oppdatering feilet: {exc}")
             else:
