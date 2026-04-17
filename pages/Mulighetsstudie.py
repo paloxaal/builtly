@@ -5,6 +5,7 @@ import math
 import os
 import re
 import tempfile
+import time
 import urllib.parse
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -4989,7 +4990,7 @@ document.getElementById('sunSeason').addEventListener('change', function() {
 });
 updateSunPosition(12, 80);
 
-// --- SOL/SKYGGE CAPTURE ---
+// --- SOL/SKYGGE CAPTURE (postMessage-basert, cross-origin-robust) ---
 // 5 faste snapshots matcher PDF-ens sol/skygge-sider
 const captureTimes = [
   { doy: 80,  hour: 12.0, label: 'Varjevndogn - 21. mars kl. 12.00' },
@@ -4999,13 +5000,15 @@ const captureTimes = [
   { doy: 172, hour: 18.0, label: 'Sommersolverv - 21. juni kl. 18.00' },
 ];
 
-// Bruk window.top sessionStorage så Python kan lese det via st_javascript
-function getStorage() {
+// postMessage til parent-vinduet — Streamlit-appen lytter der og lagrer
+// i sin egen sessionStorage, som Python så kan lese via st_javascript.
+// Dette unngår alle window.top same-origin-problemer.
+function sendToParent(payload) {
   try {
-    return window.top.sessionStorage;
+    window.parent.postMessage(payload, '*');
   } catch (e) {
-    // Hvis cross-origin, fallback til egen sessionStorage
-    return window.sessionStorage;
+    // fallback: topp-vinduet (hvis parent ikke er tilgjengelig)
+    try { window.top.postMessage(payload, '*'); } catch (e2) {}
   }
 }
 
@@ -5016,20 +5019,17 @@ async function captureSolarSnapshots() {
   btn.style.opacity = '0.6';
   const originalLabel = btn.textContent;
 
-  const storage = getStorage();
-  // Slett tidligere capture-state
-  storage.removeItem('builtly_solar_capture_status');
-  storage.removeItem('builtly_solar_capture_count');
-  for (let i = 0; i < 10; i++) {
-    storage.removeItem('builtly_solar_capture_img_' + i);
-  }
-
-  storage.setItem('builtly_solar_capture_status', 'running');
-  storage.setItem('builtly_solar_capture_count', String(captureTimes.length));
+  // Signaliser at capture starter
+  sendToParent({
+    source: 'builtly_solar_capture',
+    type: 'start',
+    count: captureTimes.length,
+  });
 
   const origHour = parseFloat(document.getElementById('sunHour').value);
   const origSeason = parseInt(document.getElementById('sunSeason').value);
 
+  const captured = [];
   for (let i = 0; i < captureTimes.length; i++) {
     const t = captureTimes[i];
     status.textContent = `Tar bilde ${i + 1}/${captureTimes.length}`;
@@ -5037,41 +5037,41 @@ async function captureSolarSnapshots() {
     // La Three.js rendre frem sol/skygge — to animation frames + 400ms for sikkerhet
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     await new Promise(r => setTimeout(r, 400));
-    // Force full render
     renderer.render(scene, camera);
-    const dataUrl = renderer.domElement.toDataURL('image/jpeg', 0.85);
-    // Lagre i storage (base64 data URL, ca 1-2 MB per bilde som JPEG 0.85)
-    try {
-      storage.setItem('builtly_solar_capture_img_' + i, dataUrl);
-      storage.setItem('builtly_solar_capture_label_' + i, t.label);
-    } catch (e) {
-      status.textContent = '❌ Lagring feilet (quota?): ' + e.message;
-      btn.disabled = false;
-      btn.style.opacity = '1';
-      btn.textContent = originalLabel;
-      return;
-    }
+
+    // JPEG 0.82 gir ~600-900 KB per bilde. postMessage takler dette fint.
+    const dataUrl = renderer.domElement.toDataURL('image/jpeg', 0.82);
+
+    captured.push({ index: i, label: t.label, doy: t.doy, hour: t.hour, dataUrl: dataUrl });
+
+    // Send hver frame med én gang så parent kan prosessere inkrementelt
+    sendToParent({
+      source: 'builtly_solar_capture',
+      type: 'frame',
+      index: i,
+      total: captureTimes.length,
+      label: t.label,
+      doy: t.doy,
+      hour: t.hour,
+      dataUrl: dataUrl,
+    });
   }
 
   // Gjenopprett original visning
   updateSunPosition(origHour, origSeason);
 
-  // Signaliser at capture er ferdig — Python vil polle dette
-  storage.setItem('builtly_solar_capture_status', 'ready');
+  // Signaliser at capture er ferdig
+  sendToParent({
+    source: 'builtly_solar_capture',
+    type: 'done',
+    count: captureTimes.length,
+    frames: captured,  // full bundle som fallback
+  });
 
   status.textContent = '✓ Bildene er klare — henter inn i rapport...';
   btn.disabled = false;
   btn.style.opacity = '1';
   btn.textContent = originalLabel;
-
-  // Etter 1.5 sek: trigger en Streamlit-rerun så Python kan hente bildene
-  // (dette gjøres ved å trigger en dummy-endring i URL hash)
-  setTimeout(() => {
-    try {
-      // Trigger main window rerun ved å endre hash og reload
-      window.top.location.hash = 'solar_capture_' + Date.now();
-    } catch (e) {}
-  }, 1500);
 }
 
 document.getElementById('captureSolar').addEventListener('click', captureSolarSnapshots);
@@ -7039,7 +7039,7 @@ def create_full_report_pdf(
                 pdf.ln(4)
 
     # ================================================================
-    # SOL/SKYGGE — INDIVIDUELLE BILDER (erstatter komprimert 3x2 grid)
+    # SOL/SKYGGE — ELEGANT ÉN-SIDE-PER-BILDE MED METADATA-PANEL
     # ================================================================
     if solar_grid_image is not None and site is not None and options:
         solar_snapshots = [
@@ -7049,33 +7049,260 @@ def create_full_report_pdf(
             (172, 15.0, "Sommersolverv — 21. juni kl. 15:00"),
             (172, 18.0, "Sommersolverv — 21. juni kl. 18:00"),
         ]
+        use_3d = bool(solar_3d_snapshots) and len(solar_3d_snapshots) == len(solar_snapshots)
+
+        # Introside — oppsummering av sol/skygge-metodikk
         pdf.add_page()
         pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
+
+        _best = options[0] if options else None
+        _best_h = float(getattr(_best, "height_m", 0.0) or 0.0) if _best else 0.0
+
         pdf.body_text(
-            "Diagrammene viser beregnede skyggeforhold for vårjevndøgn (21. mars) "
-            "og sommersolverv (21. juni) ved utvalgte klokkeslett. "
-            "Skygger fra foreslåtte volumer og nabobygg er inkludert."
+            "Analysen viser beregnede skyggeforhold for vårjevndøgn (21. mars) og "
+            "sommersolverv (21. juni) ved utvalgte klokkeslett. 3D-modellen inkluderer "
+            "både foreslått volum og 158 nabobygg, slik at kastede skygger reflekterer "
+            "den reelle situasjonen på tomten. Beregningene er stedsspesifikke for "
+            f"breddegrad {site.latitude_deg:.2f}° N."
+            if use_3d else
+            "Diagrammene viser beregnede skyggeforhold for vårjevndøgn (21. mars) og "
+            "sommersolverv (21. juni) ved utvalgte klokkeslett. Skygger fra foreslåtte "
+            "volumer og nabobygg er inkludert. Beregningene er stedsspesifikke for "
+            f"breddegrad {site.latitude_deg:.2f}° N."
         )
-        pdf.ln(4)
-        # Bruk 3D-snapshots fra Three.js hvis tilgjengelig, ellers fall tilbake til PIL-render
-        use_3d = bool(solar_3d_snapshots) and len(solar_3d_snapshots) == len(solar_snapshots)
+        pdf.ln(3)
+
+        # Liten info-boks med metodikk-kontekst
+        try:
+            pdf.set_fill_color(247, 249, 252)  # svært lys blågrå
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_line_width(0.2)
+            _box_y = pdf.get_y()
+            pdf.rect(25, _box_y, 160, 26, style="DF")
+            pdf.set_xy(29, _box_y + 3)
+            pdf.set_font(PDF_FONT, "B", 9)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(156, 5, clean_pdf_text("Metodikk"), 0, 2, "L")
+            pdf.set_x(29)
+            pdf.set_font(PDF_FONT, "", 8.5)
+            pdf.set_text_color(*_BODY_BLACK)
+            _method_text = (
+                "Bildene er renderet fra den interaktive 3D-modellen i dashbordet. "
+                "Solens posisjon (høyde og azimut) er beregnet astronomisk fra dato "
+                "og klokkeslett, og skyggene kastes deterministisk fra faktiske "
+                "volumhøyder."
+                if use_3d else
+                "Sol/skygge-diagrammene er generert fra en Python/Shapely-basert "
+                "skyggemotor. For fotorealistisk fremstilling med terreng og "
+                "nabobygg, bruk «Fang sol/skygge» i 3D-scenen og regenerer rapporten."
+            )
+            pdf.multi_cell(152, 4.2, ironclad_text_formatter(_method_text))
+            pdf.set_line_width(0.2)
+            pdf.set_xy(25, _box_y + 28)
+        except Exception:
+            pass
+        pdf.ln(2)
+
+        # Oversiktstabell med solhøyder for alle snapshots
+        try:
+            pdf.subtitle("Soldata for analyserte tidspunkter")
+            hdrs = ["Dato", "Tid", "Solhøyde", "Azimut", "Skygge (ved 16m)"]
+            widths = [35, 18, 25, 25, 52]
+            rows = []
+            for (doy, hour, lbl) in solar_snapshots:
+                alt_v = solar_altitude_deg(site.latitude_deg, doy, hour)
+                az_v = (solar_azimuth_deg(site.latitude_deg, doy, hour) - site.north_rotation_deg) % 360.0
+                sh_v = shadow_length_m(16.0, alt_v) if alt_v > 0.5 else 0.0
+                # Formater dato
+                _date = "21. mars" if doy == 80 else ("21. juni" if doy == 172 else f"dag {doy}")
+                _time = f"{int(hour):02d}:{int((hour%1)*60):02d}"
+                rows.append([
+                    _date,
+                    _time,
+                    f"{alt_v:.1f}°",
+                    f"{az_v:.0f}°",
+                    f"{sh_v:.1f} m" if alt_v > 0.5 else "—",
+                ])
+            add_pdf_table(pdf, hdrs, rows, widths)
+            pdf.ln(2)
+        except Exception:
+            pass
+
+        # --- Én side per bilde ---
         for s_idx, (doy, hour, lbl) in enumerate(solar_snapshots):
             try:
                 if use_3d:
                     snap = solar_3d_snapshots[s_idx]
                 else:
                     snap = render_solar_snapshot(site, options[0], doy, hour, lbl)
+
+                # Beregn soldata for denne tidspunktet
+                try:
+                    alt_deg = solar_altitude_deg(site.latitude_deg, doy, hour)
+                    az_deg = (solar_azimuth_deg(site.latitude_deg, doy, hour) - site.north_rotation_deg) % 360.0
+                    if _best_h > 0 and alt_deg > 0.5:
+                        sh_len = shadow_length_m(_best_h, alt_deg)
+                    else:
+                        sh_len = 0.0
+                except Exception:
+                    alt_deg = 0.0
+                    az_deg = 0.0
+                    sh_len = 0.0
+
+                # Ny side per snapshot — maksimal lesbarhet
+                pdf.add_page()
+
+                # Heading (navy, med accent-linje)
+                pdf.set_x(25)
+                pdf.set_font(PDF_FONT, "B", 15)
+                pdf.set_text_color(*_NAVY)
+                pdf.multi_cell(160, 8, clean_pdf_text(lbl), 0, "L")
+                _y_after_title = pdf.get_y()
+                pdf.set_draw_color(*_BUILTLY_BLUE)
+                pdf.set_line_width(0.6)
+                _title_w = min(pdf.get_string_width(clean_pdf_text(lbl)) + 2, 155)
+                pdf.line(25, _y_after_title + 0.5, 25 + _title_w, _y_after_title + 0.5)
+                pdf.set_line_width(0.2)
+                pdf.ln(4)
+
+                # Kort underforklaring — kontekstuell, ikke generisk
+                _season = "Vårjevndøgn" if doy == 80 else "Sommersolverv"
+                _hour_str = f"{int(hour):02d}:{int((hour%1)*60):02d}"
+                _ctx_text = {
+                    (80, 12.0): (
+                        "Midt på dagen ved vårjevndøgn står solen i sør. Dette er en referansesituasjon "
+                        "med moderat solhøyde som viser typiske skyggeforhold gjennom vår og høst."
+                    ),
+                    (80, 15.0): (
+                        "Ettermiddag ved vårjevndøgn — solen beveger seg mot vest og skyggene forlenges "
+                        "østover. Kritisk for uteareal som skal fungere utover dagen."
+                    ),
+                    (172, 12.0): (
+                        "Høyeste solstand i året. Skyggene er korteste og uteareal får maksimal solinnstråling. "
+                        "Brukes som kontrollpunkt for sommersituasjonen."
+                    ),
+                    (172, 15.0): (
+                        "Sommerettermiddag med høy sol fra sørvest. Viktigste tidspunkt for vurdering av "
+                        "solforhold på vestvendte fasader og uteareal."
+                    ),
+                    (172, 18.0): (
+                        "Kveldssol fra vest — avgjørende for solinnstråling på uteareal etter arbeidstid. "
+                        "Her vises hvilke arealer som beholder sol lengst på sommerdager."
+                    ),
+                }.get((doy, hour), f"{_season} kl. {_hour_str} — solhøyde og skyggekast for dette tidspunktet.")
+
+                pdf.set_x(25)
+                pdf.set_font(PDF_FONT, "", 9.5)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.multi_cell(160, 4.8, ironclad_text_formatter(_ctx_text))
+                pdf.ln(3)
+
+                # Stort bilde — nesten full sidebredde
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                     snap.convert("RGB").save(tmp.name, format="JPEG", quality=92)
-                    img_w = 180
+                    # 170mm bred, høyde følger bildeforhold, men cap ved 150mm
+                    img_w = 170.0
                     img_h = img_w * (snap.height / max(snap.width, 1))
-                    if img_h > 140:
-                        img_h = 140
+                    if img_h > 155:
+                        img_h = 155.0
                         img_w = img_h * (snap.width / max(snap.height, 1))
-                    pdf.check_space(int(img_h) + 20)
-                    pdf.subtitle(lbl)
-                    pdf.image(tmp.name, x=15, y=pdf.get_y(), w=img_w)
-                    pdf.ln(img_h + 6)
+                    # Sentrer horisontalt
+                    _x_img = (210 - img_w) / 2.0
+                    _y_img = pdf.get_y()
+                    pdf.image(tmp.name, x=_x_img, y=_y_img, w=img_w)
+
+                    # Subtil ramme rundt bildet for profesjonell polish
+                    pdf.set_draw_color(210, 220, 232)
+                    pdf.set_line_width(0.3)
+                    pdf.rect(_x_img, _y_img, img_w, img_h)
+                    pdf.set_line_width(0.2)
+
+                    pdf.set_y(_y_img + img_h + 5)
+
+                # Metadata-panel — tre kort i rekke: Solhøyde | Azimut | Skygge
+                try:
+                    _mx = 25.0
+                    _my = pdf.get_y()
+                    _total_w = 160.0
+                    _gap = 4.0
+                    _card_w = (_total_w - 2 * _gap) / 3.0
+                    _card_h = 18.0
+
+                    def _draw_meta_card(cx: float, cy: float, cw: float, ch: float,
+                                         label: str, value: str, hint: str) -> None:
+                        pdf.set_fill_color(250, 251, 253)
+                        pdf.set_draw_color(220, 228, 238)
+                        pdf.set_line_width(0.3)
+                        pdf.rect(cx, cy, cw, ch, style="DF")
+                        # Vertikal accent-strek til venstre
+                        pdf.set_draw_color(*_BUILTLY_BLUE)
+                        pdf.set_line_width(0.8)
+                        pdf.line(cx + 0.4, cy + 2, cx + 0.4, cy + ch - 2)
+                        pdf.set_line_width(0.2)
+                        # Label
+                        pdf.set_xy(cx + 3, cy + 2)
+                        pdf.set_font(PDF_FONT, "B", 7.5)
+                        pdf.set_text_color(*_MUTED)
+                        pdf.cell(cw - 6, 3.5, clean_pdf_text(label.upper()), 0, 0, "L")
+                        # Value
+                        pdf.set_xy(cx + 3, cy + 6)
+                        pdf.set_font(PDF_FONT, "B", 14)
+                        pdf.set_text_color(*_NAVY)
+                        pdf.cell(cw - 6, 6, clean_pdf_text(value), 0, 0, "L")
+                        # Hint
+                        pdf.set_xy(cx + 3, cy + ch - 5)
+                        pdf.set_font(PDF_FONT, "", 7)
+                        pdf.set_text_color(*_MUTED)
+                        pdf.cell(cw - 6, 3, clean_pdf_text(hint), 0, 0, "L")
+
+                    # Solhøyde
+                    _draw_meta_card(
+                        _mx, _my, _card_w, _card_h,
+                        "Solhøyde", f"{alt_deg:.1f}°",
+                        "Vinkel over horisont"
+                    )
+                    # Azimut
+                    _az_compass = {
+                        (0, 22.5): "N", (22.5, 67.5): "NØ", (67.5, 112.5): "Ø",
+                        (112.5, 157.5): "SØ", (157.5, 202.5): "S", (202.5, 247.5): "SV",
+                        (247.5, 292.5): "V", (292.5, 337.5): "NV", (337.5, 360.1): "N",
+                    }
+                    _compass = next((v for (lo, hi), v in _az_compass.items() if lo <= az_deg < hi), "—")
+                    _draw_meta_card(
+                        _mx + _card_w + _gap, _my, _card_w, _card_h,
+                        "Azimut", f"{az_deg:.0f}° ({_compass})",
+                        "Himmelretning mot sol"
+                    )
+                    # Skyggelengde
+                    if _best_h > 0 and sh_len > 0:
+                        _sh_val = f"{sh_len:.1f} m"
+                        _sh_hint = f"Fra {_best_h:.1f}m bygg"
+                    elif alt_deg <= 0.5:
+                        _sh_val = "Under horisont"
+                        _sh_hint = "Solen er gått ned"
+                    else:
+                        _sh_val = "—"
+                        _sh_hint = ""
+                    _draw_meta_card(
+                        _mx + 2 * (_card_w + _gap), _my, _card_w, _card_h,
+                        "Skyggelengde", _sh_val, _sh_hint
+                    )
+                    pdf.set_xy(25, _my + _card_h + 3)
+
+                    # Kildemerking — hvor kommer bildet fra
+                    pdf.set_font(PDF_FONT, "I", 7.5)
+                    pdf.set_text_color(*_MUTED)
+                    _source = (
+                        "Kilde: Interaktiv 3D-modell · Three.js WebGL-renderer · "
+                        "Inkluderer volum og nabobygg"
+                        if use_3d else
+                        "Kilde: Builtly skyggemotor · Python/Shapely · "
+                        "2D-projeksjon med astronomisk solposisjon"
+                    )
+                    pdf.cell(0, 3, clean_pdf_text(_source), 0, 0, "L")
+                except Exception:
+                    pass
+
             except Exception:
                 pass
 
@@ -9738,99 +9965,204 @@ render();
     st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
     st.markdown(result["report_text"])
 
-    # --- Sol/skygge 3D-snapshots til rapport (automatisk via sessionStorage) ---
-    with st.expander("Sol/skygge fra 3D-scenen i rapporten", expanded=False):
+    # --- Sol/skygge 3D-snapshots til rapport (postMessage-basert, robust) ---
+    with st.expander("Sol/skygge fra 3D-scenen i rapporten", expanded=True):
         _has_solar_3d = bool(st.session_state.get("solar_3d_snapshots"))
+
+        # Injiser en parent-level postMessage-listener som mottar frames fra
+        # 3D-iframen og lagrer i parent.sessionStorage. Dette kjører hver gang
+        # siden rendres; listeneren selv er idempotent (sjekker window-flag).
+        _listener_js = """
+        <script>
+        (function(){
+          try {
+            var P = window.parent;
+            if (P.__builtlySolarListenerReady) return;
+            P.__builtlySolarListenerReady = true;
+            // Initier tom state
+            P.sessionStorage.setItem('builtly_solar_state', 'idle');
+            P.sessionStorage.setItem('builtly_solar_count', '0');
+            P.addEventListener('message', function(ev){
+              var d = ev.data;
+              if (!d || d.source !== 'builtly_solar_capture') return;
+              try {
+                if (d.type === 'start') {
+                  P.sessionStorage.setItem('builtly_solar_state', 'running');
+                  P.sessionStorage.setItem('builtly_solar_count', String(d.count || 0));
+                  for (var i = 0; i < 10; i++) {
+                    P.sessionStorage.removeItem('builtly_solar_img_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_label_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_doy_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_hour_' + i);
+                  }
+                } else if (d.type === 'frame') {
+                  try {
+                    P.sessionStorage.setItem('builtly_solar_img_' + d.index, d.dataUrl);
+                    P.sessionStorage.setItem('builtly_solar_label_' + d.index, d.label || '');
+                    P.sessionStorage.setItem('builtly_solar_doy_' + d.index, String(d.doy || 0));
+                    P.sessionStorage.setItem('builtly_solar_hour_' + d.index, String(d.hour || 0));
+                  } catch (e) {
+                    // quota — fallback: slipp frame, fortsett
+                    console.warn('Builtly solar capture: quota exceeded for frame', d.index, e);
+                  }
+                } else if (d.type === 'done') {
+                  P.sessionStorage.setItem('builtly_solar_state', 'ready');
+                }
+              } catch (e) {
+                console.warn('Builtly solar listener error:', e);
+              }
+            }, false);
+          } catch (e) {
+            // Hvis parent ikke er tilgjengelig (usannsynlig), loggfør kun
+            console.warn('Builtly solar listener: parent access denied', e);
+          }
+        })();
+        </script>
+        """
+        components.html(_listener_js, height=0)
+
         if _has_solar_3d:
             _n = len(st.session_state["solar_3d_snapshots"])
-            st.success(f"✓ {_n} sol/skygge-bilder fra 3D-scenen er lagret og klare for rapporten")
-            if st.button("🗑 Fjern sol/skygge-bilder", key="clear_solar_3d"):
+            st.success(
+                f"✓ {_n} sol/skygge-bilder fra 3D-scenen er lastet inn og klare for rapporten. "
+                f"Klikk «Oppdater PDF med 3D-sol» under for å regenerere rapporten."
+            )
+            if st.button("🗑 Fjern sol/skygge-bilder og ta nye", key="clear_solar_3d"):
                 st.session_state.pop("solar_3d_snapshots", None)
-                # Rydd sessionStorage også
+                st.session_state.pop("solar_3d_meta", None)
                 if _HAS_ST_JS:
                     try:
                         st_javascript("""
                             (function(){
-                                const s = window.sessionStorage;
-                                s.removeItem('builtly_solar_capture_status');
-                                s.removeItem('builtly_solar_capture_count');
-                                for (let i = 0; i < 10; i++) {
-                                    s.removeItem('builtly_solar_capture_img_' + i);
-                                    s.removeItem('builtly_solar_capture_label_' + i);
+                                var s = window.parent.sessionStorage;
+                                s.setItem('builtly_solar_state', 'idle');
+                                s.setItem('builtly_solar_count', '0');
+                                for (var i = 0; i < 10; i++) {
+                                    s.removeItem('builtly_solar_img_' + i);
+                                    s.removeItem('builtly_solar_label_' + i);
+                                    s.removeItem('builtly_solar_doy_' + i);
+                                    s.removeItem('builtly_solar_hour_' + i);
                                 }
                                 return 'cleared';
                             })()
-                        """)
+                        """, key=f"clear_solar_js_{id(st.session_state)}")
                     except Exception:
                         pass
                 st.rerun()
         else:
-            st.caption(
-                "I 3D-scenen over, klikk «📥 Fang sol/skygge til PDF». "
-                "Bildene hentes automatisk inn her når de er klare — ingen nedlasting nødvendig."
+            st.markdown(
+                "**Slik henter du inn sol/skygge-bilder fra 3D-scenen:**  \n"
+                "1. Trykk **📥 Fang sol/skygge til PDF** i 3D-scenen over  \n"
+                "2. Vent mens 5 bilder tas (tar ca. 5 sekunder)  \n"
+                "3. Når statusen sier «Bildene er klare», trykk **Hent bildene nå** under"
             )
 
-        # Automatisk polling: sjekk om capture er ferdig
-        if _HAS_ST_JS and not _has_solar_3d:
-            try:
-                capture_status = st_javascript(
-                    """(function(){ return window.sessionStorage.getItem('builtly_solar_capture_status') || 'idle'; })()""",
-                    key="solar_capture_status_poll",
+            col_hent, col_status = st.columns([1, 2])
+            with col_hent:
+                hent_clicked = st.button(
+                    "📸 Hent bildene nå",
+                    type="primary",
+                    use_container_width=True,
+                    key="hent_solar_3d",
+                    disabled=not _HAS_ST_JS,
                 )
-                if capture_status == "ready":
-                    # Hent antall bilder
+
+            if hent_clicked and _HAS_ST_JS:
+                try:
+                    state = st_javascript(
+                        """(function(){ return window.parent.sessionStorage.getItem('builtly_solar_state') || 'idle'; })()""",
+                        key=f"solar_state_check_{int(time.time()*1000)}",
+                    )
                     count_str = st_javascript(
-                        """(function(){ return window.sessionStorage.getItem('builtly_solar_capture_count') || '0'; })()""",
-                        key="solar_capture_count_poll",
+                        """(function(){ return window.parent.sessionStorage.getItem('builtly_solar_count') || '0'; })()""",
+                        key=f"solar_count_check_{int(time.time()*1000)}",
                     )
                     try:
                         n_imgs = int(count_str or 0)
                     except Exception:
                         n_imgs = 0
 
-                    if n_imgs > 0:
-                        st.info(f"Henter {n_imgs} bilder fra 3D-scenen...")
-                        solar_imgs = []
-                        _progress = st.progress(0)
+                    if state != "ready" or n_imgs <= 0:
+                        with col_status:
+                            st.warning(
+                                "Ingen bilder i minnet. Klikk **📥 Fang sol/skygge til PDF** i "
+                                "3D-scenen over først, vent til statusen sier «Bildene er klare», "
+                                "og prøv så igjen."
+                            )
+                    else:
+                        solar_imgs: List[Image.Image] = []
+                        solar_meta: List[Dict[str, Any]] = []
+                        _progress = st.progress(0, text=f"Henter {n_imgs} bilder fra 3D-scenen...")
                         for i in range(n_imgs):
                             data_url = st_javascript(
-                                f"""(function(){{ return window.sessionStorage.getItem('builtly_solar_capture_img_{i}'); }})()""",
-                                key=f"solar_capture_img_{i}_poll",
+                                f"""(function(){{ return window.parent.sessionStorage.getItem('builtly_solar_img_{i}'); }})()""",
+                                key=f"solar_img_fetch_{i}_{int(time.time()*1000)}",
+                            )
+                            label_s = st_javascript(
+                                f"""(function(){{ return window.parent.sessionStorage.getItem('builtly_solar_label_{i}') || ''; }})()""",
+                                key=f"solar_lbl_fetch_{i}_{int(time.time()*1000)}",
+                            )
+                            doy_s = st_javascript(
+                                f"""(function(){{ return window.parent.sessionStorage.getItem('builtly_solar_doy_{i}') || '0'; }})()""",
+                                key=f"solar_doy_fetch_{i}_{int(time.time()*1000)}",
+                            )
+                            hour_s = st_javascript(
+                                f"""(function(){{ return window.parent.sessionStorage.getItem('builtly_solar_hour_{i}') || '0'; }})()""",
+                                key=f"solar_hour_fetch_{i}_{int(time.time()*1000)}",
                             )
                             if data_url and isinstance(data_url, str) and data_url.startswith("data:"):
                                 try:
-                                    # Dekoder base64 data-URL
                                     import base64 as _b64
-                                    header, b64_data = data_url.split(",", 1)
+                                    _, b64_data = data_url.split(",", 1)
                                     img_bytes = _b64.b64decode(b64_data)
                                     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                                     solar_imgs.append(img)
-                                except Exception as e:
-                                    st.caption(f"Bilde {i} kunne ikke dekodes: {e}")
+                                    try:
+                                        doy_v = int(float(doy_s or 0))
+                                    except Exception:
+                                        doy_v = 0
+                                    try:
+                                        hour_v = float(hour_s or 0)
+                                    except Exception:
+                                        hour_v = 0.0
+                                    solar_meta.append({
+                                        "label": str(label_s or f"Snapshot {i+1}"),
+                                        "doy": doy_v,
+                                        "hour": hour_v,
+                                    })
+                                except Exception as _de:
+                                    st.caption(f"Bilde {i+1} kunne ikke dekodes: {_de}")
                             _progress.progress((i + 1) / max(n_imgs, 1))
                         _progress.empty()
 
                         if len(solar_imgs) >= 3:
                             st.session_state["solar_3d_snapshots"] = solar_imgs
-                            # Rydd sessionStorage så vi ikke polle i det uendelige
+                            st.session_state["solar_3d_meta"] = solar_meta
+                            # Rydd opp parent.sessionStorage
                             st_javascript("""
                                 (function(){
-                                    window.sessionStorage.setItem('builtly_solar_capture_status', 'consumed');
+                                    var s = window.parent.sessionStorage;
+                                    s.setItem('builtly_solar_state', 'consumed');
                                     return 'ok';
                                 })()
-                            """, key="solar_capture_consume")
-                            st.success(f"✓ {len(solar_imgs)} bilder hentet inn. Klikk «Oppdater PDF» under.")
+                            """, key=f"solar_consume_{int(time.time()*1000)}")
+                            st.success(f"✓ {len(solar_imgs)} bilder hentet inn fra 3D-scenen.")
                             st.rerun()
                         else:
-                            st.warning(f"Kun {len(solar_imgs)} bilder kunne hentes. Prøv å klikke «Fang sol/skygge» på nytt.")
-            except Exception as e:
-                st.caption(f"Polling-feil (ignoreres): {e}")
+                            with col_status:
+                                st.warning(
+                                    f"Bare {len(solar_imgs)} av {n_imgs} bilder kunne hentes. "
+                                    f"Prøv å klikke «📥 Fang sol/skygge til PDF» på nytt."
+                                )
+                except Exception as _e:
+                    st.error(f"Henting feilet: {_e}")
 
-        if not _HAS_ST_JS:
-            st.warning(
-                "streamlit-javascript er ikke installert — automatisk sol/skygge-henting er deaktivert. "
-                "Legg til `streamlit-javascript` i requirements.txt for å aktivere."
-            )
+            if not _HAS_ST_JS:
+                st.warning(
+                    "`streamlit-javascript` er ikke installert — automatisk sol/skygge-henting er deaktivert. "
+                    "Legg til `streamlit-javascript>=0.1.5` i requirements.txt for å aktivere."
+                )
+
 
         # Oppdater PDF-knapp (hvis bildene er inne)
         if _has_solar_3d:
