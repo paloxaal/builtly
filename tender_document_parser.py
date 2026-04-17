@@ -47,6 +47,19 @@ try:
 except ImportError:
     ezdxf = None
 
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_TESSERACT = True
+except ImportError:
+    pytesseract = None
+    HAS_TESSERACT = False
+
+import subprocess
+import tempfile
+import os
+import shutil
+
 
 # ─── Classification patterns (two-phase) ─────────────────────────
 FILENAME_PATTERNS: Dict[str, List[str]] = {
@@ -180,22 +193,63 @@ def classify_by_content(text: str, fallback: str = "annet") -> str:
 
 
 # ─── Extractors per format ───────────────────────────────────────
-def _extract_pdf(data: bytes, max_pages: int = 60) -> Dict[str, Any]:
-    """Extract text, tables, and page count from PDF."""
+def _ocr_pdf_page(page, lang: str = "nor+eng", dpi: int = 200) -> str:
+    """OCR a single PDF page via Tesseract. Returns empty string on failure."""
+    if not HAS_TESSERACT:
+        return ""
+    try:
+        # Render page to image at specified DPI
+        zoom = dpi / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img_bytes = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_bytes))
+        return pytesseract.image_to_string(img, lang=lang) or ""
+    except Exception:
+        return ""
+
+
+def _extract_pdf(data: bytes, max_pages: int = 60, ocr_threshold: int = 50) -> Dict[str, Any]:
+    """
+    Extract text, tables, and page count from PDF.
+
+    OCR fallback: hvis en side har mindre enn `ocr_threshold` tegn med ren
+    tekstekstraksjon, kjøres Tesseract på den siden (nor+eng).
+    """
     if not fitz:
         return {"text": "", "page_count": 0, "error": "PyMuPDF ikke installert"}
 
-    out: Dict[str, Any] = {"text": "", "page_count": 0, "tables": []}
+    out: Dict[str, Any] = {
+        "text": "",
+        "page_count": 0,
+        "tables": [],
+        "ocr_pages": 0,
+    }
     try:
         doc = fitz.open(stream=data, filetype="pdf")
         out["page_count"] = len(doc)
         parts: List[str] = []
+        ocr_pages = 0
+
         for i, page in enumerate(doc):
             if i >= max_pages:
                 parts.append(f"\n\n[... {len(doc) - max_pages} flere sider kuttet ...]\n")
                 break
-            parts.append(f"\n── Side {i + 1} ──\n{page.get_text('text')}")
+
+            page_text = page.get_text("text") or ""
+            # OCR fallback for empty/near-empty pages
+            if len(page_text.strip()) < ocr_threshold and HAS_TESSERACT:
+                ocr_text = _ocr_pdf_page(page)
+                if ocr_text.strip():
+                    page_text = ocr_text
+                    ocr_pages += 1
+
+            parts.append(f"\n── Side {i + 1} ──\n{page_text}")
+
         out["text"] = "".join(parts)
+        out["ocr_pages"] = ocr_pages
+        if ocr_pages > 0 and not HAS_TESSERACT:
+            out["ocr_warning"] = "Skannet PDF — Tesseract ikke tilgjengelig"
         doc.close()
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
@@ -339,6 +393,59 @@ def _extract_dxf(data: bytes) -> Dict[str, Any]:
         return {"text": "", "error": f"{type(e).__name__}: {e}"}
 
 
+def _extract_dwg(data: bytes) -> Dict[str, Any]:
+    """
+    Extract info from DWG files by converting to DXF via LibreDWG (dwg2dxf).
+
+    Krever dwg2dxf i PATH. Installert i Builtly Docker.
+    """
+    dwg2dxf = shutil.which("dwg2dxf")
+    if not dwg2dxf:
+        return {
+            "text": "",
+            "error": "dwg2dxf ikke tilgjengelig (LibreDWG må være installert)",
+        }
+
+    tmpdir = tempfile.mkdtemp(prefix="builtly_dwg_")
+    try:
+        dwg_path = os.path.join(tmpdir, "in.dwg")
+        with open(dwg_path, "wb") as f:
+            f.write(data)
+
+        # dwg2dxf writes <basename>.dxf to cwd unless -o given
+        dxf_path = os.path.join(tmpdir, "in.dxf")
+        result = subprocess.run(
+            [dwg2dxf, "-o", dxf_path, dwg_path],
+            capture_output=True,
+            timeout=90,
+            cwd=tmpdir,
+        )
+
+        if not os.path.exists(dxf_path) or os.path.getsize(dxf_path) < 100:
+            stderr = result.stderr.decode("utf-8", errors="replace")[:500]
+            return {
+                "text": "",
+                "error": f"DWG-konvertering feilet: {stderr or 'ingen output'}",
+            }
+
+        with open(dxf_path, "rb") as f:
+            dxf_data = f.read()
+
+        dxf_result = _extract_dxf(dxf_data)
+        # Tag output so UI can indicate the conversion happened
+        if dxf_result.get("text"):
+            dxf_result["text"] = f"[Konvertert fra DWG via LibreDWG]\n{dxf_result['text']}"
+        dxf_result["converted_from_dwg"] = True
+        return dxf_result
+
+    except subprocess.TimeoutExpired:
+        return {"text": "", "error": "DWG-konvertering tok for lang tid (>90s)"}
+    except Exception as e:
+        return {"text": "", "error": f"DWG-feil: {type(e).__name__}: {e}"}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def _extract_text_file(data: bytes) -> Dict[str, Any]:
     """Plain text / CSV extraction."""
     for enc in ("utf-8", "latin-1", "cp1252"):
@@ -395,6 +502,7 @@ def extract_document(filename: str, data: bytes) -> Dict[str, Any]:
         ".xls": _extract_xlsx,
         ".ifc": _extract_ifc,
         ".dxf": _extract_dxf,
+        ".dwg": _extract_dwg,
         ".csv": _extract_text_file,
         ".txt": _extract_text_file,
         ".md": _extract_text_file,
@@ -419,6 +527,8 @@ def extract_document(filename: str, data: bytes) -> Dict[str, Any]:
         "text": text,
         "text_excerpt": text[:3000],
         "page_count": result.get("page_count", 0),
+        "ocr_pages": result.get("ocr_pages", 0),
+        "converted_from_dwg": result.get("converted_from_dwg", False),
         "tables": result.get("tables", []),
         "sheets": result.get("sheets", []),
         "entity_counts": result.get("entity_counts", {}),
