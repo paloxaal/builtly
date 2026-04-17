@@ -24,6 +24,10 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     patch \
     locales \
+    tesseract-ocr \
+    tesseract-ocr-nor \
+    tesseract-ocr-eng \
+    poppler-utils \
  && sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*
