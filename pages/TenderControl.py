@@ -209,27 +209,63 @@ div[data-baseweb="select"] svg {
     color: #c8d3df !important;
 }
 
-/* Dropdown-lista (popover når du åpner) */
-div[data-baseweb="popover"] ul[role="listbox"],
-div[data-baseweb="popover"] div[role="listbox"],
+/* Dropdown-lista (popover når du åpner) - aggressive regler */
+/* BaseWeb bruker portal-rendering, så vi treffer både i og utenfor app-rot */
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] > div,
+div[data-baseweb="popover"] > div > div,
 ul[data-baseweb="menu"],
-div[data-baseweb="menu"] {
+div[data-baseweb="menu"],
+div[data-baseweb="menu"] > div,
+[role="listbox"],
+div[role="listbox"],
+ul[role="listbox"] {
     background-color: #0a1623 !important;
     background: #0a1623 !important;
-    border: 1px solid rgba(120,145,170,0.3) !important;
+    border: 1px solid rgba(120,145,170,0.35) !important;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4) !important;
+    border-radius: 8px !important;
 }
-div[data-baseweb="popover"] li[role="option"],
-div[data-baseweb="popover"] div[role="option"],
-ul[data-baseweb="menu"] li,
-div[data-baseweb="menu"] li {
+
+/* Alle option-elementer - dyp spesifisitet mot BaseWeb list items */
+[data-baseweb="popover"] [role="option"],
+[data-baseweb="menu"] [role="option"],
+[data-baseweb="menu"] li,
+[role="listbox"] [role="option"],
+[role="listbox"] li,
+li[role="option"],
+div[role="option"] {
     background-color: transparent !important;
+    background: transparent !important;
     color: #f5f7fb !important;
 }
-div[data-baseweb="popover"] li[role="option"]:hover,
-div[data-baseweb="popover"] div[role="option"]:hover,
-ul[data-baseweb="menu"] li:hover,
-div[data-baseweb="menu"] li:hover {
-    background-color: rgba(56,189,248,0.15) !important;
+
+/* Tekst-innside options (span, div, p) */
+[role="option"] *,
+[data-baseweb="menu"] li *,
+[role="listbox"] li * {
+    color: #f5f7fb !important;
+    background-color: transparent !important;
+}
+
+/* Hover-state */
+[data-baseweb="popover"] [role="option"]:hover,
+[data-baseweb="menu"] [role="option"]:hover,
+[data-baseweb="menu"] li:hover,
+[role="listbox"] [role="option"]:hover,
+[role="listbox"] li:hover,
+li[role="option"]:hover,
+div[role="option"]:hover,
+[aria-selected="true"],
+[role="option"][aria-selected="true"] {
+    background-color: rgba(56,189,248,0.18) !important;
+    background: rgba(56,189,248,0.18) !important;
+    color: #f5f7fb !important;
+}
+
+[role="option"]:hover *,
+[aria-selected="true"] * {
+    color: #f5f7fb !important;
 }
 
 /* Number input pluss/minus-knapper */
