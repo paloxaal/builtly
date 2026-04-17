@@ -4904,11 +4904,24 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
   </button>
   <span id="captureStatus" style="color:#38c2c9;font-size:11px;font-weight:600;"></span>
 </div>
-<div id="captureDownloads" style="display:none;padding:10px 14px;background:rgba(10,22,40,0.85);border-top:1px solid rgba(120,145,170,0.2);">
-  <div style="color:#9fb0c3;font-size:10.5px;margin-bottom:6px;font-weight:600;">
-    Last ned bildene under og last opp i «Sol/skygge fra 3D-scenen i rapporten»-seksjonen:
+<div id="captureDownloads" style="display:none;padding:14px 16px;background:linear-gradient(180deg,rgba(10,22,40,0.92),rgba(8,18,32,0.96));border-top:1px solid rgba(56,194,201,0.4);">
+  <div style="color:#9fd0d5;font-size:12px;margin-bottom:10px;font-weight:700;display:flex;align-items:center;gap:8px;">
+    <span style="font-size:14px;">✓</span>
+    <span>5 bilder er klare. Slik får du dem inn i rapporten:</span>
   </div>
-  <div id="captureDownloadLinks" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+  <ol style="color:#c8d3df;font-size:11px;margin:0 0 10px 20px;padding:0;line-height:1.7;">
+    <li>Klikk <strong style="color:#9fd0d5;">«Last ned alle»</strong> under — 5 filer lastes ned</li>
+    <li>Scroll ned til <strong style="color:#9fd0d5;">«Sol/skygge fra 3D-scenen i rapporten»</strong></li>
+    <li>Dra alle 5 filene inn i opplastingsboksen</li>
+    <li>Klikk <strong style="color:#9fd0d5;">«Bruk disse bildene i rapporten»</strong> → PDF regenereres</li>
+  </ol>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+    <button id="downloadAllSolar" style="background:linear-gradient(135deg,rgba(56,194,201,0.96),rgba(120,220,225,0.96));color:#041018;border:none;border-radius:6px;padding:7px 14px;font-weight:700;font-size:11px;cursor:pointer;">
+      📦 Last ned alle 5
+    </button>
+    <span style="color:#78899c;font-size:10.5px;">eller enkeltvis:</span>
+    <div id="captureDownloadLinks" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
+  </div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -5119,10 +5132,31 @@ async function captureSolarSnapshots() {
   console.log('[Builtly] Capture complete. State = ready.');
 
   if (downloadContainer) downloadContainer.style.display = 'block';
-  status.textContent = '✓ Klart! Scroll ned, trykk «Hent bildene nå»';
+  status.textContent = '✓ Klart! Last ned bildene under og last opp i rapporten.';
   btn.disabled = false;
   btn.style.opacity = '1';
   btn.textContent = originalLabel;
+
+  // Koble til "Last ned alle"-knappen hvis den finnes
+  try {
+    const dlAllBtn = document.getElementById('downloadAllSolar');
+    if (dlAllBtn && !dlAllBtn._builtly_wired) {
+      dlAllBtn._builtly_wired = true;
+      dlAllBtn.addEventListener('click', function(){
+        const links = document.querySelectorAll('#captureDownloadLinks a');
+        // Last ned sekventielt med liten pause for å unngå nettleser-popup-blokk
+        let idx = 0;
+        function downloadNext() {
+          if (idx >= links.length) return;
+          const l = links[idx];
+          l.click();
+          idx++;
+          setTimeout(downloadNext, 250);
+        }
+        downloadNext();
+      });
+    }
+  } catch (e) {}
 }
 
 document.getElementById('captureSolar').addEventListener('click', captureSolarSnapshots);
@@ -10102,217 +10136,78 @@ render();
                 st.rerun()
         else:
             st.markdown(
-                "**Hvordan få sol/skygge-bildene inn i rapporten:**  \n"
+                "**Slik får du sol/skygge-bildene inn i rapporten:**  \n"
                 "1. Trykk **📥 Fang sol/skygge til PDF** i 3D-scenen over  \n"
-                "2. Vent mens 5 bilder tas (tar ca. 5 sekunder)  \n"
-                "3. Prøv først **📸 Hent bildene nå** (automatisk). "
-                "Hvis det ikke virker, last ned bildene fra 3D-scenen og last dem opp nederst."
+                "2. Når 5 bilder er tatt, klikk **📦 Last ned alle 5** under scenen  \n"
+                "3. Dra alle 5 filene inn i boksen under  \n"
+                "4. Klikk **«Bruk disse bildene i rapporten»** → PDF regenereres automatisk"
             )
 
-            _tab_auto, _tab_manual = st.tabs(["⚡ Automatisk (rask)", "📤 Manuell opplasting (garantert)"])
+            uploaded_solar = st.file_uploader(
+                "Slipp sol/skygge-bildene her (5 filer — filnavnene bevarer rekkefølge og metadata)",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key="solar_3d_uploader",
+                help="Du kan dra inn alle 5 samtidig. Filnavnene inneholder solskygge_NN_doyXXX_klXX.jpg — rekkefølge og metadata leses automatisk.",
+            )
 
-            with _tab_auto:
-                col_hent, col_status = st.columns([1, 2])
-                with col_hent:
-                    hent_clicked = st.button(
-                        "📸 Hent bildene nå",
-                        type="primary",
-                        use_container_width=True,
-                        key="hent_solar_3d",
-                        disabled=not _HAS_ST_JS,
-                    )
+            if uploaded_solar and len(uploaded_solar) >= 3:
+                # Sorter på filnavn for å bevare rekkefølge (solskygge_01_... → solskygge_05_...)
+                _sorted = sorted(uploaded_solar, key=lambda f: f.name)
+                _solar_imgs: List[Image.Image] = []
+                _solar_meta: List[Dict[str, Any]] = []
 
-                if hent_clicked and _HAS_ST_JS:
+                # Parse doy og hour fra filnavn: solskygge_01_doy80_kl120.jpg
+                _meta_defaults = [
+                    {"label": "Vårjevndøgn - 21. mars kl. 12:00", "doy": 80, "hour": 12.0},
+                    {"label": "Vårjevndøgn - 21. mars kl. 15:00", "doy": 80, "hour": 15.0},
+                    {"label": "Sommersolverv - 21. juni kl. 12:00", "doy": 172, "hour": 12.0},
+                    {"label": "Sommersolverv - 21. juni kl. 15:00", "doy": 172, "hour": 15.0},
+                    {"label": "Sommersolverv - 21. juni kl. 18:00", "doy": 172, "hour": 18.0},
+                ]
+                for idx, uf in enumerate(_sorted):
                     try:
-                        # Les state fra både localStorage og sessionStorage på parent.
-                        # JS-siden skriver til begge. localStorage overlever rerenders
-                        # og er mer pålitelig.
-                        state = st_javascript(
-                            """(function(){
-                                try { var s = window.parent.localStorage.getItem('builtly_solar_state'); if (s) return s; } catch(e){}
-                                try { var s = window.parent.sessionStorage.getItem('builtly_solar_state'); if (s) return s; } catch(e){}
-                                try { var s = window.localStorage.getItem('builtly_solar_state'); if (s) return s; } catch(e){}
-                                try { var s = window.sessionStorage.getItem('builtly_solar_state'); if (s) return s; } catch(e){}
-                                return 'idle';
-                            })()""",
-                            key=f"solar_state_check_{int(time.time()*1000)}",
-                        )
-                        count_str = st_javascript(
-                            """(function(){
-                                try { var c = window.parent.localStorage.getItem('builtly_solar_count'); if (c) return c; } catch(e){}
-                                try { var c = window.parent.sessionStorage.getItem('builtly_solar_count'); if (c) return c; } catch(e){}
-                                try { var c = window.localStorage.getItem('builtly_solar_count'); if (c) return c; } catch(e){}
-                                try { var c = window.sessionStorage.getItem('builtly_solar_count'); if (c) return c; } catch(e){}
-                                return '0';
-                            })()""",
-                            key=f"solar_count_check_{int(time.time()*1000)}",
-                        )
-                        try:
-                            n_imgs = int(count_str or 0)
-                        except Exception:
-                            n_imgs = 0
-
-                        if state != "ready" or n_imgs <= 0:
-                            with col_status:
-                                st.warning(
-                                    f"**Automatisk henting fungerte ikke** (state={state!r}, n={n_imgs}). "
-                                    f"Dette skjer typisk bak proxy/Cloudflare. "
-                                    f"Bruk fanen **📤 Manuell opplasting** i stedet — den fungerer alltid."
-                                )
+                        img = Image.open(uf).convert("RGB")
+                        _solar_imgs.append(img)
+                        # Prøv å parse doy/hour fra filnavn
+                        _m = re.search(r"doy(\d+)_kl(\d+)", uf.name or "")
+                        if _m:
+                            _doy = int(_m.group(1))
+                            _hour_raw = _m.group(2)
+                            _hour = float(_hour_raw[:-1] + "." + _hour_raw[-1]) if len(_hour_raw) > 1 else float(_hour_raw)
+                            # Match mot defaults for label
+                            _match = next((md for md in _meta_defaults if md["doy"] == _doy and abs(md["hour"] - _hour) < 0.1), None)
+                            if _match:
+                                _solar_meta.append(_match.copy())
+                            else:
+                                _solar_meta.append({"label": uf.name, "doy": _doy, "hour": _hour})
+                        elif idx < len(_meta_defaults):
+                            _solar_meta.append(_meta_defaults[idx].copy())
                         else:
-                            solar_imgs: List[Image.Image] = []
-                            solar_meta: List[Dict[str, Any]] = []
-                            _progress = st.progress(0, text=f"Henter {n_imgs} bilder fra 3D-scenen...")
-                            for i in range(n_imgs):
-                                data_url = st_javascript(
-                                    f"""(function(){{
-                                        try {{ var v = window.parent.localStorage.getItem('builtly_solar_img_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.parent.sessionStorage.getItem('builtly_solar_img_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.localStorage.getItem('builtly_solar_img_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.sessionStorage.getItem('builtly_solar_img_{i}'); if (v) return v; }} catch(e){{}}
-                                        return null;
-                                    }})()""",
-                                    key=f"solar_img_fetch_{i}_{int(time.time()*1000)}",
-                                )
-                                label_s = st_javascript(
-                                    f"""(function(){{
-                                        try {{ var v = window.parent.localStorage.getItem('builtly_solar_label_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.parent.sessionStorage.getItem('builtly_solar_label_{i}'); if (v) return v; }} catch(e){{}}
-                                        return '';
-                                    }})()""",
-                                    key=f"solar_lbl_fetch_{i}_{int(time.time()*1000)}",
-                                )
-                                doy_s = st_javascript(
-                                    f"""(function(){{
-                                        try {{ var v = window.parent.localStorage.getItem('builtly_solar_doy_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.parent.sessionStorage.getItem('builtly_solar_doy_{i}'); if (v) return v; }} catch(e){{}}
-                                        return '0';
-                                    }})()""",
-                                    key=f"solar_doy_fetch_{i}_{int(time.time()*1000)}",
-                                )
-                                hour_s = st_javascript(
-                                    f"""(function(){{
-                                        try {{ var v = window.parent.localStorage.getItem('builtly_solar_hour_{i}'); if (v) return v; }} catch(e){{}}
-                                        try {{ var v = window.parent.sessionStorage.getItem('builtly_solar_hour_{i}'); if (v) return v; }} catch(e){{}}
-                                        return '0';
-                                    }})()""",
-                                    key=f"solar_hour_fetch_{i}_{int(time.time()*1000)}",
-                                )
-                                if data_url and isinstance(data_url, str) and data_url.startswith("data:"):
-                                    try:
-                                        import base64 as _b64
-                                        _, b64_data = data_url.split(",", 1)
-                                        img_bytes = _b64.b64decode(b64_data)
-                                        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                                        solar_imgs.append(img)
-                                        try:
-                                            doy_v = int(float(doy_s or 0))
-                                        except Exception:
-                                            doy_v = 0
-                                        try:
-                                            hour_v = float(hour_s or 0)
-                                        except Exception:
-                                            hour_v = 0.0
-                                        solar_meta.append({
-                                            "label": str(label_s or f"Snapshot {i+1}"),
-                                            "doy": doy_v,
-                                            "hour": hour_v,
-                                        })
-                                    except Exception as _de:
-                                        st.caption(f"Bilde {i+1} kunne ikke dekodes: {_de}")
-                                _progress.progress((i + 1) / max(n_imgs, 1))
-                            _progress.empty()
+                            _solar_meta.append({"label": uf.name, "doy": 0, "hour": 0.0})
+                    except Exception as _ue:
+                        st.caption(f"Fil {uf.name}: {_ue}")
 
-                            if len(solar_imgs) >= 3:
-                                st.session_state["solar_3d_snapshots"] = solar_imgs
-                                st.session_state["solar_3d_meta"] = solar_meta
-                                # Marker som konsumert i alle storages
-                                st_javascript("""
-                                    (function(){
-                                        try { window.parent.localStorage.setItem('builtly_solar_state', 'consumed'); } catch(e){}
-                                        try { window.parent.sessionStorage.setItem('builtly_solar_state', 'consumed'); } catch(e){}
-                                        return 'ok';
-                                    })()
-                                """, key=f"solar_consume_{int(time.time()*1000)}")
-                                st.success(f"✓ {len(solar_imgs)} bilder hentet inn fra 3D-scenen.")
-                                st.rerun()
-                            else:
-                                with col_status:
-                                    st.warning(
-                                        f"Bare {len(solar_imgs)} av {n_imgs} bilder kunne hentes. "
-                                        f"Bruk **📤 Manuell opplasting** i stedet."
-                                    )
-                    except Exception as _e:
-                        st.error(f"Henting feilet: {_e}. Bruk **📤 Manuell opplasting** i stedet.")
+                # Preview — vis thumbnails så brukeren ser at rekkefølgen stemmer
+                if _solar_imgs:
+                    _cols = st.columns(min(len(_solar_imgs), 5))
+                    for _i, (_img, _meta) in enumerate(zip(_solar_imgs[:5], _solar_meta[:5])):
+                        with _cols[_i]:
+                            st.image(_img, use_container_width=True)
+                            st.caption(f"**{_i+1}.** {_meta['label']}")
 
-                if not _HAS_ST_JS:
-                    st.warning(
-                        "`streamlit-javascript` er ikke installert — automatisk henting er deaktivert. "
-                        "Bruk **📤 Manuell opplasting** i stedet."
-                    )
-
-            with _tab_manual:
-                st.markdown(
-                    "**Garantert-fungerende metode:**  \n"
-                    "Etter at du klikket «📥 Fang sol/skygge til PDF» i 3D-scenen, "
-                    "dukket det opp 5 nedlastingslenker under scenen. "
-                    "Last ned alle 5 (i rekkefølge 1 → 5), og dra dem inn her:"
-                )
-                uploaded_solar = st.file_uploader(
-                    "Last opp sol/skygge-bildene fra 3D-scenen (5 filer)",
-                    type=["jpg", "jpeg", "png"],
-                    accept_multiple_files=True,
-                    key="solar_3d_uploader",
-                    help="Dra inn alle 5 filene samtidig. Filnavnene inneholder rekkefølge og metadata.",
-                )
-
-                if uploaded_solar and len(uploaded_solar) >= 3:
-                    # Sorter på filnavn for å bevare rekkefølge (solskygge_01_... → solskygge_05_...)
-                    _sorted = sorted(uploaded_solar, key=lambda f: f.name)
-                    _solar_imgs: List[Image.Image] = []
-                    _solar_meta: List[Dict[str, Any]] = []
-
-                    # Parse doy og hour fra filnavn: solskygge_01_doy80_kl120.jpg
-                    _meta_defaults = [
-                        {"label": "Vårjevndøgn - 21. mars kl. 12:00", "doy": 80, "hour": 12.0},
-                        {"label": "Vårjevndøgn - 21. mars kl. 15:00", "doy": 80, "hour": 15.0},
-                        {"label": "Sommersolverv - 21. juni kl. 12:00", "doy": 172, "hour": 12.0},
-                        {"label": "Sommersolverv - 21. juni kl. 15:00", "doy": 172, "hour": 15.0},
-                        {"label": "Sommersolverv - 21. juni kl. 18:00", "doy": 172, "hour": 18.0},
-                    ]
-                    for idx, uf in enumerate(_sorted):
-                        try:
-                            img = Image.open(uf).convert("RGB")
-                            _solar_imgs.append(img)
-                            # Prøv å parse doy/hour fra filnavn
-                            _m = re.search(r"doy(\d+)_kl(\d+)", uf.name or "")
-                            if _m:
-                                _doy = int(_m.group(1))
-                                _hour_raw = _m.group(2)
-                                _hour = float(_hour_raw[:-1] + "." + _hour_raw[-1]) if len(_hour_raw) > 1 else float(_hour_raw)
-                                # match mot defaults for label
-                                _match = next((md for md in _meta_defaults if md["doy"] == _doy and abs(md["hour"] - _hour) < 0.1), None)
-                                if _match:
-                                    _solar_meta.append(_match.copy())
-                                else:
-                                    _solar_meta.append({"label": uf.name, "doy": _doy, "hour": _hour})
-                            elif idx < len(_meta_defaults):
-                                _solar_meta.append(_meta_defaults[idx].copy())
-                            else:
-                                _solar_meta.append({"label": uf.name, "doy": 0, "hour": 0.0})
-                        except Exception as _ue:
-                            st.caption(f"Fil {uf.name}: {_ue}")
-
-                    if st.button(
-                        f"✓ Bruk disse {len(_solar_imgs)} bildene i rapporten",
-                        type="primary",
-                        use_container_width=True,
-                        key="apply_uploaded_solar",
-                    ):
-                        st.session_state["solar_3d_snapshots"] = _solar_imgs
-                        st.session_state["solar_3d_meta"] = _solar_meta
-                        st.success(f"✓ {len(_solar_imgs)} bilder lastet inn. Trykk «Oppdater PDF med 3D-sol» under.")
-                        st.rerun()
+                if st.button(
+                    f"✓ Bruk disse {len(_solar_imgs)} bildene i rapporten",
+                    type="primary",
+                    use_container_width=True,
+                    key="apply_uploaded_solar",
+                ):
+                    st.session_state["solar_3d_snapshots"] = _solar_imgs
+                    st.session_state["solar_3d_meta"] = _solar_meta
+                    st.success(f"✓ {len(_solar_imgs)} bilder lastet inn. Trykk «Oppdater PDF med 3D-sol» under.")
+                    st.rerun()
+            elif uploaded_solar:
+                st.info(f"Du har lastet opp {len(uploaded_solar)} filer. Last opp minst 3 (helst alle 5) for å bruke dem i rapporten.")
 
 
         # Oppdater PDF-knapp (hvis bildene er inne)
