@@ -281,12 +281,24 @@ def generer_arkitekt_render(
     floors = int(getattr(option, "floors", 0) or 0)
     height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
 
-    # 3. Enkel, direkte prompt — brukerens egen manuelle formulering som
-    # har fungert konsistent godt. "Flatt tak" er nødvendig fordi Gemini
-    # ellers defaulter til saltak, som er uvanlig på moderne leilighetsbygg.
+    # 3. Presis prompt — eksplisitt om at KUN det grønne volumet transformeres,
+    # og at de gjennomsiktige grå nabobygg-boksene ikke skal materialiseres.
+    # Dette var tidligere et problem: Gemini tolket noen av nabobyggene som
+    # del av utbyggingen og rendret dem som beboelseshus også.
     prompt = (
-        f"Kan du gjøre om det skraverte volumet i grønt her til et "
-        f"leilighetsbygg i {floors} etasjer med flatt tak? Alt annet uendret."
+        f"Transform ONLY the solid green volume(s) in this 3D scene into a "
+        f"photorealistic {floors}-storey Norwegian apartment building with a flat roof. "
+        f"Keep the green volume's exact footprint, position, shape, and height — "
+        f"do not move it, do not change its outline, do not split it into multiple buildings. "
+        f"\n\n"
+        f"CRITICAL: The transparent/ghostly grey boxes in the scene are EXISTING neighbouring "
+        f"buildings shown as context only. Do NOT turn them into new apartment buildings, "
+        f"do NOT materialise them as part of the development. Leave them exactly as they "
+        f"appear in the aerial photo beneath — the real existing houses, garages, "
+        f"industrial sheds and roads in the ortofoto should be completely unchanged. "
+        f"\n\n"
+        f"Only the green volume becomes the new building. Everything else (ortofoto, "
+        f"existing buildings, terrain, vegetation, roads) stays identical to the input image."
     )
 
     try:
