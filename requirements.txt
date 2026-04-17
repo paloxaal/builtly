@@ -6,6 +6,7 @@ numpy
 Pillow
 requests
 markdown
+fpdf2
 PyMuPDF
 pypdf
 pdfplumber>=0.10
