@@ -2,44 +2,58 @@
 """
 Builtly | Tender Portal Fetch
 ─────────────────────────────────────────────────────────────────
-Inntak av konkurransegrunnlag fra offentlige anbudsportaler.
+Inntak av metadata fra Doffin via det offentlige JSON-API-et
+(betaapi.doffin.no/public/v2).
 
-Støtte:
-  - Doffin (offentlige kunngjøringer) via HTML-skraping og
-    direkte nedlasting av kunngjøringsvedlegg.
-  - Mercell: kun manuell opplasting (eksport fra deres portal).
-    Mercell har ikke åpent API uten egen avtale.
+Siden Doffin selv kun inneholder metadata (ikke selve
+konkurransegrunnlaget), returnerer vi:
+  - strukturerte metadata (tittel, frist, oppdragsgiver, CPV, beskrivelse)
+  - lenke til oppdragsgivers KGV (Mercell, Visma TendSign, etc.)
+    der selve konkurransegrunnlaget ligger
 
-Returnerer liste av (filename, bytes)-par klar for extract_documents.
+Mercell-integrasjon via API krever egen avtale med Mercell — se
+den separate API-forespørselen. Inntil den er på plass, må brukeren
+laste ned fra Mercell manuelt og dra ZIP-en inn i Builtly.
 """
 from __future__ import annotations
 
 import re
-import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 try:
     import requests
-    from bs4 import BeautifulSoup
-    HAS_DEPS = True
+    HAS_REQUESTS = True
 except ImportError:
     requests = None  # type: ignore
-    BeautifulSoup = None  # type: ignore
-    HAS_DEPS = False
+    HAS_REQUESTS = False
 
 
 USER_AGENT = "BuiltlyTenderControl/1.0 (+https://builtly.ai)"
 REQUEST_TIMEOUT = 30
-MAX_ATTACHMENT_MB = 50
-MAX_ATTACHMENTS = 40
+
+DOFFIN_API_BASES = [
+    "https://betaapi.doffin.no/public/v2",
+    "https://www.doffin.no/api/public/v2",
+]
 
 
+# ─── URL / ID parsing ────────────────────────────────────────────
 def _is_doffin_url(url: str) -> bool:
     return "doffin.no" in (url or "").lower()
 
 
 def _is_mercell_url(url: str) -> bool:
     return "mercell.com" in (url or "").lower()
+
+
+def _extract_doffin_id(url: str) -> Optional[str]:
+    """
+    Hent Doffin-ID (f.eks. '2025-115155') fra en URL som
+    'https://doffin.no/notices/2025-115155' eller
+    'https://www.doffin.no/nb/notice/2025-115155/...'
+    """
+    m = re.search(r"(\d{4}-\d{5,})", url or "")
+    return m.group(1) if m else None
 
 
 def detect_portal(url: str) -> str:
@@ -50,178 +64,262 @@ def detect_portal(url: str) -> str:
     return "unknown"
 
 
-# ─── Doffin-inntak ───────────────────────────────────────────────
-def fetch_doffin_tender(url: str) -> Dict[str, Any]:
+# ─── Doffin JSON API ─────────────────────────────────────────────
+def _fetch_doffin_notice_json(doffin_id: str) -> Dict[str, Any]:
     """
-    Last ned en Doffin-kunngjøring gitt dens URL.
-    Returnerer metadata + liste over vedlegg.
+    Hent den offentlige JSON-representasjonen av en Doffin-kunngjøring.
     """
-    if not HAS_DEPS:
-        return {
-            "ok": False,
-            "error": "requests og beautifulsoup4 må være installert",
-        }
+    if not HAS_REQUESTS:
+        return {"ok": False, "error": "requests ikke installert"}
 
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        return {"ok": False, "error": f"Kunne ikke hente {url}: {e}"}
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Metadata
-    metadata: Dict[str, Any] = {"source_url": url}
-    title_el = soup.find(["h1", "h2"])
-    if title_el:
-        metadata["title"] = title_el.get_text(strip=True)[:300]
-
-    # Kunngjøringsnummer / referanse
-    ref_match = re.search(r"(\d{4}-\d{6,})", resp.text)
-    if ref_match:
-        metadata["reference"] = ref_match.group(1)
-
-    # Frist for tilbud
-    deadline_match = re.search(
-        r"(?:frist|deadline)[^\d]{0,30}(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:[\sT]\d{2}[:.]?\d{2})?)",
-        resp.text, flags=re.IGNORECASE,
-    )
-    if deadline_match:
-        metadata["deadline_raw"] = deadline_match.group(1)
-
-    # Oppdragsgiver
-    buyer_match = re.search(
-        r"(?:oppdragsgiver|innkj[øo]per|buyer)[^\n<]{0,5}[:<]([^<\n]{3,150})",
-        resp.text, flags=re.IGNORECASE,
-    )
-    if buyer_match:
-        metadata["buyer"] = buyer_match.group(1).strip()
-
-    # Finn alle vedleggs-lenker
-    attachments: List[Dict[str, Any]] = []
-    doc_exts = (".pdf", ".docx", ".xlsx", ".xls", ".zip", ".ifc", ".dwg", ".dxf")
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        absolute = urllib.parse.urljoin(url, href)
-        lower = absolute.lower()
-        if any(lower.endswith(ext) for ext in doc_exts) or "attachment" in lower or "vedlegg" in lower:
-            link_text = a.get_text(strip=True) or ""
-            if absolute not in [x["url"] for x in attachments]:
-                attachments.append({
-                    "url": absolute,
-                    "link_text": link_text[:200],
-                })
-
-    return {
-        "ok": True,
-        "portal": "doffin",
-        "metadata": metadata,
-        "attachments": attachments[:MAX_ATTACHMENTS],
-        "attachments_total_found": len(attachments),
-    }
-
-
-def download_attachments(
-    attachments: List[Dict[str, Any]],
-    max_mb: int = MAX_ATTACHMENT_MB,
-) -> List[Tuple[str, bytes, Optional[str]]]:
-    """
-    Last ned vedleggsfiler.
-
-    Returnerer liste av (filename, bytes, error_or_None).
-    Filer over max_mb hoppes over med feilmelding.
-    """
-    if not HAS_DEPS:
-        return []
-
-    downloaded: List[Tuple[str, bytes, Optional[str]]] = []
-    for att in attachments:
-        url = att["url"]
-        try:
-            head_resp = requests.head(
-                url,
-                headers={"User-Agent": USER_AGENT},
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-            )
-            content_length = int(head_resp.headers.get("Content-Length", 0))
-            if content_length and content_length > max_mb * 1024 * 1024:
-                downloaded.append((
-                    _extract_filename(url, att),
-                    b"",
-                    f"For stor ({content_length / 1024 / 1024:.1f} MB > {max_mb} MB)",
-                ))
-                continue
-        except Exception:
-            # Head feiler — prøv GET likevel
-            pass
-
+    last_error: Optional[str] = None
+    for base in DOFFIN_API_BASES:
+        url = f"{base}/notices/{doffin_id}"
         try:
             resp = requests.get(
                 url,
-                headers={"User-Agent": USER_AGENT},
-                timeout=REQUEST_TIMEOUT * 2,
-                stream=True,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                },
+                timeout=REQUEST_TIMEOUT,
             )
-            resp.raise_for_status()
-            data = resp.content
-            if len(data) > max_mb * 1024 * 1024:
-                downloaded.append((
-                    _extract_filename(url, att),
-                    b"",
-                    f"For stor ({len(data) / 1024 / 1024:.1f} MB)",
-                ))
-                continue
-
-            filename = _extract_filename(url, att, response=resp)
-            downloaded.append((filename, data, None))
+            if resp.status_code == 200:
+                try:
+                    return {"ok": True, "data": resp.json(), "source_url": url}
+                except ValueError:
+                    last_error = f"Ugyldig JSON fra {url}"
+                    continue
+            else:
+                last_error = f"{url} ga HTTP {resp.status_code}"
         except Exception as e:
-            downloaded.append((_extract_filename(url, att), b"", f"Nedlasting feilet: {e}"))
+            last_error = f"{url}: {e}"
 
-    return downloaded
-
-
-def _extract_filename(url: str, att: Dict[str, Any], response=None) -> str:
-    """Finn beste tilgjengelige filnavn."""
-    # 1. Content-Disposition
-    if response is not None:
-        cd = response.headers.get("Content-Disposition", "")
-        m = re.search(r'filename\*?=["\']?(?:UTF-\d\'\')?([^"\';\r\n]+)', cd)
-        if m:
-            return urllib.parse.unquote(m.group(1))
-
-    # 2. URL-sti
-    path = urllib.parse.urlparse(url).path
-    if path:
-        name = path.rstrip("/").split("/")[-1]
-        if name and "." in name:
-            return urllib.parse.unquote(name)
-
-    # 3. Fallback til link-tekst
-    link_text = att.get("link_text", "").strip()
-    if link_text:
-        # Rens filnavn
-        safe = re.sub(r"[^\w\-. ]+", "_", link_text)[:80]
-        if "." not in safe:
-            safe += ".pdf"  # anta PDF hvis ukjent
-        return safe
-
-    return "vedlegg.bin"
+    return {"ok": False, "error": last_error or "Ukjent feil"}
 
 
-# ─── Mercell (kun info — ingen API) ──────────────────────────────
+def _pick_nested(obj: Any, *paths: str, default=None) -> Any:
+    """Hjelpefunksjon: prøv flere dot-paths inn i nested dict."""
+    for path in paths:
+        cur: Any = obj
+        for key in path.split("."):
+            if isinstance(cur, dict) and key in cur:
+                cur = cur[key]
+            elif isinstance(cur, list) and key.isdigit() and int(key) < len(cur):
+                cur = cur[int(key)]
+            else:
+                cur = None
+                break
+        if cur is not None:
+            return cur
+    return default
+
+
+def _norwegian_text(node: Any) -> Optional[str]:
+    """
+    eForms-data kommer ofte som {"nor": "tekst", "eng": "text"}
+    eller som en liste av {lang, value}. Hent norsk primært.
+    """
+    if node is None:
+        return None
+    if isinstance(node, str):
+        return node.strip() or None
+    if isinstance(node, dict):
+        for lang in ("nor", "no", "nb", "nno", "eng", "en"):
+            val = node.get(lang)
+            if val:
+                return str(val).strip()
+        # Fallback: any string-valued entry
+        for v in node.values():
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    if isinstance(node, list) and node:
+        for entry in node:
+            if isinstance(entry, dict):
+                for lang_key in ("language", "lang", "locale"):
+                    if entry.get(lang_key) in ("nor", "no", "nb", "NOR"):
+                        return str(entry.get("value") or entry.get("text") or "").strip() or None
+        first = node[0]
+        if isinstance(first, dict):
+            for k in ("value", "text", "label"):
+                if first.get(k):
+                    return str(first[k]).strip()
+        elif isinstance(first, str):
+            return first.strip() or None
+    return None
+
+
+def _extract_structured_metadata(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normaliser Doffin JSON til en flat dict med feltene Builtly bryr seg om.
+    Doffin-API-et har variasjoner i struktur mellom eForms-skjemaer,
+    så vi prøver flere stier per felt.
+    """
+    meta: Dict[str, Any] = {}
+
+    title = _norwegian_text(_pick_nested(
+        raw,
+        "title",
+        "heading",
+        "notice.title",
+        "contract.title",
+        "procurementProject.title",
+    ))
+    if title:
+        meta["title"] = title
+
+    buyer = _norwegian_text(_pick_nested(
+        raw,
+        "buyer.name",
+        "buyer.officialName",
+        "contractingAuthority.name",
+        "organisations.0.name",
+        "organization.name",
+    ))
+    if buyer:
+        meta["buyer"] = buyer
+
+    buyer_org = _pick_nested(
+        raw,
+        "buyer.organizationId",
+        "buyer.identifier",
+        "contractingAuthority.organizationNumber",
+        "organisations.0.identifier",
+    )
+    if buyer_org:
+        meta["buyer_org_no"] = str(buyer_org)
+
+    deadline = _pick_nested(
+        raw,
+        "submissionDeadline",
+        "tenderSubmissionDeadline",
+        "deadlineForReceiptOfTenders",
+        "dates.submissionDeadline",
+        "notice.submissionDeadline",
+    )
+    if deadline:
+        meta["deadline"] = str(deadline)
+
+    pub_date = _pick_nested(raw, "publicationDate", "datePublished", "notice.publicationDate")
+    if pub_date:
+        meta["publication_date"] = str(pub_date)
+
+    est_value = _pick_nested(
+        raw,
+        "estimatedValue.amount",
+        "contract.estimatedValue.amount",
+        "procurementProject.estimatedValue.amount",
+    )
+    if est_value:
+        meta["estimated_value"] = est_value
+        currency = _pick_nested(
+            raw,
+            "estimatedValue.currency",
+            "contract.estimatedValue.currency",
+            default="NOK",
+        )
+        meta["currency"] = currency
+
+    cpv = _pick_nested(raw, "cpv", "cpvCodes", "mainCpv", "procurementProject.cpv")
+    if cpv:
+        if isinstance(cpv, list):
+            meta["cpv_codes"] = [str(c) for c in cpv if c]
+        else:
+            meta["cpv_codes"] = [str(cpv)]
+
+    activity = _norwegian_text(_pick_nested(
+        raw,
+        "buyer.mainActivity",
+        "contractingAuthority.mainActivity",
+        "mainActivity",
+    ))
+    if activity:
+        meta["main_activity"] = activity
+
+    notice_type = _norwegian_text(_pick_nested(
+        raw,
+        "noticeType",
+        "formType",
+        "notice.type",
+    ))
+    if notice_type:
+        meta["notice_type"] = notice_type
+
+    procedure = _norwegian_text(_pick_nested(
+        raw,
+        "procedureType",
+        "procurementProject.procedureType",
+    ))
+    if procedure:
+        meta["procedure_type"] = procedure
+
+    ref = _pick_nested(raw, "noticeId", "reference", "id")
+    if ref:
+        meta["reference"] = str(ref)
+
+    description = _norwegian_text(_pick_nested(
+        raw,
+        "description",
+        "shortDescription",
+        "notice.description",
+        "procurementProject.description",
+    ))
+    if description:
+        meta["description"] = description[:2000]
+
+    # Lenke til konkurransegrunnlag (KGV) — dette er det viktigste feltet
+    kgv_url = _pick_nested(
+        raw,
+        "documentsUrl",
+        "procurementDocumentsUrl",
+        "electronicAccessUrl",
+        "accessToProcurementDocumentsUrl",
+        "contract.procurementDocumentsUrl",
+    )
+    if kgv_url:
+        meta["kgv_url"] = kgv_url
+        meta["kgv_provider"] = _detect_kgv_provider(kgv_url)
+
+    location = _norwegian_text(_pick_nested(
+        raw,
+        "performanceLocation",
+        "placeOfPerformance",
+        "contract.placeOfPerformance",
+    ))
+    if location:
+        meta["location"] = location
+
+    return meta
+
+
+def _detect_kgv_provider(url: str) -> str:
+    """Gjett hvilket KGV som hoster konkurransegrunnlaget."""
+    low = (url or "").lower()
+    if "mercell" in low:
+        return "Mercell"
+    if "tendsign" in low or "visma" in low:
+        return "Visma TendSign"
+    if "eu-supply" in low:
+        return "EU-Supply"
+    if "eavrop" in low or "e-avrop" in low:
+        return "e-Avrop"
+    if "ajour" in low:
+        return "Ajour System"
+    if "offentligeinnkjop" in low:
+        return "Offentlige innkjøp"
+    return "Ekstern KGV"
+
+
+# ─── Mercell ─────────────────────────────────────────────────────
 def mercell_info() -> Dict[str, Any]:
     return {
         "portal": "mercell",
         "api_available": False,
         "message": (
-            "Mercell har ikke offentlig API for tredjepartsinntak. "
-            "Last ned konkurransegrunnlaget manuelt fra Mercell-portalen "
-            "og bruk ordinær filopplasting."
+            "Mercell krever egen API-avtale for programmatisk tilgang. "
+            "Builtly har sendt forespørsel. Inntil avtale er på plass, "
+            "åpne konkurransegrunnlaget i Mercell, last ned ZIP-en og "
+            "dra filene inn i Builtly via filopplasteren."
         ),
     }
 
@@ -229,8 +327,13 @@ def mercell_info() -> Dict[str, Any]:
 # ─── Top-level entry ─────────────────────────────────────────────
 def fetch_from_url(url: str) -> Dict[str, Any]:
     """
-    Inntakspunkt som UI kaller.
-    Returnerer {portal, ok, files: [(name, bytes)], metadata, messages}.
+    Inntakspunkt UI kaller.
+
+    For Doffin: Henter metadata via JSON-API. Konkurransegrunnlag
+    ligger alltid i ekstern KGV (Mercell/TendSign/etc), så vi
+    returnerer KGV-lenken som tydelig neste steg.
+
+    For Mercell: Viser melding om at API-integrasjon ikke er på plass.
     """
     url = (url or "").strip()
     if not url:
@@ -239,26 +342,43 @@ def fetch_from_url(url: str) -> Dict[str, Any]:
     portal = detect_portal(url)
 
     if portal == "doffin":
-        meta = fetch_doffin_tender(url)
-        if not meta.get("ok"):
-            return {"ok": False, "error": meta.get("error"), "portal": "doffin"}
+        doffin_id = _extract_doffin_id(url)
+        if not doffin_id:
+            return {
+                "ok": False,
+                "portal": "doffin",
+                "error": "Kunne ikke lese Doffin-ID fra URL. Sjekk at lenken er på formen https://doffin.no/notices/YYYY-NNNNNN.",
+            }
 
-        downloads = download_attachments(meta["attachments"])
-        files: List[Tuple[str, bytes]] = []
-        errors: List[str] = []
-        for name, data, err in downloads:
-            if err:
-                errors.append(f"{name}: {err}")
-            elif data:
-                files.append((name, data))
+        api_response = _fetch_doffin_notice_json(doffin_id)
+        if not api_response.get("ok"):
+            return {
+                "ok": False,
+                "portal": "doffin",
+                "doffin_id": doffin_id,
+                "source_url": url,
+                "error": f"Henting fra Doffin JSON-API feilet: {api_response.get('error')}",
+            }
+
+        raw = api_response.get("data") or {}
+        meta = _extract_structured_metadata(raw)
+        meta["doffin_id"] = doffin_id
+        meta["doffin_url"] = f"https://www.doffin.no/notices/{doffin_id}"
+        meta["api_source"] = api_response.get("source_url")
 
         return {
             "ok": True,
             "portal": "doffin",
-            "metadata": meta["metadata"],
-            "files": files,
-            "errors": errors,
-            "attachments_total_found": meta.get("attachments_total_found", 0),
+            "metadata": meta,
+            "files": [],  # Doffin selv har ingen vedlegg
+            "kgv_url": meta.get("kgv_url"),
+            "kgv_provider": meta.get("kgv_provider"),
+            "next_step": (
+                f"Konkurransegrunnlaget ligger i {meta.get('kgv_provider', 'ekstern KGV')}. "
+                f"Åpne lenken, last ned alle vedlegg (vanligvis som ZIP) og dra filene inn under."
+                if meta.get("kgv_url")
+                else "Ingen KGV-lenke funnet i Doffin-metadataen. Dokumenter må lastes opp manuelt."
+            ),
         }
 
     if portal == "mercell":
@@ -273,6 +393,7 @@ def fetch_from_url(url: str) -> Dict[str, Any]:
         "portal": "unknown",
         "error": (
             "Ukjent portal. Støttet: Doffin (lim inn lenke til kunngjøringssiden). "
-            "For Mercell: last ned konkurransegrunnlaget manuelt og bruk filopplasting."
+            "For Mercell/Visma TendSign: last ned konkurransegrunnlaget manuelt "
+            "og dra filene inn i filopplasteren."
         ),
     }
