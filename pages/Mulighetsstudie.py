@@ -5951,15 +5951,16 @@ class BuiltlyProPDF(FPDF):
         if self.page_no() == 1:
             return
         self.set_y(10)
-        # Tynn divider-linje i toppen (subtil grå, ikke tykk blå)
-        self.set_draw_color(*_DIVIDER)
-        self.set_line_width(0.3)
-        self.line(25, 14, 185, 14)
-        self.set_line_width(0.2)
+        # Tekst først, ved y=10, høyde 6mm → slutter ved y=16
         self.set_font(PDF_FONT, "", 8)
         self.set_text_color(*_MUTED)
-        self.cell(0, 8, clean_pdf_text(f"PROSJEKT: {self.p_name}"), 0, 0, "L")
-        self.cell(0, 8, clean_pdf_text("Dokumentnr: ARK-002"), 0, 1, "R")
+        self.cell(0, 6, clean_pdf_text(f"PROSJEKT: {self.p_name}"), 0, 0, "L")
+        self.cell(0, 6, clean_pdf_text("Dokumentnr: ARK-002"), 0, 1, "R")
+        # Tynn divider-linje UNDER teksten, ikke gjennom den
+        self.set_draw_color(*_DIVIDER)
+        self.set_line_width(0.3)
+        self.line(25, 17, 185, 17)
+        self.set_line_width(0.2)
         self.set_y(22)
 
     def footer(self) -> None:
@@ -6067,9 +6068,14 @@ def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
     font_value = _pil_font(24, bold=True)
     font_small = _pil_font(22, bold=True)
 
-    # Header med accent-linje
+    # Header med accent-linje (følger faktisk tekstbredde)
     draw.text((40, 14), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(26, 43, 72), font=font_title)
-    draw.rectangle([(40, 60), (540, 64)], fill=(0, 96, 155))
+    try:
+        _sol_bbox = draw.textbbox((40, 14), "SOLANALYSE OG VOLUMSAMMENLIGNING", font=font_title)
+        _sol_right = _sol_bbox[2]
+    except Exception:
+        _sol_right = 40 + 500
+    draw.rectangle([(40, 60), (_sol_right, 64)], fill=(0, 96, 155))
 
     bar_h = 46
     y_start = 100
@@ -6136,7 +6142,13 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
     font_value = _pil_font(34, bold=True)
 
     draw.text((40, 14), "TOMTE- OG STEDSKONTEKST", fill=(26, 43, 72), font=font_title)
-    draw.rectangle([(40, 60), (500, 64)], fill=(0, 96, 155))
+    # Accent-linje følger faktisk tekstbredde
+    try:
+        _bbox = draw.textbbox((40, 14), "TOMTE- OG STEDSKONTEKST", font=font_title)
+        _title_right = _bbox[2]
+    except Exception:
+        _title_right = 40 + 460  # fallback
+    draw.rectangle([(40, 60), (_title_right, 64)], fill=(0, 96, 155))
 
     best = options[0] if options else None
     if best is None:
@@ -6175,7 +6187,13 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
     if has_env:
         env_y = _tomte_bottom + 40  # 40px margin mellom seksjoner
         draw.text((40, env_y - 14), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
-        draw.rectangle([(40, env_y + 32), (280, env_y + 36)], fill=(0, 96, 155))
+        # Accent-linje følger faktisk tekstbredde
+        try:
+            _env_bbox = draw.textbbox((40, env_y - 14), "MILJØFORHOLD", font=font_title)
+            _env_title_right = _env_bbox[2]
+        except Exception:
+            _env_title_right = 40 + 260  # fallback
+        draw.rectangle([(40, env_y + 32), (_env_title_right, env_y + 36)], fill=(0, 96, 155))
 
         noise = env.get("noise", {})
         daylight = env.get("daylight", {})
