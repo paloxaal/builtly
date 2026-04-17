@@ -5920,17 +5920,34 @@ def build_deterministic_report(
 PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
 
 
-def _register_fonts(pdf: FPDF) -> None:
-    """Registrer DejaVuSans for UTF-8-støtte (æøå, ², ³) når tilgjengelig."""
+def _register_fonts(pdf: FPDF) -> str:
+    """Registrer DejaVuSans for UTF-8-støtte (æøå, ², ³) når tilgjengelig.
+    Returnerer faktisk brukt font ("DejaVu" eller "Helvetica").
+    Idempotent: sjekker pdf.fonts før add_font (unngår kjent pyfpdf-bug
+    ved 2. gangs kall på samme font-navn i samme prosess).
+    """
     if not HAS_DEJAVU:
-        return
+        return "Helvetica"
+    existing = getattr(pdf, "fonts", {}) or {}
+    ok = 0
     for style in ["", "B", "I"]:
+        key = "dejavu" + style  # FPDF lagrer lowercase family + style
+        if key in existing:
+            ok += 1
+            continue
         path = _find_dejavu_font(style)
-        if path:
-            try:
-                pdf.add_font("DejaVu", style, path, uni=True)
-            except Exception:
-                pass
+        if not path:
+            return "Helvetica"
+        try:
+            pdf.add_font("DejaVu", style, path, uni=True)
+            ok += 1
+        except Exception:
+            # Hvis add_font feilet men fonten likevel ble lagt til (pyfpdf-cache-bug)
+            if key in getattr(pdf, "fonts", {}):
+                ok += 1
+            else:
+                return "Helvetica"
+    return "DejaVu" if ok == 3 else "Helvetica"
 
 
 # --- PDF v11 Color constants ---
@@ -6671,7 +6688,14 @@ def create_full_report_pdf(
       Page N+: Rapport tekst
     """
     pdf = BuiltlyProPDF()
-    _register_fonts(pdf)
+    # _register_fonts returnerer faktisk brukbar font. Ved 2. gangs kall
+    # (ny PDF-instans i samme prosess) kan DejaVu-registrering feile stille —
+    # vi faller da trygt tilbake til Helvetica for HELE PDF-en for å unngå
+    # "Undefined font: dejavu"-crash i header/footer.
+    global PDF_FONT
+    _active_font = _register_fonts(pdf)
+    if _active_font != PDF_FONT:
+        PDF_FONT = _active_font
     pdf.p_name = name.upper()
     pdf.set_margins(25, 25, 20)
     pdf.set_auto_page_break(True, 22)
