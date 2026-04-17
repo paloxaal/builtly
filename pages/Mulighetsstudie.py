@@ -6117,7 +6117,16 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
     """
     env = environment_data or {}
     has_env = bool(env.get("available"))
-    h = 420 if not has_env else 570
+
+    # Beregn høyden dynamisk basert på faktisk innhold.
+    # TOMTE-seksjon: start y=90, hver rad = 110h + 20gap = 130
+    # Antall rader avhenger av antall items (max 4 per rad, 6-7 items totalt)
+    # MILJØFORHOLD-seksjon: start 40px etter TOMTE-bunn, tittel +56 til kortstart, +110 til bunn
+    # Plus litt bunnmargin (30px)
+    # Antall items settes senere — anta verste fall her: 7 items = 2 rader, + env = 560 total
+    h_no_env = 90 + 2 * 130 + 30  # 380 — plass til 2 rader TOMTE-kort
+    h_with_env = h_no_env + 40 + 56 + 110 + 30  # 616 — + env-seksjon
+    h = h_with_env if has_env else h_no_env
     w = 1600
     img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -6158,8 +6167,13 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
         # Verdi: full navy
         draw.text((x + 18, y + 54), value, fill=(26, 43, 72), font=font_value)
 
+    # Beregn hvor bunnen av siste rad med TOMTE-kort er,
+    # så MILJØFORHOLD-tittel kan plasseres UNDER — ikke hardkodet 330.
+    _n_rows = (len(items) + 3) // 4  # antall rader i 4-kolonne-grid
+    _tomte_bottom = 90 + _n_rows * (card_h + 20)
+
     if has_env:
-        env_y = 330
+        env_y = _tomte_bottom + 40  # 40px margin mellom seksjoner
         draw.text((40, env_y - 14), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
         draw.rectangle([(40, env_y + 32), (280, env_y + 36)], fill=(0, 96, 155))
 
@@ -7148,14 +7162,18 @@ def create_full_report_pdf(
             (172, 15.0, "Sommersolverv — 21. juni kl. 15:00"),
             (172, 18.0, "Sommersolverv — 21. juni kl. 18:00"),
         ]
-        use_3d = bool(solar_3d_snapshots) and len(solar_3d_snapshots) == len(solar_snapshots)
+        # use_3d indikerer om 3D-snapshots er tilgjengelige i det hele tatt.
+        # Hver individuelle snapshot sjekker sin egen indeks (fleksibelt — hvis
+        # brukeren har lastet opp 3 av 5, bruker vi 3D for de 3 og fallback for 2).
+        has_any_3d = bool(solar_3d_snapshots) and len(solar_3d_snapshots) > 0
+        use_3d = has_any_3d  # flag brukt i metodikk-tekst og kilde-referanse
 
         # Introside — oppsummering av sol/skygge-metodikk
         pdf.add_page()
         pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
 
         _best = options[0] if options else None
-        _best_h = float(getattr(_best, "height_m", 0.0) or 0.0) if _best else 0.0
+        _best_h = float(getattr(_best, "building_height_m", 0.0) or 0.0) if _best else 0.0
 
         pdf.body_text(
             "Analysen viser beregnede skyggeforhold for vårjevndøgn (21. mars) og "
@@ -7230,7 +7248,9 @@ def create_full_report_pdf(
         # --- Én side per bilde ---
         for s_idx, (doy, hour, lbl) in enumerate(solar_snapshots):
             try:
-                if use_3d:
+                # Bruk 3D-snapshot hvis tilgjengelig på denne indeksen, ellers fallback
+                this_uses_3d = has_any_3d and s_idx < len(solar_3d_snapshots)
+                if this_uses_3d:
                     snap = solar_3d_snapshots[s_idx]
                 else:
                     snap = render_solar_snapshot(site, options[0], doy, hour, lbl)
@@ -7388,13 +7408,13 @@ def create_full_report_pdf(
                     )
                     pdf.set_xy(25, _my + _card_h + 3)
 
-                    # Kildemerking — hvor kommer bildet fra
+                    # Kildemerking — hvor kommer bildet fra (per bilde, ikke globalt)
                     pdf.set_font(PDF_FONT, "I", 7.5)
                     pdf.set_text_color(*_MUTED)
                     _source = (
                         "Kilde: Interaktiv 3D-modell · Three.js WebGL-renderer · "
                         "Inkluderer volum og nabobygg"
-                        if use_3d else
+                        if this_uses_3d else
                         "Kilde: Builtly skyggemotor · Python/Shapely · "
                         "2D-projeksjon med astronomisk solposisjon"
                     )
@@ -10136,6 +10156,8 @@ render();
             if st.button("🗑 Fjern sol/skygge-bilder og ta nye", key="clear_solar_3d"):
                 st.session_state.pop("solar_3d_snapshots", None)
                 st.session_state.pop("solar_3d_meta", None)
+                # Reset uploader-teller så file_uploader blir ny/tom
+                st.session_state._solar_uploader_counter = st.session_state.get("_solar_uploader_counter", 0) + 1
                 if _HAS_ST_JS:
                     try:
                         st_javascript("""
@@ -10159,20 +10181,43 @@ render();
             st.markdown(
                 "**Slik får du sol/skygge-bildene inn i rapporten:**  \n"
                 "1. Trykk **📥 Fang sol/skygge til PDF** i 3D-scenen over  \n"
-                "2. Når 5 bilder er tatt, klikk **📦 Last ned alle 5** under scenen  \n"
-                "3. Dra alle 5 filene inn i boksen under  \n"
+                "2. Klikk på hver av de 5 nedlastingslenkene som dukker opp  \n"
+                "3. Dra filene inn i boksen under (eller legg til egne vinkler du har lastet ned separat)  \n"
                 "4. Klikk **«Bruk disse bildene i rapporten»** → PDF regenereres automatisk"
             )
-
-            uploaded_solar = st.file_uploader(
-                "Slipp sol/skygge-bildene her (5 filer — filnavnene bevarer rekkefølge og metadata)",
-                type=["jpg", "jpeg", "png"],
-                accept_multiple_files=True,
-                key="solar_3d_uploader",
-                help="Du kan dra inn alle 5 samtidig. Filnavnene inneholder solskygge_NN_doyXXX_klXX.jpg — rekkefølge og metadata leses automatisk.",
+            st.caption(
+                "💡 Du kan laste opp 1–5 bilder. Trenger du flere vinkler enn standard-settet? "
+                "Dra inn dine egne bilder i tillegg — filnavn som starter med `solskygge_NN_...` "
+                "får automatisk metadata. Andre filnavn brukes som de er."
             )
 
-            if uploaded_solar and len(uploaded_solar) >= 3:
+            # Reset-counter brukes til å tvinge ny file_uploader-instans ved "fjern alt"
+            if "_solar_uploader_counter" not in st.session_state:
+                st.session_state._solar_uploader_counter = 0
+            _uploader_key = f"solar_3d_uploader_{st.session_state._solar_uploader_counter}"
+
+            uploaded_solar = st.file_uploader(
+                "Slipp sol/skygge-bildene her",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key=_uploader_key,
+                help="Dra inn 1–5 bilder. Du kan legge til flere senere ved å dra inn i samme boks, eller fjerne enkeltfiler ved å klikke X på hver fil.",
+            )
+
+            if uploaded_solar:
+                _n_files = len(uploaded_solar)
+                _col_info, _col_reset = st.columns([3, 1])
+                with _col_info:
+                    if _n_files == 1:
+                        st.caption(f"✓ 1 fil lastet opp")
+                    else:
+                        st.caption(f"✓ {_n_files} filer lastet opp")
+                with _col_reset:
+                    if st.button("🗑 Fjern alle", key="reset_solar_uploader", use_container_width=True):
+                        st.session_state._solar_uploader_counter += 1
+                        st.rerun()
+
+            if uploaded_solar and len(uploaded_solar) >= 1:
                 # Sorter på filnavn for å bevare rekkefølge (solskygge_01_... → solskygge_05_...)
                 _sorted = sorted(uploaded_solar, key=lambda f: f.name)
                 _solar_imgs: List[Image.Image] = []
@@ -10211,24 +10256,27 @@ render();
 
                 # Preview — vis thumbnails så brukeren ser at rekkefølgen stemmer
                 if _solar_imgs:
-                    _cols = st.columns(min(len(_solar_imgs), 5))
+                    st.caption("**Forhåndsvisning — slik kommer bildene inn i rapporten:**")
+                    _n_show = min(len(_solar_imgs), 5)
+                    _cols = st.columns(_n_show)
                     for _i, (_img, _meta) in enumerate(zip(_solar_imgs[:5], _solar_meta[:5])):
                         with _cols[_i]:
                             st.image(_img, use_container_width=True)
                             st.caption(f"**{_i+1}.** {_meta['label']}")
+                    if len(_solar_imgs) > 5:
+                        st.caption(f"_(+ {len(_solar_imgs) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
 
                 if st.button(
-                    f"✓ Bruk disse {len(_solar_imgs)} bildene i rapporten",
+                    f"✓ Bruk {min(len(_solar_imgs), 5)} bilder i rapporten",
                     type="primary",
                     use_container_width=True,
                     key="apply_uploaded_solar",
                 ):
-                    st.session_state["solar_3d_snapshots"] = _solar_imgs
-                    st.session_state["solar_3d_meta"] = _solar_meta
-                    st.success(f"✓ {len(_solar_imgs)} bilder lastet inn. Trykk «Oppdater PDF med 3D-sol» under.")
+                    # Bruk kun de første 5 (PDF har bare plass til 5 snapshots)
+                    st.session_state["solar_3d_snapshots"] = _solar_imgs[:5]
+                    st.session_state["solar_3d_meta"] = _solar_meta[:5]
+                    st.success(f"✓ {min(len(_solar_imgs), 5)} bilder lastet inn. Trykk «Oppdater PDF med 3D-sol» under.")
                     st.rerun()
-            elif uploaded_solar:
-                st.info(f"Du har lastet opp {len(uploaded_solar)} filer. Last opp minst 3 (helst alle 5) for å bruke dem i rapporten.")
 
 
         # Oppdater PDF-knapp (hvis bildene er inne)
