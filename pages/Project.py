@@ -23,16 +23,28 @@ st.set_page_config(page_title="Project Setup | Builtly", page_icon="⚙️", lay
 # --- 1b. AUTH-GUARD ---
 # Må kjøres før alt annet. Uautentiserte brukere redirectes til login-siden.
 # Dette hindrer at noen omgår login ved å åpne /Project direkte.
+#
+# Prøver 3 restore-mekanismer i rekkefølge (matcher frontpagens flyt):
+#   1. Hvis user_authenticated allerede er True i session_state → OK
+#   2. restore_session() fra lagrede tokens i session_state
+#   3. try_restore_from_browser() fra builtly_rt-cookie
+_auth_ok = False
 try:
     from builtly_auth import restore_session as _restore_session
-    _restore_session()
+    from builtly_auth import try_restore_from_browser as _try_browser
+    if st.session_state.get("user_authenticated"):
+        _auth_ok = True
+    elif _restore_session():
+        _auth_ok = True
+    elif _try_browser():
+        _auth_ok = True
 except Exception:
     # Hvis builtly_auth ikke er tilgjengelig (standalone-kjøring),
     # la BUILTLY_DEV_MODE avgjøre om vi tillater kjøring uten auth.
     pass
 
 _DEV_MODE = os.environ.get("BUILTLY_DEV_MODE", "").lower() in ("1", "true", "yes")
-if not st.session_state.get("user_authenticated") and not _DEV_MODE:
+if not _auth_ok and not st.session_state.get("user_authenticated") and not _DEV_MODE:
     st.warning("Du må være logget inn for å bruke Project Setup.")
     try:
         st.switch_page("Builtly_AI_frontpage_access_gate_expanded.py")
