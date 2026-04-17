@@ -1,751 +1,320 @@
 # -*- coding: utf-8 -*-
 """
-Builtly | Tender Document Parser
+Builtly | Tender Quote Parser
 ─────────────────────────────────────────────────────────────────
-Reell innholdsekstraksjon for anbudsdokumenter. Gir strukturert
-output til AI-laget i stedet for bare filnavn-metadata.
-
-Støtter: PDF, DOCX, XLSX/XLS, IFC, DWG/DXF, CSV, TXT, ZIP.
-Gjenbrukbar fra andre Builtly-moduler.
+Leser inn pristilbud fra underentreprenører (UE-respons) i PDF,
+DOCX og XLSX-format, henter ut priser, forbehold, gyldighet og
+alternativer med AI, og konsoliderer per RFQ-pakke.
 """
 from __future__ import annotations
 
-import io
-import re
-import zipfile
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-# ─── Optional parser backends ────────────────────────────────────
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    fitz = None
-
-try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
-
-try:
-    from docx import Document as DocxDocument
-except ImportError:
-    DocxDocument = None
-
-try:
-    import openpyxl
-except ImportError:
-    openpyxl = None
-
-try:
-    import ifcopenshell
-except ImportError:
-    ifcopenshell = None
-
-try:
-    import ezdxf
-except ImportError:
-    ezdxf = None
-
-try:
-    import pytesseract
-    from PIL import Image
-    HAS_TESSERACT = True
-except ImportError:
-    pytesseract = None
-    HAS_TESSERACT = False
-
-import subprocess
-import tempfile
+import json
 import os
-import shutil
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from tender_document_parser import extract_document
+from tender_ai_engine import call_ai, safe_json_loads, _claude_model_for_level
 
 
-# ─── Classification patterns (two-phase) ─────────────────────────
-FILENAME_PATTERNS: Dict[str, List[str]] = {
-    "konkurransegrunnlag": [
-        r"konkurransegrunnlag", r"kgr\b", r"tender[\s_-]?doc", r"utlysning",
-        r"invitation[\s_-]?to[\s_-]?tender", r"itt\b",
-    ],
-    "beskrivelse": [
-        r"beskrivelse", r"kravspek", r"kravspesifikasjon", r"specification",
-        r"spesifikasjon", r"teknisk[\s_-]?beskrivelse",
-    ],
-    "tegning": [
-        r"tegning", r"drawing", r"plan[\s_-]?\d", r"snitt", r"fasade[\s_-]?tegning",
-        r"arkitekt", r"\bark[\s_-]?\d", r"\brib[\s_-]?\d",
-    ],
-    "kontrakt": [
-        r"kontrakt", r"contract", r"avtale", r"agreement", r"ns[\s_-]?84\d\d",
-    ],
-    "prisskjema": [
-        r"prisskjema", r"pristilbud", r"mengdebeskrivelse", r"mengder",
-        r"bid[\s_-]?form", r"price[\s_-]?form", r"bill[\s_-]?of[\s_-]?quantit",
-        r"\bboq\b", r"tilbudsskjema",
-    ],
-    "sha": [
-        r"\bsha\b", r"byggherreforskrift", r"sikkerhet[\s_-]?helse",
-        r"hms[\s_-]?plan", r"risikovurdering",
-    ],
-    "miljo": [
-        r"milj[øo]plan", r"breeam", r"ceequal", r"ytre[\s_-]?milj",
-        r"klimagassregnskap", r"miljoeoppfolging",
-    ],
-    "rigg": [
-        r"rigg[\s_-]?og[\s_-]?drift", r"rigg[\s_-]?plan", r"logistikk",
-        r"site[\s_-]?logistics", r"riggomrade",
-    ],
-    "brann": [
-        r"brannkonsept", r"brannstrategi", r"brann[\s_-]?prosjektering",
-        r"fire[\s_-]?safety",
-    ],
-    "geo": [
-        r"geoteknisk", r"grunnunders[øo]kelse", r"rig[\s_-]?grunn",
-        r"geotechnical",
-    ],
-    "ifc": [r"\.ifc$"],
-    "kvalifikasjon": [
-        r"kvalifikasjonskrav", r"qualification", r"esgd", r"\beespd\b",
-    ],
-    "tildelingskriterier": [
-        r"tildelingskriter", r"award[\s_-]?criteria", r"evaluation[\s_-]?criteria",
-    ],
-}
+# ─── Supabase ────────────────────────────────────────────────────
+try:
+    from supabase import create_client, Client as SupabaseClient
+except ImportError:
+    create_client = None
+    SupabaseClient = None  # type: ignore
 
-EXTENSION_HINTS: Dict[str, str] = {
-    ".ifc": "ifc",
-    ".dwg": "tegning",
-    ".dxf": "tegning",
-}
-
-# Content signals that override filename classification
-CONTENT_SIGNALS: List[Tuple[str, List[str]]] = [
-    ("konkurransegrunnlag", [
-        "konkurransegrunnlag", "tilbudsfrist", "tildelingskriterier",
-        "anskaffelsesform", "kvalifikasjonskrav",
-    ]),
-    ("kontrakt", [
-        "ns 8405", "ns 8406", "ns 8407", "ns8405", "ns8406", "ns8407",
-        "dagmulkt", "sikkerhetsstillelse", "kontraktssum", "kontraktsbestemmelser",
-    ]),
-    ("prisskjema", [
-        "mengde", "enhet", "enhetspris", "sum eks mva", "post nr", "rs",
-        "kapittelsum", "delsum",
-    ]),
-    ("sha", [
-        "byggherreforskrift", "sha-plan", "sha plan", "risikovurdering",
-        "verneombud",
-    ]),
-    ("brann", [
-        "brannkonsept", "brannklasse", "risikoklasse", "rømningsvei",
-        "brannmotstand", "rei ", "ei ",
-    ]),
-    ("geo", [
-        "grunnforhold", "borrehull", "kvikkleire", "setning", "fundamenter",
-        "geoteknisk vurdering",
-    ]),
-    ("miljo", [
-        "breeam", "klimagass", "ytre miljø", "materialkrav epd",
-        "miljøoppfølging",
-    ]),
-    ("beskrivelse", [
-        "kravspesifikasjon", "teknisk beskrivelse", "ytelsesbeskrivelse",
-        "funksjonsbeskrivelse",
-    ]),
-]
+_SB: Optional["SupabaseClient"] = None
 
 
-def classify_by_filename(name: str) -> str:
-    """First-pass classification based on filename only."""
-    low = name.lower()
-    ext = Path(name).suffix.lower()
-
-    if ext in EXTENSION_HINTS:
-        return EXTENSION_HINTS[ext]
-
-    for cat, patterns in FILENAME_PATTERNS.items():
-        for pat in patterns:
-            if re.search(pat, low):
-                return cat
-    return "annet"
-
-
-def classify_by_content(text: str, fallback: str = "annet") -> str:
-    """Second-pass classification using content signals."""
-    if not text:
-        return fallback
-    low = text.lower()[:8000]  # first 8k chars is enough
-
-    scores: Dict[str, int] = {}
-    for cat, signals in CONTENT_SIGNALS:
-        hits = sum(1 for s in signals if s in low)
-        if hits > 0:
-            scores[cat] = hits
-
-    if not scores:
-        return fallback
-
-    best = max(scores.items(), key=lambda kv: kv[1])
-    # Only override fallback if content signal is strong
-    if best[1] >= 2 or fallback == "annet":
-        return best[0]
-    return fallback
-
-
-# ─── Extractors per format ───────────────────────────────────────
-def _ocr_pdf_page(page, lang: str = "nor+eng", dpi: int = 200) -> str:
-    """OCR a single PDF page via Tesseract. Returns empty string on failure."""
-    if not HAS_TESSERACT:
-        return ""
+def _sb():
+    global _SB
+    if _SB is not None:
+        return _SB
+    if not create_client:
+        return None
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+    if not (url and key):
+        return None
     try:
-        # Render page to image at specified DPI
-        zoom = dpi / 72.0
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        img_bytes = pix.tobytes("png")
-        img = Image.open(io.BytesIO(img_bytes))
-        return pytesseract.image_to_string(img, lang=lang) or ""
+        _SB = create_client(url, key)
+        return _SB
     except Exception:
-        return ""
+        return None
 
 
-def _extract_pdf(data: bytes, max_pages: int = 60, ocr_threshold: int = 50) -> Dict[str, Any]:
+# ─── AI-ekstraksjon ──────────────────────────────────────────────
+QUOTE_EXTRACT_SYSTEM = """Du er en norsk anbudsanalytiker. Du mottar teksten fra ETT pristilbud
+fra en underentreprenør (UE) og skal trekke ut strukturerte data i JSON.
+
+Vær presis. Ikke gjett på beløp som ikke står i teksten. Bruk null for felt du
+ikke finner. Alle beløp oppgis i NOK eksklusive mva med mindre annet er eksplisitt
+angitt i teksten."""
+
+QUOTE_EXTRACT_SCHEMA = """{
+  "supplier_name": "navn på leverandør/UE",
+  "supplier_org_no": "organisasjonsnummer hvis oppgitt, ellers null",
+  "contact_person": "kontaktperson hvis oppgitt",
+  "contact_email": "epost hvis oppgitt",
+  "quote_date": "YYYY-MM-DD hvis oppgitt",
+  "validity_until": "YYYY-MM-DD hvis oppgitt, ellers null",
+  "currency": "NOK|EUR|SEK/osv",
+  "total_price_ex_vat": tallverdi i NOK eksklusive mva (null hvis uklart),
+  "total_price_inc_vat": tallverdi inkl. mva hvis oppgitt separat, ellers null,
+  "price_basis": "fastpris|regningsarbeid|enhetspriser|kombinasjon|uklart",
+  "scope_description": "kort beskrivelse av hva tilbudet dekker, 1-2 setninger",
+  "line_items": [
+    {"description": "...", "quantity": tallverdi eller null, "unit": "...", "unit_price": null eller tall, "line_total": null eller tall}
+  ],
+  "options": [
+    {"description": "...", "price": null eller tall, "comment": "..."}
+  ],
+  "exclusions": ["...", "..."],
+  "reservations": ["konkrete forbehold, ett per element"],
+  "assumptions": ["forutsetninger tilbudet hviler på"],
+  "payment_terms": "betalingsbetingelser som tekst, ellers null",
+  "delivery_time": "leveringstid/fremdrift som tekst, ellers null",
+  "warranty": "garantitid/-betingelser som tekst, ellers null",
+  "risk_flags": [
+    {"severity": "HIGH|MEDIUM|LOW", "issue": "kort beskrivelse", "impact": "hvorfor det betyr noe"}
+  ]
+}"""
+
+
+def parse_quote_with_ai(
+    document: Dict[str, Any],
+    qa_level: str = "standard",
+) -> Dict[str, Any]:
     """
-    Extract text, tables, and page count from PDF.
-
-    OCR fallback: hvis en side har mindre enn `ocr_threshold` tegn med ren
-    tekstekstraksjon, kjøres Tesseract på den siden (nor+eng).
+    Kjør AI-ekstraksjon på ETT UE-pristilbud.
     """
-    if not fitz:
-        return {"text": "", "page_count": 0, "error": "PyMuPDF ikke installert"}
+    text = document.get("text") or ""
+    if not text.strip():
+        return {
+            "ok": False,
+            "error": "Tomt tekstinnhold — kunne ikke parse pristilbudet.",
+        }
 
-    out: Dict[str, Any] = {
-        "text": "",
-        "page_count": 0,
-        "tables": [],
-        "ocr_pages": 0,
+    # Cap input — tilbud er sjelden over 30 sider
+    text_capped = text[:80_000]
+
+    user_msg = (
+        f"FILNAVN: {document.get('filename', '(ukjent)')}\n"
+        f"DOKUMENTTYPE: {document.get('extension', '')}\n"
+        f"ANTALL SIDER: {document.get('page_count', 0)}\n\n"
+        f"INNHOLD:\n{text_capped}\n\n"
+        f"Ekstraher tilbudsdataene som JSON med nøyaktig denne strukturen:\n"
+        f"{QUOTE_EXTRACT_SCHEMA}\n\n"
+        f"Svar KUN med JSON-objektet, ingen forklaring utenfor."
+    )
+
+    ai_response, meta = call_ai(
+        system=QUOTE_EXTRACT_SYSTEM,
+        user=user_msg,
+        qa_level=qa_level,
+        max_tokens=4096,
+        temperature=0.0,
+    )
+
+    if not ai_response:
+        return {
+            "ok": False,
+            "error": f"AI-backend feilet: {meta.get('error', 'ukjent')}",
+            "backend": meta.get("backend"),
+        }
+
+    parsed = safe_json_loads(ai_response)
+    if not parsed:
+        return {
+            "ok": False,
+            "error": "Kunne ikke parse AI-output som JSON",
+            "raw": ai_response[:500],
+            "backend": meta.get("backend"),
+        }
+
+    return {
+        "ok": True,
+        "data": parsed,
+        "backend": meta.get("backend"),
+        "model": meta.get("model"),
     }
-    try:
-        doc = fitz.open(stream=data, filetype="pdf")
-        out["page_count"] = len(doc)
-        parts: List[str] = []
-        ocr_pages = 0
 
-        for i, page in enumerate(doc):
-            if i >= max_pages:
-                parts.append(f"\n\n[... {len(doc) - max_pages} flere sider kuttet ...]\n")
-                break
 
-            page_text = page.get_text("text") or ""
-            # OCR fallback for empty/near-empty pages
-            if len(page_text.strip()) < ocr_threshold and HAS_TESSERACT:
-                ocr_text = _ocr_pdf_page(page)
-                if ocr_text.strip():
-                    page_text = ocr_text
-                    ocr_pages += 1
+# ─── Konsolidering per RFQ-pakke ─────────────────────────────────
+def consolidate_quotes_by_package(
+    quotes: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Aggregater pristilbud per RFQ-pakke. Hver quote må ha
+    'package_name' + 'parsed' (output fra parse_quote_with_ai).
+    """
+    by_package: Dict[str, List[Dict[str, Any]]] = {}
+    for q in quotes:
+        pkg = q.get("package_name") or "Uspesifisert pakke"
+        by_package.setdefault(pkg, []).append(q)
 
-            parts.append(f"\n── Side {i + 1} ──\n{page_text}")
+    summary: List[Dict[str, Any]] = []
+    for pkg, pkg_quotes in by_package.items():
+        prices = []
+        for q in pkg_quotes:
+            data = (q.get("parsed") or {}).get("data") or {}
+            if isinstance(data.get("total_price_ex_vat"), (int, float)):
+                prices.append({
+                    "supplier": data.get("supplier_name") or "(ukjent)",
+                    "price": float(data["total_price_ex_vat"]),
+                    "validity": data.get("validity_until"),
+                    "reservations_count": len(data.get("reservations") or []),
+                    "risk_count": len(data.get("risk_flags") or []),
+                })
 
-        out["text"] = "".join(parts)
-        out["ocr_pages"] = ocr_pages
-        if ocr_pages > 0 and not HAS_TESSERACT:
-            out["ocr_warning"] = "Skannet PDF — Tesseract ikke tilgjengelig"
-        doc.close()
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
+        if prices:
+            prices_sorted = sorted(prices, key=lambda p: p["price"])
+            lowest = prices_sorted[0]
+            highest = prices_sorted[-1]
+            mean_price = sum(p["price"] for p in prices) / len(prices)
+            spread_pct = (
+                100.0 * (highest["price"] - lowest["price"]) / lowest["price"]
+                if lowest["price"] > 0 else 0.0
+            )
+        else:
+            lowest = highest = None
+            mean_price = 0.0
+            spread_pct = 0.0
 
-    # Try to extract tables separately with pdfplumber (better for BoQ)
-    if pdfplumber and len(data) < 50_000_000:  # 50 MB ceiling
+        summary.append({
+            "package_name": pkg,
+            "num_quotes": len(pkg_quotes),
+            "num_priced": len(prices),
+            "lowest": lowest,
+            "highest": highest,
+            "mean_price": round(mean_price, 0) if mean_price else None,
+            "spread_pct": round(spread_pct, 1),
+            "quotes": pkg_quotes,
+        })
+
+    return {
+        "packages": summary,
+        "total_quotes": len(quotes),
+        "consolidated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ─── Persistering (Supabase + lokal JSONL) ───────────────────────
+def persist_quote(
+    project_name: str,
+    run_id: Optional[str],
+    package_name: Optional[str],
+    filename: str,
+    parsed: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Lagre parset UE-tilbud."""
+    quote_id = str(uuid.uuid4())
+    record = {
+        "quote_id": quote_id,
+        "project_name": project_name,
+        "run_id": run_id,
+        "package_name": package_name,
+        "filename": filename,
+        "parsed_data": parsed.get("data") if parsed.get("ok") else None,
+        "parse_error": parsed.get("error") if not parsed.get("ok") else None,
+        "backend": parsed.get("backend"),
+        "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    stored_in = None
+    sb = _sb()
+    if sb:
         try:
-            with pdfplumber.open(io.BytesIO(data)) as pdf:
-                for pi, page in enumerate(pdf.pages[:max_pages]):
-                    tables = page.extract_tables() or []
-                    for ti, tbl in enumerate(tables):
-                        if tbl and len(tbl) > 1:
-                            out["tables"].append({
-                                "page": pi + 1,
-                                "rows": len(tbl),
-                                "cols": len(tbl[0]) if tbl[0] else 0,
-                                "preview": tbl[:5],
-                            })
+            sb.table("tender_quotes").insert(record).execute()
+            stored_in = "supabase"
         except Exception:
             pass
 
-    return out
+    if stored_in != "supabase":
+        local_path = Path("qa_database/tender_quotes")
+        local_path.mkdir(parents=True, exist_ok=True)
+        jsonl = local_path / "quotes.jsonl"
+        try:
+            with jsonl.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            stored_in = "local"
+        except Exception:
+            stored_in = "ikke lagret"
+
+    record["stored_in"] = stored_in
+    return record
 
 
-def _extract_docx(data: bytes) -> Dict[str, Any]:
-    """Extract text and tables from DOCX."""
-    if not DocxDocument:
-        return {"text": "", "error": "python-docx ikke installert"}
+def load_quotes(project_name: str, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Hent lagrede pristilbud for prosjektet."""
+    records: List[Dict[str, Any]] = []
 
-    out: Dict[str, Any] = {"text": "", "tables": []}
-    try:
-        doc = DocxDocument(io.BytesIO(data))
-        parts = [p.text for p in doc.paragraphs if p.text.strip()]
-        out["text"] = "\n".join(parts)
-        for ti, tbl in enumerate(doc.tables):
-            rows = []
-            for row in tbl.rows[:30]:
-                rows.append([cell.text.strip() for cell in row.cells])
-            if rows:
-                out["tables"].append({
-                    "index": ti,
-                    "rows": len(rows),
-                    "cols": len(rows[0]) if rows else 0,
-                    "preview": rows[:5],
-                })
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-    return out
+    sb = _sb()
+    if sb:
+        try:
+            q = sb.table("tender_quotes").select("*").eq("project_name", project_name)
+            if run_id:
+                q = q.eq("run_id", run_id)
+            resp = q.order("received_at", desc=True).execute()
+            if resp.data:
+                records.extend(resp.data)
+        except Exception:
+            pass
 
+    # Merge local
+    local_jsonl = Path("qa_database/tender_quotes/quotes.jsonl")
+    if local_jsonl.exists():
+        try:
+            with local_jsonl.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        if rec.get("project_name") != project_name:
+                            continue
+                        if run_id and rec.get("run_id") != run_id:
+                            continue
+                        if not any(r.get("quote_id") == rec.get("quote_id") for r in records):
+                            records.append(rec)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
-def _extract_xlsx(data: bytes) -> Dict[str, Any]:
-    """Extract sheet structure from XLSX (BoQ, prisskjema etc.)."""
-    if not openpyxl:
-        return {"text": "", "error": "openpyxl ikke installert"}
-
-    out: Dict[str, Any] = {"text": "", "sheets": []}
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-        text_parts: List[str] = []
-        for sname in wb.sheetnames[:20]:
-            ws = wb[sname]
-            sheet_info = {
-                "name": sname,
-                "max_row": ws.max_row or 0,
-                "max_col": ws.max_column or 0,
-            }
-            # Sample first ~50 rows
-            sample_rows: List[List[str]] = []
-            for ri, row in enumerate(ws.iter_rows(max_row=50, values_only=True)):
-                if ri >= 50:
-                    break
-                clean_row = [str(c) if c is not None else "" for c in row]
-                if any(c.strip() for c in clean_row):
-                    sample_rows.append(clean_row)
-            sheet_info["sample"] = sample_rows[:20]
-            out["sheets"].append(sheet_info)
-            text_parts.append(f"\n── Ark: {sname} ({sheet_info['max_row']}×{sheet_info['max_col']}) ──")
-            for row in sample_rows[:30]:
-                text_parts.append(" | ".join(row[:10]))
-        out["text"] = "\n".join(text_parts)
-        wb.close()
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-    return out
+    records.sort(key=lambda r: r.get("received_at") or "", reverse=True)
+    return records
 
 
-def _extract_ifc(data: bytes) -> Dict[str, Any]:
-    """Extract object inventory from IFC."""
-    if not ifcopenshell:
-        return {"text": "", "error": "ifcopenshell ikke installert"}
-
-    out: Dict[str, Any] = {"text": "", "entity_counts": {}}
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".ifc", delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = tmp.name
-        model = ifcopenshell.open(tmp_path)
-        # Count entities by type
-        counts: Dict[str, int] = {}
-        for entity in model:
-            t = entity.is_a()
-            counts[t] = counts.get(t, 0) + 1
-        # Keep top 30 most common
-        top = sorted(counts.items(), key=lambda kv: -kv[1])[:30]
-        out["entity_counts"] = dict(top)
-        lines = [f"IFC schema: {model.schema}"]
-        for t, n in top:
-            lines.append(f"  {t}: {n}")
-        out["text"] = "\n".join(lines)
-        Path(tmp_path).unlink(missing_ok=True)
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-    return out
-
-
-def _extract_dxf(data: bytes) -> Dict[str, Any]:
-    """Extract layer / block summary from DXF (DWG needs conversion)."""
-    if not ezdxf:
-        return {"text": "", "error": "ezdxf ikke installert"}
-    try:
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
-            tmp.write(data)
-            tmp_path = tmp.name
-        doc = ezdxf.readfile(tmp_path)
-        layers = [layer.dxf.name for layer in doc.layers]
-        blocks = [block.name for block in doc.blocks if not block.name.startswith("*")]
-        lines = [
-            f"DXF version: {doc.dxfversion}",
-            f"Antall lag: {len(layers)}",
-            f"Antall blokker: {len(blocks)}",
-        ]
-        if layers:
-            lines.append("Lag (topp 30): " + ", ".join(layers[:30]))
-        if blocks:
-            lines.append("Blokker (topp 30): " + ", ".join(blocks[:30]))
-        Path(tmp_path).unlink(missing_ok=True)
-        return {"text": "\n".join(lines), "layers": layers[:50], "blocks": blocks[:50]}
-    except Exception as e:
-        return {"text": "", "error": f"{type(e).__name__}: {e}"}
-
-
-def _extract_dwg(data: bytes) -> Dict[str, Any]:
+# ─── Entry point for UI ──────────────────────────────────────────
+def parse_and_persist_quote(
+    project_name: str,
+    run_id: Optional[str],
+    package_name: Optional[str],
+    filename: str,
+    file_bytes: bytes,
+    qa_level: str = "standard",
+) -> Dict[str, Any]:
     """
-    Extract info from DWG files by converting to DXF via LibreDWG (dwg2dxf).
-
-    Krever dwg2dxf i PATH. Installert i Builtly Docker.
+    Full pipeline: ekstraher innhold → AI-parse → persister.
+    Returnerer hele recorden (inkl. stored_in).
     """
-    dwg2dxf = shutil.which("dwg2dxf")
-    if not dwg2dxf:
-        return {
-            "text": "",
-            "error": "dwg2dxf ikke tilgjengelig (LibreDWG må være installert)",
-        }
-
-    tmpdir = tempfile.mkdtemp(prefix="builtly_dwg_")
-    try:
-        dwg_path = os.path.join(tmpdir, "in.dwg")
-        with open(dwg_path, "wb") as f:
-            f.write(data)
-
-        # dwg2dxf writes <basename>.dxf to cwd unless -o given
-        dxf_path = os.path.join(tmpdir, "in.dxf")
-        result = subprocess.run(
-            [dwg2dxf, "-o", dxf_path, dwg_path],
-            capture_output=True,
-            timeout=90,
-            cwd=tmpdir,
+    # 1. Ekstraher tekst fra fila
+    doc = extract_document(filename, file_bytes)
+    if doc.get("error") and not doc.get("text"):
+        return persist_quote(
+            project_name, run_id, package_name, filename,
+            {"ok": False, "error": f"Ekstraksjon feilet: {doc['error']}"},
         )
 
-        if not os.path.exists(dxf_path) or os.path.getsize(dxf_path) < 100:
-            stderr = result.stderr.decode("utf-8", errors="replace")[:500]
-            return {
-                "text": "",
-                "error": f"DWG-konvertering feilet: {stderr or 'ingen output'}",
-            }
+    # 2. AI-parse
+    parsed = parse_quote_with_ai(doc, qa_level=qa_level)
 
-        with open(dxf_path, "rb") as f:
-            dxf_data = f.read()
-
-        dxf_result = _extract_dxf(dxf_data)
-        # Tag output so UI can indicate the conversion happened
-        if dxf_result.get("text"):
-            dxf_result["text"] = f"[Konvertert fra DWG via LibreDWG]\n{dxf_result['text']}"
-        dxf_result["converted_from_dwg"] = True
-        return dxf_result
-
-    except subprocess.TimeoutExpired:
-        return {"text": "", "error": "DWG-konvertering tok for lang tid (>90s)"}
-    except Exception as e:
-        return {"text": "", "error": f"DWG-feil: {type(e).__name__}: {e}"}
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-def _extract_text_file(data: bytes) -> Dict[str, Any]:
-    """Plain text / CSV extraction."""
-    for enc in ("utf-8", "latin-1", "cp1252"):
-        try:
-            return {"text": data.decode(enc)[:100_000]}
-        except UnicodeDecodeError:
-            continue
-    return {"text": "", "error": "Kunne ikke dekode tekstfil"}
-
-
-def _extract_zip(data: bytes, max_files: int = 100) -> Dict[str, Any]:
-    """
-    List contents of a ZIP — brukes bare hvis ZIP-en ikke skal pakkes ut.
-    Til faktisk analyse, bruk expand_zip_to_documents() i stedet.
-    """
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            all_names = zf.namelist()
-            names = all_names[:max_files]
-            return {
-                "text": (
-                    f"ZIP-innhold ({len(all_names)} filer):\n"
-                    + "\n".join(f"  {n}" for n in names)
-                    + (f"\n  … og {len(all_names) - max_files} til" if len(all_names) > max_files else "")
-                ),
-                "entries": names,
-                "total_files_in_zip": len(all_names),
-            }
-    except Exception as e:
-        return {"text": "", "error": f"ZIP-feil: {e}"}
-
-
-# Filendelser vi kan parse — brukes til å filtrere ZIP-innhold
-PARSEABLE_EXTENSIONS = {
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls",
-    ".ifc", ".dxf", ".dwg", ".csv", ".txt", ".md",
-}
-
-
-def expand_zip_to_documents(
-    zip_filename: str,
-    zip_data: bytes,
-    max_files: int = 100,
-    max_file_size_mb: int = 50,
-    max_text_chars_per_doc: int = 200_000,
-    skip_nested_zips: bool = True,
-    progress_callback=None,
-) -> List[Dict[str, Any]]:
-    """
-    Pakk ut ZIP og returner liste av dokumenter — memory-safe.
-
-    Sikringsmekanismer:
-      - Garbage collection mellom hver fil (PyMuPDF/openpyxl/ifcopenshell
-        holder på C-allokert minne som Python ikke alltid frigjør raskt)
-      - Tekst kuttes til max_text_chars_per_doc per dokument for å
-        unngå context-eksplosjon i AI-laget
-      - max_file_size_mb per fil (default 50 MB)
-      - Avbryter med fallback-record hvis enkeltfil feiler (slipper
-        ikke unntak opp til UI — hele ZIP-en fullfører)
-
-    progress_callback(current, total, filename) kalles per fil hvis gitt.
-    """
-    import gc
-
-    documents: List[Dict[str, Any]] = []
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
-            namelist = zf.namelist()
-
-            # Filtrer bort system-filer
-            candidate_names = []
-            for name in namelist:
-                if name.endswith("/"):
-                    continue
-                base = name.split("/")[-1]
-                if base.startswith(".") or base.startswith("__"):
-                    continue
-                if "__MACOSX" in name:
-                    continue
-                ext = Path(name).suffix.lower()
-                if ext not in PARSEABLE_EXTENSIONS:
-                    if ext == ".zip" and not skip_nested_zips:
-                        pass
-                    else:
-                        continue
-                candidate_names.append(name)
-
-            if len(candidate_names) > max_files:
-                candidate_names = candidate_names[:max_files]
-
-            total = len(candidate_names)
-            max_bytes = max_file_size_mb * 1024 * 1024
-
-            for i, inner_name in enumerate(candidate_names, 1):
-                if progress_callback:
-                    try:
-                        progress_callback(i, total, Path(inner_name).name)
-                    except Exception:
-                        pass
-
-                inner_data = None
-                try:
-                    info = zf.getinfo(inner_name)
-                    if info.file_size > max_bytes:
-                        documents.append(_skip_record(
-                            inner_name, zip_filename, info.file_size,
-                            f"For stor ({info.file_size / 1024 / 1024:.1f} MB > {max_file_size_mb} MB)",
-                        ))
-                        continue
-
-                    inner_data = zf.read(inner_name)
-                    base_filename = Path(inner_name).name
-                    parsed = extract_document(base_filename, inner_data)
-
-                    # Kutt tekst for å spare minne i downstream AI-lag
-                    if parsed.get("text") and len(parsed["text"]) > max_text_chars_per_doc:
-                        parsed["text"] = parsed["text"][:max_text_chars_per_doc] + "\n[... tekst kuttet av minne-grunner ...]"
-
-                    parsed["zip_source"] = zip_filename
-                    parsed["zip_path"] = inner_name
-                    documents.append(parsed)
-
-                except MemoryError:
-                    documents.append(_skip_record(
-                        inner_name, zip_filename, 0,
-                        "Minnemangel — filen er for stor å prosessere i nåværende instans",
-                    ))
-                except Exception as e:
-                    documents.append(_skip_record(
-                        inner_name, zip_filename, 0,
-                        f"{type(e).__name__}: {str(e)[:150]}",
-                    ))
-                finally:
-                    # Frigjør bytes og kjør GC mellom hver fil
-                    inner_data = None
-                    gc.collect()
-
-    except Exception as e:
-        return [{
-            "filename": zip_filename,
-            "zip_source": zip_filename,
-            "extension": ".zip",
-            "size_kb": round(len(zip_data) / 1024, 1),
-            "category": "annet",
-            "category_filename": "annet",
-            "text": "",
-            "text_excerpt": "",
-            "tables": [],
-            "sheets": [],
-            "entity_counts": {},
-            "layers": [],
-            "blocks": [],
-            "page_count": 0,
-            "ocr_pages": 0,
-            "converted_from_dwg": False,
-            "error": f"Kunne ikke åpne ZIP: {type(e).__name__}: {e}",
-        }]
-
-    return documents
-
-
-def _skip_record(inner_name: str, zip_filename: str, size: int, err: str) -> Dict[str, Any]:
-    """Bygg en placeholder-record for filer som ikke kunne prosesseres."""
-    return {
-        "filename": Path(inner_name).name,
-        "zip_source": zip_filename,
-        "zip_path": inner_name,
-        "extension": Path(inner_name).suffix.lower(),
-        "size_kb": round(size / 1024, 1) if size else 0,
-        "category": "annet",
-        "category_filename": classify_by_filename(inner_name),
-        "text": "",
-        "text_excerpt": "",
-        "tables": [],
-        "sheets": [],
-        "entity_counts": {},
-        "layers": [],
-        "blocks": [],
-        "page_count": 0,
-        "ocr_pages": 0,
-        "converted_from_dwg": False,
-        "error": err,
-    }
-
-
-# ─── Main entry point ────────────────────────────────────────────
-def extract_document(filename: str, data: bytes) -> Dict[str, Any]:
-    """
-    Extract structured content from a single uploaded file.
-
-    Returns:
-        {
-            "filename": str,
-            "extension": str,
-            "size_kb": float,
-            "category_filename": str,   # first-pass
-            "category": str,            # final (content-confirmed)
-            "text": str,                # extracted text (possibly truncated)
-            "text_excerpt": str,        # first 3000 chars for AI manifest
-            "page_count": int,          # PDFs only
-            "tables": list,             # structured tables if any
-            "sheets": list,             # XLSX sheet info
-            "entity_counts": dict,      # IFC
-            "error": str | None,
-        }
-    """
-    ext = Path(filename).suffix.lower()
-    size_kb = round(len(data) / 1024, 1)
-    filename_cat = classify_by_filename(filename)
-
-    extractor_map = {
-        ".pdf": _extract_pdf,
-        ".docx": _extract_docx,
-        ".xlsx": _extract_xlsx,
-        ".xlsm": _extract_xlsx,
-        ".xls": _extract_xlsx,
-        ".ifc": _extract_ifc,
-        ".dxf": _extract_dxf,
-        ".dwg": _extract_dwg,
-        ".csv": _extract_text_file,
-        ".txt": _extract_text_file,
-        ".md": _extract_text_file,
-        ".zip": _extract_zip,
-    }
-
-    extractor = extractor_map.get(ext)
-    if extractor:
-        result = extractor(data)
-    else:
-        result = {"text": "", "error": f"Ingen parser for {ext}"}
-
-    text = result.get("text", "") or ""
-    final_cat = classify_by_content(text, fallback=filename_cat)
-
-    return {
-        "filename": filename,
-        "extension": ext,
-        "size_kb": size_kb,
-        "category_filename": filename_cat,
-        "category": final_cat,
-        "text": text,
-        "text_excerpt": text[:3000],
-        "page_count": result.get("page_count", 0),
-        "ocr_pages": result.get("ocr_pages", 0),
-        "converted_from_dwg": result.get("converted_from_dwg", False),
-        "tables": result.get("tables", []),
-        "sheets": result.get("sheets", []),
-        "entity_counts": result.get("entity_counts", {}),
-        "layers": result.get("layers", []),
-        "blocks": result.get("blocks", []),
-        "error": result.get("error"),
-    }
-
-
-def extract_documents(files: List[Tuple[str, bytes]]) -> List[Dict[str, Any]]:
-    """Batch-extract. `files` is list of (filename, bytes) tuples."""
-    return [extract_document(name, data) for name, data in files]
-
-
-# ─── Quick metadata-extract helpers for specific fields ──────────
-DATE_PATTERNS = [
-    r"tilbudsfrist[^\n]{0,100}?(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
-    r"innleveringsfrist[^\n]{0,100}?(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
-    r"frist for innlevering[^\n]{0,100}?(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
-    r"submission deadline[^\n]{0,100}?(\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4})",
-]
-
-MONEY_PATTERNS = [
-    r"(\d[\d\s\.\,]{3,})\s*(?:kr|nok|mnok|mill(?:ioner)?)",
-    r"(?:kr|nok)\s*(\d[\d\s\.\,]{3,})",
-]
-
-
-def quick_scan_deadlines(text: str) -> List[str]:
-    """Best-effort deadline extraction — feeds AI but also visible in UI."""
-    if not text:
-        return []
-    found: List[str] = []
-    low = text.lower()
-    for pat in DATE_PATTERNS:
-        for m in re.finditer(pat, low, flags=re.IGNORECASE):
-            found.append(m.group(1))
-    return list(dict.fromkeys(found))[:10]
-
-
-def quick_scan_ns_contract(text: str) -> Optional[str]:
-    """Detect which NS contract is referenced (8405 / 8406 / 8407)."""
-    if not text:
-        return None
-    low = text.lower()
-    for ns in ["ns 8407", "ns8407", "ns 8405", "ns8405", "ns 8406", "ns8406"]:
-        if ns in low:
-            return ns.upper().replace("NS", "NS ").replace("  ", " ").strip()
-    return None
-
-
-def quick_scan_dagmulkt(text: str) -> Optional[str]:
-    """Extract dagmulkt clause snippet."""
-    if not text:
-        return None
-    m = re.search(r"dagmulkt[^\n]{0,200}", text, flags=re.IGNORECASE)
-    return m.group(0).strip() if m else None
+    # 3. Persister
+    record = persist_quote(project_name, run_id, package_name, filename, parsed)
+    record["parsed"] = parsed
+    return record
