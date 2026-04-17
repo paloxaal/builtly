@@ -842,9 +842,6 @@ with right:
         </div>
         """)
 
-    with st.expander("Bestillingspayload"):
-        st.json(config)
-
 
 # ═════════════════════════════════════════════════════════════════
 # 11. RESULTS
