@@ -1194,6 +1194,7 @@ def _parse_uploaded_files(uploaded) -> List[Dict[str, Any]]:
     et separat dokument.
     """
     from pathlib import Path as _P
+    import gc
     results: List[Dict[str, Any]] = []
     total = len(uploaded)
     progress = st.progress(0.0, text="Leser dokumenter...")
@@ -1209,18 +1210,43 @@ def _parse_uploaded_files(uploaded) -> List[Dict[str, Any]]:
                     (i - 1) / max(total, 1),
                     text=f"Pakker ut {f.name} ({len(data) / 1024 / 1024:.0f} MB)...",
                 )
-                # Pakk ut og behandle hver fil
+
+                # Progress-callback som oppdaterer UI mens hver fil i ZIP
+                # prosesseres — gir bedre feedback og lar Streamlit heartbeat
+                def _zip_progress(inner_i: int, inner_total: int, inner_name: str):
+                    # Ikke overstig 1.0 uansett
+                    pct = min(1.0, (i - 1 + inner_i / max(inner_total, 1)) / max(total, 1))
+                    progress.progress(pct, text=f"{f.name}: {inner_i}/{inner_total} — {inner_name}")
+
                 inner_docs = expand_zip_to_documents(
                     zip_filename=f.name,
                     zip_data=data,
-                    max_files=150,
-                    max_file_size_mb=100,
+                    max_files=100,
+                    max_file_size_mb=50,
+                    max_text_chars_per_doc=200_000,
+                    progress_callback=_zip_progress,
                 )
                 results.extend(inner_docs)
+                # Frigjør ZIP-bytes
+                data = None
+                gc.collect()
             else:
                 parsed = extract_document(f.name, data)
+                # Cap tekst også for direkte-opplastede filer (store PDF-er)
+                if parsed.get("text") and len(parsed["text"]) > 200_000:
+                    parsed["text"] = parsed["text"][:200_000] + "\n[... tekst kuttet av minne-grunner ...]"
                 results.append(parsed)
+                data = None
+                gc.collect()
 
+        except MemoryError:
+            results.append({
+                "filename": f.name,
+                "category": "annet",
+                "error": "Minnemangel — filen er for stor",
+                "text": "", "text_excerpt": "", "size_kb": 0,
+            })
+            gc.collect()
         except Exception as e:
             results.append({
                 "filename": f.name,
