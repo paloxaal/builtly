@@ -5387,26 +5387,6 @@ def render_view_from_building(
     # NB: Streamlit har ikke st.components.iframe — riktig API er components.iframe
     components.iframe(viewer_url, height=height_px, scrolling=False)
 
-    # Debug-info (kollapset) for å feilsøke posisjonering
-    with st.expander("Debug · kameraposisjon og volumer", expanded=False):
-        st.caption(
-            f"**Kamera:** lat={cam_lat:.6f}, lng={cam_lng:.6f}, alt={cam_alt:.1f} m · "
-            f"heading={heading_deg}°, tilt=78°, range=5 m"
-        )
-        st.caption(
-            f"**Terreng:** base_elev={base_elev:.1f} m, etasjehøyde={floor_h:.1f} m, "
-            f"etasje={floor}, øyehøyde=1.6 m"
-        )
-        st.caption(f"**Volumer sendt til viewer:** {len(volumes_data)} bygg")
-        if not volumes_data:
-            st.warning(
-                "Ingen volumer ble sendt til vieweren. Dette er trolig fordi "
-                "massing_parts og footprint_polygon_coords begge er tomme."
-            )
-        url_preview = viewer_url[:120] + "..." if len(viewer_url) > 120 else viewer_url
-        st.code(url_preview, language="text")
-
-
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
     record = asdict(option)
     record["mix_counts"] = json.dumps(option.mix_counts, ensure_ascii=False)
@@ -5847,52 +5827,56 @@ def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]],
 
 
 def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
-    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ. Lys bakgrunn for PDF."""
-    w, h = 1600, max(440, 100 + len(options) * 90)
+    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ. Lys bakgrunn for PDF.
+
+    Font-størrelser økt for PDF-lesbarhet (1600 → ~600px skalering).
+    """
+    w, h = 1600, max(560, 120 + len(options) * 120)
     img = Image.new('RGB', (w, h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-    font_title = _pil_font(26, bold=True)
-    font_label = _pil_font(20)
-    font_value = _pil_font(17, bold=True)
-    font_small = _pil_font(16)
+    # Fonter betydelig økt: var 26/20/17/16, nå 36/26/24/22
+    font_title = _pil_font(36, bold=True)
+    font_label = _pil_font(26, bold=True)
+    font_value = _pil_font(24, bold=True)
+    font_small = _pil_font(22, bold=True)
 
     # Header med accent-linje
-    draw.text((40, 16), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(26, 43, 72), font=font_title)
-    draw.rectangle([(40, 52), (480, 54)], fill=(0, 96, 155))
+    draw.text((40, 14), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(26, 43, 72), font=font_title)
+    draw.rectangle([(40, 60), (540, 64)], fill=(0, 96, 155))
 
-    bar_h = 36
-    y_start = 80
+    bar_h = 46
+    y_start = 100
     max_bra = max((o.gross_bta_m2 * o.efficiency_ratio for o in options), default=1)
 
     for i, opt in enumerate(options):
-        y = y_start + i * 90
+        y = y_start + i * 120
         bra = opt.gross_bta_m2 * opt.efficiency_ratio
         sol = opt.solar_score
 
         # Bakgrunnsrad
         if i % 2 == 0:
-            draw.rectangle([(30, y - 8), (w - 30, y + bar_h + 28)], fill=(247, 249, 252))
+            draw.rectangle([(30, y - 12), (w - 30, y + bar_h + 38)], fill=(240, 244, 250))
 
-        draw.text((40, y + 6), f"{opt.typology}", fill=(26, 43, 72), font=font_label)
+        draw.text((44, y + 8), f"{opt.typology}", fill=(26, 43, 72), font=font_label)
 
         # Sol-bar (blå, skalert til 100)
-        sol_w = max(8, int(sol / 100 * 500))
-        draw.rectangle([(300, y), (300 + sol_w, y + bar_h // 2 - 2)], fill=(0, 96, 155))
-        draw.text((310 + sol_w, y - 3), f"Sol {sol:.0f}", fill=(0, 96, 155), font=font_value)
+        sol_w = max(12, int(sol / 100 * 520))
+        draw.rectangle([(340, y), (340 + sol_w, y + bar_h // 2 - 2)], fill=(0, 96, 155))
+        draw.text((350 + sol_w, y - 2), f"Sol {sol:.0f}", fill=(0, 96, 155), font=font_value)
 
         # BRA-bar (grønn, skalert til maks)
-        bra_w = max(8, int(bra / max(max_bra, 1) * 500))
-        draw.rectangle([(300, y + bar_h // 2 + 2), (300 + bra_w, y + bar_h)], fill=(16, 150, 100))
-        draw.text((310 + bra_w, y + bar_h // 2 + 1), f"BRA {bra:.0f} m\u00b2", fill=(16, 150, 100), font=font_value)
+        bra_w = max(12, int(bra / max(max_bra, 1) * 520))
+        draw.rectangle([(340, y + bar_h // 2 + 2), (340 + bra_w, y + bar_h)], fill=(16, 150, 100))
+        draw.text((350 + bra_w, y + bar_h // 2 + 2), f"BRA {bra:.0f} m\u00b2", fill=(16, 150, 100), font=font_value)
 
-        draw.text((1200, y + 8), f"{opt.unit_count} bol.", fill=(80, 95, 115), font=font_label)
-        draw.text((1380, y + 8), f"{opt.floors} et.", fill=(120, 130, 145), font=font_label)
+        draw.text((1250, y + 12), f"{opt.unit_count} bol.", fill=(60, 80, 110), font=font_label)
+        draw.text((1430, y + 12), f"{opt.floors} et.", fill=(70, 90, 120), font=font_label)
 
-    ly = h - 45
-    draw.rectangle([(40, ly), (58, ly + 16)], fill=(0, 96, 155))
-    draw.text((66, ly - 2), "Solscore", fill=(80, 95, 115), font=font_small)
-    draw.rectangle([(240, ly), (258, ly + 16)], fill=(16, 150, 100))
-    draw.text((266, ly - 2), "BRA (salgbart areal)", fill=(80, 95, 115), font=font_small)
+    ly = h - 60
+    draw.rectangle([(40, ly), (68, ly + 22)], fill=(0, 96, 155))
+    draw.text((80, ly - 2), "Solscore", fill=(60, 80, 110), font=font_small)
+    draw.rectangle([(280, ly), (308, ly + 22)], fill=(16, 150, 100))
+    draw.text((320, ly - 2), "BRA (salgbart areal)", fill=(60, 80, 110), font=font_small)
 
     return img
 
@@ -6005,10 +5989,10 @@ def render_solar_snapshot(
     bg = (11, 20, 38, 255)
     img = Image.new('RGBA', (canvas_w, canvas_h), bg)
     draw = ImageDraw.Draw(img, 'RGBA')
-    font_title = _pil_font(28, bold=True)
-    font_small = _pil_font(24, bold=True)
-    font_north = _pil_font(24, bold=True)
-    font_info = _pil_font(18)
+    font_title = _pil_font(32, bold=True)
+    font_small = _pil_font(28, bold=True)
+    font_north = _pil_font(28, bold=True)
+    font_info = _pil_font(22, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or []
     massing_parts = option.geometry.get('massing_parts', []) or []
