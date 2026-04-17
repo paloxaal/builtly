@@ -876,6 +876,51 @@ with left:
         if fetch_result:
             if not fetch_result.get("ok"):
                 st.error(f"Henting feilet: {fetch_result.get('error')}")
+            elif fetch_result.get("api_degraded"):
+                # API er nede — vis fallback med Doffin-lenke
+                meta = fetch_result.get("metadata", {})
+                doffin_url = meta.get("doffin_url", "")
+                st.warning(
+                    "Doffin sitt API er for øyeblikket ikke tilgjengelig. "
+                    f"Du kan åpne kunngjøringen direkte på Doffin — der finner du tittel, "
+                    f"frist, oppdragsgiver og lenken videre til konkurransegrunnlaget i KGV-portalen."
+                )
+                st.markdown(
+                    f"""
+                    <div style="
+                        background: linear-gradient(135deg, rgba(56,189,248,0.12), rgba(56,189,248,0.04));
+                        border: 1px solid rgba(56,189,248,0.35);
+                        border-radius: 12px;
+                        padding: 1.2rem;
+                        margin: 0.5rem 0;
+                    ">
+                        <div style="font-size: 0.82rem; color: #38bdf8; font-weight: 600;
+                                    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.4rem;">
+                            Doffin-kunngjøring
+                        </div>
+                        <div style="font-size: 1.05rem; color: #f5f7fb; font-weight: 600; margin-bottom: 0.3rem;">
+                            Referanse: {meta.get('reference', '')}
+                        </div>
+                        <div style="font-size: 0.9rem; color: #c8d3df; margin-bottom: 1rem;">
+                            Åpne kunngjøringen på Doffin for å se full metadata og lenke til konkurransegrunnlaget.
+                        </div>
+                        <a href="{doffin_url}" target="_blank" rel="noopener" style="
+                            display: inline-block;
+                            background: #38bdf8;
+                            color: #06111a;
+                            padding: 0.6rem 1.2rem;
+                            border-radius: 8px;
+                            font-weight: 700;
+                            text-decoration: none;
+                            font-size: 0.95rem;
+                        ">Åpne på Doffin →</a>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if fetch_result.get("api_error_detail"):
+                    with st.expander("Teknisk detalj"):
+                        st.code(fetch_result["api_error_detail"])
             else:
                 meta = fetch_result.get("metadata", {})
                 kgv_url = fetch_result.get("kgv_url")
