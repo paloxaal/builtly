@@ -171,45 +171,64 @@ header[data-testid="stHeader"] { visibility: hidden; }
 }
 
 /* Multiselect piller + dropdown-innside */
-.stMultiSelect [data-baseweb="tag"] {
-    background-color: rgba(56,189,248,0.15) !important;
-    border: 1px solid rgba(56,189,248,0.35) !important;
+div[data-baseweb="tag"],
+.stMultiSelect div[data-baseweb="tag"] {
+    background-color: rgba(56,189,248,0.18) !important;
+    background: rgba(56,189,248,0.18) !important;
+    border: 1px solid rgba(56,189,248,0.45) !important;
     color: #f5f7fb !important;
     border-radius: 6px !important;
 }
-.stMultiSelect [data-baseweb="tag"] span,
-.stMultiSelect [data-baseweb="tag"] div {
+div[data-baseweb="tag"] *,
+.stMultiSelect div[data-baseweb="tag"] * {
+    color: #f5f7fb !important;
+    background-color: transparent !important;
+}
+div[data-baseweb="tag"] span[role="img"],
+div[data-baseweb="tag"] [role="presentation"] {
     color: #f5f7fb !important;
 }
-.stMultiSelect [data-baseweb="tag"] [role="presentation"] {
-    color: #f5f7fb !important;
-}
-.stMultiSelect [data-baseweb="select"] > div,
-.stSelectbox [data-baseweb="select"] > div {
+
+/* Selectbox + Multiselect ytre boks (hele feltet) */
+div[data-baseweb="select"] > div {
     background-color: rgba(10,22,35,0.5) !important;
-    color: #f5f7fb !important;
+    background: rgba(10,22,35,0.5) !important;
     border: 1px solid rgba(120,145,170,0.25) !important;
-}
-.stMultiSelect [data-baseweb="select"] input,
-.stSelectbox [data-baseweb="select"] input {
     color: #f5f7fb !important;
 }
-.stSelectbox [data-baseweb="select"] > div > div:first-child {
-    color: #f5f7fb !important;
-}
-/* Dropdown-lista (popover når du åpner) */
-[data-baseweb="popover"] [role="listbox"],
-[data-baseweb="menu"] {
-    background-color: #0a1623 !important;
-    border: 1px solid rgba(120,145,170,0.3) !important;
-}
-[data-baseweb="popover"] [role="option"],
-[data-baseweb="menu"] li {
+div[data-baseweb="select"] > div > div {
     background-color: transparent !important;
     color: #f5f7fb !important;
 }
-[data-baseweb="popover"] [role="option"]:hover,
-[data-baseweb="menu"] li:hover {
+div[data-baseweb="select"] input {
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+}
+div[data-baseweb="select"] svg {
+    fill: #c8d3df !important;
+    color: #c8d3df !important;
+}
+
+/* Dropdown-lista (popover når du åpner) */
+div[data-baseweb="popover"] ul[role="listbox"],
+div[data-baseweb="popover"] div[role="listbox"],
+ul[data-baseweb="menu"],
+div[data-baseweb="menu"] {
+    background-color: #0a1623 !important;
+    background: #0a1623 !important;
+    border: 1px solid rgba(120,145,170,0.3) !important;
+}
+div[data-baseweb="popover"] li[role="option"],
+div[data-baseweb="popover"] div[role="option"],
+ul[data-baseweb="menu"] li,
+div[data-baseweb="menu"] li {
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+}
+div[data-baseweb="popover"] li[role="option"]:hover,
+div[data-baseweb="popover"] div[role="option"]:hover,
+ul[data-baseweb="menu"] li:hover,
+div[data-baseweb="menu"] li:hover {
     background-color: rgba(56,189,248,0.15) !important;
 }
 
