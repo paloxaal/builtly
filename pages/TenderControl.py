@@ -589,11 +589,12 @@ with left:
     """)
 
     # ── URL-inntak fra Doffin (utenfor form, så knappen fungerer uavhengig) ──
-    with st.expander("📥 Hent fra Doffin-lenke (valgfritt)", expanded=False):
+    with st.expander("📥 Hent metadata fra Doffin-lenke (valgfritt)", expanded=False):
         st.caption(
             "Lim inn en lenke til en Doffin-kunngjøring, så henter vi metadata "
-            "og tilgjengelige vedlegg automatisk. For Mercell og andre portaler "
-            "må konkurransegrunnlaget lastes ned manuelt."
+            "(tittel, frist, oppdragsgiver, CPV, beskrivelse) automatisk. "
+            "Selve konkurransegrunnlaget ligger alltid i oppdragsgivers KGV-portal "
+            "(Mercell, Visma TendSign, EU-Supply osv.) — vi viser deg lenken dit."
         )
         url_col1, url_col2 = st.columns([4, 1])
         with url_col1:
@@ -601,14 +602,14 @@ with left:
                 "URL til Doffin-kunngjøring",
                 value="",
                 key="tender_portal_url",
-                placeholder="https://www.doffin.no/notices/...",
+                placeholder="https://www.doffin.no/notices/2025-115155",
                 label_visibility="collapsed",
             )
         with url_col2:
             fetch_clicked = st.button("Hent", use_container_width=True, key="tender_fetch_btn")
 
         if fetch_clicked and portal_url.strip():
-            with st.spinner(f"Henter fra {portal_url}..."):
+            with st.spinner("Henter fra Doffin..."):
                 fetch_result = fetch_from_url(portal_url.strip())
             st.session_state.tender_portal_fetch = fetch_result
 
@@ -618,26 +619,91 @@ with left:
                 st.error(f"Henting feilet: {fetch_result.get('error')}")
             else:
                 meta = fetch_result.get("metadata", {})
-                fetched_files = fetch_result.get("files", [])
-                st.success(f"Hentet {len(fetched_files)} vedlegg fra {fetch_result.get('portal', 'portal')}")
-                if meta.get("title"):
-                    st.caption(f"**Tittel:** {meta['title']}")
-                if meta.get("buyer"):
-                    st.caption(f"**Oppdragsgiver:** {meta['buyer']}")
-                if meta.get("deadline_raw"):
-                    st.caption(f"**Frist:** {meta['deadline_raw']}")
-                if meta.get("reference"):
-                    st.caption(f"**Referanse:** {meta['reference']}")
-                if fetched_files:
-                    st.caption("Vedlegg som blir inkludert i analysen:")
-                    for name, data in fetched_files[:15]:
-                        st.caption(f"  • {name} ({len(data)/1024:.0f} KB)")
-                    if len(fetched_files) > 15:
-                        st.caption(f"  … og {len(fetched_files) - 15} til")
-                if fetch_result.get("errors"):
-                    with st.expander(f"Advarsler ({len(fetch_result['errors'])})"):
-                        for err in fetch_result["errors"]:
-                            st.caption(f"• {err}")
+                kgv_url = fetch_result.get("kgv_url")
+                kgv_provider = fetch_result.get("kgv_provider") or "Ekstern KGV"
+
+                st.success("Metadata hentet fra Doffin")
+
+                # Strukturert metadata-visning
+                mcol1, mcol2 = st.columns(2)
+                with mcol1:
+                    if meta.get("title"):
+                        st.markdown(f"**Tittel**  \n{meta['title']}")
+                    if meta.get("buyer"):
+                        buyer_line = meta["buyer"]
+                        if meta.get("buyer_org_no"):
+                            buyer_line += f"  \nOrg.nr: `{meta['buyer_org_no']}`"
+                        st.markdown(f"**Oppdragsgiver**  \n{buyer_line}")
+                    if meta.get("main_activity"):
+                        st.markdown(f"**Hovedaktivitet**  \n{meta['main_activity']}")
+                    if meta.get("location"):
+                        st.markdown(f"**Utførelsessted**  \n{meta['location']}")
+
+                with mcol2:
+                    if meta.get("deadline"):
+                        st.markdown(f"**Frist**  \n{meta['deadline']}")
+                    if meta.get("publication_date"):
+                        st.markdown(f"**Publisert**  \n{meta['publication_date']}")
+                    if meta.get("estimated_value"):
+                        st.markdown(
+                            f"**Estimert verdi**  \n"
+                            f"{meta['estimated_value']:,.0f} {meta.get('currency', 'NOK')}".replace(",", " ")
+                        )
+                    if meta.get("reference"):
+                        st.markdown(f"**Referanse**  \n`{meta['reference']}`")
+                    if meta.get("procedure_type"):
+                        st.markdown(f"**Prosedyre**  \n{meta['procedure_type']}")
+
+                if meta.get("cpv_codes"):
+                    st.markdown(f"**CPV-koder:** {', '.join(meta['cpv_codes'][:8])}")
+
+                if meta.get("description"):
+                    with st.expander("Beskrivelse"):
+                        st.write(meta["description"])
+
+                # KGV-knapp — fremhevet som neste steg
+                st.markdown("---")
+                if kgv_url:
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background: linear-gradient(135deg, rgba(56,189,248,0.12), rgba(56,189,248,0.04));
+                            border: 1px solid rgba(56,189,248,0.35);
+                            border-radius: 12px;
+                            padding: 1.2rem;
+                            margin: 0.5rem 0;
+                        ">
+                            <div style="font-size: 0.82rem; color: #38bdf8; font-weight: 600;
+                                        letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 0.4rem;">
+                                Neste steg
+                            </div>
+                            <div style="font-size: 1.05rem; color: #f5f7fb; font-weight: 600; margin-bottom: 0.3rem;">
+                                Last ned konkurransegrunnlaget fra {kgv_provider}
+                            </div>
+                            <div style="font-size: 0.9rem; color: #c8d3df; margin-bottom: 1rem;">
+                                Konkurransegrunnlaget ligger i {kgv_provider}-portalen. Åpne lenken,
+                                last ned alle vedlegg (vanligvis som ZIP), og dra filene inn i
+                                filopplasteren under.
+                            </div>
+                            <a href="{kgv_url}" target="_blank" rel="noopener" style="
+                                display: inline-block;
+                                background: #38bdf8;
+                                color: #06111a;
+                                padding: 0.6rem 1.2rem;
+                                border-radius: 8px;
+                                font-weight: 700;
+                                text-decoration: none;
+                                font-size: 0.95rem;
+                            ">Åpne i {kgv_provider} →</a>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info(
+                        "Fant ikke direktelenke til konkurransegrunnlag i Doffin-dataen. "
+                        "Søk opp kunngjøringen manuelt i KGV-portalen for å laste ned dokumenter."
+                    )
 
     with st.form("tender_control_form"):
         c1, c2 = st.columns(2)
