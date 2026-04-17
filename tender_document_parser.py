@@ -456,17 +456,161 @@ def _extract_text_file(data: bytes) -> Dict[str, Any]:
     return {"text": "", "error": "Kunne ikke dekode tekstfil"}
 
 
-def _extract_zip(data: bytes, max_files: int = 20) -> Dict[str, Any]:
-    """List contents of a ZIP; do not recurse."""
+def _extract_zip(data: bytes, max_files: int = 100) -> Dict[str, Any]:
+    """
+    List contents of a ZIP — brukes bare hvis ZIP-en ikke skal pakkes ut.
+    Til faktisk analyse, bruk expand_zip_to_documents() i stedet.
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            names = zf.namelist()[:max_files]
+            all_names = zf.namelist()
+            names = all_names[:max_files]
             return {
-                "text": "ZIP-innhold:\n" + "\n".join(f"  {n}" for n in names),
+                "text": (
+                    f"ZIP-innhold ({len(all_names)} filer):\n"
+                    + "\n".join(f"  {n}" for n in names)
+                    + (f"\n  … og {len(all_names) - max_files} til" if len(all_names) > max_files else "")
+                ),
                 "entries": names,
+                "total_files_in_zip": len(all_names),
             }
     except Exception as e:
         return {"text": "", "error": f"ZIP-feil: {e}"}
+
+
+# Filendelser vi kan parse — brukes til å filtrere ZIP-innhold
+PARSEABLE_EXTENSIONS = {
+    ".pdf", ".docx", ".xlsx", ".xlsm", ".xls",
+    ".ifc", ".dxf", ".dwg", ".csv", ".txt", ".md",
+}
+
+
+def expand_zip_to_documents(
+    zip_filename: str,
+    zip_data: bytes,
+    max_files: int = 150,
+    max_file_size_mb: int = 100,
+    skip_nested_zips: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Pakk ut en ZIP og returner en liste av dokumenter som hver er
+    prosessert gjennom extract_document(). Hver returnert dict har
+    samme struktur som extract_document() output, men med ekstra
+    'zip_source' og 'zip_path' felter.
+
+    Avslører ikke skjulte filer, ignorerer __MACOSX, .DS_Store etc.
+
+    NB: Dette kjører i UI-tråden. For 100 MB ZIP med mange PDF-er
+    kan det ta 30-60 sekunder. UI bør vise progress.
+    """
+    documents: List[Dict[str, Any]] = []
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            namelist = zf.namelist()
+        
+            # Filtrer bort system-filer og mapper
+            candidate_names = []
+            for name in namelist:
+                if name.endswith("/"):
+                    continue
+                base = name.split("/")[-1]
+                if base.startswith(".") or base.startswith("__"):
+                    continue
+                if "__MACOSX" in name:
+                    continue
+                # Kun parsebare typer (og optional skip av nested ZIPs)
+                ext = Path(name).suffix.lower()
+                if ext not in PARSEABLE_EXTENSIONS:
+                    if ext == ".zip" and not skip_nested_zips:
+                        pass  # behandles separat
+                    else:
+                        continue
+                candidate_names.append(name)
+
+            if len(candidate_names) > max_files:
+                candidate_names = candidate_names[:max_files]
+
+            # Pakk ut og parse hver fil
+            max_bytes = max_file_size_mb * 1024 * 1024
+            for inner_name in candidate_names:
+                try:
+                    info = zf.getinfo(inner_name)
+                    if info.file_size > max_bytes:
+                        documents.append({
+                            "filename": Path(inner_name).name,
+                            "zip_source": zip_filename,
+                            "zip_path": inner_name,
+                            "extension": Path(inner_name).suffix.lower(),
+                            "size_kb": round(info.file_size / 1024, 1),
+                            "category": "annet",
+                            "category_filename": classify_by_filename(inner_name),
+                            "text": "",
+                            "text_excerpt": "",
+                            "tables": [],
+                            "sheets": [],
+                            "entity_counts": {},
+                            "layers": [],
+                            "blocks": [],
+                            "page_count": 0,
+                            "ocr_pages": 0,
+                            "converted_from_dwg": False,
+                            "error": f"For stor ({info.file_size / 1024 / 1024:.1f} MB > {max_file_size_mb} MB)",
+                        })
+                        continue
+
+                    inner_data = zf.read(inner_name)
+                    base_filename = Path(inner_name).name
+                    parsed = extract_document(base_filename, inner_data)
+                    parsed["zip_source"] = zip_filename
+                    parsed["zip_path"] = inner_name
+                    documents.append(parsed)
+
+                except Exception as e:
+                    documents.append({
+                        "filename": Path(inner_name).name,
+                        "zip_source": zip_filename,
+                        "zip_path": inner_name,
+                        "extension": Path(inner_name).suffix.lower(),
+                        "size_kb": 0,
+                        "category": "annet",
+                        "category_filename": "annet",
+                        "text": "",
+                        "text_excerpt": "",
+                        "tables": [],
+                        "sheets": [],
+                        "entity_counts": {},
+                        "layers": [],
+                        "blocks": [],
+                        "page_count": 0,
+                        "ocr_pages": 0,
+                        "converted_from_dwg": False,
+                        "error": f"{type(e).__name__}: {e}",
+                    })
+
+    except Exception as e:
+        # Hele ZIP-en kunne ikke åpnes — returner én "placeholder"-oppføring
+        return [{
+            "filename": zip_filename,
+            "zip_source": zip_filename,
+            "extension": ".zip",
+            "size_kb": round(len(zip_data) / 1024, 1),
+            "category": "annet",
+            "category_filename": "annet",
+            "text": "",
+            "text_excerpt": "",
+            "tables": [],
+            "sheets": [],
+            "entity_counts": {},
+            "layers": [],
+            "blocks": [],
+            "page_count": 0,
+            "ocr_pages": 0,
+            "converted_from_dwg": False,
+            "error": f"Kunne ikke åpne ZIP: {type(e).__name__}: {e}",
+        }]
+
+    return documents
 
 
 # ─── Main entry point ────────────────────────────────────────────
