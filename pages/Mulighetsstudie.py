@@ -4919,21 +4919,15 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
 <div id="captureDownloads" style="display:none;padding:14px 16px;background:linear-gradient(180deg,rgba(10,22,40,0.92),rgba(8,18,32,0.96));border-top:1px solid rgba(56,194,201,0.4);">
   <div style="color:#9fd0d5;font-size:12px;margin-bottom:10px;font-weight:700;display:flex;align-items:center;gap:8px;">
     <span style="font-size:14px;">✓</span>
-    <span>5 bilder er klare. Slik får du dem inn i rapporten:</span>
+    <span>5 bilder er klare — slik får du dem inn i rapporten:</span>
   </div>
   <ol style="color:#c8d3df;font-size:11px;margin:0 0 10px 20px;padding:0;line-height:1.7;">
-    <li>Klikk <strong style="color:#9fd0d5;">«Last ned alle»</strong> under — 5 filer lastes ned</li>
+    <li>Klikk på <strong style="color:#9fd0d5;">alle 5 nedlastingslenkene</strong> under (én etter én)</li>
     <li>Scroll ned til <strong style="color:#9fd0d5;">«Sol/skygge fra 3D-scenen i rapporten»</strong></li>
     <li>Dra alle 5 filene inn i opplastingsboksen</li>
     <li>Klikk <strong style="color:#9fd0d5;">«Bruk disse bildene i rapporten»</strong> → PDF regenereres</li>
   </ol>
-  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-    <button id="downloadAllSolar" style="background:linear-gradient(135deg,rgba(56,194,201,0.96),rgba(120,220,225,0.96));color:#041018;border:none;border-radius:6px;padding:7px 14px;font-weight:700;font-size:11px;cursor:pointer;">
-      📦 Last ned alle 5
-    </button>
-    <span style="color:#78899c;font-size:10.5px;">eller enkeltvis:</span>
-    <div id="captureDownloadLinks" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
-  </div>
+  <div id="captureDownloadLinks" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -5120,16 +5114,21 @@ async function captureSolarSnapshots() {
       dataUrl: dataUrl,
     });
 
-    // FALLBACK 2: nedlastbare lenker
+    // FALLBACK 2: nedlastbare lenker — én per bilde, med tydelig label
     try {
       if (downloadLinks) {
         const filename = `solskygge_${String(i + 1).padStart(2, '0')}_doy${t.doy}_kl${String(t.hour).replace('.', '')}.jpg`;
+        // Kort label: "21.mars 12:00" / "21.juni 15:00" etc.
+        const dateStr = t.doy === 80 ? '21.mars' : (t.doy === 172 ? '21.juni' : `dag${t.doy}`);
+        const hourStr = `${String(Math.floor(t.hour)).padStart(2, '0')}:${String(Math.round((t.hour % 1) * 60)).padStart(2, '0')}`;
         const link = document.createElement('a');
         link.href = dataUrl;
         link.download = filename;
-        link.textContent = `📥 ${i + 1}`;
-        link.style.cssText = 'display:inline-block;background:#1e2a3f;color:#9fd0d5;text-decoration:none;padding:6px 10px;border-radius:5px;font-size:10.5px;border:1px solid rgba(120,145,170,0.3);margin-right:4px;';
-        link.title = t.label;
+        link.innerHTML = `📥 <strong>${i + 1}.</strong> ${dateStr} ${hourStr}`;
+        link.style.cssText = 'display:inline-block;background:#1e2a3f;color:#9fd0d5;text-decoration:none;padding:7px 12px;border-radius:5px;font-size:11px;border:1px solid rgba(120,145,170,0.4);margin-right:2px;transition:background 0.15s;';
+        link.onmouseover = function(){ this.style.background = '#2a3b56'; };
+        link.onmouseout = function(){ this.style.background = '#1e2a3f'; };
+        link.title = `Last ned: ${t.label}`;
         downloadLinks.appendChild(link);
       }
     } catch (e) {}
@@ -5148,27 +5147,6 @@ async function captureSolarSnapshots() {
   btn.disabled = false;
   btn.style.opacity = '1';
   btn.textContent = originalLabel;
-
-  // Koble til "Last ned alle"-knappen hvis den finnes
-  try {
-    const dlAllBtn = document.getElementById('downloadAllSolar');
-    if (dlAllBtn && !dlAllBtn._builtly_wired) {
-      dlAllBtn._builtly_wired = true;
-      dlAllBtn.addEventListener('click', function(){
-        const links = document.querySelectorAll('#captureDownloadLinks a');
-        // Last ned sekventielt med liten pause for å unngå nettleser-popup-blokk
-        let idx = 0;
-        function downloadNext() {
-          if (idx >= links.length) return;
-          const l = links[idx];
-          l.click();
-          idx++;
-          setTimeout(downloadNext, 250);
-        }
-        downloadNext();
-      });
-    }
-  } catch (e) {}
 }
 
 document.getElementById('captureSolar').addEventListener('click', captureSolarSnapshots);
