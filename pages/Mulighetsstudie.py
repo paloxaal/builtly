@@ -2208,19 +2208,42 @@ def _typology_polygon_fill(
     info: Dict[str, Any] = {"source": "polygon-fill"}
 
     if typology == "Lamell":
-        # 2-4 parallelle rektangler langs major-aksen, 6-10m gap
-        # Øker max bars fra 3 til 4 og reduserer min gap — nødvendig for
-        # å nå høye %-BRA-mål (>250%) på trange tomter.
-        bld_depth = min(13.0, minor * 0.28)
-        bld_depth = max(11.0, bld_depth)
-        # Bruk mindre gap når utnyttelsen er ambisiøs (target > 60% av tomt)
+        # 2-5 parallelle rektangler langs major-aksen, 6-10m gap
+        # For ambisiøse %-BRA-mål (>250%): bruker tynnere bygg (10m i stedet for 11-13m)
+        # og tillater opptil 5 lameller for å passe flere på trange tomter.
         aggressive = target_footprint_m2 > poly_area * 0.60
-        gap_min = 6.0 if aggressive else 8.0
-        gap_max = 10.0 if aggressive else 12.0
+        super_aggressive = target_footprint_m2 > poly_area * 0.72
+        if super_aggressive:
+            # Tynnere bygg + mindre gap for å nå 75%+ dekning
+            bld_depth = min(11.0, max(10.0, minor * 0.26))
+            gap_min, gap_max = 5.5, 8.0
+            max_bars = 5
+            width_share = 0.95
+        elif aggressive:
+            bld_depth = min(12.0, max(10.5, minor * 0.27))
+            gap_min, gap_max = 6.0, 10.0
+            max_bars = 4
+            width_share = 0.92
+        else:
+            bld_depth = min(13.0, max(11.0, minor * 0.28))
+            gap_min, gap_max = 8.0, 12.0
+            max_bars = 3
+            width_share = 0.85
         gap = min(gap_max, max(gap_min, minor * 0.13))
-        n_bars = max(2, min(4, int(minor / (bld_depth + gap))))
-        # Bruk inntil 92% av major (i stedet for 85%) ved høy utnyttelse
-        width_share = 0.92 if aggressive else 0.85
+        # Beregn hvor mange bars som faktisk passer, og hvor mange som trengs
+        n_bars_fit = max(2, min(max_bars, int(minor / (bld_depth + gap))))
+        # Hvis aggresivt: beregn behov fra target og velg flere bars hvis plass tillater
+        if aggressive and bld_depth > 0:
+            # Hvor bredt kan hver lamell maks være?
+            max_bld_width = major * width_share
+            # Antall bars som trengs for å dekke target
+            n_bars_needed = math.ceil(target_footprint_m2 / max(max_bld_width * bld_depth, 1.0))
+            n_bars = max(2, min(max_bars, min(n_bars_fit, n_bars_needed)))
+            # Men ikke velg flere enn det fysisk er plass til
+            n_bars = min(n_bars, n_bars_fit)
+        else:
+            n_bars = n_bars_fit
+        # Juster bredde: maksimer innenfor tomtens kapasitet
         bld_width = min(major * width_share, target_footprint_m2 / max(n_bars * bld_depth, 1.0))
         bld_width = max(20.0, bld_width)
 
@@ -2237,6 +2260,20 @@ def _typology_polygon_fill(
         if bars:
             result = unary_union(bars).buffer(0)
             info["n_buildings"] = len(bars)
+
+        # Fallback for svært ambisiøse mål: hvis vi ikke nådde 80% av target,
+        # prøv én tykk sammenhengende blokk som dekker mer av tomten.
+        # Dette gir en typisk "stor Lamell"/"slab"-tolkning når flere lameller
+        # ikke passer fysisk.
+        if super_aggressive and result is not None and result.area < target_footprint_m2 * 0.80:
+            thick_depth = min(minor * 0.55, 22.0)
+            thick_width = min(major * 0.95, target_footprint_m2 / max(thick_depth, 1.0))
+            thick_rect = _make_oriented_rect(pcx, pcy, thick_width, thick_depth, rad)
+            thick_clipped = thick_rect.intersection(placement_polygon).buffer(0)
+            if not thick_clipped.is_empty and thick_clipped.area > result.area:
+                result = thick_clipped
+                info["n_buildings"] = 1
+                info["fallback"] = "thick-slab"
 
     elif typology == "Punkthus":
         # Punkthus: dimensjonert fra target med 3-5 bygg
