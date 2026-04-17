@@ -214,10 +214,16 @@ def compute_readiness(
     pass3_data: Optional[Dict[str, Any]],
     documents: List[Dict[str, Any]],
     config: Dict[str, Any],
+    rfi_state: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Weighted readiness score using both deterministic rules and AI output.
     Returns per-component scores and overall.
+
+    rfi_state: optional dict keyed by 'rfi_{idx}' mapping to
+        {'status': 'open'|'answered', 'answer': str, 'answered_at': str}.
+        Besvarte RFI-er løfter scope_clarity og bygger ned det effektive
+        antallet HIGH-risk-flagg brukt i sanity caps.
     """
     components: Dict[str, float] = {}
 
@@ -246,6 +252,33 @@ def compute_readiness(
         for key in ("scope_clarity", "contract_risk", "pricing_readiness", "qualification_fit"):
             components[key] = _fallback_component(key, pass2_data, documents, config, rule_findings)
 
+    # ── 2b. RFI-drevet justering ───────────────────────────────
+    rfi_stats = {"total": 0, "answered": 0, "answered_high": 0}
+    if rfi_state and pass3_data:
+        rfis = pass3_data.get("rfi_queue") or []
+        rfi_stats["total"] = len(rfis)
+        for idx, rfi in enumerate(rfis):
+            state = rfi_state.get(f"rfi_{idx}", {})
+            if state.get("status") == "answered":
+                rfi_stats["answered"] += 1
+                if (rfi.get("priority") or "").upper() == "HIGH":
+                    rfi_stats["answered_high"] += 1
+
+        if rfi_stats["total"] > 0:
+            # Hver besvart RFI gir scope_clarity-boost,
+            # med ekstra vekt til HIGH-prioritet
+            share_answered = rfi_stats["answered"] / rfi_stats["total"]
+            high_bonus = 4.0 * rfi_stats["answered_high"]
+            boost = min(25.0, 20.0 * share_answered + high_bonus)
+            components["scope_clarity"] = min(100.0, components["scope_clarity"] + boost)
+
+            # Også mild boost på pricing_readiness ettersom avklaringer
+            # typisk reduserer prisingsusikkerhet
+            components["pricing_readiness"] = min(
+                100.0,
+                components["pricing_readiness"] + min(10.0, 10.0 * share_answered),
+            )
+
     # ── 3. Weighted overall ─────────────────────────────────────
     overall = sum(components[k] * w for k, w in READINESS_WEIGHTS.items())
 
@@ -254,11 +287,15 @@ def compute_readiness(
         1 for r in rule_findings.get("risk_items", [])
         if r.get("severity") == "HIGH"
     )
+    # Besvarte HIGH-RFI-er reduserer effektivt antall HIGH-risk-flagg
+    # (RFI-svar lukker typisk et risk-flagg fra regelmotoren)
+    effective_high_risks = max(0, high_risks - rfi_stats["answered_high"])
+
     # Hard cap if critical docs missing
     critical_missing = [c for c in missing if c in ("konkurransegrunnlag", "beskrivelse", "prisskjema")]
     if critical_missing:
         overall = min(overall, 45.0)
-    if high_risks >= 3:
+    if effective_high_risks >= 3:
         overall = min(overall, 60.0)
 
     return {
@@ -266,6 +303,7 @@ def compute_readiness(
         "components": {k: round(v, 1) for k, v in components.items()},
         "weights": READINESS_WEIGHTS,
         "band": _readiness_band(overall),
+        "rfi_stats": rfi_stats,
     }
 
 
