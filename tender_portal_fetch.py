@@ -34,6 +34,8 @@ REQUEST_TIMEOUT = 30
 DOFFIN_API_BASES = [
     "https://betaapi.doffin.no/public/v2",
     "https://www.doffin.no/api/public/v2",
+    "https://www.doffin.no/api/public/v1",
+    "https://doffin.no/api/public/v2",
 ]
 
 
@@ -68,6 +70,7 @@ def detect_portal(url: str) -> str:
 def _fetch_doffin_notice_json(doffin_id: str) -> Dict[str, Any]:
     """
     Hent den offentlige JSON-representasjonen av en Doffin-kunngjøring.
+    Doffin har flere kandidat-endepunkter med varierende stabilitet.
     """
     if not HAS_REQUESTS:
         return {"ok": False, "error": "requests ikke installert"}
@@ -84,18 +87,37 @@ def _fetch_doffin_notice_json(doffin_id: str) -> Dict[str, Any]:
                 },
                 timeout=REQUEST_TIMEOUT,
             )
-            if resp.status_code == 200:
-                try:
-                    return {"ok": True, "data": resp.json(), "source_url": url}
-                except ValueError:
-                    last_error = f"Ugyldig JSON fra {url}"
-                    continue
-            else:
-                last_error = f"{url} ga HTTP {resp.status_code}"
-        except Exception as e:
-            last_error = f"{url}: {e}"
 
-    return {"ok": False, "error": last_error or "Ukjent feil"}
+            # Sjekk Content-Type før vi prøver JSON-parsing
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            body_start = resp.text[:200].lstrip().lower() if resp.text else ""
+
+            if resp.status_code == 404:
+                last_error = f"Kunngjøring {doffin_id} finnes ikke"
+                continue
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code} fra {base}"
+                continue
+
+            # Hvis responsen starter med <!DOCTYPE eller <html, er det HTML-feilside
+            if body_start.startswith("<!doctype") or body_start.startswith("<html"):
+                last_error = f"{base} returnerer HTML (ikke JSON) — endepunkt ikke tilgjengelig"
+                continue
+
+            if "json" not in content_type and not body_start.startswith("{"):
+                last_error = f"{base} returnerer {content_type or 'ukjent format'}"
+                continue
+
+            try:
+                return {"ok": True, "data": resp.json(), "source_url": url}
+            except ValueError as e:
+                last_error = f"Ugyldig JSON fra {base}: {e}"
+                continue
+
+        except Exception as e:
+            last_error = f"{base}: {type(e).__name__}"
+
+    return {"ok": False, "error": last_error or "Ingen tilgjengelige Doffin-endepunkter"}
 
 
 def _pick_nested(obj: Any, *paths: str, default=None) -> Any:
@@ -351,26 +373,44 @@ def fetch_from_url(url: str) -> Dict[str, Any]:
             }
 
         api_response = _fetch_doffin_notice_json(doffin_id)
+        doffin_page_url = f"https://www.doffin.no/notices/{doffin_id}"
+
         if not api_response.get("ok"):
+            # Graceful fallback: Doffin sitt API er ustabilt/udokumentert.
+            # Returner det vi VET er riktig (Doffin-ID + lenke til siden)
+            # slik at brukeren kan åpne kunngjøringen manuelt.
             return {
-                "ok": False,
+                "ok": True,
                 "portal": "doffin",
-                "doffin_id": doffin_id,
-                "source_url": url,
-                "error": f"Henting fra Doffin JSON-API feilet: {api_response.get('error')}",
+                "api_degraded": True,
+                "metadata": {
+                    "doffin_id": doffin_id,
+                    "doffin_url": doffin_page_url,
+                    "reference": doffin_id,
+                },
+                "files": [],
+                "kgv_url": None,
+                "kgv_provider": None,
+                "next_step": (
+                    "Doffin-API-et er for øyeblikket ikke tilgjengelig. "
+                    "Åpne kunngjøringen direkte på Doffin for å se metadata og "
+                    "følge lenken videre til konkurransegrunnlaget i KGV-portalen."
+                ),
+                "api_error_detail": api_response.get("error"),
             }
 
         raw = api_response.get("data") or {}
         meta = _extract_structured_metadata(raw)
         meta["doffin_id"] = doffin_id
-        meta["doffin_url"] = f"https://www.doffin.no/notices/{doffin_id}"
+        meta["doffin_url"] = doffin_page_url
         meta["api_source"] = api_response.get("source_url")
 
         return {
             "ok": True,
             "portal": "doffin",
+            "api_degraded": False,
             "metadata": meta,
-            "files": [],  # Doffin selv har ingen vedlegg
+            "files": [],
             "kgv_url": meta.get("kgv_url"),
             "kgv_provider": meta.get("kgv_provider"),
             "next_step": (
