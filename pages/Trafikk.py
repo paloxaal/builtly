@@ -758,7 +758,7 @@ if st.button("🚀 Generer Trafikknotat", type="primary", use_container_width=Tr
                     report_name=f"Trafikk — Builtly_RITra_{p_name}.pdf",
                     module="RITra (Trafikk)",
                     file_path=f"Builtly_RITra_{p_name}.pdf",
-
+                    pdf_bytes=pdf_data,
                     )
 
                 except Exception:
