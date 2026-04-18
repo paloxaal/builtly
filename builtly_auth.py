@@ -671,22 +671,147 @@ def activate_invoice_user(user_id: str, lang: str = "") -> Tuple[bool, str]:
 
 # ── REPORTS ──────────────────────────────────────────────────────────────────
 
+REPORTS_BUCKET = "reports"
+
+
+def _sanitize_storage_segment(s: str, max_len: int = 60) -> str:
+    """Lag en trygg path-segment for Supabase Storage."""
+    import re
+    if not s:
+        return "untitled"
+    # Erstatt æøå og fjern ikke-ASCII
+    s = s.replace("æ", "ae").replace("ø", "o").replace("å", "a")
+    s = s.replace("Æ", "Ae").replace("Ø", "O").replace("Å", "A")
+    # Bare alfanumerisk, bindestrek og understrek
+    s = re.sub(r"[^a-zA-Z0-9_\-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return (s[:max_len] or "untitled")
+
+
+def _upload_report_bytes(
+    user_id: str,
+    project_name: str,
+    module: str,
+    report_name: str,
+    pdf_bytes: bytes,
+    content_type: str = "application/pdf",
+) -> Tuple[bool, str, str]:
+    """
+    Last opp PDF-bytes til Supabase Storage.
+    Returnerer (ok, storage_path, error_msg).
+
+    Path-format: {user_id}/{project_slug}/{timestamp}_{module}_{report_slug}.{ext}
+    """
+    if not pdf_bytes:
+        return False, "", "Ingen PDF-data å laste opp"
+    if not user_id:
+        return False, "", "Mangler user_id"
+
+    sb_admin = _sb_admin()
+    sb = _sb()
+    client = sb_admin or sb
+    if not client:
+        return False, "", "Ingen Supabase-klient tilgjengelig"
+
+    # Bygg trygg path
+    proj_slug = _sanitize_storage_segment(project_name or "uten_prosjekt")
+    report_slug = _sanitize_storage_segment(report_name or "rapport")
+    module_slug = _sanitize_storage_segment(module or "modul", max_len=30)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    # Bestem extension basert på content-type
+    ext_map = {
+        "application/pdf": "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+        "application/zip": "zip",
+    }
+    ext = ext_map.get(content_type, "pdf")
+
+    storage_path = f"{user_id}/{proj_slug}/{ts}_{module_slug}_{report_slug}.{ext}"
+
+    try:
+        # Supabase storage upload API
+        # file_options må være dict med 'content-type'
+        client.storage.from_(REPORTS_BUCKET).upload(
+            path=storage_path,
+            file=pdf_bytes,
+            file_options={"content-type": content_type, "upsert": "true"},
+        )
+        return True, storage_path, ""
+    except Exception as e:
+        # Hvis feilen er "already exists" prøv å fjerne først og last opp igjen
+        err_str = str(e).lower()
+        if "already exists" in err_str or "duplicate" in err_str:
+            try:
+                client.storage.from_(REPORTS_BUCKET).remove([storage_path])
+                client.storage.from_(REPORTS_BUCKET).upload(
+                    path=storage_path,
+                    file=pdf_bytes,
+                    file_options={"content-type": content_type},
+                )
+                return True, storage_path, ""
+            except Exception as e2:
+                return False, "", f"Re-upload feilet: {e2}"
+        return False, "", f"Upload feilet: {e}"
+
+
 def save_report(project_name: str, report_name: str, module: str,
-                file_path: str = "", download_url: str = "") -> bool:
+                pdf_bytes: Optional[bytes] = None,
+                file_path: str = "", download_url: str = "",
+                content_type: str = "application/pdf") -> bool:
+    """
+    Lagre en rapport for innlogget bruker.
+
+    Primær bruk:
+        save_report(project_name, report_name, module, pdf_bytes=bytes_data)
+        → Laster opp PDF til Supabase Storage + lagrer metadata i reports-tabellen
+
+    Backward compat (gammel signatur):
+        save_report(project_name, report_name, module, file_path="...", download_url="...")
+        → Lagrer bare metadata, ingen opplasting
+    """
     sb_admin = _sb_admin()
     sb = _sb()
     uid = st.session_state.get("user_id", "")
     now = datetime.utcnow()
     expires = now + timedelta(days=REPORT_RETENTION_DAYS)
+
+    # Last opp PDF til Storage hvis bytes er gitt
+    storage_path = ""
+    file_size = 0
+    upload_error = ""
+    if pdf_bytes and uid:
+        ok, storage_path, upload_error = _upload_report_bytes(
+            user_id=uid,
+            project_name=project_name,
+            module=module,
+            report_name=report_name,
+            pdf_bytes=pdf_bytes,
+            content_type=content_type,
+        )
+        if ok:
+            file_size = len(pdf_bytes)
+        # Hvis upload feiler, logg men fortsett med metadata-lagring
+        # (bedre enn helt tap)
+
     entry = {
         "project": project_name or "Uten prosjekt",
         "name": report_name, "module": module,
         "file_path": file_path, "download_url": download_url,
+        "storage_path": storage_path,
+        "file_size_bytes": file_size,
         "created_at": now.strftime("%Y-%m-%d %H:%M"),
         "expires_at": expires.strftime("%Y-%m-%d"),
     }
     saved = False
-    debug = f"save_report: uid={'set' if uid else 'EMPTY'}, admin={'ok' if sb_admin else 'None'}, anon={'ok' if sb else 'None'}"
+    debug = (
+        f"save_report: uid={'set' if uid else 'EMPTY'}, "
+        f"admin={'ok' if sb_admin else 'None'}, anon={'ok' if sb else 'None'}, "
+        f"storage={'ok' if storage_path else 'no'}"
+    )
+    if upload_error:
+        debug += f", upload_err={upload_error[:80]}"
+
     if uid:
         db_entry = {**entry, "user_id": uid}
         for client, label in [(sb_admin, "admin"), (sb, "anon")]:
@@ -699,12 +824,82 @@ def save_report(project_name: str, report_name: str, module: str,
                     debug += f", insert={label}=FAIL({str(e)[:50]})"
     else:
         debug += ", SKIPPED (no uid)"
-    # Store debug info in session_state so it survives st.rerun()
     st.session_state["_report_save_debug"] = debug
     if "user_reports" not in st.session_state:
         st.session_state.user_reports = []
     st.session_state.user_reports.append(entry)
     return saved
+
+
+def get_report_download_url(storage_path: str, expires_in: int = 3600) -> Optional[str]:
+    """
+    Generer en signert nedlasting-URL for en rapport i Storage.
+
+    Args:
+        storage_path: Path i bucket, f.eks. "user_id/prosjekt/2025..._geo_rapport.pdf"
+        expires_in: Sekunder lenken skal være gyldig (default 1 time)
+
+    Returns:
+        Signert URL som streng, eller None ved feil.
+    """
+    if not storage_path:
+        return None
+
+    client = _sb_admin() or _sb()
+    if not client:
+        return None
+
+    try:
+        result = client.storage.from_(REPORTS_BUCKET).create_signed_url(
+            path=storage_path,
+            expires_in=expires_in,
+        )
+        # Supabase returnerer {"signedURL": "..."} eller {"signedUrl": "..."}
+        if isinstance(result, dict):
+            return (
+                result.get("signedURL")
+                or result.get("signedUrl")
+                or result.get("signed_url")
+            )
+        return None
+    except Exception:
+        return None
+
+
+def get_report_bytes(storage_path: str) -> Optional[bytes]:
+    """
+    Last ned en rapport direkte som bytes (for bruk med st.download_button).
+    Returnerer bytes eller None ved feil.
+    """
+    if not storage_path:
+        return None
+
+    client = _sb_admin() or _sb()
+    if not client:
+        return None
+
+    try:
+        result = client.storage.from_(REPORTS_BUCKET).download(storage_path)
+        # Supabase returnerer bytes direkte
+        if isinstance(result, bytes):
+            return result
+        return None
+    except Exception:
+        return None
+
+
+def delete_report_from_storage(storage_path: str) -> bool:
+    """Slett en rapport-fil fra Storage (brukes ved retention-cleanup)."""
+    if not storage_path:
+        return False
+    client = _sb_admin() or _sb()
+    if not client:
+        return False
+    try:
+        client.storage.from_(REPORTS_BUCKET).remove([storage_path])
+        return True
+    except Exception:
+        return False
 
 
 def reload_user_reports():
@@ -722,9 +917,19 @@ def reload_user_reports():
     return False
 
 def delete_expired_reports():
-    sb = _sb()
-    if not sb: return
+    """Slett utløpte rapport-metadata + tilhørende Storage-filer."""
+    sb = _sb_admin() or _sb()
+    if not sb:
+        return
     try:
-        cutoff = datetime.utcnow().isoformat()
+        cutoff = datetime.utcnow().strftime("%Y-%m-%d")
+        # Finn utløpte rapporter først (for å kunne slette Storage)
+        expired = sb.table("reports").select("storage_path").lt("expires_at", cutoff).execute()
+        for row in (expired.data or []):
+            sp = row.get("storage_path")
+            if sp:
+                delete_report_from_storage(sp)
+        # Slett metadata-rader
         sb.table("reports").delete().lt("expires_at", cutoff).execute()
-    except Exception: pass
+    except Exception:
+        pass
