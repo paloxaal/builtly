@@ -533,6 +533,57 @@ def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str
     return None, "Kunne ikke hente kart. Tips: Sørg for å trykke 'Søk opp og lagre tomt' i trinn 2B først, da vet systemet nøyaktig hvor det skal zoome!"
 
 
+def _validated_upload_preview(
+    uploaded_files: Optional[List[Any]],
+    max_thumbs: int = 5,
+    thumb_height: int = 120,
+) -> Tuple[List[Image.Image], List[str]]:
+    """v16.3: Prosesser og vis umiddelbar preview av opplastede bilder.
+
+    Åpner hver fil med PIL for å verifisere at den er et gyldig bilde, og viser
+    en rad med thumbnails med grønn/rød indikator. Dette er workaround for at
+    Streamlit's file_uploader iblant viser røde sirkler i UI-en selv når filer
+    er akseptert av backenden — vår egen visning gir brukeren korrekt feedback.
+
+    Returnerer (gyldige_bilder, feilmeldinger).
+    """
+    if not uploaded_files:
+        return [], []
+
+    valid_images: List[Image.Image] = []
+    errors: List[str] = []
+    file_statuses: List[Dict[str, Any]] = []
+
+    for uf in uploaded_files:
+        try:
+            uf.seek(0)
+            img = Image.open(uf).convert("RGB")
+            # Lag thumbnail for visning (behold original for PDF)
+            thumb = img.copy()
+            thumb.thumbnail((thumb_height * 2, thumb_height * 2))
+            valid_images.append(img)
+            file_statuses.append({"name": uf.name, "ok": True, "thumb": thumb, "size_kb": uf.size / 1024})
+        except Exception as exc:
+            errors.append(f"{uf.name}: {str(exc)[:100]}")
+            file_statuses.append({"name": uf.name, "ok": False, "error": str(exc)[:60]})
+
+    # Vis preview-rad
+    if file_statuses:
+        n_show = min(len(file_statuses), max_thumbs)
+        cols = st.columns(n_show)
+        for i, status in enumerate(file_statuses[:max_thumbs]):
+            with cols[i]:
+                if status["ok"]:
+                    st.image(status["thumb"], use_container_width=True)
+                    st.caption(f"✅ **{status['name'][:22]}**")
+                else:
+                    st.error(f"❌ {status['name'][:22]}\n{status.get('error', '')[:40]}")
+        if len(file_statuses) > max_thumbs:
+            st.caption(f"_(+ {len(file_statuses) - max_thumbs} flere filer ikke vist som thumbnail)_")
+
+    return valid_images, errors
+
+
 def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Image]:
     images: List[Image.Image] = []
     if not uploaded_files:
@@ -11483,16 +11534,18 @@ render();
             key="scene_image_uploads",
         )
         if scene_uploads:
-            scene_images_for_pdf = []
-            for f in scene_uploads:
-                try:
-                    img_uploaded = Image.open(f).convert("RGB")
-                    scene_images_for_pdf.append(img_uploaded)
-                except Exception:
-                    pass
+            # v16.3: Umiddelbar validering + thumbnail-preview (løser forvirrende
+            # røde sirkler i Streamlit's default file-display)
+            st.markdown("**Forhåndsvisning:**")
+            scene_images_for_pdf, _upload_errors = _validated_upload_preview(
+                scene_uploads, max_thumbs=5, thumb_height=120
+            )
+            if _upload_errors:
+                for _err in _upload_errors:
+                    st.warning(f"⚠️ {_err}")
             if scene_images_for_pdf:
                 st.session_state.ark_scene_images = scene_images_for_pdf
-                st.success(f"{len(scene_images_for_pdf)} bilde(r) lastet opp — klikk «Oppdater PDF» for å inkludere i rapporten.")
+                st.success(f"✓ {len(scene_images_for_pdf)} bilde(r) klare — klikk «Oppdater PDF» for å inkludere i rapporten.")
                 if st.button("Oppdater PDF med 3D-bilder", type="primary", use_container_width=True, key="regen_pdf_3d"):
                     try:
                         pd_state = st.session_state.get("project_data", {})
@@ -11673,7 +11726,7 @@ render();
                 type=["jpg", "jpeg", "png"],
                 accept_multiple_files=True,
                 key=_uploader_key,
-                help="Dra inn 1–5 bilder. Du kan legge til flere senere ved å dra inn i samme boks, eller fjerne enkeltfiler ved å klikke X på hver fil.",
+                help="Dra inn 1–5 bilder. Ikonet for hver fil kan vises med rød sirkel — det er et kosmetisk Streamlit-problem og betyr ikke at filen er avvist. Faktisk status ser du i forhåndsvisningen som dukker opp under (grønn ✅ eller rød ❌).",
             )
 
             if uploaded_solar:
@@ -11694,6 +11747,7 @@ render();
                 _sorted = sorted(uploaded_solar, key=lambda f: f.name)
                 _solar_imgs: List[Image.Image] = []
                 _solar_meta: List[Dict[str, Any]] = []
+                _solar_statuses: List[Dict[str, Any]] = []
 
                 # Parse doy og hour fra filnavn: solskygge_01_doy80_kl120.jpg
                 _meta_defaults = [
@@ -11705,7 +11759,10 @@ render();
                 ]
                 for idx, uf in enumerate(_sorted):
                     try:
+                        uf.seek(0)
                         img = Image.open(uf).convert("RGB")
+                        _thumb = img.copy()
+                        _thumb.thumbnail((260, 260))
                         _solar_imgs.append(img)
                         # Prøv å parse doy/hour fra filnavn
                         _m = re.search(r"doy(\d+)_kl(\d+)", uf.name or "")
@@ -11713,7 +11770,6 @@ render();
                             _doy = int(_m.group(1))
                             _hour_raw = _m.group(2)
                             _hour = float(_hour_raw[:-1] + "." + _hour_raw[-1]) if len(_hour_raw) > 1 else float(_hour_raw)
-                            # Match mot defaults for label
                             _match = next((md for md in _meta_defaults if md["doy"] == _doy and abs(md["hour"] - _hour) < 0.1), None)
                             if _match:
                                 _solar_meta.append(_match.copy())
@@ -11723,18 +11779,29 @@ render();
                             _solar_meta.append(_meta_defaults[idx].copy())
                         else:
                             _solar_meta.append({"label": uf.name, "doy": 0, "hour": 0.0})
+                        _solar_statuses.append({"ok": True, "thumb": _thumb, "name": uf.name})
                     except Exception as _ue:
-                        st.caption(f"Fil {uf.name}: {_ue}")
+                        _solar_statuses.append({"ok": False, "name": uf.name, "error": str(_ue)[:60]})
 
                 # Preview — vis thumbnails så brukeren ser at rekkefølgen stemmer
-                if _solar_imgs:
+                # v16.3: Grønn/rød indikator per fil, umiddelbart etter opplasting
+                if _solar_statuses:
                     st.caption("**Forhåndsvisning — slik kommer bildene inn i rapporten:**")
-                    _n_show = min(len(_solar_imgs), 5)
+                    _n_show = min(len(_solar_statuses), 5)
                     _cols = st.columns(_n_show)
-                    for _i, (_img, _meta) in enumerate(zip(_solar_imgs[:5], _solar_meta[:5])):
+                    _valid_idx = 0
+                    for _i, _status in enumerate(_solar_statuses[:5]):
                         with _cols[_i]:
-                            st.image(_img, use_container_width=True)
-                            st.caption(f"**{_i+1}.** {_meta['label']}")
+                            if _status["ok"]:
+                                st.image(_status["thumb"], use_container_width=True)
+                                _lbl = _solar_meta[_valid_idx]["label"] if _valid_idx < len(_solar_meta) else _status["name"]
+                                st.caption(f"**{_i+1}.** ✅ {_lbl}")
+                                _valid_idx += 1
+                            else:
+                                st.error(f"❌ {_status['name'][:22]}")
+                                st.caption(_status.get("error", ""))
+                    if len(_solar_statuses) > 5:
+                        st.caption(f"_(+ {len(_solar_statuses) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
                     if len(_solar_imgs) > 5:
                         st.caption(f"_(+ {len(_solar_imgs) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
 
