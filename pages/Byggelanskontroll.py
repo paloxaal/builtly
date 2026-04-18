@@ -30,6 +30,12 @@ except ImportError:
     pdfplumber = None
 
 try:
+    import builtly_auth
+    _HAS_AUTH = True
+except ImportError:
+    _HAS_AUTH = False
+
+try:
     import fitz  # PyMuPDF (fallback)
 except ImportError:
     fitz = None
@@ -1978,6 +1984,25 @@ if "loan_analysis" in st.session_state:
                 mime="application/pdf",
                 use_container_width=True,
             )
+
+            # Lagre til brukerens rapport-dashboard (Supabase Storage)
+            # — kun én gang per unik analyse for å unngå duplikater
+            _proj_name = project_info.get('navn') or 'Uten prosjekt'
+            _save_key = f"_loan_report_saved_{_proj_name}_{datetime.now().strftime('%Y%m%d')}"
+            if not st.session_state.get(_save_key):
+                try:
+                    import builtly_auth
+                    builtly_auth.save_report(
+                        project_name=_proj_name,
+                        report_name=f"Byggelånskontroll — {_proj_name}",
+                        module="Byggelånskontroll",
+                        pdf_bytes=pdf_bytes,
+                    )
+                    st.session_state[_save_key] = True
+                except ImportError:
+                    pass  # builtly_auth ikke tilgjengelig (standalone)
+                except Exception:
+                    pass  # Upload-feil skal ikke blokkere UI
         # JSON
         st.download_button(
             "Last ned analyse (JSON)",
