@@ -5645,14 +5645,14 @@ st.markdown(
             justify-content: flex-end !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 42px !important;
-            width: 42px !important;
-            max-width: 42px !important;
+            flex: 0 0 52px !important;
+            width: 52px !important;
+            max-width: 52px !important;
         }
         /* Each selectbox: compact pill */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] {
-            width: 42px !important;
-            max-width: 42px !important;
+            width: 52px !important;
+            max-width: 52px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             padding: 0 !important;
@@ -5661,11 +5661,11 @@ st.markdown(
             background: rgba(150,180,210,0.10) !important;
             border: 1px solid rgba(150,180,210,0.20) !important;
             border-radius: 12px !important;
-            height: 40px !important;
-            min-height: 40px !important;
-            max-height: 40px !important;
-            width: 40px !important;
-            max-width: 40px !important;
+            height: 44px !important;
+            min-height: 44px !important;
+            max-height: 44px !important;
+            width: 50px !important;
+            max-width: 50px !important;
             padding: 0 !important;
             display: flex !important;
             align-items: center !important;
@@ -5675,8 +5675,8 @@ st.markdown(
         }
         /* Inner value wrapper — keep original structure, just wider */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 28px !important;
-            max-width: 28px !important;
+            width: 38px !important;
+            max-width: 38px !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
@@ -5686,18 +5686,24 @@ st.markdown(
         }
         /* Emoji — original approach, slightly larger to prevent clipping */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 17px !important;
+            font-size: 20px !important;
             line-height: 1 !important;
             display: block !important;
-            width: 24px !important;
-            max-width: 24px !important;
-            height: 24px !important;
+            width: 32px !important;
+            max-width: 32px !important;
+            height: 28px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
-            text-align: left !important;
+            text-align: center !important;
             padding: 0 !important;
             margin: 0 auto !important;
+        }
+
+        /* Gi block-container nok høyre-padding slik at topbar-pillene ikke
+           klippes av viewport-kanten */
+        .block-container {
+            padding-right: 1rem !important;
         }
 
         .mini-stat-grid,
