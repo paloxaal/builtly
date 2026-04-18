@@ -1029,13 +1029,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Check project exists
+# Note: TenderControl er en selvstendig anbudskontroll-modul og trenger
+# IKKE et eksisterende Project-oppsett. Brukeren kan jobbe i scratch-modus
+# eller velge/opprette et anbud i "Lagrede anbud"-velgeren under.
+# Prosjektnavn hentes fra (prioritert): aktivt anbud > p_name > "Anbud".
 if pd_state.get("p_name") in ["", "Nytt Prosjekt", None]:
-    st.warning("Du må sette opp prosjektdata før du kan bruke denne modulen.")
-    if find_page("Project"):
-        if st.button("Gå til Project Setup", type="primary"):
-            st.switch_page(find_page("Project"))
-    st.stop()
+    # Sett et nøytralt default hvis ikke satt — brukeren fyller inn i intake-form
+    pd_state["p_name"] = pd_state.get("p_name") or "Anbud"
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1592,30 +1592,42 @@ if submitted:
     total_input_count = (len(files) if files else 0) + len(portal_files)
 
     if total_input_count == 0:
-        st.error("Last opp minst ett dokument — eller hent fra Doffin — før kjøring.")
+        st.error(
+            "Last opp minst ett dokument — eller hent fra Doffin — før kjøring.\n\n"
+            f"Debug: files={type(files).__name__ if files is not None else 'None'}, "
+            f"len={len(files) if files else 0}, "
+            f"portal={len(portal_files)}"
+        )
+        # Vis råverdier for ytterligere debugging
+        with st.expander("Teknisk debug"):
+            st.write({"files_raw": files, "portal_files_count": len(portal_files)})
     else:
         # Step 1: Parse documents (både opplastede og portal-hentede)
-        parsed_docs = _parse_uploaded_files(files) if files else []
+        with st.status("Leser og analyserer dokumenter...", expanded=True) as status:
+            st.write(f"Fant {total_input_count} fil(er) totalt — starter parsing...")
+            parsed_docs = _parse_uploaded_files(files) if files else []
 
-        if portal_files:
-            portal_progress = st.progress(0.0, text="Parser portal-vedlegg...")
-            for i, (pname, pbytes) in enumerate(portal_files, 1):
-                portal_progress.progress(i / len(portal_files), text=f"Parser {pname} ({i}/{len(portal_files)})...")
-                try:
-                    parsed = extract_document(pname, pbytes)
-                    parsed["source"] = "doffin"
-                    parsed_docs.append(parsed)
-                except Exception as e:
-                    parsed_docs.append({
-                        "filename": pname,
-                        "category": "annet",
-                        "error": f"{type(e).__name__}: {e}",
-                        "text": "", "text_excerpt": "", "size_kb": 0,
-                        "source": "doffin",
-                    })
-            portal_progress.empty()
+            if portal_files:
+                portal_progress = st.progress(0.0, text="Parser portal-vedlegg...")
+                for i, (pname, pbytes) in enumerate(portal_files, 1):
+                    portal_progress.progress(i / len(portal_files), text=f"Parser {pname} ({i}/{len(portal_files)})...")
+                    try:
+                        parsed = extract_document(pname, pbytes)
+                        parsed["source"] = "doffin"
+                        parsed_docs.append(parsed)
+                    except Exception as e:
+                        parsed_docs.append({
+                            "filename": pname,
+                            "category": "annet",
+                            "error": f"{type(e).__name__}: {e}",
+                            "text": "", "text_excerpt": "", "size_kb": 0,
+                            "source": "doffin",
+                        })
+                portal_progress.empty()
 
-        st.session_state.tender_documents = parsed_docs
+            st.session_state.tender_documents = parsed_docs
+            status.update(label=f"✓ Leste {len(parsed_docs)} dokument(er)", state="complete")
+
         st.success(f"Leste {len(parsed_docs)} dokument(er).")
 
         # Step 2: Rule-based findings (deterministic, instant)
