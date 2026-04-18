@@ -2154,6 +2154,7 @@ if st.button("🚀 GENERER GEOTEKNISK & MILJØTEKNISK RAPPORT", type="primary", 
                             project_name=pd_state.get("p_name", ""),
                             report_name=st.session_state.generated_geo_filename,
                             module="RIG-M (Geo & Miljø)",
+                            pdf_bytes=pdf_data,
                         )
                         _save_debug += f" | {st.session_state.get('_report_save_debug', 'no debug')}"
                     except Exception as e:
