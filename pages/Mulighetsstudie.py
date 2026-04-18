@@ -9943,9 +9943,19 @@ KRAV:
             historical_analysis=st.session_state.get("historical_analysis") or historical_analysis,
             site_intelligence=site_intelligence_bundle,
         )
+        # Suksess — fjern eventuell tidligere feilmelding
+        st.session_state.pop("_pdf_generation_error", None)
     except Exception as pdf_exc:
-        st.warning(f"PDF-generering feilet: {pdf_exc}")
-        pdf_bytes = b""
+        # v16.1: Persistent feilmelding som overlever st.rerun()
+        # I tillegg beholder vi tidligere PDF hvis den finnes, slik at brukeren
+        # kan fortsette å laste ned forrige vellykkede versjon.
+        import traceback
+        _err_detail = f"{type(pdf_exc).__name__}: {pdf_exc}"
+        st.session_state["_pdf_generation_error"] = _err_detail
+        st.error(f"PDF-generering feilet: {_err_detail}")
+        # Logg full traceback til console for debugging
+        print(f"[Mulighetsstudie PDF error] {traceback.format_exc()}")
+        pdf_bytes = None  # Signalerer "feilet" — vi setter IKKE generated_ark_pdf til dette
 
     if "pending_reviews" not in st.session_state:
         st.session_state.pending_reviews = {}
@@ -9963,7 +9973,7 @@ KRAV:
         "reviewer": "Senior Arkitekt",
         "status": "Pending Lead Architect Review",
         "class": "badge-pending",
-        "pdf_bytes": pdf_bytes,
+        "pdf_bytes": pdf_bytes if pdf_bytes else b"",  # v16.1: Safely handle None
     }
 
     st.session_state.analysis_results = {
@@ -9980,21 +9990,29 @@ KRAV:
         "environment": environment_data,
         "visual_attachments": images_for_context,
     }
-    st.session_state.generated_ark_pdf = pdf_bytes
-    st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
+    # v16.1: Kun lagre PDF hvis den faktisk ble generert. Tidligere overskrev vi
+    # med b"" ved feil, som ga "PDF er ikke generert"-melding i nedlasting-seksjonen.
+    # Nå bevares eventuell tidligere vellykket PDF hvis ny generering feilet.
+    if pdf_bytes:
+        st.session_state.generated_ark_pdf = pdf_bytes
+        st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
 
-    # Save report to user dashboard
-    try:
-        from builtly_auth import save_report
-        save_report(
-            project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
-            report_name=f"Mulighetsstudie — {p_name}",
-            module="Mulighetsstudie",
-            file_path=st.session_state.generated_ark_filename,
-            pdf_bytes=pdf_bytes,
-        )
-    except ImportError:
-        pass  # Frontpage not available (standalone run)
+    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
+    if pdf_bytes:
+        try:
+            from builtly_auth import save_report
+            save_report(
+                project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
+                report_name=f"Mulighetsstudie — {p_name}",
+                module="Mulighetsstudie",
+                file_path=st.session_state.generated_ark_filename,
+                pdf_bytes=pdf_bytes,
+            )
+        except ImportError:
+            pass  # Frontpage not available (standalone run)
+        except Exception as _save_exc:
+            # Ikke blokker videre flyt — logg kun
+            print(f"[Mulighetsstudie] save_report feilet: {_save_exc}")
 
     st.rerun()
 
@@ -11866,6 +11884,7 @@ render();
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     pdf_data = st.session_state.get("generated_ark_pdf")
     pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+    _pdf_err = st.session_state.get("_pdf_generation_error")
     if pdf_data:
         st.download_button(
             "Last ned mulighetsstudie (PDF)",
@@ -11874,6 +11893,16 @@ render();
             mime="application/pdf",
             type="primary",
             use_container_width=True,
+        )
+        if _pdf_err:
+            st.warning(
+                f"⚠ Siste PDF-oppdatering feilet: {_pdf_err}. "
+                "Du kan laste ned forrige vellykkede versjon ovenfor, eller kjøre tomtestudiet på nytt."
+            )
+    elif _pdf_err:
+        st.error(
+            f"PDF-generering feilet: {_pdf_err}. "
+            "Prøv å kjøre tomtestudiet på nytt, eller kontakt Builtly-support hvis feilen vedvarer."
         )
     else:
         st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
