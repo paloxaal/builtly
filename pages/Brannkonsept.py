@@ -3117,7 +3117,7 @@ with st.expander("4. Generer rapport og nedlastinger", expanded=True):
                             report_name=f"Brannkonsept — Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
                             module="RIBr (Brannkonsept)",
                             file_path=f"Builtly_RIBr_{pd_state.get('p_name', '')}.pdf",
-
+                            pdf_bytes=report_pdf,
                             )
 
                         except Exception:
