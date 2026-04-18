@@ -1132,10 +1132,16 @@ def _fallback_grid_placement(
 
             # Klipp mot zone_buildable
             clipped = poly.intersection(zone_buildable).buffer(0)
-            if clipped.is_empty or clipped.area < 40:
+            # Krev at volumet fortsatt er minst 50% av opprinnelig fotavtrykk —
+            # ellers får vi "mikrovolumer" på kantene som utgir seg for byggetrinn
+            min_acceptable_area = max(80.0, fp_per_bldg * 0.5)
+            if clipped.is_empty or clipped.area < min_acceptable_area:
                 continue
             if isinstance(clipped, MultiPolygon):
                 clipped = max(clipped.geoms, key=lambda g: g.area)
+                # Re-sjekk etter valg av største delpolygon
+                if clipped.area < min_acceptable_area:
+                    continue
 
             # Sjekk brannavstand mot eksisterende volumer
             too_close = False
@@ -1229,6 +1235,44 @@ def pass4_phasing(
         return [], []
 
     k = max(1, target_phase_count)
+
+    # KRITISK: Re-kalibrer K basert på FAKTISK oppnådd BRA, ikke mål-BRA.
+    # Hvis Pass 3 bare plasserte 50% av målet (pga tight tomt, small typology,
+    # osv.), blir target_phase_count for høyt og hvert trinn blir undermål.
+    # Vi sikrer at hvert trinn ender i 3500-4500 m² BRA-målområdet.
+    actual_total_bra = sum(v.bra_m2 for v in volumes)
+    if actual_total_bra > 0:
+        # Ideelt antall faser basert på faktisk BRA og målet om 4000 m² per trinn
+        target_avg = (phasing_config.TARGET_PHASE_BRA_LOW +
+                      phasing_config.TARGET_PHASE_BRA_HIGH) / 2.0
+        ideal_k = max(1, round(actual_total_bra / target_avg))
+
+        # Respekter phasing_config sine harde grenser
+        min_k_hard = max(1, math.ceil(actual_total_bra / phasing_config.MAX_PHASE_BRA))
+        max_k_hard = max(1, int(actual_total_bra / phasing_config.MIN_PHASE_BRA))
+        ideal_k = _clamp(ideal_k, min_k_hard, max_k_hard)
+
+        # Juster K: respekter brukerens valg i manual/single-modus, men veiled i auto
+        if phasing_config.phasing_mode == "auto":
+            # I auto kan vi justere fritt
+            k = ideal_k
+            logger.info(
+                f"Pass 4: Re-kalibrerte K fra {target_phase_count} til {k} "
+                f"(faktisk BRA {actual_total_bra:.0f}, ideell snitt {actual_total_bra/k:.0f})"
+            )
+        elif phasing_config.phasing_mode == "manual":
+            # Manuelt er brukerens valg lov, men cap til hard-grensen
+            k = _clamp(target_phase_count, min_k_hard, max_k_hard)
+            if k != target_phase_count:
+                logger.warning(
+                    f"Pass 4: Manuelt valg {target_phase_count} var utenfor gjennomførbar "
+                    f"spenn [{min_k_hard}-{max_k_hard}] for faktisk BRA {actual_total_bra:.0f}. "
+                    f"Justert til {k}."
+                )
+        # single-mode: k=1 som brukeren valgte, ingen endring
+
+        # Men hvis volumtallet er < K, kan vi ikke ha flere faser enn volumer
+        k = min(k, len(volumes))
 
     # --- Byggefaser ---
     building_phases = _group_volumes_into_phases(

@@ -334,6 +334,39 @@ def masterplan_to_option_results(
     # Hjelp for BTA/BRA
     efficiency = float(getattr(site, "efficiency_ratio", 0.85))
 
+    # --- KRITISK: forhåndsbyg coord-groups for site, buildable, neighbors ---
+    # 3D-scenen (build_geodata_scene_payload) leter etter disse feltene i
+    # option.geometry og projiserer dem til lon/lat. Hvis de mangler,
+    # faller scenen tilbake til Oslo-default (10.75, 59.91).
+    site_polygon_coords: List[List[List[float]]] = []
+    buildable_polygon_coords: List[List[List[float]]] = []
+    neighbor_polygons_coords: List[Dict[str, Any]] = []
+
+    if masterplan.site_polygon is not None:
+        site_polygon_coords = _polygon_to_coords_groups(masterplan.site_polygon)
+    if masterplan.buildable_polygon is not None:
+        buildable_polygon_coords = _polygon_to_coords_groups(masterplan.buildable_polygon)
+
+    # Naboene fra geodata_context
+    for nb in geodata_context.get("neighbors", []):
+        nb_poly = nb.get("polygon")
+        if nb_poly is None:
+            continue
+        nb_coords = _polygon_to_coords_groups(nb_poly)
+        if nb_coords:
+            neighbor_polygons_coords.append({
+                "coords": nb_coords,
+                "height_m": float(nb.get("height_m", 9.0)),
+                "distance_m": float(nb.get("distance_m", 0.0)),
+            })
+
+    # Bygg en kart-over from volume_id → coord_groups slik at vi ikke konverterer
+    # samme polygon flere ganger
+    volume_coord_cache: Dict[str, List[List[List[float]]]] = {}
+    for v in masterplan.volumes:
+        if v.polygon is not None:
+            volume_coord_cache[v.volume_id] = _polygon_to_coords_groups(v.polygon)
+
     # Lag ett option per byggetrinn
     for phase in masterplan.building_phases:
         phase_volumes = [v for v in masterplan.volumes
@@ -347,6 +380,7 @@ def masterplan_to_option_results(
         phase_bra = sum(v.bra_m2 for v in phase_volumes)
         max_floors_in_phase = max(v.floors for v in phase_volumes)
         max_height = max(v.height_m for v in phase_volumes)
+        phase_footprint_coords = _polygon_to_coords_groups(phase_footprint)
 
         # Bygg geometry-dict slik 3D-pipeline forventer
         # Både 'buildings' (nytt format) og 'massing_parts' (dagens format)
@@ -454,6 +488,11 @@ def masterplan_to_option_results(
                 "buildings": buildings_dicts,
                 "massing_parts": massing_parts_dicts,  # for Three.js og Google Maps 3D
                 "footprint": phase_footprint,
+                # Coord-groups som 3D-pipeline (build_geodata_scene_payload) forventer
+                "site_polygon_coords": site_polygon_coords,
+                "buildable_polygon_coords": buildable_polygon_coords,
+                "footprint_polygon_coords": phase_footprint_coords,
+                "neighbor_polygons": neighbor_polygons_coords,
                 "placement": {
                     "n_buildings": len(phase_volumes),
                     "source": "Builtly Masterplan",
@@ -562,6 +601,11 @@ def masterplan_to_option_results(
                 "buildings": total_buildings,
                 "massing_parts": total_massing_parts,
                 "footprint": total_footprint,
+                # Coord-groups for 3D-pipeline
+                "site_polygon_coords": site_polygon_coords,
+                "buildable_polygon_coords": buildable_polygon_coords,
+                "footprint_polygon_coords": _polygon_to_coords_groups(total_footprint),
+                "neighbor_polygons": neighbor_polygons_coords,
                 "placement": {
                     "n_buildings": len(masterplan.volumes),
                     "source": "Builtly Masterplan",
