@@ -5605,6 +5605,114 @@ def option_to_record(option: OptionResult) -> Dict[str, Any]:
     return record
 
 
+def _build_geo_narrative_for_context(
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+) -> str:
+    """Kort geo-avsnitt for pkt. 4 TOMT OG KONTEKST. Returnerer tom streng hvis
+    ingen geo-data er tilgjengelig."""
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return ""
+
+    contamination = geodata_bundle.get("grunnforurensning", []) or []
+    hist_year = geodata_bundle.get("historisk_year")
+    parts = []
+
+    # Åpningssetning — alltid hvis vi har data
+    if hist_year:
+        parts.append(
+            f"Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
+            f"NGU og NVE, samt en AI-vurdering av historisk flyfoto fra {hist_year}. "
+            f"Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter sol/skygge-analysen."
+        )
+    else:
+        parts.append(
+            "Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
+            "NGU og NVE. Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter "
+            "sol/skygge-analysen."
+        )
+
+    # Grunnforurensning — kort statuslinje
+    cnt = len(contamination)
+    if cnt == 0:
+        parts.append(
+            "Miljødirektoratets grunnforurensningsdatabase viser ingen kjente forurensingslokaliteter innen 500 m."
+        )
+    elif cnt <= 2:
+        parts.append(
+            f"Miljødirektoratets database viser {cnt} registrert forurensingslokalitet innen 500 m" if cnt == 1
+            else f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m."
+        )
+    else:
+        parts.append(
+            f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m. "
+            f"Forhøyet oppmerksomhet anbefales."
+        )
+
+    # Historisk bruk (hvis AI-analyse finnes)
+    if historical_analysis:
+        risiko = (historical_analysis.get("risiko_niva") or "").strip()
+        if risiko and risiko != "Ukjent":
+            parts.append(
+                f"AI-basert første screening av historisk flyfoto vurderer samlet forurensningsrisiko som {risiko.lower()}. "
+                f"Vurderingen erstatter ikke miljøteknisk grunnundersøkelse."
+            )
+
+    return " ".join(parts)
+
+
+def _build_geo_narrative_for_risk(
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+) -> List[str]:
+    """Kort risiko-avsnitt som bullets til pkt. 9 RISIKO OG AVKLARINGSPUNKTER.
+    Returnerer tom liste hvis ingen geo-data er tilgjengelig."""
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return []
+
+    bullets = []
+    contamination = geodata_bundle.get("grunnforurensning", []) or []
+    cnt = len(contamination)
+
+    # Grunnforurensning-linje
+    if cnt == 0:
+        bullets.append(
+            "- Grunnforurensning: Ingen kjente lokaliteter i Miljødirektoratets database innen 500 m. "
+            "Standard aktsomhetsprosedyre tilstrekkelig før bygging."
+        )
+    elif cnt <= 2:
+        bullets.append(
+            f"- Grunnforurensning: {cnt} registrert lokalitet i Miljødirektoratets database innen 500 m. "
+            f"Miljøteknisk undersøkelse bør vurderes som del av prosjekteringsfasen."
+        )
+    else:
+        bullets.append(
+            f"- Grunnforurensning: {cnt} registrerte lokaliteter innen 500 m (Miljødirektoratet). "
+            f"Miljøteknisk grunnundersøkelse er anbefalt før byggesaksinnsending."
+        )
+
+    # AI-historisk-analyse-linje
+    if historical_analysis:
+        risiko = (historical_analysis.get("risiko_niva") or "").strip()
+        tiltak = (historical_analysis.get("anbefalte_tiltak") or "").strip()
+        if risiko and risiko != "Ukjent":
+            line = f"- Forurensningsrisiko (AI-screening av historisk flyfoto): {risiko}."
+            if tiltak:
+                # Trunker tiltak til første setning for kort bullet
+                first_sentence = tiltak.split(".")[0].strip()
+                if first_sentence and len(first_sentence) < 180:
+                    line += f" {first_sentence}."
+            line += " Se dedikert seksjon \"Historisk flyfoto og tidligere arealbruk\" for full vurdering."
+            bullets.append(line)
+        elif risiko == "Ukjent":
+            bullets.append(
+                "- Forurensningsrisiko (AI-screening av historisk flyfoto): Vurderingen er usikker — "
+                "manuell fagkontroll av historisk bruk anbefales."
+            )
+
+    return bullets
+
+
 def build_deterministic_report(
     site: SiteInputs,
     options: List[OptionResult],
@@ -5612,6 +5720,8 @@ def build_deterministic_report(
     has_visual_input: bool,
     manual_override: Optional[Dict[str, Any]] = None,
     environment_data: Optional[Dict[str, Any]] = None,
+    geodata_bundle: Optional[Dict[str, Any]] = None,
+    historical_analysis: Optional[Dict[str, str]] = None,
 ) -> str:
     if not options:
         return (
@@ -5764,6 +5874,12 @@ def build_deterministic_report(
     if wind_c.get("available"):
         lines.append(f"Vindkomfort: Klasse {wind_c.get('lawson_class', '?')} ({wind_c.get('overall', 'ikke vurdert')}).")
 
+    # Geo-avsnitt (stedskontekst + grunnforurensning + historisk bruk)
+    _geo_narr = _build_geo_narrative_for_context(geodata_bundle, historical_analysis)
+    if _geo_narr:
+        lines.append("")
+        lines.append(_geo_narr)
+
     lines.append("")
     lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
     lines.append(
@@ -5825,6 +5941,10 @@ def build_deterministic_report(
             lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
         lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
 
+        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
+        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
+            lines.append(_geo_b)
+
         if pct_bra_active and manual_pct_bra < site.utnyttelsesgrad_bra_pct * 0.9:
             lines.append(
                 f"- OBS: Oppnådd %-BRA ({manual_pct_bra:.0f}%) er lavere enn mål ({site.utnyttelsesgrad_bra_pct:.0f}%). "
@@ -5884,6 +6004,11 @@ def build_deterministic_report(
         elif best.neighbor_count > 0:
             lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
         lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
+
+        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
+        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
+            lines.append(_geo_b)
+
         lines.append("")
         lines.append("# 10. ANBEFALING / NESTE STEG")
         lines.append(
@@ -6668,6 +6793,708 @@ def _render_executive_summary(
     return img
 
 
+# ================================================================
+# GEO CONTEXT BUNDLE — automatisk henting fra åpne geo-APIer
+# ----------------------------------------------------------------
+# Porterer logikken fra pages/Geo.py (fetch_all_geodata) som lokale
+# funksjoner for å unngå cross-page-import (Geo.py kaller
+# st.set_page_config ved import — ikke trygt her).
+#
+# Scope: Historisk flyfoto (m/år), Miljødirektoratet grunnforurensning,
+# NGU Radon, NVE Flom/Kvikkleire/Skred som kartbilder. Bruker allerede
+# etablert Geodata Online-klient (gdo) der den er tilgjengelig.
+# ================================================================
+
+def _bbox_from_center_local(x: float, y: float, radius_m: float = 250.0) -> tuple:
+    """Bygg bbox (EPSG:25833) rundt et senterpunkt."""
+    return (x - radius_m, y - radius_m, x + radius_m, y + radius_m)
+
+
+def _wms_fetch(base_url: str, layers: str, bbox_25833: tuple,
+               width: int = 800, height: int = 800,
+               styles: str = "", fmt: str = "image/png",
+               version: str = "1.3.0") -> Optional[Image.Image]:
+    """Generell WMS-GetMap-fetcher. Returnerer PIL.Image eller None."""
+    try:
+        params = {
+            "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": version,
+            "LAYERS": layers, "STYLES": styles,
+            "CRS": "EPSG:25833" if version == "1.3.0" else None,
+            "SRS": None if version == "1.3.0" else "EPSG:25833",
+            "BBOX": f"{bbox_25833[0]},{bbox_25833[1]},{bbox_25833[2]},{bbox_25833[3]}",
+            "WIDTH": width, "HEIGHT": height, "FORMAT": fmt, "TRANSPARENT": "TRUE",
+        }
+        params = {k: v for k, v in params.items() if v is not None}
+        resp = requests.get(base_url, params=params, timeout=15)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        return None
+    return None
+
+
+def _fetch_ngu_radon(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://geo.ngu.no/mapserver/RadonAktsomhetWMS?",
+        layers="Radon", bbox_25833=bbox,
+    )
+
+
+def _fetch_nve_flom(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/Flom1/MapServer/WMSServer?",
+        layers="Flom_aktsomhetsomrade", bbox_25833=bbox,
+    )
+
+
+def _fetch_nve_kvikkleire(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/Mapservices/SkredKvikkleire2/MapServer/WMSServer?",
+        layers="KvikkleireFaregrad", bbox_25833=bbox,
+    )
+
+
+def _fetch_nve_skred(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/SkredSnoJord1/MapServer/WMSServer?",
+        layers="SkredSnoJordAktsomhet", bbox_25833=bbox,
+    )
+
+
+def _fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
+    """Miljødirektoratet — kjente forurensingslokaliteter i nærheten (liste av dicts)."""
+    try:
+        from pyproj import Transformer
+        tr = Transformer.from_crs(25833, 4326, always_xy=True)
+        lon, lat = tr.transform(x, y)
+    except Exception:
+        return []
+    try:
+        resp = requests.get(
+            "https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter",
+            params={"latitude": lat, "longitude": lon, "radius": int(radius_m)},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        sites = data if isinstance(data, list) else data.get("lokaliteter", data.get("features", []))
+        result = []
+        for site in sites[:20]:
+            props = site.get("properties", site) if isinstance(site, dict) else {}
+            # Forsøk å beregne avstand hvis koordinater finnes
+            dist_m = None
+            geom = site.get("geometry") if isinstance(site, dict) else None
+            if geom and geom.get("coordinates"):
+                try:
+                    scoord = geom["coordinates"]
+                    if isinstance(scoord, list) and len(scoord) >= 2:
+                        slon, slat = float(scoord[0]), float(scoord[1])
+                        # Enkel haversine i meter
+                        import math as _m
+                        R = 6371000.0
+                        dlat = _m.radians(slat - lat); dlon = _m.radians(slon - lon)
+                        a = (_m.sin(dlat/2)**2 +
+                             _m.cos(_m.radians(lat)) * _m.cos(_m.radians(slat)) * _m.sin(dlon/2)**2)
+                        dist_m = 2 * R * _m.asin(_m.sqrt(a))
+                except Exception:
+                    pass
+            result.append({
+                "navn": props.get("navn") or props.get("lokalitetsnavn") or "Ukjent",
+                "status": props.get("status") or props.get("aktivitetsstatus") or "",
+                "type": props.get("type") or props.get("forurensningstype") or "",
+                "paavirkningsgrad": props.get("paavirkningsgrad") or props.get("pavirkningsgrad") or "",
+                "id": props.get("id") or props.get("lokalitetsId") or "",
+                "distance_m": dist_m,
+            })
+        # Sorter etter avstand hvis tilgjengelig
+        result.sort(key=lambda s: s.get("distance_m") if s.get("distance_m") is not None else 9999)
+        return result
+    except Exception:
+        return []
+
+
+def build_geo_context_bundle(
+    site_polygon,
+    coords: Optional[Tuple[float, float]],
+    gdo_client,
+    radius_m: float = 300.0,
+) -> Dict[str, Any]:
+    """Samle geo-kontekst-data (historisk foto, grunnforurensning, radon, flom osv.)
+    for bruk i PDF-rapporten.
+
+    Args:
+        site_polygon: Shapely Polygon i EPSG:25833 (fra geodata_context)
+        coords: (x, y) i EPSG:25833. Hvis None, tas centroiden fra site_polygon.
+        gdo_client: GeodataOnlineClient-instans eller None
+        radius_m: Søkeradius for grunnforurensning
+
+    Returns:
+        Dict med nøklene:
+            available (bool), coords, bbox,
+            historisk (PIL.Image), historisk_year, historisk_source,
+            grunnforurensning (list), radon (PIL.Image),
+            flom (PIL.Image), kvikkleire (PIL.Image), skred (PIL.Image),
+            log (list[str]), errors (list[str])
+    """
+    result = {
+        "available": False,
+        "coords": None, "bbox": None,
+        "historisk": None, "historisk_year": None, "historisk_source": "",
+        "grunnforurensning": [],
+        "radon": None, "flom": None, "kvikkleire": None, "skred": None,
+        "log": [], "errors": [],
+    }
+
+    # Finn koordinater og bbox
+    try:
+        if coords is None and site_polygon is not None:
+            c = site_polygon.centroid
+            coords = (float(c.x), float(c.y))
+        if coords is None:
+            result["errors"].append("Ingen koordinater tilgjengelig for geo-oppslag.")
+            return result
+        x, y = coords
+        result["coords"] = (x, y)
+        if site_polygon is not None:
+            bbox = tuple(site_polygon.bounds)
+        else:
+            bbox = _bbox_from_center_local(x, y, radius_m)
+        result["bbox"] = bbox
+    except Exception as exc:
+        result["errors"].append(f"Koordinat/bbox feilet: {str(exc)[:80]}")
+        return result
+
+    # Utvid bbox litt for historisk foto (parcel-bbox er ofte for trang)
+    minx, miny, maxx, maxy = bbox
+    buf = 100.0
+    expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
+
+    # Historisk ortofoto via Geodata Online (GeomapBilder3 mosaic)
+    if gdo_client is not None:
+        try:
+            img, src, year = gdo_client.fetch_historical_ortofoto(
+                bbox=expanded_bbox, buffer_m=0, width=1200, height=1200)
+            if img is not None:
+                result["historisk"] = img
+                result["historisk_year"] = year
+                result["historisk_source"] = src
+                result["log"].append(f"Historisk ortofoto: {src} ({year})")
+            else:
+                result["log"].append(f"Historisk ortofoto: {src}")
+        except Exception as exc:
+            result["log"].append(f"Historisk ortofoto feilet: {str(exc)[:80]}")
+
+    # Miljødirektoratet — grunnforurensning (liste)
+    try:
+        sites = _fetch_miljodir_grunnforurensning(x, y, radius_m=500.0)
+        result["grunnforurensning"] = sites
+        result["log"].append(f"Miljødirektoratet: {len(sites)} kjente lokaliteter innen 500 m")
+    except Exception as exc:
+        result["log"].append(f"Miljødirektoratet feilet: {str(exc)[:80]}")
+
+    # NGU Radon — kartbilde for visuell visning i PDF
+    try:
+        img = _fetch_ngu_radon(bbox)
+        if img is not None:
+            result["radon"] = img
+            result["log"].append("NGU Radon aktsomhetskart hentet")
+    except Exception:
+        pass
+
+    # NVE Flom / Kvikkleire / Skred — kartbilder
+    for key, func, label in [
+        ("flom", _fetch_nve_flom, "NVE Flom"),
+        ("kvikkleire", _fetch_nve_kvikkleire, "NVE Kvikkleire"),
+        ("skred", _fetch_nve_skred, "NVE Skred"),
+    ]:
+        try:
+            img = func(bbox)
+            if img is not None:
+                result[key] = img
+                result["log"].append(f"{label} aktsomhetskart hentet")
+        except Exception:
+            pass
+
+    # Marker som tilgjengelig hvis vi har minst én datakilde
+    has_any = any([
+        result["historisk"] is not None,
+        bool(result["grunnforurensning"]),
+        result["radon"] is not None,
+        result["flom"] is not None,
+        result["kvikkleire"] is not None,
+        result["skred"] is not None,
+    ])
+    result["available"] = has_any
+    return result
+
+
+def analyze_historical_aerial_with_claude(
+    historical_image: Optional[Image.Image],
+    year: Optional[int],
+    contamination_sites: list,
+    address_hint: str = "",
+    nearby_plans_count: Optional[int] = None,
+) -> Optional[Dict[str, str]]:
+    """Full AI-analyse av historisk flyfoto med fokus på:
+    - Tidligere arealbruk (industri, landbruk, skog, tettsted, osv.)
+    - Potensielle forurensningskilder fra historisk bruk
+    - Anbefalte tiltak (miljøteknisk undersøkelse, MUA-kartlegging, osv.)
+
+    Returnerer dict med 'tidligere_bruk', 'forurensningsrisiko', 'anbefalte_tiltak',
+    'risiko_niva' ('Lav'/'Moderat'/'Høy'/'Ukjent'). Null ved feil eller manglende input.
+    """
+    if historical_image is None or not ANTHROPIC_API_KEY:
+        return None
+
+    contamination_summary = ""
+    if contamination_sites:
+        contamination_summary = f"\n\nFra Miljødirektoratets grunnforurensningsdatabase er det registrert {len(contamination_sites)} lokalitet(er) innen 500 m. De nærmeste:\n"
+        for s in contamination_sites[:5]:
+            line = f"  - {s.get('navn', 'Ukjent')}"
+            extras = []
+            if s.get("type"): extras.append(s["type"])
+            if s.get("status"): extras.append(s["status"])
+            if s.get("paavirkningsgrad"): extras.append(f"påvirkningsgrad: {s['paavirkningsgrad']}")
+            if s.get("distance_m") is not None: extras.append(f"ca. {int(s['distance_m'])} m unna")
+            if extras:
+                line += " — " + ", ".join(extras)
+            contamination_summary += line + "\n"
+    else:
+        contamination_summary = "\n\nMiljødirektoratets grunnforurensningsdatabase: Ingen kjente registrerte lokaliteter innen 500 m."
+
+    year_str = f"fra {year}" if year else "av ukjent år"
+    addr_str = f" for tomten ved {address_hint}" if address_hint else ""
+
+    system_prompt = (
+        "Du er en erfaren norsk miljøgeolog (RIG-M) og arealutviklingskonsulent. "
+        "Du analyserer historiske flyfoto for å vurdere tidligere arealbruk og forurensningsrisiko "
+        "i tråd med forurensningsforskriften kapittel 2 (tiltak ved utbygging) og TEK17 §§ 5-2 og 13-6. "
+        "Du svarer på norsk, fagteknisk og konkret. Du unngår spekulasjon og merker usikkerhet tydelig. "
+        "Du vet at historiske flyfoto alene ikke kan erstatte miljøteknisk grunnundersøkelse — men de "
+        "er ofte første trinn i en aktsom historisk kartlegging som kreves før byggesaksbehandling "
+        "på tomter med potensielt forurenset grunn."
+    )
+
+    user_text = (
+        f"Vedlagt er et historisk flyfoto {year_str}{addr_str}. "
+        f"{contamination_summary}\n\n"
+        "Analyser flyfotoet og gi en konkret vurdering i disse fire kategoriene. "
+        "Svar KUN som ren JSON (ingen markdown-backticks, ingen ekstra tekst) "
+        "med nøyaktig disse nøklene:\n\n"
+        "{\n"
+        '  "tidligere_bruk": "2-4 setninger som beskriver hva flyfotoet viser av arealbruk på tomten og i nærområdet. '
+        'Nevn konkret: bebyggelse, vegetasjon, infrastruktur, synlige anlegg/industri/gårdsbruk/grustak/deponi osv. '
+        'Vær konkret — unngå generelle formuleringer.",\n'
+        '  "forurensningsrisiko": "3-5 setninger som kobler observasjoner til potensielle forurensningskilder '
+        '(oljetank, smørebu, kjemisk rensing, fyllmasser, sprøytemiddelbruk, diffus byforurensning, osv.). '
+        'Vurder sannsynlighet for PAH, tungmetaller, oljehydrokarboner, asbestrester. Nevn også hvis fotoet '
+        'IKKE indikerer forhøyet risiko (f.eks. uberørt skog/landbruk uten synlige inngrep).",\n'
+        '  "anbefalte_tiltak": "Konkret anbefaling: behov for miljøteknisk grunnundersøkelse (prøvetaking + lab), '
+        'historisk kartlegging mot bransjearkiv, sjekk av arkivmateriale fra tidligere eiere, eller kun '
+        'standard påvisningsprosedyre. Vis til forurensningsforskriftens kap. 2 hvis relevant.",\n'
+        '  "risiko_niva": "ETT av: Lav, Moderat, Høy, Ukjent — din samlede vurdering"\n'
+        "}\n\n"
+        "Viktig: Hvis flyfotoet er uklart, dårlig oppløst eller du ikke kan konkludere, skriv det eksplisitt "
+        'og sett risiko_niva="Ukjent". Ikke dikt opp detaljer.'
+    )
+
+    try:
+        raw = _call_claude_vision(system_prompt, user_text, [historical_image], max_tokens=2000)
+        if not raw:
+            return None
+        # Strip markdown-fences hvis til stede
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+        # Valider forventede nøkler
+        for key in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak", "risiko_niva"):
+            data.setdefault(key, "")
+        # Normaliser risiko_niva
+        rn = str(data.get("risiko_niva", "")).strip().lower()
+        if "høy" in rn or "hoy" in rn or rn == "høy":
+            data["risiko_niva"] = "Høy"
+        elif "moderat" in rn or "middels" in rn:
+            data["risiko_niva"] = "Moderat"
+        elif "lav" in rn:
+            data["risiko_niva"] = "Lav"
+        else:
+            data["risiko_niva"] = "Ukjent"
+        return data
+    except Exception:
+        return None
+
+
+def _pil_to_temp_jpg(img: Image.Image, max_w: int = 1600) -> str:
+    """Konverter PIL-bilde til midlertidig JPG og returner filsti.
+    FPDF trenger fil på disk. Rezise om for bredt."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    try:
+        rgb = img.convert("RGB")
+        if rgb.width > max_w:
+            ratio = max_w / rgb.width
+            new_h = int(rgb.height * ratio)
+            rgb = rgb.resize((max_w, new_h), Image.LANCZOS)
+        rgb.save(tmp.name, format="JPEG", quality=88)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def build_geo_context_pages(
+    pdf: "BuiltlyProPDF",
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+    site_intelligence: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Bygg de to geo-sidene i PDF-rapporten.
+
+    Side A: STEDSKONTEKST OG GEODATA — KPI-kort (plan/projects/transport
+    hvis tilgjengelig) + grunnforurensnings-tabell + risikomerking.
+    Side B: HISTORISK FLYFOTO OG TIDLIGERE BRUK — historisk bilde +
+    AI-analyse i tre seksjoner (tidligere bruk, forurensningsrisiko,
+    anbefalte tiltak) + risiko-badge.
+    """
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return  # Skipp stille hvis ingen data
+
+    # ============================================================
+    # SIDE A: STEDSKONTEKST OG GEODATA
+    # ============================================================
+    pdf.add_page()
+    pdf.section_title("STEDSKONTEKST OG GEODATA", 16)
+    pdf.body_text(
+        "Automatisert uttrekk fra åpne norske geodata-kilder: plan- og reguleringsdata, "
+        "utbyggingsaktivitet, mobilitet/transport, samt Miljødirektoratets "
+        "grunnforurensningsdatabase. Dette er et første screeningbilde — "
+        "fagteknisk RIG-M-vurdering kreves før byggesaksinnsending."
+    )
+    pdf.ln(3)
+
+    # --- KPI-rad 1: Plan / Utbygging / Mobilitet (fra site_intelligence) ---
+    def _draw_kpi(px, py, pw, ph, title_str, value_str, sub_str, accent_color):
+        """Lokal variant av _draw_kpi_card — identisk stil til resten av PDF-en."""
+        pdf.set_fill_color(*accent_color)
+        pdf.rect(px, py, pw, 2, 'F')
+        pdf.set_draw_color(150, 170, 195)
+        pdf.set_line_width(0.3)
+        pdf.rect(px, py, pw, ph, 'D')
+        pdf.set_line_width(0.2)
+        pdf.set_fill_color(240, 244, 250)
+        pdf.rect(px + 0.3, py + 2.3, pw - 0.6, ph - 2.6, 'F')
+        pdf.set_xy(px + 3, py + 5)
+        pdf.set_font(PDF_FONT, "B", 10)
+        pdf.set_text_color(70, 90, 120)
+        pdf.cell(pw - 6, 5, clean_pdf_text(title_str), 0, 0)
+        pdf.set_xy(px + 3, py + 12)
+        pdf.set_font(PDF_FONT, "B", 16)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(pw - 6, 9, clean_pdf_text(value_str), 0, 0)
+        if sub_str:
+            pdf.set_xy(px + 3, py + 22)
+            pdf.set_font(PDF_FONT, "", 8)
+            pdf.set_text_color(100, 115, 135)
+            pdf.cell(pw - 6, 4, clean_pdf_text(sub_str), 0, 0)
+
+    # Overskrift
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("PLAN, UTBYGGING OG MOBILITET"), 0, 1)
+    pdf.ln(1)
+
+    cw, ch, gap = 51, 28, 3  # 3 kort a 51mm + 2 gaps a 3mm = 159mm (passer i 155mm textwidth + litt margin)
+    cx, cy = 25, pdf.get_y()
+
+    si = site_intelligence or {}
+    si_available = bool(si.get("available"))
+
+    # Plan-kort
+    plan = si.get("plan", {}) if si_available else {}
+    nearby_plan_n = plan.get("nearby_plan_count")
+    risk_score = plan.get("regulatory_risk_score")
+    if nearby_plan_n is not None:
+        plan_val = f"{nearby_plan_n}"
+        if risk_score is not None:
+            risk_color = _SCORE_GREEN if risk_score < 33 else _SCORE_AMBER if risk_score < 66 else _SCORE_RED
+            risk_label = "Lav risiko" if risk_score < 33 else "Moderat" if risk_score < 66 else "Høy risiko"
+            plan_sub = f"Planrisiko: {risk_label} ({risk_score:.0f}/100)"
+        else:
+            risk_color = _BUILTLY_BLUE
+            plan_sub = "planer i nærheten"
+        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", plan_val, plan_sub, risk_color)
+    else:
+        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", "Ingen data", "", _MUTED)
+
+    # Utbyggingsaktivitet
+    projects = si.get("projects", {}) if si_available else {}
+    proj_n = projects.get("nearby_count") or projects.get("feature_count")
+    if proj_n is not None:
+        proj_color = _BUILTLY_BLUE if proj_n == 0 else _SCORE_AMBER if proj_n < 5 else _SCORE_GREEN
+        proj_sub = "prosjekter i nærområdet"
+        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", f"{proj_n}", proj_sub, proj_color)
+    else:
+        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", "Ingen data", "", _MUTED)
+
+    # Mobilitet
+    transport = si.get("transport", {}) if si_available else {}
+    mob_score = transport.get("mobility_score")
+    if mob_score is not None:
+        transit_m = transport.get("nearest_transit_m")
+        mob_color = _SCORE_GREEN if mob_score >= 60 else _SCORE_AMBER if mob_score >= 40 else _SCORE_RED
+        mob_val = f"{mob_score:.0f}/100"
+        if transit_m is not None:
+            mob_sub = f"Kollektiv: {int(transit_m)} m"
+        else:
+            mob_sub = "Mobilitetsscore"
+        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", mob_val, mob_sub, mob_color)
+    else:
+        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", "Ingen data", "", _MUTED)
+
+    pdf.set_y(cy + ch + 5)
+
+    # --- Grunnforurensning-seksjon ---
+    contamination = geodata_bundle.get("grunnforurensning", [])
+
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("GRUNNFORURENSNING (MILJØDIREKTORATET)"), 0, 1)
+    pdf.ln(1)
+
+    # Status-boks
+    cnt = len(contamination)
+    if cnt == 0:
+        status_color = _SCORE_GREEN
+        status_text = "Ingen kjente lokaliteter innen 500 m radius"
+        status_sub = "Basert på Miljødirektoratets database — kilde: grfreg-api.miljodirektoratet.no"
+    elif cnt <= 2:
+        status_color = _SCORE_AMBER
+        status_text = f"{cnt} registrert lokalitet innen 500 m" if cnt == 1 else f"{cnt} registrerte lokaliteter innen 500 m"
+        status_sub = "Moderat oppmerksomhet anbefales — vurder miljøteknisk undersøkelse"
+    else:
+        status_color = _SCORE_RED
+        status_text = f"{cnt} registrerte lokaliteter innen 500 m"
+        status_sub = "Forhøyet oppmerksomhet — miljøteknisk grunnundersøkelse bør vurderes"
+
+    y_box = pdf.get_y()
+    pdf.set_fill_color(*status_color)
+    pdf.rect(25, y_box, 3, 14, 'F')  # Tykk fargestripe venstre
+    pdf.set_fill_color(247, 249, 252)
+    pdf.set_draw_color(*_DIVIDER)
+    pdf.set_line_width(0.3)
+    pdf.rect(28, y_box, 157, 14, 'DF')
+    pdf.set_line_width(0.2)
+    pdf.set_xy(31, y_box + 2)
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(152, 5, clean_pdf_text(status_text), 0, 1)
+    pdf.set_xy(31, y_box + 8)
+    pdf.set_font(PDF_FONT, "", 9)
+    pdf.set_text_color(100, 115, 135)
+    pdf.cell(152, 4, clean_pdf_text(status_sub), 0, 1)
+    pdf.set_y(y_box + 16)
+
+    # Tabell med de nærmeste lokalitetene hvis finnes
+    if contamination:
+        pdf.ln(2)
+        headers = ["Lokalitet", "Type / kategori", "Status", "Avstand"]
+        widths = [62, 43, 30, 20]
+        rows = []
+        for s in contamination[:6]:
+            navn = (s.get("navn") or "Ukjent")[:38]
+            typ = (s.get("type") or "—")[:28]
+            status = (s.get("status") or "—")[:18]
+            dist = f"{int(s['distance_m'])} m" if s.get("distance_m") is not None else "—"
+            rows.append([navn, typ, status, dist])
+        add_pdf_table(pdf, headers, rows, widths)
+        if len(contamination) > 6:
+            pdf.ln(1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "I", 8)
+            pdf.set_text_color(*_MUTED)
+            pdf.cell(0, 4, clean_pdf_text(f"... og {len(contamination) - 6} ytterligere lokalitet(er) i omrdet."), 0, 1)
+
+    # --- Øvrige aktsomhetsdata (radon, flom, kvikkleire, skred) som kompakt liste ---
+    pdf.ln(3)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("AKTSOMHETSKART — TILGJENGELIG DATA"), 0, 1)
+    pdf.ln(1)
+
+    # Liten status-liste (4 linjer)
+    aktsomhet = [
+        ("NGU Radon aktsomhetskart", geodata_bundle.get("radon") is not None),
+        ("NVE Flom aktsomhetsområde", geodata_bundle.get("flom") is not None),
+        ("NVE Kvikkleire faresoner", geodata_bundle.get("kvikkleire") is not None),
+        ("NVE Skred aktsomhet (snø/jord)", geodata_bundle.get("skred") is not None),
+    ]
+    pdf.set_font(PDF_FONT, "", 9)
+    for label, hit in aktsomhet:
+        pdf.set_x(25)
+        pdf.set_fill_color(*(_SCORE_GREEN if hit else _MUTED))
+        pdf.rect(25, pdf.get_y() + 1.5, 2, 2, 'F')
+        pdf.set_x(29)
+        pdf.set_text_color(*_BODY_BLACK)
+        status_t = "data tilgjengelig" if hit else "ingen data / utenfor kartlagt område"
+        pdf.cell(0, 5, clean_pdf_text(f"{label}  —  {status_t}"), 0, 1)
+    pdf.ln(1)
+    pdf.set_font(PDF_FONT, "I", 8)
+    pdf.set_text_color(*_MUTED)
+    pdf.set_x(25)
+    pdf.multi_cell(
+        155, 4,
+        clean_pdf_text(
+            "Aktsomhetskart er veiledende. Ved utbygging må fagfolk (RIG, miljøgeolog) "
+            "verifisere forholdene i felt og i relevante tilleggsregistre (f.eks. NGU GRANADA for grunnvann)."
+        )
+    )
+
+    # ============================================================
+    # SIDE B: HISTORISK FLYFOTO OG TIDLIGERE BRUK
+    # ============================================================
+    hist_img = geodata_bundle.get("historisk")
+    hist_year = geodata_bundle.get("historisk_year")
+    hist_src = geodata_bundle.get("historisk_source", "")
+
+    if hist_img is None:
+        # Ingen historisk foto — skipp side B, men skriv en liten note på side A
+        pdf.ln(3)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.multi_cell(
+            155, 4.5,
+            clean_pdf_text(
+                "Merk: Historisk flyfoto var ikke automatisk tilgjengelig for denne tomten. "
+                "Manuell oppslag i Norge i Bilder eller kommunearkiv anbefales som del av "
+                "aktsom historisk kartlegging (forurensningsforskriften kap. 2)."
+            )
+        )
+        return
+
+    pdf.add_page()
+    title_year = f"HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK ({hist_year})" if hist_year else "HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK"
+    pdf.section_title(title_year, 16)
+
+    intro = (
+        "Historisk flyfoto er sentralt i aktsom historisk kartlegging av tomten. "
+        "Det gir førstehånds indikasjon på tidligere arealbruk — industri, landbruk, "
+        "deponi, fylling eller andre potensielt forurensende aktiviteter — som igjen "
+        "avgjør behovet for miljøteknisk grunnundersøkelse i henhold til "
+        "forurensningsforskriften kapittel 2."
+    )
+    pdf.body_text(intro)
+    pdf.ln(2)
+
+    # Kildemerking
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "I", 8)
+    pdf.set_text_color(*_MUTED)
+    src_label = f"Kilde: {hist_src}" + (f" · År: {hist_year}" if hist_year else "")
+    pdf.cell(0, 4, clean_pdf_text(src_label), 0, 1)
+    pdf.ln(1)
+
+    # Historisk bilde sentrert (150mm bred for å gi plass til analyse under)
+    img_w = 150
+    img_h = 90  # Fast aspekt — ortofoto er ofte ~kvadratisk, men vi padder
+    x_img = (210 - img_w) / 2
+    try:
+        tmp_path = _pil_to_temp_jpg(hist_img, max_w=1600)
+        y_before = pdf.get_y()
+        # Beregn faktisk høyde basert på originalbildets aspekt
+        orig_w, orig_h = hist_img.size
+        actual_h = img_w * (orig_h / orig_w)
+        if actual_h > 110:  # Maks 110mm
+            actual_h = 110
+            img_w = actual_h * (orig_w / orig_h)
+            x_img = (210 - img_w) / 2
+        # Lys ramme rundt bildet
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.set_line_width(0.4)
+        pdf.rect(x_img - 1, y_before - 1, img_w + 2, actual_h + 2, 'D')
+        pdf.set_line_width(0.2)
+        pdf.image(tmp_path, x=x_img, y=y_before, w=img_w, h=actual_h)
+        pdf.set_y(y_before + actual_h + 4)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    except Exception as exc:
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_SCORE_RED)
+        pdf.cell(0, 5, clean_pdf_text(f"Bilde kunne ikke renderes: {str(exc)[:60]}"), 0, 1)
+
+    # --- AI-analyse-seksjon ---
+    if historical_analysis and any(historical_analysis.get(k) for k in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak")):
+        # Risiko-badge øverst
+        risk = historical_analysis.get("risiko_niva", "Ukjent")
+        risk_colors = {
+            "Lav": _SCORE_GREEN,
+            "Moderat": _SCORE_AMBER,
+            "Høy": _SCORE_RED,
+            "Ukjent": _MUTED,
+        }
+        rc = risk_colors.get(risk, _MUTED)
+
+        pdf.ln(2)
+        y_badge = pdf.get_y()
+        pdf.set_fill_color(*rc)
+        pdf.rect(25, y_badge, 4, 10, 'F')
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.rect(29, y_badge, 156, 10, 'DF')
+        pdf.set_xy(32, y_badge + 1)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(100, 115, 135)
+        pdf.cell(40, 4, clean_pdf_text("FORURENSNINGSRISIKO:"), 0, 0)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*rc)
+        pdf.cell(30, 4, clean_pdf_text(risk.upper()), 0, 0)
+        pdf.set_font(PDF_FONT, "I", 8)
+        pdf.set_text_color(*_MUTED)
+        pdf.set_xy(32, y_badge + 5.5)
+        pdf.cell(150, 4, clean_pdf_text("AI-basert første screening — fagteknisk vurdering kreves"), 0, 0)
+        pdf.set_y(y_badge + 13)
+
+        def _analysis_block(title: str, body: str) -> None:
+            if not body:
+                return
+            pdf.check_space(20)
+            pdf.ln(1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "B", 10)
+            pdf.set_text_color(*_BUILTLY_BLUE)
+            pdf.cell(0, 5, clean_pdf_text(title), 0, 1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "", 9)
+            pdf.set_text_color(*_BODY_BLACK)
+            pdf.multi_cell(155, 4.8, ironclad_text_formatter(body))
+            pdf.ln(1)
+
+        _analysis_block("TIDLIGERE AREALBRUK", historical_analysis.get("tidligere_bruk", ""))
+        _analysis_block("VURDERT FORURENSNINGSRISIKO", historical_analysis.get("forurensningsrisiko", ""))
+        _analysis_block("ANBEFALTE TILTAK", historical_analysis.get("anbefalte_tiltak", ""))
+    else:
+        # Ingen AI-analyse tilgjengelig — vis bare bildet med en note
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.multi_cell(
+            155, 4.5,
+            clean_pdf_text(
+                "AI-basert analyse av historisk flyfoto er ikke tilgjengelig i denne rapporten "
+                "(krever ANTHROPIC_API_KEY). Manuell fagvurdering av tidligere arealbruk anbefales "
+                "som del av aktsom historisk kartlegging."
+            )
+        )
+
+
 def create_full_report_pdf(
     name: str,
     client: str,
@@ -6684,9 +7511,12 @@ def create_full_report_pdf(
     plan_view_analyses: Optional[List[str]] = None,
     cover_image: Optional[Image.Image] = None,
     solar_3d_snapshots: Optional[List[Image.Image]] = None,
+    geodata_bundle: Optional[Dict[str, Any]] = None,
+    historical_analysis: Optional[Dict[str, str]] = None,
+    site_intelligence: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
-    McKinsey-quality PDF v14:
+    McKinsey-quality PDF v15:
       Page 1:  Cover (med eventuelt AI-render)
       Page 2:  Table of Contents
       Page 3:  Sammendrag (KPI-kort vektor)
@@ -6695,7 +7525,11 @@ def create_full_report_pdf(
       Page 6+: Volumskisser (top 3)
       Page N:  Planvisning og volumkontroll (med AI-analyse)
       Page N:  Sol/skygge individuelle snapshots
-      Page N+: Rapport tekst
+      Page N+1: STEDSKONTEKST OG GEODATA (NY v15) — plan/projects/transport
+                + grunnforurensning + aktsomhetskart-status
+      Page N+2: HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK (NY v15) — med
+                AI-analyse (tidligere bruk, forurensningsrisiko, tiltak)
+      Page N+3: Rapport tekst (pkt. 1–10 narrativ)
     """
     pdf = BuiltlyProPDF()
     # _register_fonts returnerer faktisk brukbar font. Ved 2. gangs kall
@@ -6812,6 +7646,12 @@ def create_full_report_pdf(
     if solar_grid_image is not None:
         toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
         toc_idx += 1
+    if geodata_bundle and geodata_bundle.get("available"):
+        toc_items.append((f"{toc_idx}.", "Stedskontekst og geodata"))
+        toc_idx += 1
+        if geodata_bundle.get("historisk") is not None:
+            toc_items.append((f"{toc_idx}.", "Historisk flyfoto og tidligere arealbruk"))
+            toc_idx += 1
 
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
@@ -7442,6 +8282,22 @@ def create_full_report_pdf(
 
             except Exception:
                 pass
+
+    # ================================================================
+    # STEDSKONTEKST OG GEODATA + HISTORISK FLYFOTO (v15 - plassert etter sol/skygge)
+    # Dette gir leseflyten: nøkkeltall → volumer → planvisning → sol/skygge →
+    # stedskontekst → narrativ oppsummering (pkt. 1–10).
+    # ================================================================
+    try:
+        build_geo_context_pages(
+            pdf,
+            geodata_bundle=geodata_bundle,
+            historical_analysis=historical_analysis,
+            site_intelligence=site_intelligence,
+        )
+    except Exception as _geo_exc:
+        # Skip geo-sider hvis noe feiler — ikke la det bryte hele PDF-en
+        pass
 
     # ================================================================
     # RAPPORT TEKST (v13: tabeller for ALTERNATIVER)
@@ -8408,6 +9264,37 @@ if run_analysis:
             except Exception as exc:
                 environment_data = {"available": False, "error": str(exc)[:120]}
 
+    # --- GEODATA-BUNDLE FOR PDF (v15): historisk flyfoto + grunnforurensning + aktsomhetskart ---
+    geodata_bundle: Dict[str, Any] = {"available": False}
+    historical_analysis: Optional[Dict[str, str]] = None
+    if site_polygon_input is not None:
+        with st.spinner("Henter historisk flyfoto og grunnforurensningsdata..."):
+            try:
+                geodata_bundle = build_geo_context_bundle(
+                    site_polygon=geodata_context.get("site_polygon"),
+                    coords=geodata_context.get("coords"),
+                    gdo_client=gdo if geodata_token_ok else None,
+                    radius_m=300.0,
+                )
+            except Exception as exc:
+                geodata_bundle = {"available": False, "error": str(exc)[:120]}
+        # SSOT: lagre i session_state så "Oppdater PDF"-knapper kan gjenbruke uten ny fetch
+        st.session_state["geodata_bundle"] = geodata_bundle
+
+        if geodata_bundle.get("historisk") is not None and ANTHROPIC_API_KEY:
+            with st.spinner("AI-analyse av historisk flyfoto (tidligere bruk + forurensningsrisiko)..."):
+                try:
+                    addr_hint = f"{pd_state.get('adresse', '')} {pd_state.get('kommune', '')}".strip()
+                    historical_analysis = analyze_historical_aerial_with_claude(
+                        historical_image=geodata_bundle["historisk"],
+                        year=geodata_bundle.get("historisk_year"),
+                        contamination_sites=geodata_bundle.get("grunnforurensning", []),
+                        address_hint=addr_hint,
+                    )
+                except Exception:
+                    historical_analysis = None
+            st.session_state["historical_analysis"] = historical_analysis
+
     option_images = [render_plan_diagram(site, option) for option in options]
 
     # Auto-generer planvisninger som 3D-scene fallback (v13: per-option error handling)
@@ -8417,7 +9304,13 @@ if run_analysis:
             auto_scene_images.append(render_plan_view(site, opt))
         except Exception:
             pass  # Skip individual failures, keep other plan views
-    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
+    deterministic_report = build_deterministic_report(
+        site, options, parsed,
+        has_visual_input=bool(images_for_context),
+        environment_data=environment_data,
+        geodata_bundle=geodata_bundle,
+        historical_analysis=historical_analysis,
+    )
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
         # Rekke er slått sammen med Lamell — erstatt i output
@@ -8479,6 +9372,40 @@ if run_analysis:
                         "lawson_class": wc_d.get("lawson_class"),
                         "overall": wc_d.get("overall"),
                     }
+            # Geo-bundle sammendrag for AI (v15 — gir AI-en grunnlag til å
+            # kommentere forurensningsrisiko i pkt. 4 og pkt. 9)
+            geo_summary = {}
+            if geodata_bundle and geodata_bundle.get("available"):
+                contamination = geodata_bundle.get("grunnforurensning", []) or []
+                geo_summary = {
+                    "available": True,
+                    "historisk_flyfoto_aar": geodata_bundle.get("historisk_year"),
+                    "historisk_flyfoto_kilde": geodata_bundle.get("historisk_source", ""),
+                    "grunnforurensning_antall_innen_500m": len(contamination),
+                    "grunnforurensning_top_lokaliteter": [
+                        {
+                            "navn": s.get("navn"),
+                            "type": s.get("type"),
+                            "status": s.get("status"),
+                            "avstand_m": int(s["distance_m"]) if s.get("distance_m") is not None else None,
+                        }
+                        for s in contamination[:5]
+                    ],
+                    "aktsomhetskart_tilgjengelig": {
+                        "radon": geodata_bundle.get("radon") is not None,
+                        "flom": geodata_bundle.get("flom") is not None,
+                        "kvikkleire": geodata_bundle.get("kvikkleire") is not None,
+                        "skred": geodata_bundle.get("skred") is not None,
+                    },
+                }
+                if historical_analysis:
+                    geo_summary["ai_historisk_analyse"] = {
+                        "risiko_niva": historical_analysis.get("risiko_niva"),
+                        "tidligere_bruk": historical_analysis.get("tidligere_bruk"),
+                        "forurensningsrisiko": historical_analysis.get("forurensningsrisiko"),
+                        "anbefalte_tiltak": historical_analysis.get("anbefalte_tiltak"),
+                    }
+
             analysis_payload = {
                 "site": asdict(site),
                 "alternatives": [asdict(option) | {"geometry": None} for option in options],
@@ -8490,6 +9417,7 @@ if run_analysis:
                 "terrain_meta": terrain_meta,
                 "site_intelligence": site_intelligence_bundle,
                 "environment": env_summary,
+                "geo_context": geo_summary,
             }
             _report_system = (
                 "Du er senior arkitekt og utviklingsrådgiver. Du får et ferdig, deterministisk analysegrunnlag i JSON. "
@@ -8519,8 +9447,12 @@ KRAV:
 - Leilighetsmiks skal beskrives som kapasitetsestimat.
 - Ikke skriv om noe du ikke vet.
 - OBLIGATORISK: Hvis støydata finnes i JSON (environment.noise), SKAL du kommentere støynivå i dB, kildetype og konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
-- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger og sol/skygge-diagrammer.
-- Skriv sammenhengende norsk tekst, ikke bullet points. Bruk riktig norsk (æ, ø, å).
+- OBLIGATORISK — GEO-DATA: Hvis geo_context.available = true i JSON, SKAL du:
+  * I pkt. 4 (TOMT OG KONTEKST): Nevne kort at det er gjennomført automatisk uttrekk av stedskontekst- og geodata (Miljødirektoratet, NGU, NVE), og at detaljert gjennomgang finnes i dedikert seksjon "Stedskontekst og geodata" etter sol/skygge-analysen. Hvis grunnforurensning_antall_innen_500m > 0, nevn tallet og flagg at miljøteknisk undersøkelse bør vurderes. Hvis ai_historisk_analyse.risiko_niva finnes (Lav/Moderat/Høy), nevn samlet forurensningsrisiko-nivå i 1 setning.
+  * I pkt. 9 (RISIKO OG AVKLARINGSPUNKTER): Lag et eget risikopunkt om grunnforurensning med antall registrerte lokaliteter og tiltaksanbefaling. Hvis ai_historisk_analyse finnes, nevn AI-screening av historisk flyfoto og henvis til den dedikerte geo-seksjonen for full vurdering. Ikke reproduser hele AI-analyseteksten — oppsummer kort (1-2 setninger per punkt).
+  * Ikke dupliser innholdet fra den dedikerte geo-seksjonen — kort henvisning er tilstrekkelig i den narrative teksten.
+- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger, sol/skygge-diagrammer og (hvis tilgjengelig) historisk flyfoto med AI-vurdering.
+- Skriv sammenhengende norsk tekst, ikke bullet points (untatt i pkt. 9 som kan være bullets). Bruk riktig norsk (æ, ø, å).
 """
             ai_report = _call_claude_text(_report_system, _report_user, max_tokens=6000)
             if ai_report:
@@ -8561,6 +9493,9 @@ KRAV:
             plan_view_analyses=pv_analyses or None,
             cover_image=st.session_state.get("stability_render_image"),
             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+            geodata_bundle=st.session_state.get("geodata_bundle") or geodata_bundle,
+            historical_analysis=st.session_state.get("historical_analysis") or historical_analysis,
+            site_intelligence=site_intelligence_bundle,
         )
     except Exception as pdf_exc:
         st.warning(f"PDF-generering feilet: {pdf_exc}")
@@ -9720,6 +10655,8 @@ render();
                                 site_obj, motor_options, {}, has_visual_input=True,
                                 manual_override=manual_override_data,
                                 environment_data=result.get("environment"),
+                                geodata_bundle=st.session_state.get("geodata_bundle"),
+                                historical_analysis=st.session_state.get("historical_analysis"),
                             )
                         except Exception:
                             updated_report = result.get("report_text", "")
@@ -9748,6 +10685,9 @@ render();
                             solar_grid_image=_solar_grid,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
@@ -9952,6 +10892,9 @@ render();
                             plan_view_analyses=pv_analyses_3d or None,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -10099,6 +11042,9 @@ render();
                             plan_view_analyses=pv_analyses_upload or None,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -10325,6 +11271,9 @@ render();
                         plan_view_analyses=_cached_pv,
                         cover_image=_cached_cover,
                         solar_3d_snapshots=st.session_state["solar_3d_snapshots"],
+                        geodata_bundle=st.session_state.get("geodata_bundle"),
+                        historical_analysis=st.session_state.get("historical_analysis"),
+                        site_intelligence=result.get("site_intelligence"),
                     )
                     st.session_state.generated_ark_pdf = new_pdf_bytes
                     _msg = "✓ PDF oppdatert med 3D-sol/skygge-bilder"
@@ -10392,6 +11341,9 @@ render();
                             plan_view_analyses=pv_analyses_sr or None,
                             cover_image=rendered,
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_sr
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
