@@ -178,10 +178,14 @@ def clean_pdf_text(text: Any) -> str:
     text = text.replace("\u2013", "-").replace("\u2014", "-")
     text = text.replace("\u201c", '"').replace("\u201d", '"')
     text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u2026", "...").replace("\u2022", "*")
+    text = text.replace("\u2026", "...")
+    # v16.1: NB: IKKE konverter \u2022 (•) til * globalt. PDF-rendereren bruker
+    # \u2022 som bullet-marker for DejaVu og forventer at tegnet overlever.
+    # Tidligere konverterte vi alltid til *, som ga rapporter med "*"-bullets.
     if HAS_DEJAVU:
         return text
-    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
+    # Fallback: latin-1 for Helvetica — \u2022 finnes ikke i latin-1, må konverteres
+    text = text.replace("\u2022", "*")
     text = text.replace("\u00b2", "2").replace("\u00b3", "3")
     return text.encode("latin-1", "replace").decode("latin-1")
 
@@ -1183,11 +1187,20 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
 
         # ADAPTIV BUFFER: reduser buffer hvis den spiser for mye av smal dimensjon
         major, minor, _ = minimum_rotated_dims(site_polygon)
-        effective_setback = polygon_setback_m
-        if minor > 0 and polygon_setback_m > 0:
+        # v16.1: Effektiv buffer er maksverdien av polygonbuffer OG byggegrensene
+        # (front/bak/side). Tidligere brukte vi bare polygonbuffer, som ga buggen at
+        # når polygonbuffer=0 ble hele tomten brukt som byggefelt — byggegrensene
+        # ble da aldri applisert på site_polygon.
+        max_legal_setback = max(
+            float(getattr(site, "front_setback_m", 0.0) or 0.0),
+            float(getattr(site, "rear_setback_m", 0.0) or 0.0),
+            float(getattr(site, "side_setback_m", 0.0) or 0.0),
+        )
+        effective_setback = max(float(polygon_setback_m), max_legal_setback)
+        if minor > 0 and effective_setback > 0:
             # Buffer paa begge sider = 2x setback. Behold maks 35% av smal side.
             max_allowed = minor * 0.175  # 17.5% per side = 35% totalt
-            effective_setback = min(polygon_setback_m, max(1.5, max_allowed))
+            effective_setback = min(effective_setback, max(1.5, max_allowed))
 
         buildable_polygon = site_polygon.buffer(-effective_setback) if effective_setback > 0 else site_polygon
         # Behold hele geometrien, ikke bare største del
@@ -8045,6 +8058,16 @@ def create_full_report_pdf(
         if line.startswith("# ") and narrativ_toc_count < MAX_NARRATIV_TOC_ITEMS:
             # Strip "# " og eventuell "#" og mellomrom
             title = line.lstrip("#").strip()
+            # Strip nummerprefiks: "1. OPPSUMMERING" → "OPPSUMMERING"
+            # (TOC-indeks er allerede toc_idx — vi vil ikke ha dobbel nummerering)
+            title = re.sub(r"^\d+\.\s*", "", title).strip()
+            # Title case: OPPSUMMERING → Oppsummering (mindre ropende i TOC)
+            if title.isupper() and len(title) > 3:
+                # Spesialbehandling: behold akronymer og rom-etter-slash
+                # Enkleste: bare første bokstav stor, resten små
+                title = title.capitalize()
+                # Men behold store bokstaver etter "/" og "-" (f.eks. "Risiko og avklaringspunkter")
+                # capitalize() gjør dette naturlig nok
             # Filtrer bort støy-headings: for korte (<3 tegn) eller rene tall
             if len(title) < 3 or title.isdigit():
                 continue
@@ -8776,13 +8799,18 @@ def create_full_report_pdf(
             pdf.section_title(line.replace("#", "").strip(), 14)
         elif line.startswith("##"):
             pdf.subtitle(line.replace("#", "").strip())
-        elif line.startswith("- "):
+        elif re.match(r"^[-\*•]\s+", line):
+            # Aksepterer både "- ", "* " og "• " som bullet-marker (safety net —
+            # skal normaliseres til "- " av _normalize_bullets, men dette sikrer
+            # konsistent rendering selv om AI-rapport slipper gjennom med *)
             pdf.check_space(7)
             pdf.set_x(30)
             pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(*_BODY_BLACK)
             bullet = "\u2022 " if HAS_DEJAVU else "* "
-            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + line[2:]))
+            # Strip bullet-marker (ett tegn + minst ett mellomrom) før rendering
+            content = re.sub(r"^[-\*•]\s+", "", line)
+            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + content))
         else:
             pdf.check_space(7)
             pdf.body_text(line)
@@ -11781,8 +11809,11 @@ render();
         st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
 
     # Vis cachet render fra session (uten duplikat ved knapp-klikk)
-    if "stability_render_image" in st.session_state:
-        st.image(st.session_state["stability_render_image"], caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
+    # v16.1: Eksplisitt not-None sjekk — 'in session_state' alene er ikke nok
+    # siden verdien kan være None fra en feilet Gemini-kjøring tidligere.
+    _cached_render = st.session_state.get("stability_render_image")
+    if _cached_render is not None:
+        st.image(_cached_render, caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
 
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     pdf_data = st.session_state.get("generated_ark_pdf")
