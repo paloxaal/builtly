@@ -9991,6 +9991,7 @@ KRAV:
             report_name=f"Mulighetsstudie — {p_name}",
             module="Mulighetsstudie",
             file_path=st.session_state.generated_ark_filename,
+            pdf_bytes=pdf_bytes,
         )
     except ImportError:
         pass  # Frontpage not available (standalone run)
@@ -11137,6 +11138,21 @@ render();
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
+
+                        # Oppdater til brukerens rapport-dashboard
+                        try:
+                            from builtly_auth import save_report as _save_report_regen
+                            _save_report_regen(
+                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                                module="Mulighetsstudie",
+                                file_path=st.session_state.generated_ark_filename,
+                                pdf_bytes=new_pdf_bytes,
+                            )
+                        except ImportError:
+                            pass
+                        except Exception:
+                            pass
                     except Exception:
                         pass  # Behold gammel PDF hvis regen feiler
 
@@ -11494,6 +11510,22 @@ render();
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
+
+                        # Oppdater til brukerens rapport-dashboard
+                        try:
+                            from builtly_auth import save_report as _save_report_3d
+                            _save_report_3d(
+                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                                module="Mulighetsstudie",
+                                file_path=st.session_state.generated_ark_filename,
+                                pdf_bytes=new_pdf_bytes,
+                            )
+                        except ImportError:
+                            pass
+                        except Exception:
+                            pass
+
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Feil ved PDF-oppdatering: {exc}")
@@ -11726,6 +11758,22 @@ render();
                     if _cached_cover is not None:
                         _msg += " (fotorealistisk forside beholdt)"
                     st.success(_msg)
+
+                    # Oppdater til brukerens rapport-dashboard
+                    try:
+                        from builtly_auth import save_report as _save_report_solar
+                        _save_report_solar(
+                            project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                            report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                            module="Mulighetsstudie",
+                            file_path=st.session_state.get("generated_ark_filename", ""),
+                            pdf_bytes=new_pdf_bytes,
+                        )
+                    except ImportError:
+                        pass
+                    except Exception:
+                        pass
+
                     st.rerun()
                 except Exception as e:
                     st.error(f"Kunne ikke regenerere PDF: {e}")
