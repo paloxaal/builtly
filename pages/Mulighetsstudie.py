@@ -89,6 +89,18 @@ except ImportError:
     HAS_AI_PLANNER = False
     ai_site_planner = None  # type: ignore[assignment]
 
+# Masterplan-motor (ny 6-pass arkitektur - erstatter A/B/C-alternativflyt)
+try:
+    import masterplan_engine
+    import masterplan_integration
+    from masterplan_types import PhasingConfig
+    HAS_MASTERPLAN = True
+except Exception:
+    masterplan_engine = None  # type: ignore
+    masterplan_integration = None  # type: ignore
+    PhasingConfig = None  # type: ignore
+    HAS_MASTERPLAN = False
+
 
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(
@@ -178,15 +190,10 @@ def clean_pdf_text(text: Any) -> str:
     text = text.replace("\u2013", "-").replace("\u2014", "-")
     text = text.replace("\u201c", '"').replace("\u201d", '"')
     text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u2026", "...")
-    # v16.2: NB: IKKE konverter \u2022 (•) til * globalt. PDF-rendereren bruker
-    # \u2022 som bullet-marker for DejaVu og forventer at tegnet overlever.
-    # Men vi MÅ sjekke PDF_FONT (faktisk aktivt font), ikke HAS_DEJAVU (fontfilen
-    # på disk). Registrering kan feile selv om filen finnes.
-    if PDF_FONT == "DejaVu":
+    text = text.replace("\u2026", "...").replace("\u2022", "*")
+    if HAS_DEJAVU:
         return text
-    # Fallback: latin-1 for Helvetica — \u2022 finnes ikke i latin-1, må konverteres
-    text = text.replace("\u2022", "*")
+    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
     text = text.replace("\u00b2", "2").replace("\u00b3", "3")
     return text.encode("latin-1", "replace").decode("latin-1")
 
@@ -258,6 +265,14 @@ def generer_arkitekt_render(
     erstatte de fargede boksene med en realistisk bygning mens ortofotoet bevares.
 
     api_key: GOOGLE_API_KEY (samme som appen bruker for Gemini ellers).
+
+    Støtter to scene-moduser:
+      - Klassisk A/B/C: ett grønt volum (eller flere grønne) som alle utgjør ett prosjekt
+      - Masterplan: volumer fargekodet etter byggetrinn (lysblå, lilla, grønn, gul, rød, ...)
+        — alle fargede (ikke-grå) volumer er del av utbyggingen og skal materialiseres
+        sammen, men de ulike fargene er kun DIAGRAM-kontekst (byggetrinn-identifikasjon).
+        Den fotorealistiske renderen skal vise bygningene i realistiske materialvalg,
+        ikke i fase-fargene.
     """
     if not api_key:
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
@@ -280,31 +295,176 @@ def generer_arkitekt_render(
         "Tårn": "high-rise residential tower (tårn)",
         "Rekke": "row of modern townhouses (rekkehus)",
         "Podium + Tårn": "residential tower on a commercial podium",
+        "Masterplan": "residential development with multiple buildings across phases",
     }
     typology_eng = typologi_map.get(option.typology, "residential apartment building")
 
     floors = int(getattr(option, "floors", 0) or 0)
     height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
 
-    # 3. Presis prompt — eksplisitt om at KUN det grønne volumet transformeres,
-    # og at de gjennomsiktige grå nabobygg-boksene ikke skal materialiseres.
-    # Dette var tidligere et problem: Gemini tolket noen av nabobyggene som
-    # del av utbyggingen og rendret dem som beboelseshus også.
-    prompt = (
-        f"Transform ONLY the solid green volume(s) in this 3D scene into a "
-        f"photorealistic {floors}-storey Norwegian apartment building with a flat roof. "
-        f"Keep the green volume's exact footprint, position, shape, and height — "
-        f"do not move it, do not change its outline, do not split it into multiple buildings. "
-        f"\n\n"
-        f"CRITICAL: The transparent/ghostly grey boxes in the scene are EXISTING neighbouring "
-        f"buildings shown as context only. Do NOT turn them into new apartment buildings, "
-        f"do NOT materialise them as part of the development. Leave them exactly as they "
-        f"appear in the aerial photo beneath — the real existing houses, garages, "
-        f"industrial sheds and roads in the ortofoto should be completely unchanged. "
-        f"\n\n"
-        f"Only the green volume becomes the new building. Everything else (ortofoto, "
-        f"existing buildings, terrain, vegetation, roads) stays identical to the input image."
+    # 3. Deteksjon: er dette en masterplan-scene med fargekodede byggetrinn?
+    # Sjekk geometry for masterplan-spesifikke felter
+    geometry = getattr(option, "geometry", {}) or {}
+    is_masterplan = bool(
+        geometry.get("is_total_plan")
+        or geometry.get("phase_number") is not None
+        or geometry.get("masterplan_ref") is not None
+        or option.typology == "Masterplan"
     )
+
+    # 4. Bygg kontekst-info om byggetrinn (kun for masterplan)
+    phase_context = ""
+    typology_mix_text = ""
+    if is_masterplan:
+        mp_ref = geometry.get("masterplan_ref")
+        if mp_ref is not None and getattr(mp_ref, "building_phases", None):
+            n_phases = len(mp_ref.building_phases)
+            # Sjekk om det er næring eller barnehage i prosjektet
+            has_naering = any(
+                "naering" in (p.programs_included or [])
+                for p in mp_ref.building_phases
+            )
+            has_barnehage = any(
+                "barnehage" in (p.programs_included or [])
+                for p in mp_ref.building_phases
+            )
+
+            # Analyser typologi-miks for å gi Gemini presise materialanvisninger
+            typ_set = set()
+            try:
+                for v in getattr(mp_ref, "volumes", []):
+                    if getattr(v, "typology", None):
+                        typ_set.add(v.typology)
+            except Exception:
+                pass
+
+            if len(typ_set) > 1:
+                # Flere typologier — gi Gemini visuell differensiering mellom dem
+                typ_descriptions = []
+                if "Rekke" in typ_set:
+                    typ_descriptions.append(
+                        "LOWER LONG NARROW volumes (2-3 storeys) = row houses (rekkehus): "
+                        "warm wood cladding dominant, pitched or low-pitched roofs, small private entrances"
+                    )
+                if "Lamell" in typ_set:
+                    typ_descriptions.append(
+                        "LONG RECTANGULAR volumes (3-6 storeys) = apartment lamellas: "
+                        "light plaster facades with wood accents, continuous balconies along one side, flat roofs"
+                    )
+                if "Punkthus" in typ_set:
+                    typ_descriptions.append(
+                        "SQUARE/COMPACT volumes (4-7+ storeys) = point blocks (punkthus): "
+                        "more uniform facades on all four sides, balconies on multiple corners, flat roofs"
+                    )
+                if "Karré" in typ_set:
+                    typ_descriptions.append(
+                        "LARGE SQUARE/RECTANGULAR volumes with internal courtyards = perimeter blocks (karré): "
+                        "continuous facade along the outer edge, uniform window rhythm, flat roofs"
+                    )
+                if "Tårn" in typ_set:
+                    typ_descriptions.append(
+                        "TALL SLENDER volumes (8+ storeys) = residential towers: "
+                        "darker or metallic cladding, articulated balconies, flat roof with parapet"
+                    )
+                if typ_descriptions:
+                    typology_mix_text = (
+                        "\n\nTYPOLOGY MIX: This plan uses multiple building types. Read each "
+                        "volume's shape and height to choose the right architectural expression:\n- "
+                        + "\n- ".join(typ_descriptions)
+                    )
+
+            extras = []
+            if has_naering:
+                extras.append(
+                    "One or more GROUND-FLOOR COMMERCIAL UNITS (næringslokaler): these show "
+                    "LARGER GLAZED STOREFRONTS with floor-to-ceiling windows, a signboard zone "
+                    "above the entrance, and often a neutral stone/concrete base. The ground "
+                    "floor is visually distinct from the residential floors above"
+                )
+            if has_barnehage:
+                extras.append(
+                    "A KINDERGARTEN (barnehage) in the ground floor of a southern volume: "
+                    "child-scaled colourful windows, a visible fenced outdoor play area with "
+                    "grass, sandbox and small play equipment south of the building, wood or "
+                    "bright plaster facade on the kindergarten portion"
+                )
+            extras_text = ""
+            if extras:
+                extras_text = (
+                    "\n\nMIXED-USE PROGRAM: In addition to residential units, the development includes:\n- "
+                    + "\n- ".join(extras)
+                )
+
+            phase_context = (
+                f"\n\nMASTERPLAN CONTEXT: This is a phased development with {n_phases} "
+                f"building phases. The DIFFERENT COLOURS on the solid volumes in the scene "
+                f"(light blue, purple, green, yellow, red, orange, pink, cyan, lime, etc.) "
+                f"are NOT intended facade colours — they are a diagram convention identifying "
+                f"which phase each volume belongs to (Phase 1, 2, 3, ...). "
+                f"In the photorealistic render, ALL coloured volumes must be transformed "
+                f"into a COHERENT, ARCHITECTURALLY UNIFIED Norwegian residential development. "
+                f"DO NOT reproduce the phase colours on the facades. "
+                f"The palette should be REALISTIC NORWEGIAN MATERIALS: light plastered "
+                f"facades in warm white/beige/cream, wood cladding accents in pine or "
+                f"heat-treated spruce, dark metal roof details in anthracite or dark brown, "
+                f"balconies with glass or wood railings. Use SUBTLE VARIATIONS between "
+                f"buildings (different wood tones, plaster colour shifts) to avoid a monotonous look."
+                + typology_mix_text
+                + extras_text
+            )
+
+    # 5. Presis prompt — håndterer både klassisk grønn-volum og masterplan-fargekoding
+    if is_masterplan:
+        prompt = (
+            f"Transform ALL solid-coloured volumes (any non-grey colour: light blue, "
+            f"purple, green, yellow, red, orange, pink, lime, cyan, magenta, etc.) in "
+            f"this 3D scene into photorealistic Norwegian apartment buildings. "
+            f"The scene shows a master plan for a residential development.\n\n"
+            f"RULE 1 — KEEP GEOMETRY EXACT: Each volume's footprint, position, shape, "
+            f"and height must be preserved. DO NOT move them. DO NOT change outlines. "
+            f"DO NOT merge or split volumes. DO NOT add new volumes. DO NOT remove volumes.\n\n"
+            f"RULE 2 — GREY BOXES ARE UNTOUCHABLE: The transparent/ghostly grey boxes in "
+            f"the scene are EXISTING NEIGHBOURING BUILDINGS shown as context only. "
+            f"DO NOT turn them into new apartment buildings. DO NOT materialise them. "
+            f"Leave the real existing houses, garages, industrial sheds, and roads in "
+            f"the ortofoto beneath COMPLETELY UNCHANGED.\n\n"
+            f"RULE 3 — PHASE COLOURS ARE DIAGRAM, NOT FACADE: The coloured volumes "
+            f"(blue/purple/green/yellow/etc.) indicate CONSTRUCTION PHASE, not building "
+            f"colour. Render all phased volumes with a UNIFIED REALISTIC MATERIAL PALETTE "
+            f"(see masterplan context below). The only valid colours on the final rendered "
+            f"buildings should be real-world architectural materials."
+            + phase_context
+            + f"\n\nARCHITECTURAL STYLE: Contemporary Norwegian residential "
+            f"(Bolig Norge / Trondheim-suburb aesthetic). Clean lines, generous balconies, "
+            f"warm plaster and wood cladding, dark metal roof edges, realistic materiality. "
+            f"Window rhythm should feel like actual apartments (punched openings, not "
+            f"continuous glazing).\n\n"
+            f"LANDSCAPING: Fill the spaces BETWEEN the buildings with realistic Norwegian "
+            f"residential courtyards: mature deciduous and pine trees, paved walkways, "
+            f"small lawns, benches, bicycle parking shelters, a playground area in one "
+            f"courtyard. DO NOT add cars or parking lots at ground level (parking is in "
+            f"basement). The courtyards should feel lived-in and green.\n\n"
+            f"LIGHTING: Soft Nordic daylight, slightly overcast, as typical for Trondheim "
+            f"in spring or autumn. Subtle shadows. The existing ortofoto lighting should "
+            f"match the new buildings."
+        )
+    else:
+        # Klassisk A/B/C: grønt volum (som før)
+        prompt = (
+            f"Transform ONLY the solid green volume(s) in this 3D scene into a "
+            f"photorealistic {floors}-storey Norwegian apartment building with a flat roof. "
+            f"Keep the green volume's exact footprint, position, shape, and height — "
+            f"do not move it, do not change its outline, do not split it into multiple buildings. "
+            f"\n\n"
+            f"CRITICAL: The transparent/ghostly grey boxes in the scene are EXISTING neighbouring "
+            f"buildings shown as context only. Do NOT turn them into new apartment buildings, "
+            f"do NOT materialise them as part of the development. Leave them exactly as they "
+            f"appear in the aerial photo beneath — the real existing houses, garages, "
+            f"industrial sheds and roads in the ortofoto should be completely unchanged. "
+            f"\n\n"
+            f"Only the green volume becomes the new building. Everything else (ortofoto, "
+            f"existing buildings, terrain, vegetation, roads) stays identical to the input image."
+        )
 
     try:
         # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
@@ -531,57 +691,6 @@ def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str
             pass
 
     return None, "Kunne ikke hente kart. Tips: Sørg for å trykke 'Søk opp og lagre tomt' i trinn 2B først, da vet systemet nøyaktig hvor det skal zoome!"
-
-
-def _validated_upload_preview(
-    uploaded_files: Optional[List[Any]],
-    max_thumbs: int = 5,
-    thumb_height: int = 120,
-) -> Tuple[List[Image.Image], List[str]]:
-    """v16.3: Prosesser og vis umiddelbar preview av opplastede bilder.
-
-    Åpner hver fil med PIL for å verifisere at den er et gyldig bilde, og viser
-    en rad med thumbnails med grønn/rød indikator. Dette er workaround for at
-    Streamlit's file_uploader iblant viser røde sirkler i UI-en selv når filer
-    er akseptert av backenden — vår egen visning gir brukeren korrekt feedback.
-
-    Returnerer (gyldige_bilder, feilmeldinger).
-    """
-    if not uploaded_files:
-        return [], []
-
-    valid_images: List[Image.Image] = []
-    errors: List[str] = []
-    file_statuses: List[Dict[str, Any]] = []
-
-    for uf in uploaded_files:
-        try:
-            uf.seek(0)
-            img = Image.open(uf).convert("RGB")
-            # Lag thumbnail for visning (behold original for PDF)
-            thumb = img.copy()
-            thumb.thumbnail((thumb_height * 2, thumb_height * 2))
-            valid_images.append(img)
-            file_statuses.append({"name": uf.name, "ok": True, "thumb": thumb, "size_kb": uf.size / 1024})
-        except Exception as exc:
-            errors.append(f"{uf.name}: {str(exc)[:100]}")
-            file_statuses.append({"name": uf.name, "ok": False, "error": str(exc)[:60]})
-
-    # Vis preview-rad
-    if file_statuses:
-        n_show = min(len(file_statuses), max_thumbs)
-        cols = st.columns(n_show)
-        for i, status in enumerate(file_statuses[:max_thumbs]):
-            with cols[i]:
-                if status["ok"]:
-                    st.image(status["thumb"], use_container_width=True)
-                    st.caption(f"✅ **{status['name'][:22]}**")
-                else:
-                    st.error(f"❌ {status['name'][:22]}\n{status.get('error', '')[:40]}")
-        if len(file_statuses) > max_thumbs:
-            st.caption(f"_(+ {len(file_statuses) - max_thumbs} flere filer ikke vist som thumbnail)_")
-
-    return valid_images, errors
 
 
 def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Image]:
@@ -1239,20 +1348,11 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
 
         # ADAPTIV BUFFER: reduser buffer hvis den spiser for mye av smal dimensjon
         major, minor, _ = minimum_rotated_dims(site_polygon)
-        # v16.1: Effektiv buffer er maksverdien av polygonbuffer OG byggegrensene
-        # (front/bak/side). Tidligere brukte vi bare polygonbuffer, som ga buggen at
-        # når polygonbuffer=0 ble hele tomten brukt som byggefelt — byggegrensene
-        # ble da aldri applisert på site_polygon.
-        max_legal_setback = max(
-            float(getattr(site, "front_setback_m", 0.0) or 0.0),
-            float(getattr(site, "rear_setback_m", 0.0) or 0.0),
-            float(getattr(site, "side_setback_m", 0.0) or 0.0),
-        )
-        effective_setback = max(float(polygon_setback_m), max_legal_setback)
-        if minor > 0 and effective_setback > 0:
+        effective_setback = polygon_setback_m
+        if minor > 0 and polygon_setback_m > 0:
             # Buffer paa begge sider = 2x setback. Behold maks 35% av smal side.
             max_allowed = minor * 0.175  # 17.5% per side = 35% totalt
-            effective_setback = min(effective_setback, max(1.5, max_allowed))
+            effective_setback = min(polygon_setback_m, max(1.5, max_allowed))
 
         buildable_polygon = site_polygon.buffer(-effective_setback) if effective_setback > 0 else site_polygon
         # Behold hele geometrien, ikke bare største del
@@ -3266,13 +3366,7 @@ MOTORENS ALTERNATIVER (referanse):
 {chr(10).join(motor_summary)}
 """
 
-    result = _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
-    if result:
-        # Post-filter: samme rydding som i hoved-AI-rapport
-        result = _strip_hallucinated_preamble(result)
-        result = _strip_hallucinated_appendix(result)
-        result = _normalize_bullets(result)
-    return result
+    return _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
 
 
 def refine_sketch_with_ai(
@@ -4922,6 +5016,9 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
                 "name": part.get('name', option.typology),
                 "color": [int(c) for c in color[:3]],
                 "floors": int(part.get('floors', option.floors)),
+                "phase": part.get('phase'),
+                "typology": part.get('typology', option.typology),
+                "program": part.get('program', 'bolig'),
             })
     else:
         fc = flatten_coord_groups(footprint_coords)
@@ -4932,6 +5029,9 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
                 "name": option.typology,
                 "color": [34, 197, 94],
                 "floors": int(option.floors),
+                "phase": None,
+                "typology": option.typology,
+                "program": "bolig",
             })
 
     view_r = site_span * 0.7
@@ -4967,6 +5067,7 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
   }
 </style></head><body>
 <div id="info">__INFO__</div>
+__PHASE_LEGEND__
 <div id="help">Venstre mus: roter | Scroll: zoom | Shift+dra: panorer</div>
 <div id="sunControls" style="position:absolute;bottom:40px;left:14px;right:14px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:10px 16px;display:flex;gap:16px;align-items:center;font:12px -apple-system,sans-serif;">
   <span style="color:#38bdf8;font-weight:700;white-space:nowrap;">☀ Sol/skygge</span>
@@ -5511,6 +5612,17 @@ animate();
         + (f" | Terreng: {terrain_ctx.get('relief_m', 0):.1f}m relieff" if terrain_ctx and terrain_ctx.get('relief_m') else "")
     )
 
+    # Inject fase-legende hvis masterplan er aktiv
+    _phase_legend_html = ""
+    if HAS_MASTERPLAN:
+        try:
+            _mp_ref = st.session_state.get("_current_masterplan")
+            if _mp_ref is not None and _mp_ref.building_phases:
+                _phase_legend_html = masterplan_integration.build_phase_legend_html(_mp_ref)
+        except Exception:
+            _phase_legend_html = ""
+    html = html.replace('__PHASE_LEGEND__', _phase_legend_html)
+
     components.html(html, height=height_px + 10, scrolling=False)
 
 
@@ -5676,171 +5788,6 @@ def option_to_record(option: OptionResult) -> Dict[str, Any]:
     return record
 
 
-def _build_geo_narrative_for_context(
-    geodata_bundle: Optional[Dict[str, Any]],
-    historical_analysis: Optional[Dict[str, str]],
-) -> str:
-    """Kort geo-avsnitt for pkt. 4 TOMT OG KONTEKST. Returnerer tom streng hvis
-    ingen geo-data er tilgjengelig."""
-    if not geodata_bundle or not geodata_bundle.get("available"):
-        return ""
-
-    contamination = geodata_bundle.get("grunnforurensning", []) or []
-    hist_year = geodata_bundle.get("historisk_year")
-    parts = []
-
-    # Åpningssetning — alltid hvis vi har data
-    if hist_year:
-        parts.append(
-            f"Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
-            f"NGU og NVE, samt en AI-vurdering av historisk flyfoto fra {hist_year}. "
-            f"Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter sol/skygge-analysen."
-        )
-    else:
-        parts.append(
-            "Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
-            "NGU og NVE. Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter "
-            "sol/skygge-analysen."
-        )
-
-    # Grunnforurensning — kort statuslinje
-    cnt = len(contamination)
-    if cnt == 0:
-        parts.append(
-            "Miljødirektoratets grunnforurensningsdatabase viser ingen kjente forurensingslokaliteter innen 500 m."
-        )
-    elif cnt <= 2:
-        parts.append(
-            f"Miljødirektoratets database viser {cnt} registrert forurensingslokalitet innen 500 m" if cnt == 1
-            else f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m."
-        )
-    else:
-        parts.append(
-            f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m. "
-            f"Forhøyet oppmerksomhet anbefales."
-        )
-
-    # Historisk bruk (hvis AI-analyse finnes)
-    if historical_analysis:
-        risiko = (historical_analysis.get("risiko_niva") or "").strip()
-        if risiko and risiko != "Ukjent":
-            parts.append(
-                f"AI-basert første screening av historisk flyfoto vurderer samlet forurensningsrisiko som {risiko.lower()}. "
-                f"Vurderingen erstatter ikke miljøteknisk grunnundersøkelse."
-            )
-
-    # v16: Aktsomhet (radon/flom/kvikkleire/skred) — kort sammendrag
-    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
-    if aktsomhet.get("available"):
-        kategorier = aktsomhet.get("categories", {}) or {}
-        hits = [k for k, v in kategorier.items() if v.get("hit")]
-        if hits:
-            label_map = {
-                "radon": "radon", "flom": "flom", "kvikkleire": "kvikkleire",
-                "skred_snø": "snøskred", "skred_stein": "steinskred", "skred_jord": "jord-/flomskred",
-            }
-            hit_labels = [label_map.get(h, h) for h in hits]
-            parts.append(
-                f"Tomten ligger i registrert aktsomhetssone for {', '.join(hit_labels)} "
-                f"(Geodata Online DOK). Fagteknisk RIG-/geoteknisk vurdering er nødvendig — se risiko-seksjonen."
-            )
-        else:
-            parts.append(
-                "Tomten ligger utenfor registrerte aktsomhetssoner for radon, flom, kvikkleire og skred "
-                "(DOK Samfunnssikkerhet / DOK Geologi)."
-            )
-
-    return " ".join(parts)
-
-
-def _build_geo_narrative_for_risk(
-    geodata_bundle: Optional[Dict[str, Any]],
-    historical_analysis: Optional[Dict[str, str]],
-) -> List[str]:
-    """Kort risiko-avsnitt som bullets til pkt. 9 RISIKO OG AVKLARINGSPUNKTER.
-    Returnerer tom liste hvis ingen geo-data er tilgjengelig."""
-    if not geodata_bundle or not geodata_bundle.get("available"):
-        return []
-
-    bullets = []
-    contamination = geodata_bundle.get("grunnforurensning", []) or []
-    cnt = len(contamination)
-
-    # Grunnforurensning-linje
-    if cnt == 0:
-        bullets.append(
-            "- Grunnforurensning: Ingen kjente lokaliteter i Miljødirektoratets database innen 500 m. "
-            "Standard aktsomhetsprosedyre tilstrekkelig før bygging."
-        )
-    elif cnt <= 2:
-        bullets.append(
-            f"- Grunnforurensning: {cnt} registrert lokalitet i Miljødirektoratets database innen 500 m. "
-            f"Miljøteknisk undersøkelse bør vurderes som del av prosjekteringsfasen."
-        )
-    else:
-        bullets.append(
-            f"- Grunnforurensning: {cnt} registrerte lokaliteter innen 500 m (Miljødirektoratet). "
-            f"Miljøteknisk grunnundersøkelse er anbefalt før byggesaksinnsending."
-        )
-
-    # AI-historisk-analyse-linje
-    if historical_analysis:
-        risiko = (historical_analysis.get("risiko_niva") or "").strip()
-        tiltak = (historical_analysis.get("anbefalte_tiltak") or "").strip()
-        if risiko and risiko != "Ukjent":
-            line = f"- Forurensningsrisiko (AI-screening av historisk flyfoto): {risiko}."
-            if tiltak:
-                # Trunker tiltak til første setning for kort bullet
-                first_sentence = tiltak.split(".")[0].strip()
-                if first_sentence and len(first_sentence) < 180:
-                    line += f" {first_sentence}."
-            line += " Se dedikert seksjon \"Historisk flyfoto og tidligere arealbruk\" for full vurdering."
-            bullets.append(line)
-        elif risiko == "Ukjent":
-            bullets.append(
-                "- Forurensningsrisiko (AI-screening av historisk flyfoto): Vurderingen er usikker — "
-                "manuell fagkontroll av historisk bruk anbefales."
-            )
-
-    # v16: Aktsomhetskart-bullets (radon/flom/kvikkleire/skred fra DOK)
-    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
-    if aktsomhet.get("available"):
-        kategorier = aktsomhet.get("categories", {}) or {}
-        # Tiltaksmapping per kategori
-        tiltak_map = {
-            "radon": "Radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5.",
-            "flom": "Flomvurdering må inkluderes i ROS-analyse. Tiltakskategori vurderes iht. TEK17 § 7-2.",
-            "kvikkleire": "Geoteknisk vurdering og prosedyre iht. NVE veileder 1/2019 er obligatorisk før byggesøknad.",
-            "skred_snø": "Skredfarevurdering iht. TEK17 § 7-3 kan være påkrevd.",
-            "skred_stein": "Steinsprangvurdering iht. TEK17 § 7-3 kan være påkrevd.",
-            "skred_jord": "Jord-/flomskredvurdering iht. TEK17 § 7-3 kan være påkrevd.",
-        }
-        label_map = {
-            "radon": "Radon",
-            "flom": "Flom",
-            "kvikkleire": "Kvikkleire",
-            "skred_snø": "Snøskred",
-            "skred_stein": "Steinskred",
-            "skred_jord": "Jord-/flomskred",
-        }
-        for cat_key, cat_data in kategorier.items():
-            if not cat_data.get("hit"):
-                continue
-            severity = cat_data.get("severity", "registrert")
-            detail = cat_data.get("detail", "")
-            label = label_map.get(cat_key, cat_key)
-            tiltak = tiltak_map.get(cat_key, "Fagteknisk vurdering anbefales.")
-            sev_text = {"høy": "høy aktsomhet", "moderat": "moderat aktsomhet",
-                        "lav": "lav aktsomhet", "registrert": "registrert sone"}.get(severity, severity)
-            line = f"- {label}: {sev_text}"
-            if detail and detail.lower() not in ("aktsomhetsområde", "aktsomhetssone"):
-                line += f" ({detail})"
-            line += f". {tiltak}"
-            bullets.append(line)
-
-    return bullets
-
-
 def build_deterministic_report(
     site: SiteInputs,
     options: List[OptionResult],
@@ -5848,8 +5795,6 @@ def build_deterministic_report(
     has_visual_input: bool,
     manual_override: Optional[Dict[str, Any]] = None,
     environment_data: Optional[Dict[str, Any]] = None,
-    geodata_bundle: Optional[Dict[str, Any]] = None,
-    historical_analysis: Optional[Dict[str, str]] = None,
 ) -> str:
     if not options:
         return (
@@ -6002,12 +5947,6 @@ def build_deterministic_report(
     if wind_c.get("available"):
         lines.append(f"Vindkomfort: Klasse {wind_c.get('lawson_class', '?')} ({wind_c.get('overall', 'ikke vurdert')}).")
 
-    # Geo-avsnitt (stedskontekst + grunnforurensning + historisk bruk)
-    _geo_narr = _build_geo_narrative_for_context(geodata_bundle, historical_analysis)
-    if _geo_narr:
-        lines.append("")
-        lines.append(_geo_narr)
-
     lines.append("")
     lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
     lines.append(
@@ -6069,10 +6008,6 @@ def build_deterministic_report(
             lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
         lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
 
-        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
-        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
-            lines.append(_geo_b)
-
         if pct_bra_active and manual_pct_bra < site.utnyttelsesgrad_bra_pct * 0.9:
             lines.append(
                 f"- OBS: Oppnådd %-BRA ({manual_pct_bra:.0f}%) er lavere enn mål ({site.utnyttelsesgrad_bra_pct:.0f}%). "
@@ -6108,6 +6043,15 @@ def build_deterministic_report(
                     f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
                 )
         lines.append("")
+        # Masterplan-seksjon: byggetrinn og fasering
+        if HAS_MASTERPLAN:
+            try:
+                _mp_for_report = st.session_state.get("_current_masterplan") if hasattr(st, "session_state") else None
+            except Exception:
+                _mp_for_report = None
+            if _mp_for_report is not None and _mp_for_report.building_phases:
+                lines.append(masterplan_integration.render_phasing_report_markdown(_mp_for_report))
+
         lines.append("# 8. ALTERNATIVER")
         for option in options:
             bra_est = option.gross_bta_m2 * option.efficiency_ratio
@@ -6132,11 +6076,6 @@ def build_deterministic_report(
         elif best.neighbor_count > 0:
             lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
         lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
-
-        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
-        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
-            lines.append(_geo_b)
-
         lines.append("")
         lines.append("# 10. ANBEFALING / NESTE STEG")
         lines.append(
@@ -6921,1025 +6860,540 @@ def _render_executive_summary(
     return img
 
 
-# ================================================================
-# GEO CONTEXT BUNDLE — automatisk henting fra åpne geo-APIer
-# ----------------------------------------------------------------
-# Porterer logikken fra pages/Geo.py (fetch_all_geodata) som lokale
-# funksjoner for å unngå cross-page-import (Geo.py kaller
-# st.set_page_config ved import — ikke trygt her).
-#
-# Scope: Historisk flyfoto (m/år), Miljødirektoratet grunnforurensning,
-# NGU Radon, NVE Flom/Kvikkleire/Skred som kartbilder. Bruker allerede
-# etablert Geodata Online-klient (gdo) der den er tilgjengelig.
-# ================================================================
+def _draw_program_icons(pdf: Any, x: float, y: float, programs: List[str],
+                         size: float = 3.5, spacing: float = 1.0) -> float:
+    """Tegn små farge-ikoner for programmene i en byggefase.
 
-def _bbox_from_center_local(x: float, y: float, radius_m: float = 250.0) -> tuple:
-    """Bygg bbox (EPSG:25833) rundt et senterpunkt."""
-    return (x - radius_m, y - radius_m, x + radius_m, y + radius_m)
+    Ikonene tegnes med FPDF rect/ellipse/line primitiver (ingen ekstern
+    fontavhengighet). Returnerer total bredde brukt (for å sette X etter).
 
-
-def _wms_fetch(base_url: str, layers: str, bbox_25833: tuple,
-               width: int = 800, height: int = 800,
-               styles: str = "", fmt: str = "image/png",
-               version: str = "1.3.0") -> Optional[Image.Image]:
-    """Generell WMS-GetMap-fetcher. Returnerer PIL.Image eller None."""
-    try:
-        params = {
-            "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": version,
-            "LAYERS": layers, "STYLES": styles,
-            "CRS": "EPSG:25833" if version == "1.3.0" else None,
-            "SRS": None if version == "1.3.0" else "EPSG:25833",
-            "BBOX": f"{bbox_25833[0]},{bbox_25833[1]},{bbox_25833[2]},{bbox_25833[3]}",
-            "WIDTH": width, "HEIGHT": height, "FORMAT": fmt, "TRANSPARENT": "TRUE",
-        }
-        params = {k: v for k, v in params.items() if v is not None}
-        resp = requests.get(base_url, params=params, timeout=15)
-        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    except Exception:
-        return None
-    return None
-
-
-def _fetch_ngu_radon(bbox: tuple) -> Optional[Image.Image]:
-    return _wms_fetch(
-        "https://geo.ngu.no/mapserver/RadonAktsomhetWMS?",
-        layers="Radon", bbox_25833=bbox,
-    )
-
-
-def _fetch_nve_flom(bbox: tuple) -> Optional[Image.Image]:
-    return _wms_fetch(
-        "https://nve.geodataonline.no/arcgis/services/Flom1/MapServer/WMSServer?",
-        layers="Flom_aktsomhetsomrade", bbox_25833=bbox,
-    )
-
-
-def _fetch_nve_kvikkleire(bbox: tuple) -> Optional[Image.Image]:
-    return _wms_fetch(
-        "https://nve.geodataonline.no/arcgis/services/Mapservices/SkredKvikkleire2/MapServer/WMSServer?",
-        layers="KvikkleireFaregrad", bbox_25833=bbox,
-    )
-
-
-def _fetch_nve_skred(bbox: tuple) -> Optional[Image.Image]:
-    return _wms_fetch(
-        "https://nve.geodataonline.no/arcgis/services/SkredSnoJord1/MapServer/WMSServer?",
-        layers="SkredSnoJordAktsomhet", bbox_25833=bbox,
-    )
-
-
-def _fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
-    """Miljødirektoratet — kjente forurensingslokaliteter i nærheten (liste av dicts)."""
-    try:
-        from pyproj import Transformer
-        tr = Transformer.from_crs(25833, 4326, always_xy=True)
-        lon, lat = tr.transform(x, y)
-    except Exception:
-        return []
-    try:
-        resp = requests.get(
-            "https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter",
-            params={"latitude": lat, "longitude": lon, "radius": int(radius_m)},
-            timeout=8,
-        )
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        sites = data if isinstance(data, list) else data.get("lokaliteter", data.get("features", []))
-        result = []
-        for site in sites[:20]:
-            props = site.get("properties", site) if isinstance(site, dict) else {}
-            # Forsøk å beregne avstand hvis koordinater finnes
-            dist_m = None
-            geom = site.get("geometry") if isinstance(site, dict) else None
-            if geom and geom.get("coordinates"):
-                try:
-                    scoord = geom["coordinates"]
-                    if isinstance(scoord, list) and len(scoord) >= 2:
-                        slon, slat = float(scoord[0]), float(scoord[1])
-                        # Enkel haversine i meter
-                        import math as _m
-                        R = 6371000.0
-                        dlat = _m.radians(slat - lat); dlon = _m.radians(slon - lon)
-                        a = (_m.sin(dlat/2)**2 +
-                             _m.cos(_m.radians(lat)) * _m.cos(_m.radians(slat)) * _m.sin(dlon/2)**2)
-                        dist_m = 2 * R * _m.asin(_m.sqrt(a))
-                except Exception:
-                    pass
-            result.append({
-                "navn": props.get("navn") or props.get("lokalitetsnavn") or "Ukjent",
-                "status": props.get("status") or props.get("aktivitetsstatus") or "",
-                "type": props.get("type") or props.get("forurensningstype") or "",
-                "paavirkningsgrad": props.get("paavirkningsgrad") or props.get("pavirkningsgrad") or "",
-                "id": props.get("id") or props.get("lokalitetsId") or "",
-                "distance_m": dist_m,
-            })
-        # Sorter etter avstand hvis tilgjengelig
-        result.sort(key=lambda s: s.get("distance_m") if s.get("distance_m") is not None else 9999)
-        return result
-    except Exception:
-        return []
-
-
-def _classify_aktsomhet_feature(layer_name: str, attrs: Dict[str, Any]) -> Optional[Tuple[str, str]]:
-    """Klassifiser en DOK-feature i (kategori, alvorlighetsbeskrivelse) basert på
-    layer_name og attributter.
-
-    Returnerer (kategori, detalj) eller None hvis ikke relevant.
-
-    Kategorier: 'radon', 'flom', 'kvikkleire', 'skred_snø', 'skred_stein',
-                'skred_jord', 'skred_annet', 'samfunnssikkerhet_annet'.
+    Programmer som støttes:
+      - bolig       → hus med pitched roof (triangelform)
+      - barnehage   → firkant med "bølget" tak + liten solfigur
+      - naering     → butikk-ramme med storefront-vinduer
+      - service     → sirkel med bindestrek (service-symbol)
+      - felleshus   → liten firkant med dør
     """
-    ln = (layer_name or "").lower()
+    if not programs:
+        return 0.0
 
-    # Hjelpe: finn fare-/klasse-attributt fra ulike mulige feltnavn
-    def _fareverdi() -> str:
-        for key in ("faregrad", "fare", "klasse", "risikoklasse", "risikogruppe",
-                    "aktsomhetsnivaa", "aktsomhetsniva", "nivaa", "niva",
-                    "verdi", "type", "kategori", "beskrivelse", "navn"):
-            for k, v in (attrs or {}).items():
-                if k.lower() == key and v not in (None, "", 0):
-                    return str(v)
-        return ""
+    cur_x = x
+    for prog in programs:
+        _draw_single_program_icon(pdf, cur_x, y, prog, size)
+        cur_x += size + spacing
 
-    detalj = _fareverdi()
-
-    # Radon (NGU aktsomhetskart)
-    if "radon" in ln:
-        return ("radon", detalj or "Aktsomhetsområde")
-
-    # Flom
-    if "flom" in ln:
-        return ("flom", detalj or "Flomutsatt aktsomhetsområde")
-
-    # Kvikkleire
-    if "kvikkleire" in ln or "kvikk" in ln:
-        return ("kvikkleire", detalj or "Faregradssone kvikkleire")
-
-    # Skred (snø/jord/stein/flomskred)
-    if "snoskred" in ln or "snøskred" in ln or ("snø" in ln and "skred" in ln):
-        return ("skred_snø", detalj or "Aktsomhetsområde")
-    if "steinskred" in ln or "steinsprang" in ln or ("stein" in ln and "skred" in ln):
-        return ("skred_stein", detalj or "Aktsomhetsområde")
-    if "jordskred" in ln or "lossmasseskred" in ln or ("jord" in ln and "skred" in ln):
-        return ("skred_jord", detalj or "Aktsomhetsområde")
-    if "flomskred" in ln:
-        return ("skred_jord", detalj or "Flomskred aktsomhet")
-    if "skred" in ln:
-        return ("skred_annet", detalj or "Skredaktsomhet")
-
-    # Andre samfunnssikkerhetslag vi ikke gjenkjenner — ikke returner
-    return None
+    return cur_x - x
 
 
-def _fetch_aktsomhet_via_gdo(site_polygon, gdo_client) -> Dict[str, Any]:
-    """Hent strukturerte aktsomhetsdata (radon/flom/kvikkleire/skred) via
-    Geodata Online DOK Samfunnssikkerhet + DOK Geologi (radon).
-
-    Returnerer dict med per-kategori-status:
-        {
-            "available": True/False,
-            "categories": {
-                "radon": {"hit": True/False, "detail": "...", "features": N},
-                "flom": {...},
-                "kvikkleire": {...},
-                "skred_snø": {...},
-                "skred_stein": {...},
-                "skred_jord": {...},
-            },
-            "total_features": N,
-            "source": "Geodata Online DOK Samfunnssikkerhet",
-            "errors": [...],
-        }
-    """
-    result = {
-        "available": False,
-        "categories": {},
-        "total_features": 0,
-        "source": "Geodata Online DOK",
-        "errors": [],
-    }
-    if gdo_client is None or site_polygon is None:
-        result["errors"].append("Geodata Online client eller tomtepolygon mangler")
-        return result
-
-    # Initialiser alle kategoriene til "ikke treff" — vi fyller inn ved funn
-    categories = {
-        "radon": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-        "flom": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-        "kvikkleire": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-        "skred_snø": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-        "skred_stein": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-        "skred_jord": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
-    }
-
-    # Kall DOK Samfunnssikkerhet (flom, kvikkleire, skred)
+def _draw_single_program_icon(pdf: Any, x: float, y: float, program: str, size: float = 3.5) -> None:
+    """Tegn ett enkelt ikon for gitt program. Størrelsen er i mm."""
     try:
-        from geodata_client import GEOMAP_DOKSAMFUNNSSIKKERHET_MS
-        sikkerhet = gdo_client.fetch_context_from_service(
-            GEOMAP_DOKSAMFUNNSSIKKERHET_MS,
-            site_polygon,
-            buffer_m=50.0,  # liten buffer — vi vil vite om tomten ligger i sone
-            source_label="Geodata Online DOK Samfunnssikkerhet",
-        )
-        for feat in sikkerhet.get("features") or []:
-            layer_name = feat.get("layer_name", "")
-            attrs = feat.get("attributes") or {}
-            cls = _classify_aktsomhet_feature(layer_name, attrs)
-            if cls is None:
-                continue
-            cat, detail = cls
-            if cat in categories:
-                categories[cat]["hit"] = True
-                categories[cat]["features"] += 1
-                # Behold mest informative detalj (ikke bare "Aktsomhetsområde")
-                if detail and detail != "Aktsomhetsområde" and not categories[cat]["detail"]:
-                    categories[cat]["detail"] = detail
-                elif not categories[cat]["detail"]:
-                    categories[cat]["detail"] = detail
-                result["total_features"] += 1
-        for err in (sikkerhet.get("errors") or [])[:3]:
-            result["errors"].append(f"Samfunnssikkerhet: {err[:100]}")
-    except Exception as exc:
-        result["errors"].append(f"DOK Samfunnssikkerhet: {str(exc)[:120]}")
-
-    # Kall DOK Geologi (radon og kvikkleire-faresoner)
-    try:
-        from geodata_client import GEOMAP_DOKGEOLOGI_MS
-        geologi = gdo_client.fetch_context_from_service(
-            GEOMAP_DOKGEOLOGI_MS,
-            site_polygon,
-            buffer_m=50.0,
-            source_label="Geodata Online DOK Geologi",
-        )
-        for feat in geologi.get("features") or []:
-            layer_name = feat.get("layer_name", "")
-            attrs = feat.get("attributes") or {}
-            cls = _classify_aktsomhet_feature(layer_name, attrs)
-            if cls is None:
-                continue
-            cat, detail = cls
-            if cat in categories:
-                categories[cat]["hit"] = True
-                categories[cat]["features"] += 1
-                if detail and not categories[cat]["detail"]:
-                    categories[cat]["detail"] = detail
-                result["total_features"] += 1
-        for err in (geologi.get("errors") or [])[:3]:
-            result["errors"].append(f"Geologi: {err[:100]}")
-    except Exception as exc:
-        result["errors"].append(f"DOK Geologi: {str(exc)[:120]}")
-
-    # Klassifiser severity basert på detail-strengen (NGU-konvensjon: klasse 1-3)
-    for cat, data in categories.items():
-        if not data["hit"]:
-            data["severity"] = "ingen"
-            continue
-        detail_lower = (data["detail"] or "").lower()
-        if any(word in detail_lower for word in ("høy", "hoy", "stor", "3", "høg")):
-            data["severity"] = "høy"
-        elif any(word in detail_lower for word in ("moderat", "middels", "2")):
-            data["severity"] = "moderat"
-        elif any(word in detail_lower for word in ("lav", "låg", "lite", "1", "liten")):
-            data["severity"] = "lav"
+        pdf.set_line_width(0.25)
+        if program == "bolig":
+            # Hus: takform (triangel på toppen av firkant)
+            pdf.set_fill_color(99, 135, 170)  # muted blue
+            pdf.set_draw_color(50, 75, 100)
+            # Veggene
+            body_h = size * 0.6
+            pdf.rect(x, y + size * 0.4, size, body_h, style="DF")
+            # Taket (triangel via polygon)
+            roof_pts = [
+                (x, y + size * 0.4),
+                (x + size / 2, y),
+                (x + size, y + size * 0.4),
+            ]
+            # FPDF har ikke native polygon; bruk lines
+            pdf.set_fill_color(80, 110, 140)
+            pdf.set_draw_color(50, 75, 100)
+            try:
+                pdf.polygon(roof_pts, style="DF")
+            except AttributeError:
+                # Eldre fpdf uten polygon — tegn kun linjer
+                pdf.line(*roof_pts[0], *roof_pts[1])
+                pdf.line(*roof_pts[1], *roof_pts[2])
+                pdf.line(*roof_pts[0], *roof_pts[2])
+        elif program == "barnehage":
+            # Barnehage: gul firkant med solfigur
+            pdf.set_fill_color(253, 205, 80)  # sunny yellow
+            pdf.set_draw_color(200, 150, 50)
+            pdf.rect(x, y, size, size, style="DF")
+            # Liten sol-sirkel
+            try:
+                pdf.set_fill_color(255, 140, 0)
+                pdf.ellipse(x + size * 0.25, y + size * 0.25, size * 0.5, size * 0.5, style="F")
+            except Exception:
+                pass
+        elif program == "naering":
+            # Næring: firkant med storefront-striper (handel/service)
+            pdf.set_fill_color(180, 200, 225)
+            pdf.set_draw_color(70, 100, 140)
+            pdf.rect(x, y, size, size, style="DF")
+            # Horisontal linje for skilt
+            pdf.set_draw_color(70, 100, 140)
+            pdf.line(x + size * 0.1, y + size * 0.3, x + size * 0.9, y + size * 0.3)
+            # Vertikal linje (dør)
+            pdf.line(x + size * 0.5, y + size * 0.3, x + size * 0.5, y + size * 0.95)
+        elif program == "service":
+            # Service: sirkel med "+"-tegn
+            try:
+                pdf.set_fill_color(200, 230, 200)
+                pdf.set_draw_color(60, 130, 60)
+                pdf.ellipse(x, y, size, size, style="DF")
+                pdf.set_draw_color(40, 100, 40)
+                pdf.set_line_width(0.4)
+                pdf.line(x + size * 0.5, y + size * 0.25, x + size * 0.5, y + size * 0.75)
+                pdf.line(x + size * 0.25, y + size * 0.5, x + size * 0.75, y + size * 0.5)
+            except Exception:
+                pass
+        elif program == "felleshus":
+            # Felleshus: firkant med synlig dør
+            pdf.set_fill_color(220, 210, 190)
+            pdf.set_draw_color(140, 110, 70)
+            pdf.rect(x, y, size, size, style="DF")
+            # Liten dør
+            pdf.set_fill_color(140, 110, 70)
+            pdf.rect(x + size * 0.35, y + size * 0.5, size * 0.3, size * 0.5, style="F")
         else:
-            # Treff uten klassifisert alvorlighet — markér som "registrert"
-            data["severity"] = "registrert"
-
-    result["categories"] = categories
-    result["available"] = True  # Vi har kalt API-et, selv om ingen treff
-    return result
-
-
-def build_geo_context_bundle(
-    site_polygon,
-    coords: Optional[Tuple[float, float]],
-    gdo_client,
-    radius_m: float = 300.0,
-) -> Dict[str, Any]:
-    """Samle geo-kontekst-data (historisk foto, grunnforurensning, radon, flom osv.)
-    for bruk i PDF-rapporten.
-
-    Args:
-        site_polygon: Shapely Polygon i EPSG:25833 (fra geodata_context)
-        coords: (x, y) i EPSG:25833. Hvis None, tas centroiden fra site_polygon.
-        gdo_client: GeodataOnlineClient-instans eller None
-        radius_m: Søkeradius for grunnforurensning
-
-    Returns:
-        Dict med nøklene:
-            available (bool), coords, bbox,
-            historisk (PIL.Image), historisk_year, historisk_source,
-            grunnforurensning (list), radon (PIL.Image),
-            flom (PIL.Image), kvikkleire (PIL.Image), skred (PIL.Image),
-            log (list[str]), errors (list[str])
-    """
-    result = {
-        "available": False,
-        "coords": None, "bbox": None,
-        "historisk": None, "historisk_year": None, "historisk_source": "",
-        "grunnforurensning": [],
-        "radon": None, "flom": None, "kvikkleire": None, "skred": None,
-        "aktsomhet": {"available": False, "categories": {}},  # NY v16: strukturerte DOK-data
-        "log": [], "errors": [],
-    }
-
-    # Finn koordinater og bbox
-    try:
-        if coords is None and site_polygon is not None:
-            c = site_polygon.centroid
-            coords = (float(c.x), float(c.y))
-        if coords is None:
-            result["errors"].append("Ingen koordinater tilgjengelig for geo-oppslag.")
-            return result
-        x, y = coords
-        result["coords"] = (x, y)
-        if site_polygon is not None:
-            bbox = tuple(site_polygon.bounds)
-        else:
-            bbox = _bbox_from_center_local(x, y, radius_m)
-        result["bbox"] = bbox
-    except Exception as exc:
-        result["errors"].append(f"Koordinat/bbox feilet: {str(exc)[:80]}")
-        return result
-
-    # Utvid bbox litt for historisk foto (parcel-bbox er ofte for trang)
-    minx, miny, maxx, maxy = bbox
-    buf = 100.0
-    expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
-
-    # Historisk ortofoto via Geodata Online (GeomapBilder3 mosaic)
-    if gdo_client is not None:
-        try:
-            img, src, year = gdo_client.fetch_historical_ortofoto(
-                bbox=expanded_bbox, buffer_m=0, width=1200, height=1200)
-            if img is not None:
-                result["historisk"] = img
-                result["historisk_year"] = year
-                result["historisk_source"] = src
-                result["log"].append(f"Historisk ortofoto: {src} ({year})")
-            else:
-                result["log"].append(f"Historisk ortofoto: {src}")
-        except Exception as exc:
-            result["log"].append(f"Historisk ortofoto feilet: {str(exc)[:80]}")
-
-    # Miljødirektoratet — grunnforurensning (liste)
-    try:
-        sites = _fetch_miljodir_grunnforurensning(x, y, radius_m=500.0)
-        result["grunnforurensning"] = sites
-        result["log"].append(f"Miljødirektoratet: {len(sites)} kjente lokaliteter innen 500 m")
-    except Exception as exc:
-        result["log"].append(f"Miljødirektoratet feilet: {str(exc)[:80]}")
-
-    # --- AKTSOMHETSDATA via Geodata Online DOK (v16: strukturerte data, ikke bare bilder) ---
-    # Dette gir oss faktisk klassifisering ("moderat radon", "flomsone", osv.)
-    # i stedet for bare "ingen data / utenfor kartlagt område".
-    try:
-        aktsomhet = _fetch_aktsomhet_via_gdo(site_polygon, gdo_client)
-        result["aktsomhet"] = aktsomhet
-        if aktsomhet.get("available"):
-            hits = [c for c, d in aktsomhet.get("categories", {}).items() if d.get("hit")]
-            if hits:
-                result["log"].append(f"DOK aktsomhet: treff i {len(hits)} kategorier: {', '.join(hits)}")
-            else:
-                result["log"].append("DOK aktsomhet: tomten ligger ikke i noen registrert aktsomhetssone")
-    except Exception as exc:
-        result["aktsomhet"] = {"available": False, "errors": [str(exc)[:120]]}
-        result["log"].append(f"DOK aktsomhet feilet: {str(exc)[:80]}")
-
-    # --- Gamle WMS-kall beholdes som fallback for kartbilder i PDF ---
-    # Kun brukt hvis noen vil vise kartbilder i tillegg til strukturerte data.
-    # (Dagens Saga Park-test viste at disse WMS-ene ofte returnerer tomme bilder,
-    # så de er nedprioritert men ikke fjernet.)
-    try:
-        img = _fetch_ngu_radon(bbox)
-        if img is not None:
-            result["radon"] = img
-            result["log"].append("NGU Radon aktsomhetskart (WMS-bilde) hentet")
+            # Fallback: grå firkant
+            pdf.set_fill_color(180, 180, 190)
+            pdf.set_draw_color(100, 100, 110)
+            pdf.rect(x, y, size, size, style="DF")
     except Exception:
         pass
-
-    for key, func, label in [
-        ("flom", _fetch_nve_flom, "NVE Flom"),
-        ("kvikkleire", _fetch_nve_kvikkleire, "NVE Kvikkleire"),
-        ("skred", _fetch_nve_skred, "NVE Skred"),
-    ]:
-        try:
-            img = func(bbox)
-            if img is not None:
-                result[key] = img
-                result["log"].append(f"{label} aktsomhetskart (WMS-bilde) hentet")
-        except Exception:
-            pass
-
-    # Marker som tilgjengelig hvis vi har minst én datakilde
-    has_any = any([
-        result["historisk"] is not None,
-        bool(result["grunnforurensning"]),
-        result["radon"] is not None,
-        result["flom"] is not None,
-        result["kvikkleire"] is not None,
-        result["skred"] is not None,
-        bool(result.get("aktsomhet", {}).get("available")),
-    ])
-    result["available"] = has_any
-    return result
-
-
-def analyze_historical_aerial_with_claude(
-    historical_image: Optional[Image.Image],
-    year: Optional[int],
-    contamination_sites: list,
-    address_hint: str = "",
-    nearby_plans_count: Optional[int] = None,
-) -> Optional[Dict[str, str]]:
-    """Full AI-analyse av historisk flyfoto med fokus på:
-    - Tidligere arealbruk (industri, landbruk, skog, tettsted, osv.)
-    - Potensielle forurensningskilder fra historisk bruk
-    - Anbefalte tiltak (miljøteknisk undersøkelse, MUA-kartlegging, osv.)
-
-    Returnerer dict med 'tidligere_bruk', 'forurensningsrisiko', 'anbefalte_tiltak',
-    'risiko_niva' ('Lav'/'Moderat'/'Høy'/'Ukjent'). Null ved feil eller manglende input.
-    """
-    if historical_image is None or not ANTHROPIC_API_KEY:
-        return None
-
-    contamination_summary = ""
-    if contamination_sites:
-        contamination_summary = f"\n\nFra Miljødirektoratets grunnforurensningsdatabase er det registrert {len(contamination_sites)} lokalitet(er) innen 500 m. De nærmeste:\n"
-        for s in contamination_sites[:5]:
-            line = f"  - {s.get('navn', 'Ukjent')}"
-            extras = []
-            if s.get("type"): extras.append(s["type"])
-            if s.get("status"): extras.append(s["status"])
-            if s.get("paavirkningsgrad"): extras.append(f"påvirkningsgrad: {s['paavirkningsgrad']}")
-            if s.get("distance_m") is not None: extras.append(f"ca. {int(s['distance_m'])} m unna")
-            if extras:
-                line += " — " + ", ".join(extras)
-            contamination_summary += line + "\n"
-    else:
-        contamination_summary = "\n\nMiljødirektoratets grunnforurensningsdatabase: Ingen kjente registrerte lokaliteter innen 500 m."
-
-    year_str = f"fra {year}" if year else "av ukjent år"
-    addr_str = f" for tomten ved {address_hint}" if address_hint else ""
-
-    system_prompt = (
-        "Du er en erfaren norsk miljøgeolog (RIG-M) og arealutviklingskonsulent. "
-        "Du analyserer historiske flyfoto for å vurdere tidligere arealbruk og forurensningsrisiko "
-        "i tråd med forurensningsforskriften kapittel 2 (tiltak ved utbygging) og TEK17 §§ 5-2 og 13-6. "
-        "Du svarer på norsk, fagteknisk og konkret. Du unngår spekulasjon og merker usikkerhet tydelig. "
-        "Du vet at historiske flyfoto alene ikke kan erstatte miljøteknisk grunnundersøkelse — men de "
-        "er ofte første trinn i en aktsom historisk kartlegging som kreves før byggesaksbehandling "
-        "på tomter med potensielt forurenset grunn."
-    )
-
-    user_text = (
-        f"Vedlagt er et historisk flyfoto {year_str}{addr_str}. "
-        f"{contamination_summary}\n\n"
-        "Analyser flyfotoet og gi en konkret vurdering i disse fire kategoriene. "
-        "Svar KUN som ren JSON (ingen markdown-backticks, ingen ekstra tekst) "
-        "med nøyaktig disse nøklene:\n\n"
-        "{\n"
-        '  "tidligere_bruk": "2-4 setninger som beskriver hva flyfotoet viser av arealbruk på tomten og i nærområdet. '
-        'Nevn konkret: bebyggelse, vegetasjon, infrastruktur, synlige anlegg/industri/gårdsbruk/grustak/deponi osv. '
-        'Vær konkret — unngå generelle formuleringer.",\n'
-        '  "forurensningsrisiko": "3-5 setninger som kobler observasjoner til potensielle forurensningskilder '
-        '(oljetank, smørebu, kjemisk rensing, fyllmasser, sprøytemiddelbruk, diffus byforurensning, osv.). '
-        'Vurder sannsynlighet for PAH, tungmetaller, oljehydrokarboner, asbestrester. Nevn også hvis fotoet '
-        'IKKE indikerer forhøyet risiko (f.eks. uberørt skog/landbruk uten synlige inngrep).",\n'
-        '  "anbefalte_tiltak": "Konkret anbefaling: behov for miljøteknisk grunnundersøkelse (prøvetaking + lab), '
-        'historisk kartlegging mot bransjearkiv, sjekk av arkivmateriale fra tidligere eiere, eller kun '
-        'standard påvisningsprosedyre. Vis til forurensningsforskriftens kap. 2 hvis relevant.",\n'
-        '  "risiko_niva": "ETT av: Lav, Moderat, Høy, Ukjent — din samlede vurdering"\n'
-        "}\n\n"
-        "Viktig: Hvis flyfotoet er uklart, dårlig oppløst eller du ikke kan konkludere, skriv det eksplisitt "
-        'og sett risiko_niva="Ukjent". Ikke dikt opp detaljer.'
-    )
-
-    try:
-        raw = _call_claude_vision(system_prompt, user_text, [historical_image], max_tokens=2000)
-        if not raw:
-            return None
-        # Strip markdown-fences hvis til stede
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        data = json.loads(text)
-        # Valider forventede nøkler
-        for key in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak", "risiko_niva"):
-            data.setdefault(key, "")
-        # Normaliser risiko_niva
-        rn = str(data.get("risiko_niva", "")).strip().lower()
-        if "høy" in rn or "hoy" in rn or rn == "høy":
-            data["risiko_niva"] = "Høy"
-        elif "moderat" in rn or "middels" in rn:
-            data["risiko_niva"] = "Moderat"
-        elif "lav" in rn:
-            data["risiko_niva"] = "Lav"
-        else:
-            data["risiko_niva"] = "Ukjent"
-        return data
-    except Exception:
-        return None
-
-
-def _pil_to_temp_jpg(img: Image.Image, max_w: int = 1600) -> str:
-    """Konverter PIL-bilde til midlertidig JPG og returner filsti.
-    FPDF trenger fil på disk. Rezise om for bredt."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    try:
-        rgb = img.convert("RGB")
-        if rgb.width > max_w:
-            ratio = max_w / rgb.width
-            new_h = int(rgb.height * ratio)
-            rgb = rgb.resize((max_w, new_h), Image.LANCZOS)
-        rgb.save(tmp.name, format="JPEG", quality=88)
     finally:
-        tmp.close()
-    return tmp.name
+        # Reset line width to default
+        pdf.set_line_width(0.2)
 
 
-def build_geo_context_pages(
-    pdf: "BuiltlyProPDF",
-    geodata_bundle: Optional[Dict[str, Any]],
-    historical_analysis: Optional[Dict[str, str]],
-    site_intelligence: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Bygg de to geo-sidene i PDF-rapporten.
+def _draw_status_icon(pdf: Any, x: float, y: float, is_ok: bool, size: float = 3.5) -> None:
+    """Tegn grønn sjekk (OK) eller gul varsel-trekant (Merknad)."""
+    try:
+        pdf.set_line_width(0.25)
+        if is_ok:
+            # Grønn sirkel med hake
+            pdf.set_fill_color(52, 168, 83)
+            pdf.set_draw_color(30, 120, 60)
+            try:
+                pdf.ellipse(x, y, size, size, style="DF")
+            except Exception:
+                pdf.rect(x, y, size, size, style="DF")
+            # Hake (to linjer)
+            pdf.set_draw_color(255, 255, 255)
+            pdf.set_line_width(0.5)
+            pdf.line(x + size * 0.22, y + size * 0.52, x + size * 0.42, y + size * 0.72)
+            pdf.line(x + size * 0.42, y + size * 0.72, x + size * 0.80, y + size * 0.30)
+        else:
+            # Gul trekant med utropstegn
+            pdf.set_fill_color(250, 190, 40)
+            pdf.set_draw_color(200, 140, 0)
+            try:
+                pts = [
+                    (x + size / 2, y),
+                    (x + size, y + size * 0.95),
+                    (x, y + size * 0.95),
+                ]
+                pdf.polygon(pts, style="DF")
+            except AttributeError:
+                pdf.rect(x, y, size, size, style="DF")
+            # Utropstegn
+            pdf.set_draw_color(80, 50, 0)
+            pdf.set_line_width(0.5)
+            pdf.line(x + size / 2, y + size * 0.3, x + size / 2, y + size * 0.65)
+            # Prikk (via liten rekt)
+            pdf.set_fill_color(80, 50, 0)
+            pdf.rect(x + size / 2 - 0.2, y + size * 0.75, 0.4, 0.4, style="F")
+    except Exception:
+        pass
+    finally:
+        pdf.set_line_width(0.2)
 
-    Side A: STEDSKONTEKST OG GEODATA — KPI-kort (plan/projects/transport
-    hvis tilgjengelig) + grunnforurensnings-tabell + risikomerking.
-    Side B: HISTORISK FLYFOTO OG TIDLIGERE BRUK — historisk bilde +
-    AI-analyse i tre seksjoner (tidligere bruk, forurensningsrisiko,
-    anbefalte tiltak) + risiko-badge.
+
+def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["SiteInputs"]) -> None:
+    """Tegn dedikert PDF-side(r) for byggetrinn og fasering.
+
+    Mønster (matcher sol/skygge-sidene):
+      - Intro med sammendrag av byggetrinn
+      - Tabell med alle byggetrinn
+      - Fase-kort per byggetrinn (4 per side) med farge, BRA, programmer, status
+      - Parkeringsfaser-tabell
+      - Uterom/MUA-sammendrag
+
+    PDF-objektet har metoder: add_page(), section_title(text, size), body_text(text),
+    set_fill_color, rect, set_xy, set_font, cell, multi_cell, ln.
     """
-    if not geodata_bundle or not geodata_bundle.get("available"):
-        return  # Skipp stille hvis ingen data
+    from masterplan_integration import PHASE_COLORS_HEX
 
-    # ============================================================
-    # SIDE A: STEDSKONTEKST OG GEODATA
-    # ============================================================
+    # ==== SIDE 1: Intro og oversikt ====
     pdf.add_page()
-    pdf.section_title("STEDSKONTEKST OG GEODATA", 16)
-    pdf.body_text(
-        "Automatisert uttrekk fra åpne norske geodata-kilder: plan- og reguleringsdata, "
-        "utbyggingsaktivitet, mobilitet/transport, samt Miljødirektoratets "
-        "grunnforurensningsdatabase. Dette er et første screeningbilde — "
-        "fagteknisk RIG-M-vurdering kreves før byggesaksinnsending."
-    )
-    pdf.ln(3)
+    pdf.section_title("BYGGETRINN OG FASERING", 16)
 
-    # --- KPI-rad 1: Plan / Utbygging / Mobilitet (fra site_intelligence) ---
-    def _draw_kpi(px, py, pw, ph, title_str, value_str, sub_str, accent_color):
-        """Lokal variant av _draw_kpi_card — identisk stil til resten av PDF-en."""
-        pdf.set_fill_color(*accent_color)
-        pdf.rect(px, py, pw, 2, 'F')
-        pdf.set_draw_color(150, 170, 195)
-        pdf.set_line_width(0.3)
-        pdf.rect(px, py, pw, ph, 'D')
-        pdf.set_line_width(0.2)
-        pdf.set_fill_color(240, 244, 250)
-        pdf.rect(px + 0.3, py + 2.3, pw - 0.6, ph - 2.6, 'F')
-        pdf.set_xy(px + 3, py + 5)
-        pdf.set_font(PDF_FONT, "B", 10)
-        pdf.set_text_color(70, 90, 120)
-        pdf.cell(pw - 6, 5, clean_pdf_text(title_str), 0, 0)
-        pdf.set_xy(px + 3, py + 12)
-        pdf.set_font(PDF_FONT, "B", 16)
-        pdf.set_text_color(*_NAVY)
-        pdf.cell(pw - 6, 9, clean_pdf_text(value_str), 0, 0)
-        if sub_str:
-            pdf.set_xy(px + 3, py + 22)
-            pdf.set_font(PDF_FONT, "", 8)
-            pdf.set_text_color(100, 115, 135)
-            pdf.cell(pw - 6, 4, clean_pdf_text(sub_str), 0, 0)
-
-    # Overskrift
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "B", 11)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(0, 7, clean_pdf_text("PLAN, UTBYGGING OG MOBILITET"), 0, 1)
-    pdf.ln(1)
-
-    cw, ch, gap = 51, 28, 3  # 3 kort a 51mm + 2 gaps a 3mm = 159mm (passer i 155mm textwidth + litt margin)
-    cx, cy = 25, pdf.get_y()
-
-    si = site_intelligence or {}
-    si_available = bool(si.get("available"))
-
-    # Plan-kort
-    plan = si.get("plan", {}) if si_available else {}
-    nearby_plan_n = plan.get("nearby_plan_count")
-    risk_score = plan.get("regulatory_risk_score")
-    if nearby_plan_n is not None:
-        plan_val = f"{nearby_plan_n}"
-        if risk_score is not None:
-            risk_color = _SCORE_GREEN if risk_score < 33 else _SCORE_AMBER if risk_score < 66 else _SCORE_RED
-            risk_label = "Lav risiko" if risk_score < 33 else "Moderat" if risk_score < 66 else "Høy risiko"
-            plan_sub = f"Planrisiko: {risk_label} ({risk_score:.0f}/100)"
-        else:
-            risk_color = _BUILTLY_BLUE
-            plan_sub = "planer i nærheten"
-        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", plan_val, plan_sub, risk_color)
-    else:
-        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", "Ingen data", "", _MUTED)
-
-    # Utbyggingsaktivitet
-    projects = si.get("projects", {}) if si_available else {}
-    proj_n = projects.get("nearby_count") or projects.get("feature_count")
-    if proj_n is not None:
-        proj_color = _BUILTLY_BLUE if proj_n == 0 else _SCORE_AMBER if proj_n < 5 else _SCORE_GREEN
-        proj_sub = "prosjekter i nærområdet"
-        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", f"{proj_n}", proj_sub, proj_color)
-    else:
-        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", "Ingen data", "", _MUTED)
-
-    # Mobilitet
-    transport = si.get("transport", {}) if si_available else {}
-    mob_score = transport.get("mobility_score")
-    if mob_score is not None:
-        transit_m = transport.get("nearest_transit_m")
-        mob_color = _SCORE_GREEN if mob_score >= 60 else _SCORE_AMBER if mob_score >= 40 else _SCORE_RED
-        mob_val = f"{mob_score:.0f}/100"
-        if transit_m is not None:
-            mob_sub = f"Kollektiv: {int(transit_m)} m"
-        else:
-            mob_sub = "Mobilitetsscore"
-        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", mob_val, mob_sub, mob_color)
-    else:
-        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", "Ingen data", "", _MUTED)
-
-    pdf.set_y(cy + ch + 5)
-
-    # --- Grunnforurensning-seksjon ---
-    contamination = geodata_bundle.get("grunnforurensning", [])
-
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "B", 11)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(0, 7, clean_pdf_text("GRUNNFORURENSNING (MILJØDIREKTORATET)"), 0, 1)
-    pdf.ln(1)
-
-    # Status-boks
-    cnt = len(contamination)
-    if cnt == 0:
-        status_color = _SCORE_GREEN
-        status_text = "Ingen kjente lokaliteter innen 500 m radius"
-        status_sub = "Basert på Miljødirektoratets database — kilde: grfreg-api.miljodirektoratet.no"
-    elif cnt <= 2:
-        status_color = _SCORE_AMBER
-        status_text = f"{cnt} registrert lokalitet innen 500 m" if cnt == 1 else f"{cnt} registrerte lokaliteter innen 500 m"
-        status_sub = "Moderat oppmerksomhet anbefales — vurder miljøteknisk undersøkelse"
-    else:
-        status_color = _SCORE_RED
-        status_text = f"{cnt} registrerte lokaliteter innen 500 m"
-        status_sub = "Forhøyet oppmerksomhet — miljøteknisk grunnundersøkelse bør vurderes"
-
-    y_box = pdf.get_y()
-    pdf.set_fill_color(*status_color)
-    pdf.rect(25, y_box, 3, 14, 'F')  # Tykk fargestripe venstre
-    pdf.set_fill_color(247, 249, 252)
-    pdf.set_draw_color(*_DIVIDER)
-    pdf.set_line_width(0.3)
-    pdf.rect(28, y_box, 157, 14, 'DF')
-    pdf.set_line_width(0.2)
-    pdf.set_xy(31, y_box + 2)
-    pdf.set_font(PDF_FONT, "B", 10)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(152, 5, clean_pdf_text(status_text), 0, 1)
-    pdf.set_xy(31, y_box + 8)
-    pdf.set_font(PDF_FONT, "", 9)
-    pdf.set_text_color(100, 115, 135)
-    pdf.cell(152, 4, clean_pdf_text(status_sub), 0, 1)
-    pdf.set_y(y_box + 16)
-
-    # Tabell med de nærmeste lokalitetene hvis finnes
-    if contamination:
-        pdf.ln(2)
-        headers = ["Lokalitet", "Type / kategori", "Status", "Avstand"]
-        widths = [62, 43, 30, 20]
-        rows = []
-        for s in contamination[:6]:
-            navn = (s.get("navn") or "Ukjent")[:38]
-            typ = (s.get("type") or "—")[:28]
-            status = (s.get("status") or "—")[:18]
-            dist = f"{int(s['distance_m'])} m" if s.get("distance_m") is not None else "—"
-            rows.append([navn, typ, status, dist])
-        add_pdf_table(pdf, headers, rows, widths)
-        if len(contamination) > 6:
-            pdf.ln(1)
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "I", 8)
-            pdf.set_text_color(*_MUTED)
-            pdf.cell(0, 4, clean_pdf_text(f"... og {len(contamination) - 6} ytterligere lokalitet(er) i omrdet."), 0, 1)
-
-    # --- Aktsomhetskart — strukturerte DOK-data fra Geodata Online (v16) ---
-    pdf.ln(3)
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "B", 11)
-    pdf.set_text_color(*_NAVY)
-    pdf.cell(0, 7, clean_pdf_text("AKTSOMHET — RADON, FLOM OG SKRED"), 0, 1)
-    pdf.ln(1)
-
-    aktsomhet_data = geodata_bundle.get("aktsomhet", {}) or {}
-    categories = aktsomhet_data.get("categories", {}) or {}
-    gdo_ok = aktsomhet_data.get("available", False)
-
-    # Kategorier i fast rekkefølge for konsekvent layout
-    akt_rows = [
-        ("radon", "Radon (NGU aktsomhetskart)"),
-        ("flom", "Flom (NVE aktsomhetsområde)"),
-        ("kvikkleire", "Kvikkleire (NVE faresoner)"),
-        ("skred_snø", "Snøskred (NVE aktsomhet)"),
-        ("skred_stein", "Steinskred / steinsprang"),
-        ("skred_jord", "Jord-/flomskred"),
-    ]
-
-    pdf.set_font(PDF_FONT, "", 9)
-    for key, label in akt_rows:
-        cat = categories.get(key, {}) or {}
-        hit = bool(cat.get("hit"))
-        severity = cat.get("severity", "ukjent")
-        detail = cat.get("detail", "")
-
-        # Fargekode indikator
-        if not gdo_ok:
-            color = _MUTED
-            status = "data ikke hentet"
-        elif not hit:
-            color = _SCORE_GREEN
-            status = "ingen registrert aktsomhetssone"
-        elif severity == "høy":
-            color = _SCORE_RED
-            status = f"høy aktsomhet — {detail}" if detail else "høy aktsomhet"
-        elif severity == "moderat":
-            color = _SCORE_AMBER
-            status = f"moderat aktsomhet — {detail}" if detail else "moderat aktsomhet"
-        elif severity == "lav":
-            color = _SCORE_AMBER  # gul for forsiktighet
-            status = f"lav aktsomhet — {detail}" if detail else "lav aktsomhet"
-        else:  # registrert, men ukjent grad
-            color = _SCORE_AMBER
-            status = f"registrert aktsomhet — {detail}" if detail else "registrert aktsomhetssone"
-
-        pdf.set_x(25)
-        pdf.set_fill_color(*color)
-        pdf.rect(25, pdf.get_y() + 1.5, 2.5, 2.5, 'F')
-        pdf.set_x(30)
-        pdf.set_text_color(*_BODY_BLACK)
-        pdf.cell(60, 5, clean_pdf_text(label), 0, 0)
-        pdf.set_text_color(*_MUTED) if not hit or not gdo_ok else pdf.set_text_color(*_BODY_BLACK)
-        pdf.cell(0, 5, clean_pdf_text(status), 0, 1)
-
-    # Hvis vi fikk noen treff totalt, legg til en sammendragsboks
-    total_hits = sum(1 for c in categories.values() if c.get("hit"))
-    if gdo_ok and total_hits > 0:
-        pdf.ln(2)
-        y_box = pdf.get_y()
-        pdf.set_fill_color(*_SCORE_AMBER)
-        pdf.rect(25, y_box, 3, 10, 'F')
-        pdf.set_fill_color(247, 249, 252)
-        pdf.set_draw_color(*_DIVIDER)
-        pdf.set_line_width(0.3)
-        pdf.rect(28, y_box, 157, 10, 'DF')
-        pdf.set_line_width(0.2)
-        pdf.set_xy(31, y_box + 1.5)
-        pdf.set_font(PDF_FONT, "B", 9)
-        pdf.set_text_color(*_NAVY)
-        pdf.cell(152, 4, clean_pdf_text(
-            f"Tomten er registrert i {total_hits} aktsomhetskategori" +
-            ("er" if total_hits != 1 else "")
-        ), 0, 1)
-        pdf.set_xy(31, y_box + 5.5)
-        pdf.set_font(PDF_FONT, "", 8)
-        pdf.set_text_color(100, 115, 135)
-        pdf.cell(152, 4, clean_pdf_text(
-            "Faglig RIG-/geotekniker-vurdering er nødvendig før byggesaksbehandling."
-        ), 0, 1)
-        pdf.set_y(y_box + 12)
-
-    pdf.ln(1)
-    pdf.set_font(PDF_FONT, "I", 8)
-    pdf.set_text_color(*_MUTED)
-    pdf.set_x(25)
-    pdf.multi_cell(
-        155, 4,
-        clean_pdf_text(
-            f"Kilde: {aktsomhet_data.get('source', 'Geodata Online DOK')}. "
-            "Aktsomhetskart er veiledende. Ved utbygging må fagfolk (RIG, geotekniker, miljøgeolog) "
-            "verifisere forholdene i felt og i relevante tilleggsregistre (f.eks. NGU GRANADA for grunnvann, "
-            "NVE Temakart for detaljerte skredfaresoner)."
-        )
-    )
-
-    # ============================================================
-    # SIDE B: HISTORISK FLYFOTO OG TIDLIGERE BRUK
-    # ============================================================
-    hist_img = geodata_bundle.get("historisk")
-    hist_year = geodata_bundle.get("historisk_year")
-    hist_src = geodata_bundle.get("historisk_source", "")
-
-    if hist_img is None:
-        # Ingen historisk foto — skipp side B, men skriv en liten note på side A
-        pdf.ln(3)
-        pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "I", 9)
-        pdf.set_text_color(*_MUTED)
-        pdf.multi_cell(
-            155, 4.5,
-            clean_pdf_text(
-                "Merk: Historisk flyfoto var ikke automatisk tilgjengelig for denne tomten. "
-                "Manuell oppslag i Norge i Bilder eller kommunearkiv anbefales som del av "
-                "aktsom historisk kartlegging (forurensningsforskriften kap. 2)."
-            )
-        )
-        return
-
-    pdf.add_page()
-    title_year = f"HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK ({hist_year})" if hist_year else "HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK"
-    pdf.section_title(title_year, 16)
-
+    m = masterplan.metrics
     intro = (
-        "Historisk flyfoto er sentralt i aktsom historisk kartlegging av tomten. "
-        "Det gir førstehånds indikasjon på tidligere arealbruk — industri, landbruk, "
-        "deponi, fylling eller andre potensielt forurensende aktiviteter — som igjen "
-        "avgjør behovet for miljøteknisk grunnundersøkelse i henhold til "
-        "forurensningsforskriften kapittel 2."
-    )
+        f"Masterplanen er delt i {m.phase_count_buildings} byggetrinn à snitt "
+        f"{m.avg_phase_bra:,.0f} m² BRA (min {m.min_phase_bra:,.0f}, max {m.max_phase_bra:,.0f}). "
+        f"Parkering løses i {m.phase_count_parking} fase(r). Hvert trinn er vurdert for "
+        f"standalone-bokvalitet: gjennomsnittsscore {m.standalone_habitability_score:.0f}/100."
+    ).replace(",", " ")
     pdf.body_text(intro)
     pdf.ln(2)
 
-    # Kildemerking
-    pdf.set_x(25)
-    pdf.set_font(PDF_FONT, "I", 8)
-    pdf.set_text_color(*_MUTED)
-    src_label = f"Kilde: {hist_src}" + (f" · År: {hist_year}" if hist_year else "")
-    pdf.cell(0, 4, clean_pdf_text(src_label), 0, 1)
+    # Metodikk-info-boks (samme mønster som sol/skygge)
+    try:
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(220, 228, 238)
+        pdf.set_line_width(0.2)
+        _box_y = pdf.get_y()
+        pdf.rect(25, _box_y, 160, 30, style="DF")
+        pdf.set_xy(29, _box_y + 3)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(31, 43, 61)  # navy
+        pdf.cell(156, 5, clean_pdf_text("Metodikk"), 0, 2, "L")
+        pdf.set_x(29)
+        pdf.set_font(PDF_FONT, "", 8.5)
+        pdf.set_text_color(30, 30, 30)
+        _method = (
+            "Byggetrinnene er generert av Builtly Masterplan-motor via 6-pass "
+            "arkitektur. Hvert trinn er ~3500-4500 m² BRA og må kunne stå som "
+            "selvstendig bomiljø: egne oppganger, dedikert uterom, trygg adkomst. "
+            "Parkeringsfaser planlegges separat og kan utvides etappevis."
+        )
+        pdf.multi_cell(152, 4.2, ironclad_text_formatter(_method))
+        pdf.set_xy(25, _box_y + 32)
+    except Exception:
+        pass
+    pdf.ln(3)
+
+    # Oversiktstabell: alle byggetrinn
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(31, 43, 61)
+    pdf.cell(0, 5, clean_pdf_text("Byggetrinn — oversikt"), 0, 2, "L")
     pdf.ln(1)
 
-    # Historisk bilde sentrert (150mm bred for å gi plass til analyse under)
-    img_w = 150
-    img_h = 90  # Fast aspekt — ortofoto er ofte ~kvadratisk, men vi padder
-    x_img = (210 - img_w) / 2
-    try:
-        tmp_path = _pil_to_temp_jpg(hist_img, max_w=1600)
-        y_before = pdf.get_y()
-        # Beregn faktisk høyde basert på originalbildets aspekt
-        orig_w, orig_h = hist_img.size
-        actual_h = img_w * (orig_h / orig_w)
-        if actual_h > 110:  # Maks 110mm
-            actual_h = 110
-            img_w = actual_h * (orig_w / orig_h)
-            x_img = (210 - img_w) / 2
-        # Lys ramme rundt bildet
-        pdf.set_draw_color(*_DIVIDER)
-        pdf.set_line_width(0.4)
-        pdf.rect(x_img - 1, y_before - 1, img_w + 2, actual_h + 2, 'D')
-        pdf.set_line_width(0.2)
-        pdf.image(tmp_path, x=x_img, y=y_before, w=img_w, h=actual_h)
-        pdf.set_y(y_before + actual_h + 4)
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-    except Exception as exc:
-        pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "I", 9)
-        pdf.set_text_color(*_SCORE_RED)
-        pdf.cell(0, 5, clean_pdf_text(f"Bilde kunne ikke renderes: {str(exc)[:60]}"), 0, 1)
+    headers = ["Trinn", "BRA m²", "Boliger", "Programmer", "P-fase", "Uterom m²", "Status"]
+    widths = [18, 22, 18, 40, 16, 22, 24]
+    pdf.set_font(PDF_FONT, "B", 8.5)
+    pdf.set_fill_color(31, 43, 61)
+    pdf.set_text_color(255, 255, 255)
+    x_start = 25
+    pdf.set_x(x_start)
+    for h, w in zip(headers, widths):
+        pdf.cell(w, 6, clean_pdf_text(h), 1, 0, "L", fill=True)
+    pdf.ln(6)
 
-    # --- AI-analyse-seksjon ---
-    if historical_analysis and any(historical_analysis.get(k) for k in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak")):
-        # Risiko-badge øverst
-        risk = historical_analysis.get("risiko_niva", "Ukjent")
-        risk_colors = {
-            "Lav": _SCORE_GREEN,
-            "Moderat": _SCORE_AMBER,
-            "Høy": _SCORE_RED,
-            "Ukjent": _MUTED,
-        }
-        rc = risk_colors.get(risk, _MUTED)
-
-        pdf.ln(2)
-        y_badge = pdf.get_y()
-        pdf.set_fill_color(*rc)
-        pdf.rect(25, y_badge, 4, 10, 'F')
-        pdf.set_fill_color(247, 249, 252)
-        pdf.set_draw_color(*_DIVIDER)
-        pdf.rect(29, y_badge, 156, 10, 'DF')
-        pdf.set_xy(32, y_badge + 1)
-        pdf.set_font(PDF_FONT, "B", 9)
-        pdf.set_text_color(100, 115, 135)
-        pdf.cell(40, 4, clean_pdf_text("FORURENSNINGSRISIKO:"), 0, 0)
-        pdf.set_font(PDF_FONT, "B", 11)
-        pdf.set_text_color(*rc)
-        pdf.cell(30, 4, clean_pdf_text(risk.upper()), 0, 0)
-        pdf.set_font(PDF_FONT, "I", 8)
-        pdf.set_text_color(*_MUTED)
-        pdf.set_xy(32, y_badge + 5.5)
-        pdf.cell(150, 4, clean_pdf_text("AI-basert første screening — fagteknisk vurdering kreves"), 0, 0)
-        pdf.set_y(y_badge + 13)
-
-        def _analysis_block(title: str, body: str) -> None:
-            if not body:
-                return
-            pdf.check_space(20)
-            pdf.ln(1)
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "B", 10)
-            pdf.set_text_color(*_BUILTLY_BLUE)
-            pdf.cell(0, 5, clean_pdf_text(title), 0, 1)
-            pdf.set_x(25)
-            pdf.set_font(PDF_FONT, "", 9)
-            pdf.set_text_color(*_BODY_BLACK)
-            pdf.multi_cell(155, 4.8, ironclad_text_formatter(body))
-            pdf.ln(1)
-
-        _analysis_block("TIDLIGERE AREALBRUK", historical_analysis.get("tidligere_bruk", ""))
-        _analysis_block("VURDERT FORURENSNINGSRISIKO", historical_analysis.get("forurensningsrisiko", ""))
-        _analysis_block("ANBEFALTE TILTAK", historical_analysis.get("anbefalte_tiltak", ""))
-    else:
-        # Ingen AI-analyse tilgjengelig — vis bare bildet med en note
-        pdf.ln(2)
-        pdf.set_x(25)
-        pdf.set_font(PDF_FONT, "I", 9)
-        pdf.set_text_color(*_MUTED)
-        pdf.multi_cell(
-            155, 4.5,
-            clean_pdf_text(
-                "AI-basert analyse av historisk flyfoto er ikke tilgjengelig i denne rapporten "
-                "(krever ANTHROPIC_API_KEY). Manuell fagvurdering av tidligere arealbruk anbefales "
-                "som del av aktsom historisk kartlegging."
-            )
-        )
-
-
-# ================================================================
-# POST-FILTER HELPERS FOR AI-GENERERT RAPPORTTEKST
-# Claude ignorerer av og til FORBUDT-klausulene i prompten — disse
-# filtrene rydder ut hallusinasjonene før teksten sendes til PDF.
-# ================================================================
-
-def _strip_hallucinated_preamble(text: str) -> str:
-    """Fjern hallusinerte forside-blokker som Claude av og til legger FØR pkt. 1.
-    Eksempel: "MULIGHETSSTUDIE\n\nDato: [Dagens dato]\nProsjekt: ..."
-    Alt før første "# 1." (eller "1." som seksjonsstart) er preamble — kutt det.
-    """
-    if not text:
-        return text
-    # Finn starten av pkt. 1 — aksepterer både "# 1." og "1. OPPSUMMERING"
-    m = re.search(r"^#?\s*1\.\s+[A-ZÆØÅ]", text, re.MULTILINE)
-    if m and m.start() > 0:
-        # Det finnes tekst før pkt. 1 — sjekk om det ligner preamble
-        preamble = text[:m.start()].strip()
-        # Preamble er "suspekt" hvis den inneholder placeholder eller metadata-nøkler
-        suspect_patterns = [
-            r"\[[Dd]agens\s+dato\]", r"\[[Ss]ett\s+inn", r"\[[Pp]laceholder",
-            r"^MULIGHETSSTUDIE\s*$", r"^Dato\s*:", r"^Prosjekt\s*:",
-            r"^Tomteareal\s*:", r"^Oppdragsgiver\s*:", r"^Utarbeidet\s+av\s*:",
+    pdf.set_font(PDF_FONT, "", 8)
+    pdf.set_text_color(30, 30, 30)
+    for phase in masterplan.building_phases:
+        progs = ", ".join(phase.programs_included) if phase.programs_included else "bolig"
+        if len(progs) > 22:
+            progs = progs[:20] + "…"
+        p_fase = ",".join(str(p) for p in phase.parking_served_by) or "-"
+        status = "OK" if phase.standalone_habitable else "Merknad"
+        row = [
+            f"T{phase.phase_number}",
+            f"{phase.actual_bra:,.0f}".replace(",", " "),
+            f"{phase.units_estimate}",
+            progs,
+            f"P{p_fase}",
+            f"{phase.standalone_outdoor_m2:,.0f}".replace(",", " "),
+            status,
         ]
-        is_suspect = any(re.search(p, preamble, re.MULTILINE) for p in suspect_patterns)
-        # Kort preamble (< 400 tegn) som ikke inneholder # headings er også mistenkelig
-        has_headings = bool(re.search(r"^#\s", preamble, re.MULTILINE))
-        if is_suspect or (len(preamble) < 400 and not has_headings):
-            return text[m.start():]
-    return text
+        pdf.set_x(x_start)
+        fill = phase.phase_number % 2 == 0
+        if fill:
+            pdf.set_fill_color(247, 249, 252)
+        for val, w in zip(row, widths):
+            pdf.cell(w, 5.5, clean_pdf_text(val), 1, 0, "L", fill=fill)
+        pdf.ln(5.5)
+    pdf.ln(3)
 
+    # Tidslinje-visualisering (forenklet Gantt-stripe)
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(31, 43, 61)
+    pdf.cell(0, 5, clean_pdf_text("Tidsplan (estimert)"), 0, 2, "L")
+    pdf.set_font(PDF_FONT, "", 8)
+    pdf.set_text_color(30, 30, 30)
+    pdf.cell(0, 4, clean_pdf_text(
+        "Forutsetning: 24 mnd per byggetrinn, 6 mnd overlapp. "
+        "Faktisk tidsplan fastsettes i prosjekteringsfasen."
+    ), 0, 2, "L")
+    pdf.ln(2)
 
-def _strip_hallucinated_appendix(text: str) -> str:
-    """Fjern hallusinert VEDLEGG/APPENDIKS-seksjon etter pkt. 10.
-    Geo-data og støy er allerede presentert i dedikerte PDF-seksjoner
-    og skal ikke dupliseres i vedlegg i rapportteksten.
-    """
-    if not text:
-        return text
-    # Finn starten av en vedleggs-seksjon etter pkt. 10
-    # Mønster: "VEDLEGG", "APPENDIKS", "APPENDIX", "TILLEGG" som overskrift
-    m = re.search(
-        r"^(?:#+\s*|\*\*)?(?:VEDLEGG|APPENDIKS|APPENDIX|TILLEGG)\b",
-        text, re.MULTILINE | re.IGNORECASE
-    )
-    if m:
-        # Kun fjern hvis vedlegget kommer ETTER pkt. 10
-        pkt10 = re.search(r"^#?\s*10\.\s+", text, re.MULTILINE)
-        if pkt10 and m.start() > pkt10.start():
-            return text[:m.start()].rstrip() + "\n"
-    return text
+    # Tegn en enkel Gantt-strøm
+    try:
+        DEFAULT_DUR = 24
+        month_schedule = {}
+        cur = 0
+        for p in masterplan.building_phases:
+            dur = p.estimated_duration_months or DEFAULT_DUR
+            month_schedule[p.phase_number] = (cur, cur + dur)
+            cur += max(1, dur - 6)
+        total_months = max(e for _, e in month_schedule.values()) if month_schedule else DEFAULT_DUR
 
+        gantt_x0 = 45.0
+        gantt_w = 140.0
+        row_h = 5.0
+        gantt_y = pdf.get_y()
+        pdf.set_line_width(0.15)
+        for i, phase in enumerate(masterplan.building_phases):
+            y = gantt_y + i * (row_h + 1.5)
+            # Label
+            pdf.set_xy(25, y)
+            pdf.set_font(PDF_FONT, "", 7.5)
+            pdf.set_text_color(80, 80, 90)
+            pdf.cell(18, row_h, clean_pdf_text(f"T{phase.phase_number}"), 0, 0, "L")
+            # Bakgrunnsstripe
+            pdf.set_fill_color(240, 243, 248)
+            pdf.rect(gantt_x0, y, gantt_w, row_h, style="F")
+            # Selve trinn-stripen
+            s, e = month_schedule[phase.phase_number]
+            left = gantt_x0 + (s / total_months) * gantt_w
+            width = ((e - s) / total_months) * gantt_w
+            # Fase-farge (hex → RGB)
+            hex_color = PHASE_COLORS_HEX[(phase.phase_number - 1) % len(PHASE_COLORS_HEX)]
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            pdf.set_fill_color(r, g, b)
+            pdf.rect(left, y + 0.5, width, row_h - 1, style="F")
+            # Tekst i stripen
+            pdf.set_xy(left + 1.5, y + 0.3)
+            pdf.set_font(PDF_FONT, "B", 6.5)
+            pdf.set_text_color(15, 25, 45)
+            pdf.cell(max(10, width - 3), row_h, clean_pdf_text(f"{phase.actual_bra:,.0f}".replace(",", " ") + " m²"), 0, 0, "L")
+        # Parkeringsfaser — tegn på egen rad, grå
+        last_row_y = gantt_y + len(masterplan.building_phases) * (row_h + 1.5)
+        for pp in masterplan.parking_phases:
+            if not pp.serves_building_phases:
+                continue
+            first_served = min(pp.serves_building_phases)
+            if first_served not in month_schedule:
+                continue
+            b_start = month_schedule[first_served][0]
+            p_dur = 12
+            p_start = max(0, b_start - p_dur)
+            y = last_row_y + (pp.phase_number - 1) * (row_h + 1.5)
+            pdf.set_xy(25, y)
+            pdf.set_font(PDF_FONT, "", 7.5)
+            pdf.set_text_color(80, 80, 90)
+            pdf.cell(18, row_h, clean_pdf_text(f"P{pp.phase_number}"), 0, 0, "L")
+            pdf.set_fill_color(240, 243, 248)
+            pdf.rect(gantt_x0, y, gantt_w, row_h, style="F")
+            left = gantt_x0 + (p_start / total_months) * gantt_w
+            width = ((b_start - p_start) / total_months) * gantt_w
+            pdf.set_fill_color(100, 116, 139)
+            pdf.rect(left, y + 0.5, width, row_h - 1, style="F")
+            pdf.set_xy(left + 1.5, y + 0.3)
+            pdf.set_font(PDF_FONT, "B", 6.5)
+            pdf.set_text_color(245, 245, 250)
+            pdf.cell(max(10, width - 3), row_h, clean_pdf_text(f"{pp.num_spaces} pl"), 0, 0, "L")
+        pdf.set_xy(25, last_row_y + len(masterplan.parking_phases) * (row_h + 1.5) + 2)
 
-def _normalize_bullets(text: str) -> str:
-    """Konverter '*' og '•' bullet-markere til '-' for konsistent rendering."""
-    if not text:
-        return text
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        # Match "* " eller "• " i starten (etter whitespace)
-        m = re.match(r"^(\s*)[\*•]\s+(.*)$", line)
-        if m:
-            lines[i] = f"{m.group(1)}- {m.group(2)}"
-    return "\n".join(lines)
+        # Tids-akse
+        pdf.set_font(PDF_FONT, "", 7)
+        pdf.set_text_color(120, 125, 135)
+        years = max(1, total_months // 12 + 1)
+        for yr in range(years + 1):
+            x_pos = gantt_x0 + (yr * 12 / total_months) * gantt_w
+            pdf.set_xy(x_pos - 4, pdf.get_y())
+            pdf.cell(10, 4, clean_pdf_text(f"År {yr}"), 0, 0, "L")
+        pdf.ln(6)
+    except Exception:
+        pass
+
+    # ==== SIDE 2+: Fase-kort (4 per side) ====
+    phases_per_page = 4
+    for page_start in range(0, len(masterplan.building_phases), phases_per_page):
+        pdf.add_page()
+        pdf.section_title("BYGGETRINN — DETALJER", 14)
+        pdf.ln(2)
+
+        page_phases = masterplan.building_phases[page_start:page_start + phases_per_page]
+        card_w = 160.0
+        card_h = 54.0
+        card_x = 25.0
+        card_y_start = pdf.get_y()
+
+        for i, phase in enumerate(page_phases):
+            card_y = card_y_start + i * (card_h + 4)
+            # Fase-farge-bånd til venstre
+            hex_color = PHASE_COLORS_HEX[(phase.phase_number - 1) % len(PHASE_COLORS_HEX)]
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            pdf.set_fill_color(r, g, b)
+            pdf.rect(card_x, card_y, 4, card_h, style="F")
+            # Kort-bakgrunn
+            pdf.set_fill_color(252, 253, 254)
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_line_width(0.15)
+            pdf.rect(card_x + 4, card_y, card_w - 4, card_h, style="DF")
+
+            # Overskrift
+            pdf.set_xy(card_x + 8, card_y + 3)
+            pdf.set_font(PDF_FONT, "B", 11)
+            pdf.set_text_color(31, 43, 61)
+            pdf.cell(card_w - 12, 5, clean_pdf_text(phase.label or f"Trinn {phase.phase_number}"), 0, 0, "L")
+
+            # Key metrics (horisontal)
+            pdf.set_xy(card_x + 8, card_y + 10)
+            pdf.set_font(PDF_FONT, "", 8.5)
+            pdf.set_text_color(80, 80, 90)
+            metrics_text = (
+                f"BRA: {phase.actual_bra:,.0f} m²   |   "
+                f"Boliger: {phase.units_estimate}   |   "
+                f"Uterom: {phase.standalone_outdoor_m2:,.0f} m²   |   "
+                f"P-fase: {','.join(str(p) for p in phase.parking_served_by) or '-'}"
+            ).replace(",", " ")
+            pdf.cell(card_w - 12, 4.5, clean_pdf_text(metrics_text), 0, 0, "L")
+
+            # Programmer (med ikoner)
+            pdf.set_xy(card_x + 8, card_y + 16)
+            pdf.set_font(PDF_FONT, "B", 8)
+            pdf.set_text_color(31, 43, 61)
+            pdf.cell(26, 4, clean_pdf_text("Programmer:"), 0, 0, "L")
+            # Ikoner for hvert program
+            progs_list = list(phase.programs_included) if phase.programs_included else ["bolig"]
+            icon_x = card_x + 34
+            icon_y = card_y + 15.8
+            _draw_program_icons(pdf, icon_x, icon_y, progs_list, size=3.5, spacing=1.2)
+            # Tekstlabel etter ikoner
+            label_x = icon_x + len(progs_list) * (3.5 + 1.2) + 2
+            pdf.set_xy(label_x, card_y + 16)
+            pdf.set_font(PDF_FONT, "", 8)
+            pdf.set_text_color(30, 30, 30)
+            pdf.cell(card_w - (label_x - card_x) - 4, 4,
+                     clean_pdf_text(", ".join(progs_list)), 0, 0, "L")
+
+            # Avhengigheter
+            pdf.set_xy(card_x + 8, card_y + 21)
+            pdf.set_font(PDF_FONT, "B", 8)
+            pdf.set_text_color(31, 43, 61)
+            pdf.cell(26, 4, clean_pdf_text("Avhengigheter:"), 0, 0, "L")
+            pdf.set_font(PDF_FONT, "", 8)
+            pdf.set_text_color(30, 30, 30)
+            deps = (", ".join(f"T{d}" for d in phase.depends_on_phases)
+                    if phase.depends_on_phases else "Ingen (kan starte først)")
+            pdf.cell(card_w - 38, 4, clean_pdf_text(deps), 0, 0, "L")
+
+            # Status (med ikon)
+            _draw_status_icon(pdf, card_x + 8, card_y + 25.8,
+                              is_ok=phase.standalone_habitable, size=3.8)
+            pdf.set_xy(card_x + 14, card_y + 26)
+            pdf.set_font(PDF_FONT, "B", 8)
+            status_color = (46, 139, 87) if phase.standalone_habitable else (200, 120, 0)
+            pdf.set_text_color(*status_color)
+            status_label = (
+                "Standalone-bomiljø: OK"
+                if phase.standalone_habitable
+                else "Standalone-bomiljø: Merknader"
+            )
+            pdf.cell(card_w - 18, 4, clean_pdf_text(status_label), 0, 0, "L")
+
+            # Merknader/issues
+            if phase.standalone_issues:
+                pdf.set_xy(card_x + 8, card_y + 31)
+                pdf.set_font(PDF_FONT, "I", 7.5)
+                pdf.set_text_color(130, 90, 40)
+                issues_text = " · ".join(phase.standalone_issues[:3])
+                if len(issues_text) > 110:
+                    issues_text = issues_text[:108] + "…"
+                pdf.cell(card_w - 12, 3.5, clean_pdf_text(issues_text), 0, 0, "L")
+
+            # Volum-liste (nederst)
+            pdf.set_xy(card_x + 8, card_y + 38)
+            pdf.set_font(PDF_FONT, "", 7.5)
+            pdf.set_text_color(120, 125, 135)
+            vol_ids = phase.volume_ids[:8]
+            if len(phase.volume_ids) > 8:
+                vol_text = f"Volumer: {', '.join(vol_ids)} (+{len(phase.volume_ids)-8} til)"
+            else:
+                vol_text = f"Volumer: {', '.join(vol_ids)}"
+            pdf.cell(card_w - 12, 3.5, clean_pdf_text(vol_text), 0, 0, "L")
+
+    # ==== Siste side: Parkering og uterom ====
+    pdf.add_page()
+    pdf.section_title("PARKERING OG UTEROM", 14)
+    pdf.ln(2)
+
+    # Parkeringsfaser
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(31, 43, 61)
+    pdf.cell(0, 5, clean_pdf_text("Parkeringsfaser"), 0, 2, "L")
+    pdf.ln(1)
+
+    pdf.set_font(PDF_FONT, "", 8.5)
+    pdf.set_text_color(30, 30, 30)
+    for pp in masterplan.parking_phases:
+        served_str = ", ".join(f"T{b}" for b in pp.serves_building_phases) or "–"
+        ramp_str = (f"{len(pp.ramps)} rampe(r)" if pp.ramps
+                    else f"utvider P{','.join(str(p) for p in pp.extends_parking_phases)}")
+        line = (
+            f"P{pp.phase_number}:  {pp.num_spaces} plasser   |   {ramp_str}   |   "
+            f"betjener byggetrinn {served_str}"
+        )
+        pdf.cell(0, 4.5, clean_pdf_text(line), 0, 2, "L")
+        if pp.notes:
+            pdf.set_font(PDF_FONT, "I", 7.5)
+            pdf.set_text_color(100, 105, 115)
+            pdf.cell(0, 4, clean_pdf_text("   " + pp.notes[:140]), 0, 2, "L")
+            pdf.set_font(PDF_FONT, "", 8.5)
+            pdf.set_text_color(30, 30, 30)
+    pdf.ln(4)
+
+    # Uterom/MUA
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(31, 43, 61)
+    pdf.cell(0, 5, clean_pdf_text("Uteoppholdsareal (MUA)"), 0, 2, "L")
+    pdf.ln(1)
+
+    mua_bakke = masterplan.outdoor_system.mua_on_ground_felles()
+    mua_tak = masterplan.outdoor_system.mua_on_roof()
+    mua_total = masterplan.outdoor_system.mua_total()
+    mua_required = masterplan.metrics.mua_required_m2
+    mua_compliant = masterplan.metrics.mua_compliant
+
+    # KPI-lignende rad
+    pdf.set_font(PDF_FONT, "", 8.5)
+    pdf.set_text_color(30, 30, 30)
+    kpi_rows = [
+        ("Total MUA", f"{mua_total:,.0f} m²".replace(",", " ")),
+        ("Felles på bakkeplan", f"{mua_bakke:,.0f} m²".replace(",", " ")),
+        ("MUA på tak", f"{mua_tak:,.0f} m²".replace(",", " ")),
+        ("Krav (byggesone 2, 40 m²/bolig)", f"{mua_required:,.0f} m²".replace(",", " ")),
+        ("Status", "Compliant" if mua_compliant else "UNDERSKUDD"),
+    ]
+    for label, value in kpi_rows:
+        pdf.set_font(PDF_FONT, "", 8.5)
+        pdf.cell(70, 4.5, clean_pdf_text(label), 0, 0, "L")
+        pdf.set_font(PDF_FONT, "B", 8.5)
+        if label == "Status":
+            status_color = (46, 139, 87) if mua_compliant else (200, 60, 60)
+            pdf.set_text_color(*status_color)
+        pdf.cell(0, 4.5, clean_pdf_text(value), 0, 2, "L")
+        pdf.set_text_color(30, 30, 30)
+    pdf.ln(3)
+
+    # Diagonal og tun
+    if masterplan.outdoor_system.diagonal_linestring is not None:
+        pdf.set_font(PDF_FONT, "I", 8)
+        pdf.set_text_color(80, 80, 90)
+        pdf.multi_cell(0, 4, clean_pdf_text(
+            "Uterom-systemet er organisert rundt en hovedferdselsåre (diagonalen) — "
+            "en grønn og sosial korridor gjennom tomta (inspirert av LPO-mønster fra NRK Tyholt). "
+            "Mellom volumene ligger tun som lokale MUA-soner. "
+            "Takflater på bygg ≥ 3 etasjer utnyttes som MUA."
+        ))
+    pdf.ln(2)
+
+    # Evt. warnings
+    if masterplan.warnings:
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(200, 120, 0)
+        pdf.cell(0, 5, clean_pdf_text("Merknader fra motoren"), 0, 2, "L")
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.set_text_color(80, 80, 90)
+        for w in masterplan.warnings[:8]:
+            pdf.multi_cell(0, 4, clean_pdf_text(f"• {w}"))
 
 
 def create_full_report_pdf(
@@ -7958,12 +7412,10 @@ def create_full_report_pdf(
     plan_view_analyses: Optional[List[str]] = None,
     cover_image: Optional[Image.Image] = None,
     solar_3d_snapshots: Optional[List[Image.Image]] = None,
-    geodata_bundle: Optional[Dict[str, Any]] = None,
-    historical_analysis: Optional[Dict[str, str]] = None,
-    site_intelligence: Optional[Dict[str, Any]] = None,
+    masterplan: Optional[Any] = None,
 ) -> bytes:
     """
-    McKinsey-quality PDF v15:
+    McKinsey-quality PDF v14:
       Page 1:  Cover (med eventuelt AI-render)
       Page 2:  Table of Contents
       Page 3:  Sammendrag (KPI-kort vektor)
@@ -7972,11 +7424,7 @@ def create_full_report_pdf(
       Page 6+: Volumskisser (top 3)
       Page N:  Planvisning og volumkontroll (med AI-analyse)
       Page N:  Sol/skygge individuelle snapshots
-      Page N+1: STEDSKONTEKST OG GEODATA (NY v15) — plan/projects/transport
-                + grunnforurensning + aktsomhetskart-status
-      Page N+2: HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK (NY v15) — med
-                AI-analyse (tidligere bruk, forurensningsrisiko, tiltak)
-      Page N+3: Rapport tekst (pkt. 1–10 narrativ)
+      Page N+: Rapport tekst
     """
     pdf = BuiltlyProPDF()
     # _register_fonts returnerer faktisk brukbar font. Ved 2. gangs kall
@@ -8093,43 +7541,17 @@ def create_full_report_pdf(
     if solar_grid_image is not None:
         toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
         toc_idx += 1
-    if geodata_bundle and geodata_bundle.get("available"):
-        toc_items.append((f"{toc_idx}.", "Stedskontekst og geodata"))
-        toc_idx += 1
-        if geodata_bundle.get("historisk") is not None:
-            toc_items.append((f"{toc_idx}.", "Historisk flyfoto og tidligere arealbruk"))
-            toc_idx += 1
 
-    # TOC: kun fange OFFISIELLE # -headings (ikke underpunkter i narrativ tekst).
-    # Tidligere regex fanget også "1. Detaljert støyutredning..." fra pkt. 10-underpunkter.
-    # Nå aksepteres kun linjer som EKSPLISITT starter med "# " (hash + mellomrom).
-    narrativ_toc_count = 0
-    MAX_NARRATIV_TOC_ITEMS = 12  # safety cap — unngå TOC-spam ved hallusinasjoner
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
-        if line.startswith("# ") and narrativ_toc_count < MAX_NARRATIV_TOC_ITEMS:
-            # Strip "# " og eventuell "#" og mellomrom
-            title = line.lstrip("#").strip()
-            # Strip nummerprefiks: "1. OPPSUMMERING" → "OPPSUMMERING"
-            # (TOC-indeks er allerede toc_idx — vi vil ikke ha dobbel nummerering)
-            title = re.sub(r"^\d+\.\s*", "", title).strip()
-            # Title case: OPPSUMMERING → Oppsummering (mindre ropende i TOC)
-            if title.isupper() and len(title) > 3:
-                # Spesialbehandling: behold akronymer og rom-etter-slash
-                # Enkleste: bare første bokstav stor, resten små
-                title = title.capitalize()
-                # Men behold store bokstaver etter "/" og "-" (f.eks. "Risiko og avklaringspunkter")
-                # capitalize() gjør dette naturlig nok
-            # Filtrer bort støy-headings: for korte (<3 tegn) eller rene tall
-            if len(title) < 3 or title.isdigit():
-                continue
-            # Filtrer bort hallusinerte FORBUDT-headings som kan ha sneket seg gjennom
-            title_upper = title.upper()
-            if any(bad in title_upper for bad in ("VEDLEGG", "APPENDIKS", "APPENDIX", "MULIGHETSSTUDIE\n")):
-                continue
-            toc_items.append((f"{toc_idx}.", title))
+        if re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
+            # Strip existing number prefix: "1. OPPSUMMERING" → "Oppsummering"
+            title_clean = re.sub(r"^\d+\.\s*", "", line).strip()
+            toc_items.append((f"{toc_idx}.", title_clean))
             toc_idx += 1
-            narrativ_toc_count += 1
+        elif line.startswith("# "):
+            toc_items.append((f"{toc_idx}.", line.replace("#", "").strip()))
+            toc_idx += 1
 
     for num, title in toc_items:
         pdf.set_x(30)
@@ -8751,20 +8173,14 @@ def create_full_report_pdf(
                 pass
 
     # ================================================================
-    # STEDSKONTEKST OG GEODATA + HISTORISK FLYFOTO (v15 - plassert etter sol/skygge)
-    # Dette gir leseflyten: nøkkeltall → volumer → planvisning → sol/skygge →
-    # stedskontekst → narrativ oppsummering (pkt. 1–10).
+    # BYGGETRINN (Masterplan) - egen side med fase-kort og Gantt
     # ================================================================
-    try:
-        build_geo_context_pages(
-            pdf,
-            geodata_bundle=geodata_bundle,
-            historical_analysis=historical_analysis,
-            site_intelligence=site_intelligence,
-        )
-    except Exception as _geo_exc:
-        # Skip geo-sider hvis noe feiler — ikke la det bryte hele PDF-en
-        pass
+    if masterplan is not None and getattr(masterplan, "building_phases", None):
+        try:
+            _render_masterplan_phases_page(pdf, masterplan, site)
+        except Exception as _e:
+            # PDF skal ikke feile hvis masterplan-rendering går galt
+            pass
 
     # ================================================================
     # RAPPORT TEKST (v13: tabeller for ALTERNATIVER)
@@ -8851,23 +8267,13 @@ def create_full_report_pdf(
             pdf.section_title(line.replace("#", "").strip(), 14)
         elif line.startswith("##"):
             pdf.subtitle(line.replace("#", "").strip())
-        elif re.match(r"^[-\*•]\s+", line):
-            # Aksepterer både "- ", "* " og "• " som bullet-marker (safety net —
-            # skal normaliseres til "- " av _normalize_bullets, men dette sikrer
-            # konsistent rendering selv om AI-rapport slipper gjennom med *)
+        elif line.startswith("- "):
             pdf.check_space(7)
             pdf.set_x(30)
             pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(*_BODY_BLACK)
-            # v16.2.1: Sjekk faktisk aktivt font på PDF-objektet (ikke global PDF_FONT)
-            # for robusthet mot race conditions ved regenerering. FPDF lagrer aktivt
-            # font som pdf.font_family i lowercase. Hvis det ikke er "dejavu", faller
-            # vi trygt tilbake til "*" selv om PDF_FONT-globalen sier "DejaVu".
-            _pdf_current_font = str(getattr(pdf, "font_family", "") or "").lower()
-            bullet = "\u2022 " if _pdf_current_font == "dejavu" else "* "
-            # Strip bullet-marker (ett tegn + minst ett mellomrom) før rendering
-            content = re.sub(r"^[-\*•]\s+", "", line)
-            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + content))
+            bullet = "\u2022 " if HAS_DEJAVU else "* "
+            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + line[2:]))
         else:
             pdf.check_space(7)
             pdf.body_text(line)
@@ -9254,7 +8660,7 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     front_setback_m = s1.number_input("Byggegrense mot gate / front (m)", min_value=0.0, value=4.0, step=0.5)
     rear_setback_m = s2.number_input("Bakre byggegrense (m)", min_value=0.0, value=4.0, step=0.5)
     side_setback_m = s3.number_input("Sideavstand (m)", min_value=0.0, value=4.0, step=0.5)
-    polygon_setback_m = s4.number_input("Ekstra inntrekk fra tomtegrense (m)", min_value=0.0, value=0.0, step=0.5, help="Bufferavstand FRA tomtegrensen — kommer i tillegg til byggegrensene over. La stå på 0 hvis byggegrensene (front/bak/side) allerede dekker alt. Bruk positivt tall hvis du vil modellere ekstra fri flate mot tomtegrense (f.eks. terrengtilpasning, snølagring) utover det byggegrensene sier.")
+    polygon_setback_m = s4.number_input("Polygonbuffer / inntrekk (m)", min_value=0.0, value=4.0, step=0.5)
 
     r1, r2, r3, r4 = st.columns(4)
     max_bya_pct = r1.number_input("Maks BYA (%)", min_value=1.0, max_value=100.0, value=float(parsed.get("max_bya_pct", 35.0)), step=1.0)
@@ -9284,11 +8690,67 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     else:
         u3.caption("Aktiver «Styr volum fra %-BRA» for å bruke utnyttelsesgrad som primær volumdriver.")
 
+# --- Masterplan: faseringsvalg ---
+if HAS_MASTERPLAN:
+    with st.expander("2C. Byggetrinn og masterplan", expanded=True):
+        # Beregn foreløpig target_bra for anbefaling av antall faser
+        if bra_pct_override and utnyttelsesgrad_bra_pct > 0:
+            _target_bra_preview = site_area_m2 * utnyttelsesgrad_bra_pct / 100.0
+        elif max_bra_m2 > 0:
+            _target_bra_preview = max_bra_m2
+        else:
+            # Fallback: BYA × etasjer × effektivitet
+            _target_bra_preview = site_area_m2 * (max_bya_pct / 100.0) * max(int(max_floors), 3) * 0.85
+
+        _phasing_config, _phasing_info = masterplan_integration.build_phasing_ui(
+            target_bra_m2=_target_bra_preview,
+            key_prefix="masterplan",
+        )
+
+        st.markdown("---")
+        st.markdown("### Programmiks")
+        p1, p2, p3 = st.columns(3)
+        _include_barnehage = p1.checkbox(
+            "Inkluder barnehage (6-base)",
+            value=False,
+            key="mp_include_barnehage",
+            help="Reserverer ~1 279 m² i 1. etg av sørlige volumer + 2 448 m² uteareal. "
+                 "Barnehage-krav kommer typisk fra kommunen basert på områdebehov — skru på bare når det er aktuelt.",
+        )
+        _include_naering = p2.checkbox(
+            "Inkluder næring / service i 1. etg",
+            value=True,
+            key="mp_include_naering",
+            help="Typisk 2–5% av BRA, maks 1 500 m² dagligvare i byggesone 2. Vanlig å ha næring i 1. etg mot hovedveg.",
+        )
+        _byggesone = p3.selectbox(
+            "Byggesone (KPA)",
+            options=["2", "1", "3", "4"],
+            index=0,
+            key="mp_byggesone",
+            help="Byggesone 2: sentrale byområder, 40 m²/bolig MUA, min 100% BRA.",
+        )
+
+        # Lagre i session_state for bruk i generate_options
+        st.session_state["_masterplan_phasing_config"] = _phasing_config
+        st.session_state["_masterplan_include_barnehage"] = _include_barnehage
+        st.session_state["_masterplan_include_naering"] = _include_naering
+        st.session_state["_masterplan_byggesone"] = _byggesone
+
+        # Toggle for å slå av masterplan og falle tilbake til klassisk A/B/C
+        _use_mp = st.checkbox(
+            "Bruk masterplan-motor (ny 6-pass arkitektur)",
+            value=True,
+            key="mp_use_masterplan",
+            help="Slå av for å bruke klassisk A/B/C-alternativflyt (fallback).",
+        )
+        st.session_state["_use_masterplan"] = _use_mp
+
 with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
     st.markdown("##### 1. Hent eiendom fra matrikkel")
     if not geodata_token_ok:
         st.warning("Eiendomsdata er ikke tilkoblet. Kontakt administrator for oppsett.")
-    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4).")
+    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter: `57/270, 57/156` eller forkortet `57/270, 156` hvis samme Gnr.")
 
     c_k, c_g = st.columns(2)
     kommune_nr_input = c_k.text_input("Kommune (Navn eller 4-sifret nummer)", value=pd_state.get('kommune', ''))
@@ -9306,9 +8768,13 @@ with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True)
             st.error("Eiendomsdata er ikke tilkoblet. Kan ikke hente tomt.")
         else:
             pairs = []
-            # Stoett komma-separert ("57/270, 57/156") og slash-separert ("57/270/57/156")
+            # Støtter fire formater:
+            #  1) "57/270"                — ett par
+            #  2) "57/270, 57/156"        — to komma-separerte par
+            #  3) "57/270/57/156"         — slash-separerte par
+            #  4) "57/270, 156"           — forkortet, samme Gnr for neste Bnr (vanlig norsk praksis)
             raw = gnr_bnr_input.replace(" ", "")
-            # Splitt paa komma foerst
+            last_gnr: Optional[str] = None
             for part in raw.split(","):
                 part = part.strip()
                 if not part:
@@ -9317,12 +8783,21 @@ with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True)
                 if len(segments) == 2:
                     # Standard: "57/270"
                     pairs.append((segments[0], segments[1]))
+                    last_gnr = segments[0]
                 elif len(segments) >= 4 and len(segments) % 2 == 0:
                     # Flere par i ett: "57/270/57/156" -> (57,270), (57,156)
                     for i in range(0, len(segments), 2):
                         pairs.append((segments[i], segments[i + 1]))
+                        last_gnr = segments[i]
                 elif len(segments) == 1 and segments[0].isdigit():
-                    continue  # Bare et tall, ignorer
+                    # Forkortelse: "57/270, 156" der 156 er Bnr under sist-sette Gnr
+                    if last_gnr is not None:
+                        pairs.append((last_gnr, segments[0]))
+                    else:
+                        st.warning(
+                            f"Fant bare ett tall ('{segments[0]}') uten Gnr foran. "
+                            f"Skriv f.eks. '57/270' eller '57/270, 156'."
+                        )
                 else:
                     st.warning(f"Kunne ikke tolke '{part}'. Bruk formatet Gnr/Bnr (f.eks. 57/270).")
             if not pairs:
@@ -9411,10 +8886,10 @@ with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
     mcols = st.columns(4)
     mix_inputs = []
     defaults = [
-        ("1-rom", 15.0, 20.0),
-        ("2-rom", 35.0, 38.0),
-        ("3-rom", 35.0, 60.0),
-        ("4-rom+", 15.0, 85.0),
+        ("1-rom", 15.0, 38.0),
+        ("2-rom", 35.0, 52.0),
+        ("3-rom", 35.0, 72.0),
+        ("4-rom+", 15.0, 95.0),
     ]
     for idx, (label, share_default, size_default) in enumerate(defaults):
         with mcols[idx]:
@@ -9692,8 +9167,50 @@ if run_analysis:
 
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
-    with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
-        options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+
+    # Masterplan-motor eller klassisk A/B/C basert på toggle
+    _use_masterplan_now = HAS_MASTERPLAN and st.session_state.get("_use_masterplan", True)
+    if _use_masterplan_now:
+        _phasing_config = st.session_state.get("_masterplan_phasing_config") or PhasingConfig()
+        _include_barnehage = st.session_state.get("_masterplan_include_barnehage", False)
+        _include_naering = st.session_state.get("_masterplan_include_naering", False)
+        _byggesone = st.session_state.get("_masterplan_byggesone", "2")
+
+        # target_bra: prioritering %-BRA > max_bra_m2 > estimat fra BTA
+        if site.utnyttelsesgrad_bra_pct > 0:
+            _target_bra = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        elif site.max_bra_m2 > 0:
+            _target_bra = site.max_bra_m2
+        else:
+            _target_bra = site.desired_bta_m2 * site.efficiency_ratio
+
+        _phase_count = _phasing_config.resolve_phase_count(_target_bra)
+        with st.spinner(
+            f"Bygger masterplan: {_target_bra:,.0f} m² BRA i {_phase_count} byggetrinn{ai_label}{bra_label} ..."
+        ):
+            _masterplan = masterplan_integration.run_masterplan_from_site_inputs(
+                site=site,
+                geodata_context=geodata_context,
+                phasing_config=_phasing_config,
+                target_bra_m2=_target_bra,
+                include_barnehage=_include_barnehage,
+                include_naering=_include_naering,
+                byggesone=_byggesone,
+            )
+        if _masterplan is None:
+            st.error("Masterplan-generering feilet. Sjekk input-parametre, eller slå av masterplan-motor i seksjon 2C.")
+            options = []
+            st.session_state["_current_masterplan"] = None
+        else:
+            options = masterplan_integration.masterplan_to_option_results(
+                _masterplan, site, geodata_context, OptionResult,
+            )
+            st.session_state["_current_masterplan"] = _masterplan
+    else:
+        # Klassisk A/B/C-flyt (fallback)
+        with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+            options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+        st.session_state["_current_masterplan"] = None
 
     # Diagnostikk — lagre i session_state for visning i resultatene
     if site.utnyttelsesgrad_bra_pct > 0:
@@ -9741,37 +9258,6 @@ if run_analysis:
             except Exception as exc:
                 environment_data = {"available": False, "error": str(exc)[:120]}
 
-    # --- GEODATA-BUNDLE FOR PDF (v15): historisk flyfoto + grunnforurensning + aktsomhetskart ---
-    geodata_bundle: Dict[str, Any] = {"available": False}
-    historical_analysis: Optional[Dict[str, str]] = None
-    if site_polygon_input is not None:
-        with st.spinner("Henter historisk flyfoto og grunnforurensningsdata..."):
-            try:
-                geodata_bundle = build_geo_context_bundle(
-                    site_polygon=geodata_context.get("site_polygon"),
-                    coords=geodata_context.get("coords"),
-                    gdo_client=gdo if geodata_token_ok else None,
-                    radius_m=300.0,
-                )
-            except Exception as exc:
-                geodata_bundle = {"available": False, "error": str(exc)[:120]}
-        # SSOT: lagre i session_state så "Oppdater PDF"-knapper kan gjenbruke uten ny fetch
-        st.session_state["geodata_bundle"] = geodata_bundle
-
-        if geodata_bundle.get("historisk") is not None and ANTHROPIC_API_KEY:
-            with st.spinner("AI-analyse av historisk flyfoto (tidligere bruk + forurensningsrisiko)..."):
-                try:
-                    addr_hint = f"{pd_state.get('adresse', '')} {pd_state.get('kommune', '')}".strip()
-                    historical_analysis = analyze_historical_aerial_with_claude(
-                        historical_image=geodata_bundle["historisk"],
-                        year=geodata_bundle.get("historisk_year"),
-                        contamination_sites=geodata_bundle.get("grunnforurensning", []),
-                        address_hint=addr_hint,
-                    )
-                except Exception:
-                    historical_analysis = None
-            st.session_state["historical_analysis"] = historical_analysis
-
     option_images = [render_plan_diagram(site, option) for option in options]
 
     # Auto-generer planvisninger som 3D-scene fallback (v13: per-option error handling)
@@ -9781,13 +9267,7 @@ if run_analysis:
             auto_scene_images.append(render_plan_view(site, opt))
         except Exception:
             pass  # Skip individual failures, keep other plan views
-    deterministic_report = build_deterministic_report(
-        site, options, parsed,
-        has_visual_input=bool(images_for_context),
-        environment_data=environment_data,
-        geodata_bundle=geodata_bundle,
-        historical_analysis=historical_analysis,
-    )
+    deterministic_report = build_deterministic_report(site, options, parsed, has_visual_input=bool(images_for_context), environment_data=environment_data)
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
         # Rekke er slått sammen med Lamell — erstatt i output
@@ -9849,55 +9329,6 @@ if run_analysis:
                         "lawson_class": wc_d.get("lawson_class"),
                         "overall": wc_d.get("overall"),
                     }
-            # Geo-bundle sammendrag for AI (v15/v16 — gir AI-en grunnlag til å
-            # kommentere forurensningsrisiko i pkt. 4 og pkt. 9)
-            geo_summary = {}
-            if geodata_bundle and geodata_bundle.get("available"):
-                contamination = geodata_bundle.get("grunnforurensning", []) or []
-                geo_summary = {
-                    "available": True,
-                    "historisk_flyfoto_aar": geodata_bundle.get("historisk_year"),
-                    "historisk_flyfoto_kilde": geodata_bundle.get("historisk_source", ""),
-                    "grunnforurensning_antall_innen_500m": len(contamination),
-                    "grunnforurensning_top_lokaliteter": [
-                        {
-                            "navn": s.get("navn"),
-                            "type": s.get("type"),
-                            "status": s.get("status"),
-                            "avstand_m": int(s["distance_m"]) if s.get("distance_m") is not None else None,
-                        }
-                        for s in contamination[:5]
-                    ],
-                }
-                # v16: Strukturerte aktsomhetsdata fra Geodata Online DOK
-                akt_bundle = geodata_bundle.get("aktsomhet", {}) or {}
-                if akt_bundle.get("available"):
-                    akt_cats = akt_bundle.get("categories", {}) or {}
-                    # Bygg kun et sammendrag med treff — tom hvis ingenting
-                    akt_hits = {}
-                    for cat_key, cat_data in akt_cats.items():
-                        if cat_data.get("hit"):
-                            akt_hits[cat_key] = {
-                                "severity": cat_data.get("severity", "registrert"),
-                                "detail": cat_data.get("detail", ""),
-                            }
-                    geo_summary["aktsomhet"] = {
-                        "data_hentet": True,
-                        "total_treff": sum(1 for c in akt_cats.values() if c.get("hit")),
-                        "kategorier_med_treff": akt_hits,
-                        "kilde": akt_bundle.get("source", "Geodata Online DOK"),
-                    }
-                else:
-                    geo_summary["aktsomhet"] = {"data_hentet": False}
-
-                if historical_analysis:
-                    geo_summary["ai_historisk_analyse"] = {
-                        "risiko_niva": historical_analysis.get("risiko_niva"),
-                        "tidligere_bruk": historical_analysis.get("tidligere_bruk"),
-                        "forurensningsrisiko": historical_analysis.get("forurensningsrisiko"),
-                        "anbefalte_tiltak": historical_analysis.get("anbefalte_tiltak"),
-                    }
-
             analysis_payload = {
                 "site": asdict(site),
                 "alternatives": [asdict(option) | {"geometry": None} for option in options],
@@ -9909,7 +9340,6 @@ if run_analysis:
                 "terrain_meta": terrain_meta,
                 "site_intelligence": site_intelligence_bundle,
                 "environment": env_summary,
-                "geo_context": geo_summary,
             }
             _report_system = (
                 "Du er senior arkitekt og utviklingsrådgiver. Du får et ferdig, deterministisk analysegrunnlag i JSON. "
@@ -9938,36 +9368,15 @@ KRAV:
 - Sol/skygge skal omtales som indikativ 2.5D, ikke full detaljsimulering.
 - Leilighetsmiks skal beskrives som kapasitetsestimat.
 - Ikke skriv om noe du ikke vet.
-- FORBUDT: Ikke skriv forside-blokker, meta-headers eller tittelavsnitt (eksempel: "MULIGHETSSTUDIE", "Dato: [Dagens dato]", "Prosjekt: Boligutvikling", "Tomteareal: X m²"). Start rapporten DIREKTE med "# 1. OPPSUMMERING" som første linje. Alle tittel- og metadata-elementer håndteres av PDF-layouten.
-- FORBUDT: Ikke bruk placeholder-verdier som "[Dagens dato]", "[Sett inn verdi]", eller tilsvarende — rapporten genereres automatisk og må være komplett.
-- FORBUDT: Ikke lag en "VEDLEGG"-seksjon, "APPENDIKS" eller tilsvarende etter pkt. 10. Siste seksjon i rapporten SKAL være "# 10. ANBEFALING / NESTE STEG". Geo-data, støydata og aktsomhetskart er allerede presentert i dedikerte seksjoner FØR rapportteksten — ikke dupliser dem i vedlegg.
-- BULLET-FORMAT: Bruk bindestrek "- " som bullet-marker, IKKE asterisk "*" eller punkt "•". Eksempel: "- Punkt 1" (ikke "* Punkt 1" eller "• Punkt 1").
 - OBLIGATORISK: Hvis støydata finnes i JSON (environment.noise), SKAL du kommentere støynivå i dB, kildetype og konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
-- OBLIGATORISK — GEO-DATA: Hvis geo_context.available = true i JSON, SKAL du:
-  - I pkt. 4 (TOMT OG KONTEKST): Nevne kort at det er gjennomført automatisk uttrekk av stedskontekst- og geodata (Miljødirektoratet, NGU, NVE), og at detaljert gjennomgang finnes i dedikert seksjon "Stedskontekst og geodata" etter sol/skygge-analysen. Hvis grunnforurensning_antall_innen_500m > 0, nevn tallet og flagg at miljøteknisk undersøkelse bør vurderes. Hvis ai_historisk_analyse.risiko_niva finnes (Lav/Moderat/Høy), nevn samlet forurensningsrisiko-nivå i 1 setning. Hvis geo_context.aktsomhet.total_treff > 0, nevn kort at tomten er registrert i X aktsomhetskategorier (radon/flom/skred/kvikkleire) og henvis til geo-seksjonen.
-  - I pkt. 9 (RISIKO OG AVKLARINGSPUNKTER): Lag et eget risikopunkt om grunnforurensning med antall registrerte lokaliteter og tiltaksanbefaling. Hvis ai_historisk_analyse finnes, nevn AI-screening av historisk flyfoto og henvis til den dedikerte geo-seksjonen for full vurdering. Hvis geo_context.aktsomhet.kategorier_med_treff inneholder noe, lag ETT eget risikopunkt per kategori (f.eks. "- Radon: moderat aktsomhet — radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5", "- Kvikkleire: registrert faresone — geoteknisk vurdering er obligatorisk før byggesøknad"). Vær konkret om hva utbygger må gjøre. Ikke reproduser hele AI-analyseteksten — oppsummer kort (1-2 setninger per punkt).
-  - Ikke dupliser innholdet fra den dedikerte geo-seksjonen — kort henvisning er tilstrekkelig i den narrative teksten.
-- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger, sol/skygge-diagrammer og (hvis tilgjengelig) historisk flyfoto med AI-vurdering.
-- Skriv sammenhengende norsk tekst. Bullets kan brukes i pkt. 9 (RISIKO) og pkt. 10 (ANBEFALING) hvis det gir leseflyt, ellers sammenhengende prosa. Bruk riktig norsk (æ, ø, å).
+- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger og sol/skygge-diagrammer.
+- Skriv sammenhengende norsk tekst, ikke bullet points. Bruk riktig norsk (æ, ø, å).
 """
             ai_report = _call_claude_text(_report_system, _report_user, max_tokens=6000)
             if ai_report:
-                # Post-filter: fjern eventuell hallusinert forside-blokk før pkt. 1
-                # (Claude ignorerer av og til FORBUDT-klausulen)
-                ai_report = _strip_hallucinated_preamble(ai_report)
-                # Post-filter: fjern eventuell hallusinert VEDLEGG-seksjon etter pkt. 10
-                ai_report = _strip_hallucinated_appendix(ai_report)
-                # Normaliser *-bullets til -
-                ai_report = _normalize_bullets(ai_report)
                 final_report_text = ai_report
         except Exception:
             final_report_text = deterministic_report
-
-    # v16.2.1: Safety net — normaliser bullets på final_report_text uansett codepath.
-    # Dette dekker den deterministiske fallback-teksten og site_intelligence-markdown
-    # som konkateneres inn. _normalize_bullets er idempotent så trygt å kalle flere ganger.
-    # Dette sikrer at ingen • eller * slipper gjennom til PDF selv om fontregistrering feiler.
-    final_report_text = _normalize_bullets(final_report_text)
 
     try:
         solar_grid_img = None
@@ -10002,23 +9411,11 @@ KRAV:
             plan_view_analyses=pv_analyses or None,
             cover_image=st.session_state.get("stability_render_image"),
             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
-            geodata_bundle=st.session_state.get("geodata_bundle") or geodata_bundle,
-            historical_analysis=st.session_state.get("historical_analysis") or historical_analysis,
-            site_intelligence=site_intelligence_bundle,
+            masterplan=st.session_state.get("_current_masterplan"),
         )
-        # Suksess — fjern eventuell tidligere feilmelding
-        st.session_state.pop("_pdf_generation_error", None)
     except Exception as pdf_exc:
-        # v16.1: Persistent feilmelding som overlever st.rerun()
-        # I tillegg beholder vi tidligere PDF hvis den finnes, slik at brukeren
-        # kan fortsette å laste ned forrige vellykkede versjon.
-        import traceback
-        _err_detail = f"{type(pdf_exc).__name__}: {pdf_exc}"
-        st.session_state["_pdf_generation_error"] = _err_detail
-        st.error(f"PDF-generering feilet: {_err_detail}")
-        # Logg full traceback til console for debugging
-        print(f"[Mulighetsstudie PDF error] {traceback.format_exc()}")
-        pdf_bytes = None  # Signalerer "feilet" — vi setter IKKE generated_ark_pdf til dette
+        st.warning(f"PDF-generering feilet: {pdf_exc}")
+        pdf_bytes = b""
 
     if "pending_reviews" not in st.session_state:
         st.session_state.pending_reviews = {}
@@ -10036,7 +9433,7 @@ KRAV:
         "reviewer": "Senior Arkitekt",
         "status": "Pending Lead Architect Review",
         "class": "badge-pending",
-        "pdf_bytes": pdf_bytes if pdf_bytes else b"",  # v16.1: Safely handle None
+        "pdf_bytes": pdf_bytes,
     }
 
     st.session_state.analysis_results = {
@@ -10053,29 +9450,20 @@ KRAV:
         "environment": environment_data,
         "visual_attachments": images_for_context,
     }
-    # v16.1: Kun lagre PDF hvis den faktisk ble generert. Tidligere overskrev vi
-    # med b"" ved feil, som ga "PDF er ikke generert"-melding i nedlasting-seksjonen.
-    # Nå bevares eventuell tidligere vellykket PDF hvis ny generering feilet.
-    if pdf_bytes:
-        st.session_state.generated_ark_pdf = pdf_bytes
-        st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
+    st.session_state.generated_ark_pdf = pdf_bytes
+    st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
 
-    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
-    if pdf_bytes:
-        try:
-            from builtly_auth import save_report
-            save_report(
-                project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
-                report_name=f"Mulighetsstudie — {p_name}",
-                module="Mulighetsstudie",
-                file_path=st.session_state.generated_ark_filename,
-                pdf_bytes=pdf_bytes,
-            )
-        except ImportError:
-            pass  # Frontpage not available (standalone run)
-        except Exception as _save_exc:
-            # Ikke blokker videre flyt — logg kun
-            print(f"[Mulighetsstudie] save_report feilet: {_save_exc}")
+    # Save report to user dashboard
+    try:
+        from builtly_auth import save_report
+        save_report(
+            project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
+            report_name=f"Mulighetsstudie — {p_name}",
+            module="Mulighetsstudie",
+            file_path=st.session_state.generated_ark_filename,
+        )
+    except ImportError:
+        pass  # Frontpage not available (standalone run)
 
     st.rerun()
 
@@ -10282,6 +9670,13 @@ if "analysis_results" in st.session_state:
 </script>
 """
     components.html(radar_html, height=440, scrolling=False)
+
+    # --- MASTERPLAN: Byggetrinn-Gantt ---
+    if HAS_MASTERPLAN:
+        _mp_for_gantt = st.session_state.get("_current_masterplan")
+        if _mp_for_gantt is not None and _mp_for_gantt.building_phases:
+            st.markdown("<div class='section-header'>Byggetrinn og rekkefølge</div>", unsafe_allow_html=True)
+            masterplan_integration.render_phasing_gantt_streamlit(_mp_for_gantt)
 
     # --- SIDE-BY-SIDE SAMMENLIGNING ---
     st.markdown("<div class='section-header'>Sammenlign to alternativer</div>", unsafe_allow_html=True)
@@ -11183,8 +10578,6 @@ render();
                                 site_obj, motor_options, {}, has_visual_input=True,
                                 manual_override=manual_override_data,
                                 environment_data=result.get("environment"),
-                                geodata_bundle=st.session_state.get("geodata_bundle"),
-                                historical_analysis=st.session_state.get("historical_analysis"),
                             )
                         except Exception:
                             updated_report = result.get("report_text", "")
@@ -11213,27 +10606,10 @@ render();
                             solar_grid_image=_solar_grid,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
-                            geodata_bundle=st.session_state.get("geodata_bundle"),
-                            historical_analysis=st.session_state.get("historical_analysis"),
-                            site_intelligence=result.get("site_intelligence"),
+                            masterplan=st.session_state.get("_current_masterplan"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
-
-                        # Oppdater til brukerens rapport-dashboard
-                        try:
-                            from builtly_auth import save_report as _save_report_regen
-                            _save_report_regen(
-                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
-                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
-                                module="Mulighetsstudie",
-                                file_path=st.session_state.generated_ark_filename,
-                                pdf_bytes=new_pdf_bytes,
-                            )
-                        except ImportError:
-                            pass
-                        except Exception:
-                            pass
                     except Exception:
                         pass  # Behold gammel PDF hvis regen feiler
 
@@ -11435,9 +10811,7 @@ render();
                             plan_view_analyses=pv_analyses_3d or None,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
-                            geodata_bundle=st.session_state.get("geodata_bundle"),
-                            historical_analysis=st.session_state.get("historical_analysis"),
-                            site_intelligence=result.get("site_intelligence"),
+                            masterplan=st.session_state.get("_current_masterplan"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
@@ -11534,18 +10908,16 @@ render();
             key="scene_image_uploads",
         )
         if scene_uploads:
-            # v16.3: Umiddelbar validering + thumbnail-preview (løser forvirrende
-            # røde sirkler i Streamlit's default file-display)
-            st.markdown("**Forhåndsvisning:**")
-            scene_images_for_pdf, _upload_errors = _validated_upload_preview(
-                scene_uploads, max_thumbs=5, thumb_height=120
-            )
-            if _upload_errors:
-                for _err in _upload_errors:
-                    st.warning(f"⚠️ {_err}")
+            scene_images_for_pdf = []
+            for f in scene_uploads:
+                try:
+                    img_uploaded = Image.open(f).convert("RGB")
+                    scene_images_for_pdf.append(img_uploaded)
+                except Exception:
+                    pass
             if scene_images_for_pdf:
                 st.session_state.ark_scene_images = scene_images_for_pdf
-                st.success(f"✓ {len(scene_images_for_pdf)} bilde(r) klare — klikk «Oppdater PDF» for å inkludere i rapporten.")
+                st.success(f"{len(scene_images_for_pdf)} bilde(r) lastet opp — klikk «Oppdater PDF» for å inkludere i rapporten.")
                 if st.button("Oppdater PDF med 3D-bilder", type="primary", use_container_width=True, key="regen_pdf_3d"):
                     try:
                         pd_state = st.session_state.get("project_data", {})
@@ -11587,28 +10959,10 @@ render();
                             plan_view_analyses=pv_analyses_upload or None,
                             cover_image=st.session_state.get("stability_render_image"),
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
-                            geodata_bundle=st.session_state.get("geodata_bundle"),
-                            historical_analysis=st.session_state.get("historical_analysis"),
-                            site_intelligence=result.get("site_intelligence"),
+                            masterplan=st.session_state.get("_current_masterplan"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_bytes
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
-
-                        # Oppdater til brukerens rapport-dashboard
-                        try:
-                            from builtly_auth import save_report as _save_report_3d
-                            _save_report_3d(
-                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
-                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
-                                module="Mulighetsstudie",
-                                file_path=st.session_state.generated_ark_filename,
-                                pdf_bytes=new_pdf_bytes,
-                            )
-                        except ImportError:
-                            pass
-                        except Exception:
-                            pass
-
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Feil ved PDF-oppdatering: {exc}")
@@ -11726,7 +11080,7 @@ render();
                 type=["jpg", "jpeg", "png"],
                 accept_multiple_files=True,
                 key=_uploader_key,
-                help="Dra inn 1–5 bilder. Ikonet for hver fil kan vises med rød sirkel — det er et kosmetisk Streamlit-problem og betyr ikke at filen er avvist. Faktisk status ser du i forhåndsvisningen som dukker opp under (grønn ✅ eller rød ❌).",
+                help="Dra inn 1–5 bilder. Du kan legge til flere senere ved å dra inn i samme boks, eller fjerne enkeltfiler ved å klikke X på hver fil.",
             )
 
             if uploaded_solar:
@@ -11747,7 +11101,6 @@ render();
                 _sorted = sorted(uploaded_solar, key=lambda f: f.name)
                 _solar_imgs: List[Image.Image] = []
                 _solar_meta: List[Dict[str, Any]] = []
-                _solar_statuses: List[Dict[str, Any]] = []
 
                 # Parse doy og hour fra filnavn: solskygge_01_doy80_kl120.jpg
                 _meta_defaults = [
@@ -11759,10 +11112,7 @@ render();
                 ]
                 for idx, uf in enumerate(_sorted):
                     try:
-                        uf.seek(0)
                         img = Image.open(uf).convert("RGB")
-                        _thumb = img.copy()
-                        _thumb.thumbnail((260, 260))
                         _solar_imgs.append(img)
                         # Prøv å parse doy/hour fra filnavn
                         _m = re.search(r"doy(\d+)_kl(\d+)", uf.name or "")
@@ -11770,6 +11120,7 @@ render();
                             _doy = int(_m.group(1))
                             _hour_raw = _m.group(2)
                             _hour = float(_hour_raw[:-1] + "." + _hour_raw[-1]) if len(_hour_raw) > 1 else float(_hour_raw)
+                            # Match mot defaults for label
                             _match = next((md for md in _meta_defaults if md["doy"] == _doy and abs(md["hour"] - _hour) < 0.1), None)
                             if _match:
                                 _solar_meta.append(_match.copy())
@@ -11779,29 +11130,18 @@ render();
                             _solar_meta.append(_meta_defaults[idx].copy())
                         else:
                             _solar_meta.append({"label": uf.name, "doy": 0, "hour": 0.0})
-                        _solar_statuses.append({"ok": True, "thumb": _thumb, "name": uf.name})
                     except Exception as _ue:
-                        _solar_statuses.append({"ok": False, "name": uf.name, "error": str(_ue)[:60]})
+                        st.caption(f"Fil {uf.name}: {_ue}")
 
                 # Preview — vis thumbnails så brukeren ser at rekkefølgen stemmer
-                # v16.3: Grønn/rød indikator per fil, umiddelbart etter opplasting
-                if _solar_statuses:
+                if _solar_imgs:
                     st.caption("**Forhåndsvisning — slik kommer bildene inn i rapporten:**")
-                    _n_show = min(len(_solar_statuses), 5)
+                    _n_show = min(len(_solar_imgs), 5)
                     _cols = st.columns(_n_show)
-                    _valid_idx = 0
-                    for _i, _status in enumerate(_solar_statuses[:5]):
+                    for _i, (_img, _meta) in enumerate(zip(_solar_imgs[:5], _solar_meta[:5])):
                         with _cols[_i]:
-                            if _status["ok"]:
-                                st.image(_status["thumb"], use_container_width=True)
-                                _lbl = _solar_meta[_valid_idx]["label"] if _valid_idx < len(_solar_meta) else _status["name"]
-                                st.caption(f"**{_i+1}.** ✅ {_lbl}")
-                                _valid_idx += 1
-                            else:
-                                st.error(f"❌ {_status['name'][:22]}")
-                                st.caption(_status.get("error", ""))
-                    if len(_solar_statuses) > 5:
-                        st.caption(f"_(+ {len(_solar_statuses) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
+                            st.image(_img, use_container_width=True)
+                            st.caption(f"**{_i+1}.** {_meta['label']}")
                     if len(_solar_imgs) > 5:
                         st.caption(f"_(+ {len(_solar_imgs) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
 
@@ -11846,31 +11186,13 @@ render();
                         plan_view_analyses=_cached_pv,
                         cover_image=_cached_cover,
                         solar_3d_snapshots=st.session_state["solar_3d_snapshots"],
-                        geodata_bundle=st.session_state.get("geodata_bundle"),
-                        historical_analysis=st.session_state.get("historical_analysis"),
-                        site_intelligence=result.get("site_intelligence"),
+                        masterplan=st.session_state.get("_current_masterplan"),
                     )
                     st.session_state.generated_ark_pdf = new_pdf_bytes
                     _msg = "✓ PDF oppdatert med 3D-sol/skygge-bilder"
                     if _cached_cover is not None:
                         _msg += " (fotorealistisk forside beholdt)"
                     st.success(_msg)
-
-                    # Oppdater til brukerens rapport-dashboard
-                    try:
-                        from builtly_auth import save_report as _save_report_solar
-                        _save_report_solar(
-                            project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
-                            report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
-                            module="Mulighetsstudie",
-                            file_path=st.session_state.get("generated_ark_filename", ""),
-                            pdf_bytes=new_pdf_bytes,
-                        )
-                    except ImportError:
-                        pass
-                    except Exception:
-                        pass
-
                     st.rerun()
                 except Exception as e:
                     st.error(f"Kunne ikke regenerere PDF: {e}")
@@ -11932,9 +11254,7 @@ render();
                             plan_view_analyses=pv_analyses_sr or None,
                             cover_image=rendered,
                             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
-                            geodata_bundle=st.session_state.get("geodata_bundle"),
-                            historical_analysis=st.session_state.get("historical_analysis"),
-                            site_intelligence=result.get("site_intelligence"),
+                            masterplan=st.session_state.get("_current_masterplan"),
                         )
                         st.session_state.generated_ark_pdf = new_pdf_sr
                         st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
@@ -11954,16 +11274,12 @@ render();
         st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
 
     # Vis cachet render fra session (uten duplikat ved knapp-klikk)
-    # v16.1: Eksplisitt not-None sjekk — 'in session_state' alene er ikke nok
-    # siden verdien kan være None fra en feilet Gemini-kjøring tidligere.
-    _cached_render = st.session_state.get("stability_render_image")
-    if _cached_render is not None:
-        st.image(_cached_render, caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
+    if "stability_render_image" in st.session_state:
+        st.image(st.session_state["stability_render_image"], caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
 
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     pdf_data = st.session_state.get("generated_ark_pdf")
     pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
-    _pdf_err = st.session_state.get("_pdf_generation_error")
     if pdf_data:
         st.download_button(
             "Last ned mulighetsstudie (PDF)",
@@ -11972,16 +11288,6 @@ render();
             mime="application/pdf",
             type="primary",
             use_container_width=True,
-        )
-        if _pdf_err:
-            st.warning(
-                f"⚠ Siste PDF-oppdatering feilet: {_pdf_err}. "
-                "Du kan laste ned forrige vellykkede versjon ovenfor, eller kjøre tomtestudiet på nytt."
-            )
-    elif _pdf_err:
-        st.error(
-            f"PDF-generering feilet: {_pdf_err}. "
-            "Prøv å kjøre tomtestudiet på nytt, eller kontakt Builtly-support hvis feilen vedvarer."
         )
     else:
         st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
