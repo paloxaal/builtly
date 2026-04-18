@@ -1,1876 +1,122 @@
-import os
-import hashlib
-import hmac
 import base64
-import html
+import io
 import json
+import math
+import os
 import re
-import smtplib
-import ssl
-from email.message import EmailMessage
+import tempfile
+import time
+import urllib.parse
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
-from urllib import error as urlerror
-from urllib import parse as urlparse
-from urllib import request as urlrequest
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+import pandas as pd
+import requests
 import streamlit as st
-
-# Auth & payment integration (Supabase + Stripe)
+import streamlit.components.v1 as components
 try:
-    import builtly_auth
-    _HAS_AUTH = True
+    from streamlit_javascript import st_javascript
+    _HAS_ST_JS = True
 except ImportError:
-    _HAS_AUTH = False
+    _HAS_ST_JS = False
+    def st_javascript(*args, **kwargs):
+        return None
+from fpdf import FPDF
+from PIL import Image, ImageDraw, ImageFont
+from shapely import affinity
+from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
+from shapely.ops import unary_union
 
-# -------------------------------------------------
-# 1) PAGE CONFIG
-# -------------------------------------------------
+try:
+    from pyproj import CRS, Transformer
+    HAS_PYPROJ = True
+except Exception:
+    HAS_PYPROJ = False
+
+    class CRS:  # type: ignore[override]
+        @staticmethod
+        def from_epsg(_: int) -> None:
+            return None
+
+        def to_string(self) -> str:
+            return ""
+
+    class Transformer:  # type: ignore[override]
+        @staticmethod
+        def from_crs(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("pyproj er ikke installert i miljøet.")
+
+try:
+    from rasterio.io import MemoryFile
+    HAS_RASTERIO = True
+except Exception:
+    HAS_RASTERIO = False
+    MemoryFile = None  # type: ignore[assignment]
+
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
+try:
+    from geodata_client import GeodataOnlineClient, geodata_buildings_to_neighbors
+    HAS_GEODATA_ONLINE = True
+except ImportError:
+    HAS_GEODATA_ONLINE = False
+
+try:
+    from site_intelligence import (
+        apply_site_intelligence_to_options,
+        build_site_intelligence_bundle,
+        build_site_intelligence_markdown,
+    )
+    HAS_SITE_INTELLIGENCE = True
+except ImportError:
+    HAS_SITE_INTELLIGENCE = False
+
+try:
+    import ai_site_planner
+    HAS_AI_PLANNER = bool(ai_site_planner.is_available())
+except ImportError:
+    HAS_AI_PLANNER = False
+    ai_site_planner = None  # type: ignore[assignment]
+
+
+# --- 1. TEKNISK OPPSETT ---
 st.set_page_config(
-    page_title="Builtly | Engineering Portal",
-    page_icon="favicon.png",
+    page_title="Mulighetsstudie (ARK) | Builtly",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Open Graph meta tags for link previews (iMessage, WhatsApp, LinkedIn, etc.)
-st.markdown("""
-<meta property="og:title" content="Builtly | AI-assisted Engineering. Human-verified." />
-<meta property="og:description" content="AI-drevet prosjektering for bygg og eiendom. Last opp rådata – AI analyserer, beregner og utarbeider rapporten." />
-<meta property="og:image" content="https://builtly.ai/logo-white.png" />
-<meta property="og:url" content="https://builtly.ai" />
-<meta property="og:type" content="website" />
-<link rel="icon" type="image/png" href="./favicon.png" />
-<link rel="apple-touch-icon" href="./favicon.png" />
-""", unsafe_allow_html=True)
-
-# -------------------------------------------------
-# 2) LANGUAGE NORMALIZATION & SESSION STATE
-# -------------------------------------------------
-LANG_ALIASES = {
-    "🇬🇧 English": "🇬🇧 English (UK)",
-    "🇸🇪 Svensk": "🇸🇪 Svenska",
-}
-
-if "app_lang" not in st.session_state:
-    # Try to restore language from ?lang= query param first
-    _init_lang_param = str(st.query_params.get("lang", "")).strip().lower() if hasattr(st, "query_params") else ""
-    _INIT_LANG_MAP = {"no": "🇳🇴 Norsk", "en-us": "🇺🇸 English (US)", "en-gb": "🇬🇧 English (UK)",
-                      "sv": "🇸🇪 Svenska", "da": "🇩🇰 Dansk", "fi": "🇫🇮 Suomi", "de": "🇩🇪 Deutsch"}
-    if _init_lang_param in _INIT_LANG_MAP:
-        st.session_state.app_lang = _INIT_LANG_MAP[_init_lang_param]
-    else:
-        # No query param — inject JS to read from localStorage and redirect
-        st.session_state.app_lang = "🇺🇸 English (US)"
-        st.components.v1.html("""<script>
-        (function(){
-            try {
-                var saved = localStorage.getItem('builtly_lang');
-                if (!saved) return;
-                var url = new URL(window.parent.location.href);
-                if (url.searchParams.has('lang')) return;
-                url.searchParams.set('lang', saved);
-                window.parent.location.replace(url.toString());
-            } catch(e) {}
-        })();
-        </script>""", height=0)
-
-st.session_state.app_lang = LANG_ALIASES.get(st.session_state.app_lang, st.session_state.app_lang)
-
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {
-        "land": "Norge (TEK17 / plan- og bygningsloven)",
-        "p_name": "",
-        "c_name": "",
-        "p_desc": "",
-        "adresse": "",
-        "kommune": "",
-        "gnr": "",
-        "bnr": "",
-        "b_type": "Næring / Kontor",
-        "etasjer": 4,
-        "bta": 2500,
-        "last_sync": "Ikke synket enda",
-    }
-
-if "assistant_history" not in st.session_state:
-    st.session_state.assistant_history = []
-
-if "assistant_input_nonce" not in st.session_state:
-    st.session_state.assistant_input_nonce = 0
-
-if "assistant_discipline_codes" not in st.session_state:
-    st.session_state.assistant_discipline_codes = ['geo', 'rib', 'fire', 'sha', 'breeam']
-
-if "assistant_dialog_open" not in st.session_state:
-    st.session_state.assistant_dialog_open = False
-
-if "site_access_granted" not in st.session_state:
-    st.session_state.site_access_granted = False
-
-if "site_access_error" not in st.session_state:
-    st.session_state.site_access_error = ""
-
-if "site_access_input_nonce" not in st.session_state:
-    st.session_state.site_access_input_nonce = 0
-
-# -- User auth & subscription state --
-# Step 1: Try to restore session from browser localStorage (via _brt query param)
-_session_restored_from_browser = False
-if _HAS_AUTH and not st.session_state.get("user_authenticated"):
-    _session_restored_from_browser = builtly_auth.try_restore_from_browser()
-
-# Step 2: Set defaults for any keys not already populated
-if "user_authenticated" not in st.session_state:
-    st.session_state.user_authenticated = False
-if "user_email" not in st.session_state:
-    st.session_state.user_email = ""
-if "user_name" not in st.session_state:
-    st.session_state.user_name = ""
-if "user_plan" not in st.session_state:
-    st.session_state.user_plan = ""  # "modul", "team", "enterprise"
-
-# Step 3: Keep access granted if user is authenticated
-if st.session_state.get("user_authenticated") and st.session_state.get("user_email"):
-    st.session_state.site_access_granted = True
-    # Try to restore Supabase API session (best-effort, don't kick user out on failure)
-    if _HAS_AUTH and st.session_state.get("_sb_access_token") and not _session_restored_from_browser:
-        builtly_auth.restore_session()  # updates tokens if successful
-    # Always ensure refresh token is persisted to browser localStorage
-    # (handles case where login's st.rerun() prevented the first JS persist)
-    if _HAS_AUTH and st.session_state.get("_sb_refresh_token"):
-        builtly_auth._persist_tokens_to_browser(st.session_state["_sb_refresh_token"])
-
-# Step 4: If not authenticated and no _brt in URL, inject localStorage reader
-# (will redirect with ?_brt=<token> if localStorage has a stored token)
-if _HAS_AUTH and not st.session_state.get("user_authenticated"):
+google_key = os.environ.get("GOOGLE_API_KEY")
+llm_available = bool(google_key and genai is not None)
+if llm_available:
     try:
-        _has_brt = "_brt" in st.query_params
+        genai.configure(api_key=google_key)
     except Exception:
-        _has_brt = False
-    if not _has_brt:
-        builtly_auth.inject_browser_token_reader()
-if "user_company" not in st.session_state:
-    st.session_state.user_company = ""
-if "user_countries" not in st.session_state:
-    st.session_state.user_countries = []  # list of country codes
-if "user_payment_method" not in st.session_state:
-    st.session_state.user_payment_method = ""  # "card" or "invoice"
-if "user_account_status" not in st.session_state:
-    st.session_state.user_account_status = ""  # "active", "pending_invoice", "inactive"
-if "user_reports" not in st.session_state:
-    st.session_state.user_reports = []  # list of dicts: {project, name, module, created, expires, download_url}
-if "auth_page" not in st.session_state:
-    st.session_state.auth_page = ""  # "login", "register", "plans", "dashboard"
+        llm_available = False
 
-ASSISTANT_END_MARKER = "[[BUILTLY_DONE]]"
-
-ACCESS_GATE_COPY = {
-    "🇬🇧 English (UK)": {
-        "eyebrow": "Restricted access",
-        "title": "Enter code to open Builtly",
-        "subtitle": "This front page is protected. Enter the access code to continue.",
-        "label": "Access code",
-        "placeholder": "Enter code",
-        "button": "Open portal",
-        "error_invalid": "That code is not correct. Please try again.",
-        "info": "Language selection is kept when the portal opens.",
-        "admin_missing": "Access control is enabled, but no code is configured. Set BUILTLY_ACCESS_CODE or BUILTLY_ACCESS_CODES in Render.",
-        "admin_help": "Optional: use BUILTLY_ACCESS_CODE_SHA256 to store a SHA-256 hash instead of plain text.",
-    },
-    "🇺🇸 English (US)": {
-        "eyebrow": "Restricted access",
-        "title": "Enter code to open Builtly",
-        "subtitle": "This front page is protected. Enter the access code to continue.",
-        "label": "Access code",
-        "placeholder": "Enter code",
-        "button": "Open portal",
-        "error_invalid": "That code is not correct. Please try again.",
-        "info": "Language selection is kept when the portal opens.",
-        "admin_missing": "Access control is enabled, but no code is configured. Set BUILTLY_ACCESS_CODE or BUILTLY_ACCESS_CODES in Render.",
-        "admin_help": "Optional: use BUILTLY_ACCESS_CODE_SHA256 to store a SHA-256 hash instead of plain text.",
-    },
-    "🇳🇴 Norsk": {
-        "eyebrow": "Begrenset tilgang",
-        "title": "Angi kode for å åpne Builtly",
-        "subtitle": "Forsiden er låst. Skriv inn tilgangskoden for å åpne portalen.",
-        "label": "Tilgangskode",
-        "placeholder": "Skriv inn kode",
-        "button": "Åpne portal",
-        "error_invalid": "Koden er ikke riktig. Prøv igjen.",
-        "info": "Språkvalget beholdes når portalen åpnes.",
-        "admin_missing": "Tilgangskontroll er slått på, men ingen kode er konfigurert. Sett BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
-        "admin_help": "Valgfritt: bruk BUILTLY_ACCESS_CODE_SHA256 hvis du vil lagre hash i stedet for klartekst.",
-    },
-    "🇸🇪 Svenska": {
-        "eyebrow": "Begränsad åtkomst",
-        "title": "Ange kod för att öppna Builtly",
-        "subtitle": "Startsidan är låst. Skriv in åtkomstkoden för att fortsätta.",
-        "label": "Åtkomstkod",
-        "placeholder": "Skriv in kod",
-        "button": "Öppna portalen",
-        "error_invalid": "Koden är inte korrekt. Försök igen.",
-        "info": "Språkvalet behålls när portalen öppnas.",
-        "admin_missing": "Åtkomstkontroll är aktiverad, men ingen kod är konfigurerad. Sätt BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
-        "admin_help": "Valfritt: använd BUILTLY_ACCESS_CODE_SHA256 om du vill lagra hash i stället för klartext.",
-    },
-    "🇩🇰 Dansk": {
-        "eyebrow": "Begrænset adgang",
-        "title": "Indtast kode for at åbne Builtly",
-        "subtitle": "Forsiden er låst. Skriv adgangskoden for at fortsætte.",
-        "label": "Adgangskode",
-        "placeholder": "Skriv kode",
-        "button": "Åbn portal",
-        "error_invalid": "Koden er ikke korrekt. Prøv igen.",
-        "info": "Sprogvalget bevares, når portalen åbnes.",
-        "admin_missing": "Adgangskontrol er slået til, men ingen kode er konfigureret. Sæt BUILTLY_ACCESS_CODE eller BUILTLY_ACCESS_CODES i Render.",
-        "admin_help": "Valgfrit: brug BUILTLY_ACCESS_CODE_SHA256, hvis du vil gemme hash i stedet for klartekst.",
-    },
-    "🇫🇮 Suomi": {
-        "eyebrow": "Rajoitettu käyttö",
-        "title": "Anna koodi avataksesi Builtlyn",
-        "subtitle": "Etusivu on suojattu. Syötä pääsykoodi jatkaaksesi.",
-        "label": "Pääsykoodi",
-        "placeholder": "Anna koodi",
-        "button": "Avaa portaali",
-        "error_invalid": "Koodi ei ole oikein. Yritä uudelleen.",
-        "info": "Kielivalinta säilyy, kun portaali avataan.",
-        "admin_missing": "Pääsynhallinta on käytössä, mutta koodia ei ole määritetty. Aseta BUILTLY_ACCESS_CODE tai BUILTLY_ACCESS_CODES Renderissä.",
-        "admin_help": "Valinnainen: käytä BUILTLY_ACCESS_CODE_SHA256, jos haluat tallentaa SHA-256-tiivisteen selväkielisen koodin sijaan.",
-    },
-    "🇩🇪 Deutsch": {
-        "eyebrow": "Geschützter Zugang",
-        "title": "Code eingeben, um Builtly zu öffnen",
-        "subtitle": "Die Startseite ist geschützt. Bitte den Zugangscode eingeben, um fortzufahren.",
-        "label": "Zugangscode",
-        "placeholder": "Code eingeben",
-        "button": "Portal öffnen",
-        "error_invalid": "Der Code ist nicht korrekt. Bitte erneut versuchen.",
-        "info": "Die Sprachauswahl bleibt beim Öffnen des Portals erhalten.",
-        "admin_missing": "Der Zugangsschutz ist aktiv, aber kein Code ist konfiguriert. Setzen Sie BUILTLY_ACCESS_CODE oder BUILTLY_ACCESS_CODES in Render.",
-        "admin_help": "Optional: Verwenden Sie BUILTLY_ACCESS_CODE_SHA256, um statt Klartext einen SHA-256-Hash zu speichern.",
-    },
-}
+gdo = GeodataOnlineClient() if HAS_GEODATA_ONLINE else None
+geodata_token_ok = False
+if gdo is not None and gdo.is_available():
+    try:
+        gdo.get_token()
+        geodata_token_ok = True
+    except Exception:
+        geodata_token_ok = False
 
 
-def get_access_copy(lang_key: str) -> Dict:
-    return ACCESS_GATE_COPY.get(lang_key, ACCESS_GATE_COPY["🇬🇧 English (UK)"])
-
-# -------------------------------------------------
-# 3) LANGUAGE TEXTS & REGULATORY PROFILES
-# -------------------------------------------------
-TEXTS = {'🇬🇧 English (UK)': {'rule_set': 'United Kingdom (Building Regulations / Approved Documents)',
-                     'eyebrow': 'Reimagining engineering in construction and property',
-                     'title': "Engineering meets AI.",
-                     'subtitle': 'Builtly lets you generate professional engineering reports yourself – in minutes, not weeks. '
-                                 'Upload raw data, and AI analyses, calculates and produces the report. '
-                                 'Use it as a working document, decision basis, or early-phase assessment. '
-                                 'Need formal sign-off for permits? We connect you with qualified professionals.',
-                     'btn_setup': 'Open project setup',
-                     'btn_qa': 'Open QA and sign-off',
-                     'proofs': ['Generate yourself', 'Rules-first AI', 'PDF + DOCX output', 'Professional review on demand', 'Full audit trail'],
-                     'why_kicker': 'Why Builtly?',
-                     'stat1_v': 'Ready instantly',
-                     'stat1_t': 'Generate reports yourself',
-                     'stat1_d': 'No waiting for consultants. Upload data, get the report – done.',
-                     'stat2_v': 'Three levels',
-                     'stat2_t': 'Auto → Reviewed → Certified',
-                     'stat2_d': 'Use reports as working drafts (Auto), with professional review (Reviewed), or with licensed sign-off for permits (Certified).',
-                     'stat3_v': 'Complete deliverables',
-                     'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-                     'stat3_d': 'Full report packages with appendices, calculations and audit trail.',
-                     'stat4_v': 'Full Traceability',
-                     'stat4_t': 'Auditable end-to-end',
-                     'stat4_d': 'Every input, source and decision is logged and verifiable.',
-                     'sec_val_kicker': 'The platform',
-                     'sec_val_title': 'One platform. Every discipline. One source of truth.',
-                     'sec_val_sub': 'Builtly is not a tool – it is the infrastructure that connects every stakeholder in the value chain. '
-                                    'Developer, engineer, contractor, bank and investor on one traceable foundation.',
-                     'val_1_t': 'Every discipline. One flow.',
-                     'val_1_d': 'GEO, Fire, Structural, Acoustics, SHA, TDD, Climate risk and more – from the same project data, in one portal.',
-                     'val_2_t': 'Rules-first AI',
-                     'val_2_d': 'AI operates inside building regulations, national standards and EU Taxonomy – not free-form text. Grounded in the rules.',
-                     'val_3_t': 'Professional review when you need it',
-                     'val_3_d': 'Most reports are ready to use immediately as working documents. Need formal certification for permits? We connect qualified professionals for sign-off.',
-                     'val_4_t': 'Scales without growing proportionally',
-                     'val_4_d': 'New disciplines, new markets and new partners plug into the same infrastructure.',
-                     'sec_loop_kicker': 'The Builtly Loop',
-                     'sec_loop_title': 'From raw data to finished deliverable – in four steps.',
-                     'sec_loop_sub': 'A structured workflow that eliminates manual drafting, ensures regulatory compliance and delivers '
-                                     'traceable document packages ready for submission or execution.',
-                     'loop_1_t': 'Input',
-                     'loop_1_d': 'Upload PDFs, IFC models, XLSX lab files, drawings, and project-specific data in one place.',
-                     'loop_2_t': 'AI analyses and generates',
-                     'loop_2_d': 'The platform validates, checks regulations, performs calculations and writes the report – automatically.',
-                     'loop_3_t': 'Use directly or send to QA',
-                     'loop_3_d': 'Your report is ready to use immediately. For projects requiring formal sign-off, send it to a qualified professional for certification.',
-                     'loop_4_t': 'Finished deliverable',
-                     'loop_4_d': 'Complete documentation package in standard formats – ready for municipal submission or use on site.',
-                     'mod_sec_kicker': 'Modules',
-                     'mod_sec_title': 'Modules for analysis, documentation and decisions',
-                     'mod_sec_sub': 'Choose the workflow that fits your project. Every module uses the same project data, '
-                                    'traceability and quality-controlled delivery flow inside Builtly.',
-                     'mod_sec1': 'Ground conditions, acoustics & fire',
-                     'mod_sec2': 'Early phase, structure & mobility',
-                     'mod_sec3': 'Sustainability, safety & certification',
-                     'mod_sec3_sub': 'Modules for environmental follow-up, safety planning and certification support in one workflow.',
-                     'm_geo_t': 'GEO / ENV - Ground Conditions',
-                     'm_geo_d': 'Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts '
-                                'environmental action plans.',
-                     'm_geo_in': 'XLSX / CSV / PDF + plans',
-                     'm_geo_out': 'Environmental action plan, logs',
-                     'm_geo_btn': 'Open Geo & Env',
-                     'm_aku_t': 'ACOUSTICS - Noise & Sound',
-                     'm_aku_d': 'Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation '
-                                'strategies.',
-                     'm_aku_in': 'Noise map + floor plan',
-                     'm_aku_out': 'Acoustics report, facade evaluation',
-                     'm_aku_btn': 'Open Acoustics',
-                     'm_brann_t': 'FIRE - Safety Strategy',
-                     'm_brann_d': 'Evaluate architectural drawings against building codes. Generates escape routes, fire cell division, '
-                                  'and fire strategy.',
-                     'm_brann_in': 'Architectural drawings + class',
-                     'm_brann_out': 'Fire strategy concept, deviations',
-                     'm_brann_btn': 'Open Fire Strategy',
-                     'm_ark_t': 'ARK - Feasibility Study',
-                     'm_ark_d': 'Site screening, volume analysis, and early-phase decision support before full engineering design.',
-                     'm_ark_in': 'Site data, zoning plans',
-                     'm_ark_out': 'Feasibility report, utilization metrics',
-                     'm_ark_btn': 'Open Feasibility',
-                     'm_rib_t': 'STRUC - Structural Concept',
-                     'm_rib_d': 'Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.',
-                     'm_rib_in': 'Models, load parameters',
-                     'm_rib_out': 'Concept memo, grid layouts',
-                     'm_rib_btn': 'Open Structural',
-                     'm_tra_t': 'TRAFFIC - Mobility',
-                     'm_tra_d': 'Traffic generation, parking requirements, access logic, and soft-mobility planning for early project '
-                                'phases.',
-                     'm_tra_in': 'Site plans, local norms',
-                     'm_tra_out': 'Traffic memo, mobility plan',
-                     'm_tra_btn': 'Open Traffic & Mobility',
-                     'm_sha_t': 'SHA - Safety & Health Plan',
-                     'm_sha_d': 'Safety, health, and working environment. Generates routines for site logistics and high-risk operations.',
-                     'm_sha_in': 'Project data + Risk factors',
-                     'm_sha_out': 'Complete SHA plan',
-                     'm_sha_btn': 'Open SHA Module',
-                     'm_breeam_t': 'BREEAM Assistant',
-                     'm_breeam_d': 'Early-phase assessment of BREEAM potential, credit requirements, and material strategies.',
-                     'm_breeam_in': 'Building data + Ambitions',
-                     'm_breeam_out': 'BREEAM Pre-assessment',
-                     'm_breeam_btn': 'Open BREEAM Assistant',
-                     'm_mop_t': 'MOP - Environment Plan',
-                     'm_mop_d': 'Environmental follow-up plan. Assesses waste management, reuse, emissions, and nature preservation.',
-                     'm_mop_in': 'Project data + Eco goals',
-                     'm_mop_out': 'MOP Document',
-                     'm_mop_btn': 'Open MOP Module',
-                     'btn_dev': 'In development',
-                     'cta_title': 'Ready to reimagine how engineering gets done?',
-                     'cta_desc': 'Start with one project. See what AI can deliver in minutes – not days. '
-                                 'Builtly is built for those who want to lead, not follow.',
-                     'cta_btn1': 'Start in project setup',
-                     'cta_btn2': 'Go to review queue',
-                     'cta_btn_plans': 'View plans',
-                     'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
-                     'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
-                     'label_input': 'Input',
-                     'label_output': 'Output',
-                     'assistant_kicker': 'Builtly Assistant',
-                     'assistant_title': 'Ask across every engineering discipline.',
-                     'assistant_subtitle': 'A front-page question surface for GEO, structural, demolition, acoustics, fire, environment, '
-                                           'SHA, BREEAM and property. The assistant follows the selected language and defaults to the '
-                                           'relevant national rule set.',
-                     'assistant_label_country': 'Country',
-                     'assistant_label_rules': 'Rule set',
-                     'assistant_label_status': 'Status',
-                     'assistant_disciplines_label': 'Disciplines',
-                     'assistant_question_label': 'Your question',
-                     'assistant_placeholder': 'Example: What must be clarified for a six-storey apartment project with a basement in early '
-                                              'phase?',
-                     'assistant_btn': 'Ask Builtly',
-                     'assistant_clear': 'Clear conversation',
-                     'assistant_loading': 'Builtly is analysing your question...',
-                     'assistant_examples_label': 'Example prompts',
-                     'assistant_examples': ['What should we clarify early for a residential block with a basement near a busy road?',
-                                            'Which BREEAM topics should be prioritised for an office project in early phase?',
-                                            'What should a demolition and SHA strategy cover next to a school?'],
-                     'assistant_disclaimer': 'Guidance is AI-assisted and must be quality-assured by the responsible discipline lead '
-                                             'before design decisions or sign-off.',
-                     'assistant_history_label': 'Recent dialogue',
-                     'assistant_empty_title': 'Ready for live questions',
-                     'assistant_empty_body': 'Visitors can ask questions about building technology and property right on the front page, '
-                                             'and the answer can be steered by discipline, language and national regulations.',
-                     'assistant_latest_answer': 'Latest answer',
-                     'assistant_status_live': 'AI ready',
-                     'assistant_status_setup': 'UI ready',
-                     'assistant_error_prefix': 'Could not generate an answer',
-                     'assistant_note_prefix': 'Setup note',
-                     'assistant_scope_value': 'GEO · Structural · Demolition · Acoustics · Fire · Environment · SHA · BREEAM · Property · '
-                                              'Traffic'},
- '🇳🇴 Norsk': {'rule_set': 'Norge (TEK17 / plan- og bygningsloven)',
-              'eyebrow': 'Vi revolusjonerer prosjekteringen i bygg og eiendom',
-              'title': "Ingeniørfaget møter AI.",
-              'subtitle': 'Builtly lar deg generere fagrapporter selv – på minutter, ikke uker. '
-                          'Last opp rådata, og AI analyserer, beregner og utarbeider rapporten. '
-                          'Bruk den som arbeidsdokument, beslutningsgrunnlag eller tidligfase-vurdering. '
-                          'Trenger du formell signering for byggesak? Da kobler vi inn godkjent fagperson.',
-              'btn_setup': 'Åpne Project Setup',
-              'btn_qa': 'Åpne QA & Sign-off',
-              'proofs': ['Generer selv', 'Regelstyrt AI', 'PDF + DOCX', 'Fagperson ved behov', 'Full sporbarhet'],
-              'why_kicker': 'Hvorfor Builtly?',
-              'stat1_v': 'Klar umiddelbart',
-              'stat1_t': 'Generer rapporter selv',
-              'stat1_d': 'Du trenger ikke vente på rådgivere. Last opp data, få rapporten – ferdig.',
-              'stat2_v': 'Tre nivåer',
-              'stat2_t': 'Auto → Reviewed → Attestert',
-              'stat2_d': 'Bruk rapporten som arbeidsutkast (Auto), med faglig gjennomgang (Reviewed), eller med ansvarsrett for søknad (Attestert).',
-              'stat3_v': 'Komplette leveranser',
-              'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-              'stat3_d': 'Fulle rapportpakker med vedlegg, beregninger og sporbarhet.',
-              'stat4_v': 'Full Sporbarhet',
-              'stat4_t': 'Etterprøvbart i alt',
-              'stat4_d': 'Hvert input, kilde og beslutning er logget.',
-              'sec_val_kicker': 'Plattformen',
-              'sec_val_title': 'Én plattform. Alle fag. Én sannhet.',
-              'sec_val_sub': 'Builtly er ikke et verktøy – det er infrastrukturen som binder alle aktører i verdikjeden. '
-                             'Utbygger, rådgiver, entreprenør, bank og investor på ett sporbart grunnlag.',
-              'val_1_t': 'Alle fag. Én flyt.',
-              'val_1_d': 'GEO, Brann, RIB, Akustikk, SHA, TDD, Klimarisiko og mer – fra samme prosjektgrunnlag, i én portal.',
-              'val_2_t': 'Regelstyrt AI',
-              'val_2_d': 'AI opererer innenfor TEK17, NS-standarder og EU Taxonomy – ikke fri tekst. Forankret i regelverket.',
-              'val_3_t': 'Fagperson når du trenger det',
-              'val_3_d': 'De fleste rapporter brukes direkte som arbeidsdokument. Trenger du formell attestering for søknad? Da kobler vi inn fagperson med ansvarsrett.',
-              'val_4_t': 'Skalerer uten å vokse proporsjonalt',
-              'val_4_d': 'Nye fag, nye markeder og nye partnere plugges inn i samme infrastruktur.',
-              'sec_loop_kicker': 'Builtly Loop',
-              'sec_loop_title': 'Fra rådata til ferdig leveranse – i fire steg.',
-              'sec_loop_sub': 'En strukturert arbeidsflyt som eliminerer manuelt skrivearbeid, sikrer regelverksetterlevelse '
-                              'og leverer sporbare dokumentpakker klare for byggesak og utførelse.',
-              'loop_1_t': 'Last opp rådata',
-              'loop_1_d': 'PDF, IFC-modeller, labfiler, tegninger og prosjektdata samles på ett sted.',
-              'loop_2_t': 'AI analyserer og genererer',
-              'loop_2_d': 'Plattformen validerer, sjekker regelverk, gjør beregninger og skriver rapporten – automatisk.',
-              'loop_3_t': 'Bruk direkte eller send til QA',
-              'loop_3_d': 'Rapporten er klar til bruk umiddelbart. For prosjekter som krever formell signering, sendes den videre til fagperson for attestering.',
-              'loop_4_t': 'Ferdig leveranse',
-              'loop_4_d': 'Komplett dokumentpakke i standardformater – klar for innsending til kommunen eller bruk på byggeplassen.',
-              'mod_sec_kicker': 'Moduler',
-              'mod_sec_title': 'Moduler for analyse, dokumentasjon og beslutningsstøtte',
-              'mod_sec_sub': 'Velg arbeidsflaten som passer prosjektet ditt. Alle modulene bruker samme prosjektdata, '
-                             'sporbarhet og kvalitetssikrede leveranseflyt i Builtly.',
-              'mod_sec1': 'Grunnforhold, lyd & brann',
-              'mod_sec2': 'Tidligfase, konstruksjon & mobilitet',
-              'mod_sec3': 'Bærekraft, sikkerhet & sertifisering',
-              'mod_sec3_sub': 'Moduler for miljøoppfølging, sikkerhetsplaner og sertifiseringsstøtte samlet i én arbeidsflyt.',
-              'm_geo_t': 'GEO / MILJØ - Grunnforhold',
-              'm_geo_d': 'Analyserer lab-filer og graveceller. Klassifiserer masser og utarbeider tiltaksplaner.',
-              'm_geo_in': 'XLSX / CSV / PDF + Kart',
-              'm_geo_out': 'Tiltaksplan, logg',
-              'm_geo_btn': 'Åpne Geo & Miljø',
-              'm_aku_t': 'AKUSTIKK - Støy & Lyd',
-              'm_aku_d': 'Leser støykart og plantegninger. Genererer krav til fasade, vinduer og skjerming.',
-              'm_aku_in': 'Støykart + Plan',
-              'm_aku_out': 'Akustikkrapport',
-              'm_aku_btn': 'Åpne Akustikk',
-              'm_brann_t': 'BRANN - Sikkerhetskonsept',
-              'm_brann_d': 'Vurderer arkitektur mot forskrifter. Definerer rømning og brannceller.',
-              'm_brann_in': 'Tegninger + Klasse',
-              'm_brann_out': 'Brannkonsept (RIBr)',
-              'm_brann_btn': 'Åpne Brannkonsept',
-              'm_ark_t': 'ARK - Mulighetsstudie',
-              'm_ark_d': 'Tomteanalyse, volumvurdering og beslutningsgrunnlag for tidligfase.',
-              'm_ark_in': 'Regulering + Tomt',
-              'm_ark_out': 'Mulighetsstudie',
-              'm_ark_btn': 'Åpne Feasibility',
-              'm_rib_t': 'RIB - Konstruksjon',
-              'm_rib_d': 'Konseptuelle struktursjekker, spennvidder og integrasjon med klimagass.',
-              'm_rib_in': 'Modeller, Laster',
-              'm_rib_out': 'Konseptnotat RIB',
-              'm_rib_btn': 'Åpne Konstruksjon',
-              'm_tra_t': 'TRAFIKK - Mobilitet',
-              'm_tra_d': 'Trafikkgenerering, parkering, adkomstlogikk og myke trafikanter for tidligfase.',
-              'm_tra_in': 'Situasjonsplan',
-              'm_tra_out': 'Trafikknotat',
-              'm_tra_btn': 'Åpne Trafikk & Mobilitet',
-              'm_sha_t': 'SHA-Plan (Sikkerhet)',
-              'm_sha_d': 'Sikkerhet, helse og arbeidsmiljø. Genererer rutiner for rigg, logistikk og risikofylte operasjoner.',
-              'm_sha_in': 'Prosjektdata + Risiko',
-              'm_sha_out': 'Komplett SHA-plan',
-              'm_sha_btn': 'Åpne SHA',
-              'm_breeam_t': 'BREEAM Assistent',
-              'm_breeam_d': 'Tidligfase vurdering av BREEAM-NOR potensial, poengkrav og materialstrategi.',
-              'm_breeam_in': 'Byggdata + Ambisjon',
-              'm_breeam_out': 'BREEAM Pre-assessment',
-              'm_breeam_btn': 'Åpne BREEAM',
-              'm_mop_t': 'MOP (Miljøoppfølging)',
-              'm_mop_d': 'Miljøoppfølgingsplan for byggeplass. Vurderer avfall, ombruk, utslipp og natur.',
-              'm_mop_in': 'Prosjektdata + Miljømål',
-              'm_mop_out': 'MOP Dokument',
-              'm_mop_btn': 'Åpne MOP',
-              'btn_dev': 'Under utvikling',
-              'cta_title': 'Klar til å revolusjonere prosjekteringen?',
-              'cta_desc': 'Start med ett prosjekt. Se hva Builtly kan levere på minutter – ikke dager og uker. '
-                          'Builtly er bygget for de som vil ligge foran, ikke henge etter.',
-              'cta_btn1': 'Start i Project Setup',
-              'cta_btn2': 'Gå til kontroll-kø',
-              'cta_btn_plans': 'Se kontoplaner',
-              'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
-              'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
-              'label_input': 'Input',
-              'label_output': 'Output',
-              'assistant_kicker': 'Builtly Assistent',
-              'assistant_title': 'Still spørsmål på tvers av alle byggfag.',
-              'assistant_subtitle': 'En integrert spørreflate på forsiden for GEO, RIB, rive, RIAku, RIBr, miljø, SHA, BREEAM og eiendom. '
-                                    'Assistenten følger valgt språk og bruker riktig nasjonalt regelverk som utgangspunkt.',
-              'assistant_label_country': 'Land',
-              'assistant_label_rules': 'Regelverk',
-              'assistant_label_status': 'Status',
-              'assistant_disciplines_label': 'Fagområder',
-              'assistant_question_label': 'Spørsmål',
-              'assistant_placeholder': 'Eksempel: Hva må avklares i tidligfase for et boligprosjekt på seks etasjer med kjeller?',
-              'assistant_btn': 'Spør Builtly',
-              'assistant_clear': 'Tøm samtale',
-              'assistant_loading': 'Builtly analyserer spørsmålet ditt...',
-              'assistant_examples_label': 'Eksempler på spørsmål',
-              'assistant_examples': ['Hva må vi avklare tidlig for en boligblokk med parkeringskjeller ved trafikkert vei?',
-                                     'Hvilke BREEAM-tema bør prioriteres i tidligfase for et kontorprosjekt?',
-                                     'Hva bør en rive- og SHA-strategi dekke ved arbeid nær skole?'],
-              'assistant_disclaimer': 'Svarene er AI-assisterte og må kvalitetssikres av ansvarlig fagperson før prosjekteringsvalg eller '
-                                      'signering.',
-              'assistant_history_label': 'Nylig dialog',
-              'assistant_empty_title': 'Klar for spørsmål fra besøkende',
-              'assistant_empty_body': 'Besøkende kan stille spørsmål om bygningsteknikk og eiendom direkte på forsiden, og svarene styres '
-                                      'av fagvalg, språk og nasjonalt regelverk.',
-              'assistant_latest_answer': 'Siste svar',
-              'assistant_status_live': 'AI klar',
-              'assistant_status_setup': 'UI klart',
-              'assistant_error_prefix': 'Kunne ikke generere svar',
-              'assistant_note_prefix': 'Oppsett',
-              'assistant_scope_value': 'GEO · RIB · Rive · RIAku · RIBr · Miljø · SHA · BREEAM · Eiendom · Trafikk'},
- '🇸🇪 Svenska': {'rule_set': 'Sverige (Boverkets regler / övergång 2025–2026)',
-                'eyebrow': 'Vi revolutionerar projekteringen inom bygg och fastighet',
-                'title': "Ingenjörsyrket möter AI.",
-                'subtitle': 'Builtly låter dig generera fackrapporter själv – på minuter, inte veckor. '
-                             'Ladda upp rådata, och AI analyserar, beräknar och upprättar rapporten. '
-                             'Använd den som arbetsdokument, beslutsunderlag eller tidig bedömning. '
-                             'Behöver du formellt godkännande för bygglov? Då kopplar vi in kvalificerad fackperson.',
-                'btn_setup': 'Starta i Project Setup',
-                'btn_qa': 'Öppna QA & Sign-off',
-                'proofs': ['Generera själv', 'Regelbaserad AI', 'PDF + DOCX', 'Fackperson vid behov', 'Fullständig spårbarhet'],
-                'why_kicker': 'Varför Builtly?',
-                'stat1_v': 'Klar direkt',
-                'stat1_t': 'Generera rapporter själv',
-                'stat1_d': 'Du behöver inte vänta på konsulter. Ladda upp data, få rapporten – klart.',
-                'stat2_v': 'Tre nivåer',
-                'stat2_t': 'Auto → Granskad → Certifierad',
-                'stat2_d': 'Använd rapporten som arbetsutkast (Auto), med fackgranskning (Granskad), eller med ansvarig expert för bygglov (Certifierad).',
-                'stat3_v': 'Kompletta leveranser',
-                'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-                'stat3_d': 'Fullständiga rapportpaket med bilagor, beräkningar och spårbarhet.',
-                'stat4_v': 'Spårbarhet',
-                'stat4_t': 'Dokumentation',
-                'stat4_d': 'Versionshantering från input till PDF',
-                'sec_val_kicker': 'Plattformen',
-                'sec_val_title': 'En plattform. Alla discipliner. En källa till sanning.',
-                'sec_val_sub': 'Builtly är inte ett verktyg – det är infrastrukturen som förbinder alla aktörer i värdekedjan. '
-                               'Byggherre, ingenjör, entreprenör, bank och investerare på ett spårbart underlag.',
-                'val_1_t': 'Alla discipliner. Ett flöde.',
-                'val_1_d': 'GEO, Brand, Konstruktion, Akustik, SHA, TDD, Klimatrisk och mer – från samma projektdata, i en portal.',
-                'val_2_t': 'Regelbaserad AI',
-                'val_2_d': 'AI arbetar inom plan- och bygglagen, svenska standarder och EU Taxonomy – inte fri text. Förankrad i regelverket.',
-                'val_3_t': 'Fackperson när du behöver det',
-                'val_3_d': 'De flesta rapporter kan användas direkt som arbetsdokument. Behöver du formell certifiering för bygglov? Då kopplar vi in kvalificerad fackperson.',
-                'val_4_t': 'Skalerar utan att växa proportionellt',
-                'val_4_d': 'Nya discipliner, nya marknader och nya partners ansluts till samma infrastruktur.',
-                'sec_loop_kicker': 'Builtly Loop',
-                'sec_loop_title': 'Från rådata till färdig leverans – i fyra steg.',
-                'sec_loop_sub': 'Ett strukturerat arbetsflöde som eliminerar manuellt skrivarbete, säkerställer regelefterlevnad '
-                               'och levererar spårbara dokumentpaket klara för ansökan eller utförande.',
-                'loop_1_t': 'Ladda upp rådata',
-                'loop_1_d': 'PDF:er, IFC-modeller, labfiler, ritningar och projektdata samlas på ett ställe.',
-                'loop_2_t': 'AI analyserar och genererar',
-                'loop_2_d': 'Plattformen validerar, kontrollerar regelverk, beräknar och skriver rapporten – automatiskt.',
-                'loop_3_t': 'Använd direkt eller skicka till QA',
-                'loop_3_d': 'Rapporten är klar att använda direkt. För projekt som kräver formellt godkännande skickas den vidare till fackperson för certifiering.',
-                'loop_4_t': 'Färdig leverans',
-                'loop_4_d': 'Färdigt dokument för bygglov.',
-                'mod_sec_kicker': 'Moduler',
-                'mod_sec_title': 'Specialiserade agenter',
-                'mod_sec_sub': 'Varje modul delar samma portal och kvalitetskontroll.',
-                'mod_sec1': 'Tillgängligt nu',
-                'mod_sec2': 'Roadmap och tidiga skeden',
-                'mod_sec3': 'Hållbarhet & Säkerhet',
-                'mod_sec3_sub': 'Integrerade tjänster för miljöuppföljning, säkerhet och certifiering, anpassade för att skapa '
-                                'ansvarsfulla projekt.',
-                'm_geo_t': 'GEO / MILJÖ',
-                'm_geo_d': 'Analyserar labbfiler. Klassificerar massor och åtgärdsplaner.',
-                'm_geo_in': 'XLSX / CSV + Karta',
-                'm_geo_out': 'Åtgärdsplan',
-                'm_geo_btn': 'Öppna Geo',
-                'm_aku_t': 'AKUSTIK',
-                'm_aku_d': 'Läser bullerkartor och planritningar. Genererar fasadkrav.',
-                'm_aku_in': 'Bullerkarta + Plan',
-                'm_aku_out': 'Akustikrapport',
-                'm_aku_btn': 'Öppna Akustik',
-                'm_brann_t': 'BRAND - Koncept',
-                'm_brann_d': 'Utvärderar arkitektur mot BBR. Definierar brandceller.',
-                'm_brann_in': 'Ritningar + Klass',
-                'm_brann_out': 'Brandkoncept',
-                'm_brann_btn': 'Öppna Brand',
-                'm_ark_t': 'ARK - Förstudie',
-                'm_ark_d': 'Tomtanalys och volymbedömning för tidiga skeden.',
-                'm_ark_in': 'Detaljplan + Tomt',
-                'm_ark_out': 'Förstudie',
-                'm_ark_btn': 'Öppna ARK',
-                'm_rib_t': 'Konstruktion',
-                'm_rib_d': 'Konceptuella strukturkontroller och byggfysik.',
-                'm_rib_in': 'Sektion + Laster',
-                'm_rib_out': 'Koncept-PM',
-                'm_rib_btn': 'Öppna Konstruktion',
-                'm_tra_t': 'TRAFIK',
-                'm_tra_d': 'Trafikalstring, parkering och logistik.',
-                'm_tra_in': 'Situationsplan',
-                'm_tra_out': 'Trafik-PM',
-                'm_tra_btn': 'Öppna Trafik',
-                'm_sha_t': 'SHA-Plan (Säkerhet)',
-                'm_sha_d': 'Säkerhet, hälsa och arbetsmiljö. Genererar rutiner för byggarbetsplatsen.',
-                'm_sha_in': 'Projektdata + Risker',
-                'm_sha_out': 'Komplett SHA-plan',
-                'm_sha_btn': 'Öppna SHA',
-                'm_breeam_t': 'BREEAM Assistent',
-                'm_breeam_d': 'Tidig bedömning av BREEAM-krav och materialstrategi.',
-                'm_breeam_in': 'Byggdata + Ambition',
-                'm_breeam_out': 'BREEAM Pre-assessment',
-                'm_breeam_btn': 'Öppna BREEAM',
-                'm_mop_t': 'MOP (Miljöplan)',
-                'm_mop_d': 'Miljöuppföljningsplan för avfall, återbruk och utsläpp.',
-                'm_mop_in': 'Projektdata + Miljömål',
-                'm_mop_out': 'MOP Dokument',
-                'm_mop_btn': 'Öppna MOP',
-                'mod_sec6': 'Bank & Finansiering',
-                'mod_sec6_sub': 'Moduler för byggnadskreditskontroll, kreditunderlag och bankrapportering. Automatiserad datainsamling och strukturerat beslutsstöd för långivare.',
-                'badge_byggelanskontroll': 'Byggnadslån',
-                'badge_kredittgrunnlag': 'Kredit',
-                'm_byggelanskontroll_t': 'BYGGNADSKREDITSKONTROLL – Utbetalningskontroll & verifiering',
-                'm_byggelanskontroll_d': 'Verifierar utbetalningsförfrågningar mot byggbudget, tidsplan och kontraktsunderlag. Genererar bankens kontrollrapport med avvikelser och godkännandeunderlag.',
-                'm_byggelanskontroll_in': 'Utbetalningsförfrågan + budget + tidsplan',
-                'm_byggelanskontroll_out': 'Kontrollrapport, avvikelselogg, godkännandeunderlag',
-                'm_byggelanskontroll_btn': 'Öppna Kreditskontroll',
-                'm_kredittgrunnlag_t': 'KREDITUNDERLAG – Beslutsstöd för kreditkommitté',
-                'm_kredittgrunnlag_d': 'Sammanställer tekniska, regulatoriska och finansiella data till ett strukturerat kreditunderlag för tomtlån, byggnadslån och hyresrättslån.',
-                'm_kredittgrunnlag_in': 'Projektdata + fastighetsinformation + finansstruktur',
-                'm_kredittgrunnlag_out': 'Kreditpromemoria, riskmatris, beslutsunderlag',
-                'm_kredittgrunnlag_btn': 'Öppna Kreditunderlag',
-                'btn_dev': 'Under utveckling',
-                'cta_title': 'Starta ett projekt. Ladda upp data.',
-                'cta_desc': 'Builtly kombinerar insamling, AI och professionell signering i en portal.',
-                'cta_btn1': 'Starta i Project Setup',
-                'cta_btn2': 'Gå till QA-kö',
-                'cta_btn_plans': 'Se kontoplaner',
-                'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
-                'footer_meta': '© 2026 Builtly Engineering AS. Alla rättigheter förbehållna.',
-                'label_input': 'Input',
-                'label_output': 'Output',
-                'assistant_kicker': 'Builtly Assistent',
-                'assistant_title': 'Ställ frågor inom hela byggtekniken.',
-                'assistant_subtitle': 'En integrerad frågeyta på startsidan för GEO, konstruktion, rivning, akustik, brand, miljö, SHA, '
-                                      'BREEAM och fastighet. Assistenten följer valt språk och utgår från rätt nationellt regelverk.',
-                'assistant_label_country': 'Land',
-                'assistant_label_rules': 'Regelverk',
-                'assistant_label_status': 'Status',
-                'assistant_disciplines_label': 'Discipliner',
-                'assistant_question_label': 'Din fråga',
-                'assistant_placeholder': 'Exempel: Vad måste klarläggas i tidigt skede för ett bostadsprojekt i sex våningar med källare?',
-                'assistant_btn': 'Fråga Builtly',
-                'assistant_clear': 'Rensa dialog',
-                'assistant_loading': 'Builtly analyserar din fråga...',
-                'assistant_examples_label': 'Exempelfrågor',
-                'assistant_examples': ['Vad bör vi klargöra tidigt för ett bostadshus med garage intill en trafikerad väg?',
-                                       'Vilka BREEAM-frågor bör prioriteras tidigt för ett kontorsprojekt?',
-                                       'Vad bör en rivnings- och SHA-strategi omfatta nära en skola?'],
-                'assistant_disclaimer': 'Svaren är AI-assisterade och måste kvalitetssäkras av ansvarig specialist innan '
-                                        'projekteringsbeslut eller signering.',
-                'assistant_history_label': 'Senaste dialog',
-                'assistant_empty_title': 'Redo för frågor från besökare',
-                'assistant_empty_body': 'Besökare kan ställa frågor om byggteknik och fastighet direkt på startsidan, och svaren styrs av '
-                                        'disciplin, språk och nationella regler.',
-                'assistant_latest_answer': 'Senaste svar',
-                'assistant_status_live': 'AI klar',
-                'assistant_status_setup': 'UI klart',
-                'assistant_error_prefix': 'Kunde inte generera svar',
-                'assistant_note_prefix': 'Konfiguration',
-                'assistant_scope_value': 'GEO · Konstruktion · Rivning · Akustik · Brand · Miljö · SHA · BREEAM · Fastighet · Trafik'},
- '🇩🇰 Dansk': {'rule_set': 'Danmark (BR18 / nationale annekser)',
-              'eyebrow': 'Vi revolutionerer projekteringen inden for byg og ejendom',
-              'title': "Ingeniørfaget møder AI.",
-              'subtitle': 'Builtly lader dig generere fagrapporter selv – på minutter, ikke uger. '
-                          'Upload rådata, og AI analyserer, beregner og udarbejder rapporten. '
-                          'Brug den som arbejdsdokument, beslutningsgrundlag eller tidlig vurdering. '
-                          'Har du brug for formel godkendelse til byggesag? Så kobler vi kvalificeret fagperson på.',
-              'btn_setup': 'Start i Project Setup',
-              'btn_qa': 'Åbn QA & Sign-off',
-              'proofs': ['Generér selv', 'Regelbaseret AI', 'PDF + DOCX', 'Fagperson ved behov', 'Fuld sporbarhed'],
-              'why_kicker': 'Hvorfor Builtly?',
-              'stat1_v': 'Klar med det samme',
-              'stat1_t': 'Generér rapporter selv',
-              'stat1_d': 'Du behøver ikke vente på rådgivere. Upload data, få rapporten – færdig.',
-              'stat2_v': 'Tre niveauer',
-              'stat2_t': 'Auto → Gennemgået → Certificeret',
-              'stat2_d': 'Brug rapporten som arbejdsudkast (Auto), med faglig gennemgang (Gennemgået), eller med ansvar for byggesag (Certificeret).',
-              'stat3_v': 'Komplette leverancer',
-              'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-              'stat3_d': 'Fulde rapportpakker med bilag, beregninger og sporbarhed.',
-              'stat4_v': 'Sporbarhed',
-              'stat4_t': 'Dokumentation',
-              'stat4_d': 'Versionskontrol fra input til PDF',
-              'sec_val_kicker': 'Platformen',
-              'sec_val_title': 'Én platform. Alle fag. Én sandhed.',
-              'sec_val_sub': 'Builtly er ikke et værktøj – det er infrastrukturen der forbinder alle aktører i værdikæden. '
-                             'Bygherre, rådgiver, entreprenør, bank og investor på ét sporbart grundlag.',
-              'val_1_t': 'Alle fag. Ét flow.',
-              'val_1_d': 'GEO, Brand, Konstruktion, Akustik, SHA, TDD, Klimarisiko og mere – fra samme projektdata, i én portal.',
-              'val_2_t': 'Regelbaseret AI',
-              'val_2_d': 'AI opererer inden for bygningsreglementet, danske standarder og EU Taxonomy – ikke fri tekst. Forankret i reglerne.',
-              'val_3_t': 'Fagperson når du har brug for det',
-              'val_3_d': 'De fleste rapporter kan bruges direkte som arbejdsdokument. Har du brug for formel certificering til byggesag? Så kobler vi kvalificeret fagperson på.',
-              'val_4_t': 'Skalerer uden at vokse proportionelt',
-              'val_4_d': 'Nye fag, nye markeder og nye partnere tilsluttes samme infrastruktur.',
-              'sec_loop_kicker': 'Builtly Loop',
-              'sec_loop_title': 'Fra rådata til færdig leverance – i fire trin.',
-              'sec_loop_sub': 'Et struktureret workflow der eliminerer manuelt skrivearbejde, sikrer regeloverholdelse '
-                             'og leverer sporbare dokumentpakker klar til sagsbehandling eller udførelse.',
-              'loop_1_t': 'Upload rådata',
-              'loop_1_d': 'PDF-er, IFC-modeller, labfiler, tegninger og projektdata samles ét sted.',
-              'loop_2_t': 'AI analyserer og genererer',
-              'loop_2_d': 'Platformen validerer, tjekker regler, laver beregninger og skriver rapporten – automatisk.',
-              'loop_3_t': 'Brug direkte eller send til QA',
-              'loop_3_d': 'Rapporten er klar til brug med det samme. For projekter der kræver formel godkendelse, sendes den videre til fagperson for certificering.',
-              'loop_4_t': 'Færdig leverance',
-              'mod_sec_kicker': 'Moduler',
-              'mod_sec_title': 'Specialiserede agenter',
-              'mod_sec_sub': 'Hvert modul deler samme portal og kvalitetskontrol.',
-              'mod_sec1': 'Tilgængelig nu',
-              'mod_sec2': 'Roadmap',
-              'mod_sec3': 'Bæredygtighed & Sikkerhed',
-              'mod_sec3_sub': 'Integrerede tjenester til miljøopfølgning, sikkerhed og certificering, skræddersyet til ansvarlige '
-                              'projekter.',
-              'm_geo_t': 'GEO / MILJØ',
-              'm_geo_d': 'Analyserer lab-filer og udarbejder miljøhandlingsplaner.',
-              'm_geo_in': 'XLSX / CSV + Kort',
-              'm_geo_out': 'Handlingsplan',
-              'm_geo_btn': 'Åbn Geo',
-              'm_aku_t': 'AKUSTIK',
-              'm_aku_d': 'Læser støjkort. Genererer krav til facade.',
-              'm_aku_in': 'Støjkort + Plan',
-              'm_aku_out': 'Akustikrapport',
-              'm_aku_btn': 'Åbn Akustik',
-              'm_brann_t': 'BRAND',
-              'm_brann_d': 'Vurderer arkitektur mod BR18. Definerer brandceller.',
-              'm_brann_in': 'Tegninger + Klasse',
-              'm_brann_out': 'Brandstrategi',
-              'm_brann_btn': 'Åbn Brand',
-              'm_ark_t': 'ARK - Studie',
-              'm_ark_d': 'Grundanlyse og volumen for tidlige faser.',
-              'm_ark_in': 'Lokalplan + Grund',
-              'm_ark_out': 'Mulighedsstudie',
-              'm_ark_btn': 'Åbn ARK',
-              'm_rib_t': 'Konstruktion',
-              'm_rib_d': 'Konceptuelle strukturtjek og bygningsfysik.',
-              'm_rib_in': 'Snit + Laster',
-              'm_rib_out': 'Konceptnotat',
-              'm_rib_btn': 'Åbn Konstruktion',
-              'm_tra_t': 'TRAFIK',
-              'm_tra_d': 'Trafikgenerering og parkering.',
-              'm_tra_in': 'Situationsplan',
-              'm_tra_out': 'Trafiknotat',
-              'm_tra_btn': 'Åbn Trafik',
-              'm_sha_t': 'SHA-Plan (Sikkerhed)',
-              'm_sha_d': 'Sikkerhed, sundhed og arbejdsmiljø. Genererer rutiner for byggepladsen.',
-              'm_sha_in': 'Projektdata + Risici',
-              'm_sha_out': 'Komplet SHA-plan',
-              'm_sha_btn': 'Åbn SHA',
-              'm_breeam_t': 'BREEAM Assistent',
-              'm_breeam_d': 'Tidlig vurdering af BREEAM potentiale og materialestrategi.',
-              'm_breeam_in': 'Byggedata + Ambition',
-              'm_breeam_out': 'BREEAM Pre-assessment',
-              'm_breeam_btn': 'Åbn BREEAM',
-              'm_mop_t': 'MOP (Miljøplan)',
-              'm_mop_d': 'Miljøopfølgningsplan for affald, genbrug og udledning.',
-              'm_mop_in': 'Projektdata + Miljømål',
-              'm_mop_out': 'MOP Dokument',
-              'm_mop_btn': 'Åbn MOP',
-              'mod_sec6': 'Bank & Finans',
-              'mod_sec6_sub': 'Moduler til byggelånskontrol, kreditgrundlag og bankrapportering. Automatiseret dataindsamling og struktureret beslutningsstøtte til banker og kreditgivere.',
-              'badge_byggelanskontroll': 'Byggelån',
-              'badge_kredittgrunnlag': 'Kredit',
-              'm_byggelanskontroll_t': 'BYGGELÅNSKONTROL – Udbetalingskontrol & verifikation',
-              'm_byggelanskontroll_d': 'Verificerer trækningsanmodninger mod byggebudget, tidsplan og kontraktsgrundlag. Genererer bankens kontrolrapport med afvigelser og godkendelsesgrundlag.',
-              'm_byggelanskontroll_in': 'Trækningsanmodning + budget + tidsplan',
-              'm_byggelanskontroll_out': 'Kontrolrapport, afvigelseslog, godkendelsesgrundlag',
-              'm_byggelanskontroll_btn': 'Åbn Byggelånskontrol',
-              'm_kredittgrunnlag_t': 'KREDITGRUNDLAG – Beslutningsstøtte til kreditkomité',
-              'm_kredittgrunnlag_d': 'Sammenstiller tekniske, regulatoriske og finansielle data til et struktureret kreditgrundlag for grund-, bygge- og udlejningslån.',
-              'm_kredittgrunnlag_in': 'Projektdata + ejendomsinfo + finansieringsstruktur',
-              'm_kredittgrunnlag_out': 'Kreditmemo, risikomatrix, beslutningsgrundlag',
-              'm_kredittgrunnlag_btn': 'Åbn Kreditgrundlag',
-              'btn_dev': 'Under udvikling',
-              'cta_title': 'Start et projekt. Upload data.',
-              'cta_desc': 'Builtly kombinerer dataindsamling, AI og faglig signering i én portal.',
-              'cta_btn1': 'Start i Project Setup',
-              'cta_btn2': 'Gå til QA',
-              'cta_btn_plans': 'Se kontoplaner',
-              'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
-              'footer_meta': '© 2026 Builtly Engineering AS. Alle rettigheder forbeholdes.',
-              'label_input': 'Input',
-              'label_output': 'Output',
-              'assistant_kicker': 'Builtly Assistent',
-              'assistant_title': 'Stil spørgsmål på tværs af alle byggediscipliner.',
-              'assistant_subtitle': 'En integreret spørgeflade på forsiden for GEO, konstruktion, nedrivning, akustik, brand, miljø, SHA, '
-                                    'BREEAM og ejendom. Assistenten følger valgt sprog og tager udgangspunkt i det relevante nationale '
-                                    'regelsæt.',
-              'assistant_label_country': 'Land',
-              'assistant_label_rules': 'Regelsæt',
-              'assistant_label_status': 'Status',
-              'assistant_disciplines_label': 'Fagområder',
-              'assistant_question_label': 'Dit spørgsmål',
-              'assistant_placeholder': 'Eksempel: Hvad skal afklares tidligt for et boligprojekt i seks etager med kælder?',
-              'assistant_btn': 'Spørg Builtly',
-              'assistant_clear': 'Ryd dialog',
-              'assistant_loading': 'Builtly analyserer dit spørgsmål...',
-              'assistant_examples_label': 'Eksempelspørgsmål',
-              'assistant_examples': ['Hvad skal vi afklare tidligt for en boligblok med parkeringskælder ved en trafikeret vej?',
-                                     'Hvilke BREEAM-emner bør prioriteres tidligt i et kontorprojekt?',
-                                     'Hvad bør en nedrivnings- og SHA-strategi dække tæt på en skole?'],
-              'assistant_disclaimer': 'Svarene er AI-assisterede og skal kvalitetssikres af ansvarlig fagperson før projekteringsvalg '
-                                      'eller signering.',
-              'assistant_history_label': 'Seneste dialog',
-              'assistant_empty_title': 'Klar til spørgsmål fra besøgende',
-              'assistant_empty_body': 'Besøgende kan stille spørgsmål om byggeteknik og ejendom direkte på forsiden, og svarene styres af '
-                                      'fagvalg, sprog og nationale regler.',
-              'assistant_latest_answer': 'Seneste svar',
-              'assistant_status_live': 'AI klar',
-              'assistant_status_setup': 'UI klar',
-              'assistant_error_prefix': 'Kunne ikke generere svar',
-              'assistant_note_prefix': 'Opsætning',
-              'assistant_scope_value': 'GEO · Konstruktion · Nedrivning · Akustik · Brand · Miljø · SHA · BREEAM · Ejendom · Trafik'},
- '🇺🇸 English (US)': {'rule_set': 'United States (IBC / IRC / local amendments)',
-                     'eyebrow': 'Reimagining engineering in construction and property',
-                     'title': "Engineering meets AI.",
-                     'subtitle': 'Builtly lets you generate professional engineering reports yourself – in minutes, not weeks. '
-                                 'Upload raw data, and AI analyses, calculates and produces the report. '
-                                 'Use it as a working document, decision basis, or early-phase assessment. '
-                                 'Need formal sign-off for permits? We connect you with qualified professionals.',
-                     'btn_setup': 'Open project setup',
-                     'btn_qa': 'Open QA and sign-off',
-                     'proofs': ['Generate yourself', 'Rules-first AI', 'PDF + DOCX output', 'Professional review on demand', 'Full audit trail'],
-                     'why_kicker': 'Why Builtly?',
-                     'stat1_v': 'Ready instantly',
-                     'stat1_t': 'Generate reports yourself',
-                     'stat1_d': 'No waiting for consultants. Upload data, get the report – done.',
-                     'stat2_v': 'Three levels',
-                     'stat2_t': 'Auto → Reviewed → Certified',
-                     'stat2_d': 'Use reports as working drafts (Auto), with professional review (Reviewed), or with licensed sign-off for permits (Certified).',
-                     'stat3_v': 'Complete deliverables',
-                     'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-                     'stat3_d': 'Full report packages with appendices, calculations and audit trail.',
-                     'stat4_v': 'Full Traceability',
-                     'stat4_t': 'End-to-end logging',
-                     'stat4_d': 'Inputs, versions, compliance checks logged',
-                     'sec_val_kicker': 'The platform',
-                     'sec_val_title': 'One platform. Every discipline. One source of truth.',
-                     'sec_val_sub': 'Builtly is not a tool – it is the infrastructure that connects every stakeholder in the value chain. '
-                                    'Developer, engineer, contractor, bank and investor on one traceable foundation.',
-                     'val_1_t': 'Every discipline. One flow.',
-                     'val_1_d': 'GEO, Fire, Structural, Acoustics, SHA, TDD, Climate risk and more – from the same project data, in one portal.',
-                     'val_2_t': 'Rules-first AI',
-                     'val_2_d': 'AI operates inside building regulations, national standards and EU Taxonomy – not free-form text. Grounded in the rules.',
-                     'val_3_t': 'Professional review when you need it',
-                     'val_3_d': 'Most reports are ready to use immediately as working documents. Need formal certification for permits? We connect qualified professionals for sign-off.',
-                     'val_4_t': 'Scales without growing proportionally',
-                     'val_4_d': 'New disciplines, new markets and new partners plug into the same infrastructure.',
-                     'sec_loop_kicker': 'The Builtly Loop',
-                     'sec_loop_title': 'From raw data to finished deliverable – in four steps.',
-                     'sec_loop_sub': 'A structured workflow that eliminates manual drafting, ensures regulatory compliance and delivers '
-                                     'traceable document packages ready for submission or execution.',
-                     'loop_1_t': 'Upload raw data',
-                     'loop_1_d': 'PDFs, IFC models, lab files, drawings and project data in one place.',
-                     'loop_2_t': 'AI analyses and generates',
-                     'loop_2_d': 'The platform parses, validates, applies local rule checks, performs calculations, and drafts the '
-                                 'deliverable.',
-                     'loop_3_t': 'Use directly or send to QA',
-                     'loop_3_d': 'Your report is ready to use immediately. For projects requiring formal sign-off, send it to a qualified professional for certification.',
-                     'loop_4_t': 'Output',
-                     'loop_4_d': 'Final documentation package in standard formats, ready for permit submission or construction use.',
-                     'mod_sec_kicker': 'Modules and roadmap',
-                     'mod_sec_title': 'Specialized agents in one platform',
-                     'mod_sec_sub': 'Each module has dedicated ingestion logic, discipline-specific rules, and output templates while '
-                                    'sharing the same portal, validation, QA, and sign-off backbone.',
-                     'mod_sec1': 'Available now and pilot-ready',
-                     'mod_sec2': 'Roadmap and early-phase tools',
-                     'mod_sec3': 'Sustainability & Compliance',
-                     'mod_sec3_sub': 'Integrated services for environmental follow-up, safety, and certification, tailored to create '
-                                     'responsible and value-driven developments.',
-                     'm_geo_t': 'GEO / ENV - Ground Conditions',
-                     'm_geo_d': 'Analyze lab files and excavation plans. Classifies masses, proposes disposal logic, and drafts '
-                                'environmental action plans.',
-                     'm_geo_in': 'XLSX / CSV / PDF + plans',
-                     'm_geo_out': 'Environmental action plan, logs',
-                     'm_geo_btn': 'Open Geo & Env',
-                     'm_aku_t': 'ACOUSTICS - Noise & Sound',
-                     'm_aku_d': 'Ingest noise maps and floor plans. Generates facade requirements, window specifications, and mitigation '
-                                'strategies.',
-                     'm_aku_in': 'Noise map + floor plan',
-                     'm_aku_out': 'Acoustics report, facade evaluation',
-                     'm_aku_btn': 'Open Acoustics',
-                     'm_brann_t': 'FIRE - Safety Strategy',
-                     'm_brann_d': 'Evaluate architectural drawings against applicable building codes. Generates egress logic, fire '
-                                  'compartmentation, and fire strategy.',
-                     'm_brann_in': 'Architectural drawings + class',
-                     'm_brann_out': 'Fire strategy concept, deviations',
-                     'm_brann_btn': 'Open Fire Strategy',
-                     'm_ark_t': 'ARK - Feasibility Study',
-                     'm_ark_d': 'Site screening, volume analysis, and early-phase decision support before full engineering design.',
-                     'm_ark_in': 'Site data, zoning plans',
-                     'm_ark_out': 'Feasibility report, utilization metrics',
-                     'm_ark_btn': 'Open Feasibility',
-                     'm_rib_t': 'STRUC - Structural Concept',
-                     'm_rib_d': 'Conceptual structural checks, principle dimensioning, and integration with carbon footprint estimations.',
-                     'm_rib_in': 'Models, load parameters',
-                     'm_rib_out': 'Concept memo, grid layouts',
-                     'm_rib_btn': 'Open Structural',
-                     'm_tra_t': 'TRAFFIC - Mobility',
-                     'm_tra_d': 'Traffic generation, parking requirements, access logic, and soft-mobility planning for early project '
-                                'phases.',
-                     'm_tra_in': 'Site plans, local norms',
-                     'm_tra_out': 'Traffic memo, mobility plan',
-                     'm_tra_btn': 'Open Traffic & Mobility',
-                     'm_sha_t': 'SHA - Safety & Health Plan',
-                     'm_sha_d': 'Safety, health, and working environment. Generates routines for site logistics and high-risk operations.',
-                     'm_sha_in': 'Project data + Risk factors',
-                     'm_sha_out': 'Complete SHA plan',
-                     'm_sha_btn': 'Open SHA Module',
-                     'm_breeam_t': 'BREEAM Assistant',
-                     'm_breeam_d': 'Early-phase assessment of BREEAM potential, credit requirements, and material strategies.',
-                     'm_breeam_in': 'Building data + Ambitions',
-                     'm_breeam_out': 'BREEAM Pre-assessment',
-                     'm_breeam_btn': 'Open BREEAM Assistant',
-                     'm_mop_t': 'MOP - Environment Plan',
-                     'm_mop_d': 'Environmental follow-up plan. Assesses waste management, reuse, emissions, and nature preservation.',
-                     'm_mop_in': 'Project data + Eco goals',
-                     'm_mop_out': 'MOP Document',
-                     'm_mop_btn': 'Open MOP Module',
-                     'btn_dev': 'In development',
-                     'cta_title': 'Ready to reimagine how engineering gets done?',
-                     'cta_desc': 'Start with one project. See what AI can deliver in minutes – not days. '
-                                 'Builtly is built for those who want to lead, not follow.',
-                     'cta_btn1': 'Start in project setup',
-                     'cta_btn2': 'Go to review queue',
-                     'cta_btn_plans': 'View plans',
-                     'footer_copy': 'AI-assisted engineering. Human-verified. Compliance-grade.',
-                     'footer_meta': '© 2026 Builtly Engineering AS. All rights reserved.',
-                     'label_input': 'Input',
-                     'label_output': 'Output',
-                     'assistant_kicker': 'Builtly Assistant',
-                     'assistant_title': 'Ask across every engineering discipline.',
-                     'assistant_subtitle': 'A front-page question surface for GEO, structural, demolition, acoustics, fire, environment, '
-                                           'SHA, BREEAM, and real estate. The assistant follows the selected language and defaults to the '
-                                           'relevant national code framework.',
-                     'assistant_label_country': 'Country',
-                     'assistant_label_rules': 'Rule set',
-                     'assistant_label_status': 'Status',
-                     'assistant_disciplines_label': 'Disciplines',
-                     'assistant_question_label': 'Your question',
-                     'assistant_placeholder': 'Example: What should be checked early for a six-story multifamily project with one basement '
-                                              'level?',
-                     'assistant_btn': 'Ask Builtly',
-                     'assistant_clear': 'Clear conversation',
-                     'assistant_loading': 'Builtly is analysing your question...',
-                     'assistant_examples_label': 'Example prompts',
-                     'assistant_examples': ['What needs early review for a multifamily project with one basement level next to a busy '
-                                            'street?',
-                                            'Which BREEAM themes should be prioritized early for an office project?',
-                                            'What should a demolition and site safety strategy cover next to a school?'],
-                     'assistant_disclaimer': 'Guidance is AI-assisted and must be quality-assured by the responsible discipline lead '
-                                             'before design decisions or sign-off.',
-                     'assistant_history_label': 'Recent dialogue',
-                     'assistant_empty_title': 'Ready for live questions',
-                     'assistant_empty_body': 'Visitors can ask questions about building technology and property right on the front page, '
-                                             'and the answer can be steered by discipline, language and national regulations.',
-                     'assistant_latest_answer': 'Latest answer',
-                     'assistant_status_live': 'AI ready',
-                     'assistant_status_setup': 'UI ready',
-                     'assistant_error_prefix': 'Could not generate an answer',
-                     'assistant_note_prefix': 'Setup note',
-                     'assistant_scope_value': 'GEO · Structural · Demolition · Acoustics · Fire · Environment · Safety · BREEAM · Real '
-                                              'Estate · Traffic'},
- '🇫🇮 Suomi': {'rule_set': 'Suomi (rakentamislaki / Suomen rakentamismääräykset)',
-              'eyebrow': 'Vallankumoamme suunnitteluprosessin rakentamisessa ja kiinteistöalalla',
-              'title': "Insinöörityö kohtaa tekoälyn.",
-              'subtitle': 'Builtly antaa sinun luoda ammattiraportteja itse – minuuteissa, ei viikoissa. '
-                          'Lataa raakadata, ja tekoäly analysoi, laskee ja tuottaa raportin. '
-                          'Käytä sitä työasiakirjana, päätöksenteon tukena tai varhaisen vaiheen arviona. '
-                          'Tarvitsetko virallisen hyväksynnän rakennuslupaa varten? Yhdistämme pätevän asiantuntijan.',
-              'btn_setup': 'Avaa projektin aloitus',
-              'btn_qa': 'Avaa QA ja hyväksyntä',
-              'proofs': ['Luo itse', 'Sääntöpohjainen AI', 'PDF + DOCX', 'Asiantuntija tarvittaessa', 'Täysi jäljitettävyys'],
-              'why_kicker': 'Miksi Builtly?',
-              'stat1_v': 'Heti valmis',
-              'stat1_t': 'Luo raportteja itse',
-              'stat1_d': 'Ei tarvitse odottaa konsultteja. Lataa data, saa raportti – valmis.',
-              'stat2_v': 'Kolme tasoa',
-              'stat2_t': 'Auto → Tarkistettu → Sertifioitu',
-              'stat2_d': 'Käytä raporttia työversiona (Auto), ammattilaisen tarkistamana (Tarkistettu), tai virallisesti allekirjoitettuna lupaa varten (Sertifioitu).',
-              'stat3_v': 'Valmiit toimitukset',
-              'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-              'stat3_d': 'Täydelliset raporttipaketit liitteineen, laskelmineen ja jäljitettävyyksineen.',
-              'stat4_v': 'Täysi jäljitettävyys',
-              'stat4_t': 'Lokitus alusta loppuun',
-              'stat4_d': 'syötteet, versiot ja määräystarkistukset tallennetaan',
-              'sec_val_kicker': 'Alusta',
-              'sec_val_title': 'Yksi alusta. Kaikki alat. Yksi totuus.',
-              'sec_val_sub': 'Builtly ei ole irrallisten työkalujen kokoelma. Se on yksi turvallinen portaali projektin aloitukseen, '
-                             'tiedonkeruuseen, validointiin, AI-käsittelyyn, tarkastukseen, hyväksyntään ja lopulliseen toimitukseen.',
-              'val_1_t': 'Asiakasportaali',
-              'val_1_d': 'Projektin perustaminen, aineistojen lataus, puuttuvien tietojen seuranta, dokumenttien tuotanto ja audit trail '
-                         'samassa työnkulussa.',
-              'val_2_t': 'Sääntöpohjainen AI',
-              'val_2_d': 'AI toimii selkeiden määräysten, tarkistuslistojen ja standardimallien sisällä - ei vapaana arvailuna.',
-              'val_3_t': 'Asiantuntija kun tarvitset',
-              'val_3_d': 'Useimmat raportit ovat käyttövalmiita työasiakirjoina. Tarvitsetko virallisen sertifioinnin lupaa varten? Yhdistämme pätevän asiantuntijan.',
-              'val_4_t': 'Skaalautuva toimitus',
-              'val_4_d': 'Uudet suunnittelualat voidaan liittää samaan validointi-, dokumentointi- ja hyväksyntärunkoon.',
-              'sec_loop_kicker': 'Builtly Loop',
-              'sec_loop_title': 'Raakadatasta valmiiseen toimitukseen – neljässä vaiheessa.',
-              'sec_loop_sub': 'Jäsennelty työnkulku, joka poistaa manuaalisen kirjoitustyön, varmistaa säädöstenmukaisuuden '
-                             'ja tuottaa jäljitettäviä dokumenttipaketteja valmiina lupakäsittelyyn tai toteutukseen.',
-              'loop_1_t': 'Syöte',
-              'loop_1_d': 'Lataa PDF:t, IFC-mallit, Excel-tiedostot, piirustukset ja projektikohtaiset tiedot yhteen paikkaan.',
-              'loop_2_t': 'Tekoäly analysoi ja luo',
-              'loop_2_d': 'Alusta validoi, tarkistaa säädökset, tekee laskelmat ja kirjoittaa raportin – automaattisesti.',
-              'loop_3_t': 'Käytä suoraan tai lähetä QA:han',
-              'loop_3_d': 'Raportti on käyttövalmis heti. Projekteihin, jotka vaativat virallista hyväksyntää, se lähetetään asiantuntijalle sertifiointia varten.',
-              'loop_4_t': 'Valmis toimitus',
-              'loop_4_d': 'Valmis dokumenttipaketti vakioformaateissa, valmis lupakäsittelyyn tai toteutukseen.',
-              'mod_sec_kicker': 'Moduulit ja tiekartta',
-              'mod_sec_title': 'Erikoistuneet agentit yhdellä alustalla',
-              'mod_sec_sub': 'Jokaisella moduulilla on oma syöttölogiikka, alakohtaiset säännöt ja tuotemallit, mutta sama portaali-, '
-                             'validointi-, QA- ja hyväksyntärunko.',
-              'mod_sec1': 'Saatavilla nyt',
-              'mod_sec2': 'Tiekartta ja varhaisen vaiheen työkalut',
-              'mod_sec3': 'Kestävyys ja turvallisuus',
-              'mod_sec3_sub': 'Integroituja palveluja ympäristöseurantaan, turvallisuuteen ja sertifiointiin vastuullisten hankkeiden '
-                              'tueksi.',
-              'm_geo_t': 'GEO / YMPÄRISTÖ - Maaperä ja olosuhteet',
-              'm_geo_d': 'Analysoi laboratoriotiedot ja kaivusuunnitelmat. Luokittelee massat ja laatii ympäristötoimenpiteitä.',
-              'm_geo_in': 'XLSX / CSV / PDF + suunnitelmat',
-              'm_geo_out': 'Ympäristötoimenpidesuunnitelma, lokit',
-              'm_geo_btn': 'Avaa Geo & ympäristö',
-              'm_aku_t': 'AKUSTIIKKA - Melu ja ääni',
-              'm_aku_d': 'Lukee melukarttoja ja pohjakuvia. Tuottaa julkisivuvaatimukset, ikkunaerittelyt ja torjuntaratkaisut.',
-              'm_aku_in': 'Melukartta + pohja',
-              'm_aku_out': 'Akustiikkaraportti',
-              'm_aku_btn': 'Avaa akustiikka',
-              'm_brann_t': 'PALO - Turvallisuusstrategia',
-              'm_brann_d': 'Arvioi arkkitehtipiirustukset määräysten näkökulmasta. Tuottaa poistumislogiikan, palo-osastoinnin ja '
-                           'palostrategian.',
-              'm_brann_in': 'Piirustukset + luokka',
-              'm_brann_out': 'Palostrategia',
-              'm_brann_btn': 'Avaa palostrategia',
-              'm_ark_t': 'ARK - Toteutettavuustutkimus',
-              'm_ark_d': 'Tontin seulonta, volyymianalyysi ja varhaisen vaiheen päätöstuki ennen täyttä suunnittelua.',
-              'm_ark_in': 'Tonttidata, kaavat',
-              'm_ark_out': 'Toteutettavuusraportti',
-              'm_ark_btn': 'Avaa feasibility',
-              'm_rib_t': 'RAKENNE - Konseptitarkastelu',
-              'm_rib_d': 'Konseptitason rakennecheckit, mitoitusperiaatteet ja yhteys hiilijalanjälkilaskentaan.',
-              'm_rib_in': 'Mallit, kuormat',
-              'm_rib_out': 'Konseptimuistio',
-              'm_rib_btn': 'Avaa rakenne',
-              'm_tra_t': 'LIIKENNE - Liikkuminen',
-              'm_tra_d': 'Liikennetuotos, pysäköinti, saavutettavuus ja pehmeän liikenteen tarkastelut varhaisessa vaiheessa.',
-              'm_tra_in': 'Asemapiirros, paikalliset normit',
-              'm_tra_out': 'Liikennemuistio',
-              'm_tra_btn': 'Avaa liikenne',
-              'm_sha_t': 'SHA - Turvallisuus ja terveys',
-              'm_sha_d': 'Turvallisuus, terveys ja työympäristö. Tuottaa käytännöt työmaajärjestelyille ja riskialttiille töille.',
-              'm_sha_in': 'Projektidata + riskit',
-              'm_sha_out': 'Täydellinen SHA-suunnitelma',
-              'm_sha_btn': 'Avaa SHA',
-              'm_breeam_t': 'BREEAM-avustaja',
-              'm_breeam_d': 'Varhaisen vaiheen arvio BREEAM-potentiaalista, krediiteistä ja materiaalistrategioista.',
-              'm_breeam_in': 'Rakennusdata + tavoitteet',
-              'm_breeam_out': 'BREEAM-esiarvio',
-              'm_breeam_btn': 'Avaa BREEAM',
-              'm_mop_t': 'MOP - Ympäristösuunnitelma',
-              'm_mop_d': 'Ympäristön seuranta- ja toteutussuunnitelma jätteille, uudelleenkäytölle, päästöille ja luonnolle.',
-              'm_mop_in': 'Projektidata + ympäristötavoitteet',
-              'm_mop_out': 'MOP-dokumentti',
-              'm_mop_btn': 'Avaa MOP',
-              'mod_sec6': 'Pankki & Rahoitus',
-              'mod_sec6_sub': 'Moduulit rakennuslainan valvontaan, luottoperusteisiin ja pankkiraportointiin. Automatisoitu tiedonkeruu ja jäsennelty päätöksentuki pankeille ja luotonantajille.',
-              'badge_byggelanskontroll': 'Rakennuslaina',
-              'badge_kredittgrunnlag': 'Luotto',
-              'm_byggelanskontroll_t': 'RAKENNUSLAINAN VALVONTA – Maksatuksen valvonta & todentaminen',
-              'm_byggelanskontroll_d': 'Tarkistaa nostopyynnöt rakennusbudjetin, aikataulun ja sopimusperustan suhteen. Tuottaa pankin valvontaraportin poikkeamineen ja hyväksymisperustan.',
-              'm_byggelanskontroll_in': 'Nostopyyntö + budjetti + aikataulu',
-              'm_byggelanskontroll_out': 'Valvontaraportti, poikkeamaloki, hyväksymisperusta',
-              'm_byggelanskontroll_btn': 'Avaa Lainavalvonta',
-              'm_kredittgrunnlag_t': 'LUOTTOPERUSTE – Päätöstuki luottovaliokunnalle',
-              'm_kredittgrunnlag_d': 'Kokoaa tekniset, sääntelyyn liittyvät ja taloudelliset tiedot jäsennellyksi luottoperusteeksi tontti-, rakennus- ja vuokralainoja varten.',
-              'm_kredittgrunnlag_in': 'Projektidata + kiinteistötiedot + rahoitusrakenne',
-              'm_kredittgrunnlag_out': 'Luottomuistio, riskimatriisi, päätösperuste',
-              'm_kredittgrunnlag_btn': 'Avaa Luottoperuste',
-              'btn_dev': 'Kehityksessä',
-              'cta_title': 'Aloita yhdellä projektilla. Lataa raaka-aineisto.',
-              'cta_desc': 'Builtly yhdistää asiakkaan itsepalvelun, deterministiset tarkistukset, AI-luonnokset ja ammatillisen '
-                          'hyväksynnän yhteen portaaliin.',
-              'cta_btn1': 'Aloita projektin aloituksessa',
-              'cta_btn2': 'Siirry tarkastusjonoon',
-              'cta_btn_plans': 'Katso suunnitelmat',
-              'footer_copy': 'AI-avusteinen suunnittelu. Ihmisen varmistama. Compliance-grade.',
-              'footer_meta': '© 2026 Builtly Engineering AS. Kaikki oikeudet pidätetään.',
-              'label_input': 'Syöte',
-              'label_output': 'Tuloste',
-              'assistant_kicker': 'Builtly-assistentti',
-              'assistant_title': 'Kysy kaikista rakennustekniikan osa-alueista.',
-              'assistant_subtitle': 'Integroitu kysymysnäkymä etusivulla GEO:lle, rakenteille, purulle, akustiikalle, palolle, '
-                                    'ympäristölle, SHA:lle, BREEAMille ja kiinteistöille. Assistentti seuraa valittua kieltä ja soveltaa '
-                                    'oikeaa kansallista sääntöpohjaa.',
-              'assistant_label_country': 'Maa',
-              'assistant_label_rules': 'Sääntöpohja',
-              'assistant_label_status': 'Tila',
-              'assistant_disciplines_label': 'Aihealueet',
-              'assistant_question_label': 'Kysymyksesi',
-              'assistant_placeholder': 'Esimerkki: Mitä pitää selvittää varhaisessa vaiheessa kuusikerroksisessa asuinhankkeessa, jossa on '
-                                       'kellari?',
-              'assistant_btn': 'Kysy Builtlyltä',
-              'assistant_clear': 'Tyhjennä keskustelu',
-              'assistant_loading': 'Builtly analysoi kysymystäsi...',
-              'assistant_examples_label': 'Esimerkkikysymyksiä',
-              'assistant_examples': ['Mitä pitää selvittää varhain asuinkerrostalossa, jossa on pysäköintikellari vilkkaan tien vieressä?',
-                                     'Mitkä BREEAM-teemat kannattaa priorisoida toimistohankkeen alkuvaiheessa?',
-                                     'Mitä purku- ja SHA-strategian pitäisi kattaa koulun vieressä?'],
-              'assistant_disclaimer': 'Vastaukset ovat AI-avusteisia ja vastuullisen asiantuntijan on tarkistettava ne ennen '
-                                      'suunnittelupäätöksiä tai hyväksyntää.',
-              'assistant_history_label': 'Viimeaikainen dialogi',
-              'assistant_empty_title': 'Valmis live-kysymyksille',
-              'assistant_empty_body': 'Vierailijat voivat kysyä rakennustekniikasta ja kiinteistökehityksestä suoraan etusivulla. '
-                                      'Vastaukset ohjautuvat alan, kielen ja kansallisten määräysten mukaan.',
-              'assistant_latest_answer': 'Viimeisin vastaus',
-              'assistant_status_live': 'AI valmis',
-              'assistant_status_setup': 'Käyttöliittymä valmis',
-              'assistant_error_prefix': 'Vastauksen luonti epäonnistui',
-              'assistant_note_prefix': 'Huomio',
-              'assistant_scope_value': 'GEO · Rakenteet · Purku · Akustiikka · Palo · Ympäristö · SHA · BREEAM · Kiinteistö · Liikenne'},
- '🇩🇪 Deutsch': {'rule_set': 'Deutschland (Landesbauordnungen / MBO / MVV TB)',
-                'eyebrow': 'Wir revolutionieren das Bauwesen und die Immobilienbranche',
-                'title': "Das Ingenieurwesen trifft KI.",
-                'subtitle': 'Mit Builtly erstellen Sie Fachberichte selbst – in Minuten, nicht Wochen. '
-                             'Laden Sie Rohdaten hoch, und KI analysiert, berechnet und erstellt den Bericht. '
-                             'Nutzen Sie ihn als Arbeitsdokument, Entscheidungsgrundlage oder Frühphasenbewertung. '
-                             'Brauchen Sie eine formelle Genehmigung für den Bauantrag? Wir verbinden Sie mit qualifizierten Fachleuten.',
-                'btn_setup': 'Projekt-Setup öffnen',
-                'btn_qa': 'QA & Freigabe öffnen',
-                'proofs': ['Selbst erstellen', 'Regelbasierte KI', 'PDF + DOCX', 'Fachperson bei Bedarf', 'Volle Nachvollziehbarkeit'],
-                'why_kicker': 'Warum Builtly?',
-                'stat1_v': 'Sofort verfügbar',
-                'stat1_t': 'Berichte selbst erstellen',
-                'stat1_d': 'Kein Warten auf Berater. Daten hochladen, Bericht erhalten – fertig.',
-                'stat2_v': 'Drei Stufen',
-                'stat2_t': 'Auto → Geprüft → Zertifiziert',
-                'stat2_d': 'Nutzen Sie den Bericht als Arbeitsentwurf (Auto), mit Fachprüfung (Geprüft), oder mit Bauvorlageberechtigung (Zertifiziert).',
-                'stat3_v': 'Komplette Lieferungen',
-                'stat3_t': 'PDF, DOCX, XLSX, IFC, DWG',
-                'stat3_d': 'Vollständige Berichtspakete mit Anhängen, Berechnungen und Prüfpfad.',
-                'stat4_v': 'Volle Nachvollziehbarkeit',
-                'stat4_t': 'End-to-end Logging',
-                'stat4_d': 'Eingaben, Versionen und Regelprüfungen werden protokolliert',
-                'sec_val_kicker': 'Die Plattform',
-                'sec_val_title': 'Eine Plattform. Alle Disziplinen. Eine Wahrheit.',
-                'sec_val_sub': 'Builtly ist kein Werkzeug – es ist die Infrastruktur, die alle Akteure der Wertschöpfungskette verbindet. '
-                               'Bauherr, Ingenieur, Unternehmer, Bank und Investor auf einer nachvollziehbaren Grundlage.',
-                'val_1_t': 'Alle Disziplinen. Ein Workflow.',
-                'val_1_d': 'GEO, Brand, Tragwerk, Akustik, SHA, TDD, Klimarisiko und mehr – aus denselben Projektdaten, in einem Portal.',
-                'val_2_t': 'Regelbasierte KI',
-                'val_2_d': 'Die KI arbeitet innerhalb klarer regulatorischer Leitplanken, Checklisten und Standardvorlagen - nicht als '
-                           'freies Rätselraten.',
-                'val_3_t': 'Fachperson wenn Sie sie brauchen',
-                'val_3_d': 'Die meisten Berichte sind sofort als Arbeitsdokument nutzbar. Brauchen Sie eine formelle Zertifizierung für den Bauantrag? Wir verbinden qualifizierte Fachleute.',
-                'val_4_t': 'Skaliert ohne proportionales Wachstum',
-                'val_4_d': 'Neue Disziplinen, neue Märkte und neue Partner werden an dieselbe Infrastruktur angebunden.',
-                'sec_loop_kicker': 'Builtly Loop',
-                'sec_loop_title': 'Von Rohdaten zur fertigen Lieferung – in vier Schritten.',
-                'sec_loop_sub': 'Ein strukturierter Workflow, der manuelle Schreibarbeit eliminiert, Regelkonformität sicherstellt '
-                               'und nachvollziehbare Dokumentationspakete liefert, bereit für Genehmigung oder Ausführung.',
-                'loop_1_t': 'Input',
-                'loop_1_d': 'PDFs, IFC-Modelle, Excel-Dateien, Zeichnungen und projektspezifische Daten an einem Ort hochladen.',
-                'loop_2_t': 'KI analysiert und generiert',
-                'loop_2_d': 'Die Plattform validiert, prüft Vorschriften, führt Berechnungen aus und erstellt den Bericht – automatisch.',
-                'loop_3_t': 'Direkt verwenden oder zur QA senden',
-                'loop_3_d': 'Ihr Bericht ist sofort einsatzbereit. Für Projekte mit formeller Genehmigungspflicht wird er an Fachleute zur Zertifizierung weitergeleitet.',
-                'loop_4_t': 'Fertige Lieferung',
-                'loop_4_d': 'Vollständiges Dokumentationspaket in Standardformaten – bereit für die Baugenehmigung oder Ausführung.',
-                'mod_sec_kicker': 'Module und Roadmap',
-                'mod_sec_title': 'Spezialisierte Agenten auf einer Plattform',
-                'mod_sec_sub': 'Jedes Modul hat eigene Ingestionslogik, fachliche Regelwerke und Ausgabevorlagen, teilt sich aber Portal, '
-                               'Validierung, QA und Freigabe.',
-                'mod_sec1': 'Jetzt verfügbar',
-                'mod_sec2': 'Roadmap und Frühphase',
-                'mod_sec3': 'Nachhaltigkeit & Sicherheit',
-                'mod_sec3_sub': 'Integrierte Leistungen für Umweltbegleitung, Sicherheit und Zertifizierung für verantwortungsvolle '
-                                'Projekte.',
-                'm_geo_t': 'GEO / UMWELT - Baugrund und Rahmenbedingungen',
-                'm_geo_d': 'Analysiert Laborwerte und Aushubpläne, klassifiziert Massen und erstellt Umweltmaßnahmen.',
-                'm_geo_in': 'XLSX / CSV / PDF + Pläne',
-                'm_geo_out': 'Umweltmaßnahmenplan, Logs',
-                'm_geo_btn': 'Geo & Umwelt öffnen',
-                'm_aku_t': 'AKUSTIK - Lärm & Schall',
-                'm_aku_d': 'Liest Lärmkarten und Grundrisse ein. Erzeugt Fassadenanforderungen, Fensterspezifikationen und '
-                           'Minderungsstrategien.',
-                'm_aku_in': 'Lärmkarte + Grundriss',
-                'm_aku_out': 'Akustikbericht',
-                'm_aku_btn': 'Akustik öffnen',
-                'm_brann_t': 'BRAND - Sicherheitskonzept',
-                'm_brann_d': 'Prüft Architekturunterlagen gegen baurechtliche Anforderungen und erzeugt Fluchtweglogik, Brandabschnitte '
-                             'und Brandschutzstrategie.',
-                'm_brann_in': 'Pläne + Klasse',
-                'm_brann_out': 'Brandschutzkonzept',
-                'm_brann_btn': 'Brandschutz öffnen',
-                'm_ark_t': 'ARK - Machbarkeitsstudie',
-                'm_ark_d': 'Grundstücksscreening, Volumenanalyse und Entscheidungsgrundlage für frühe Projektphasen.',
-                'm_ark_in': 'Standortdaten, Planungsrecht',
-                'm_ark_out': 'Machbarkeitsbericht',
-                'm_ark_btn': 'Machbarkeit öffnen',
-                'm_rib_t': 'TRAGWERK - Strukturkonzept',
-                'm_rib_d': 'Konzeptionelle Tragwerkschecks, erste Dimensionierung und Anbindung an CO2-Betrachtungen.',
-                'm_rib_in': 'Modelle, Lastannahmen',
-                'm_rib_out': 'Konzeptmemo',
-                'm_rib_btn': 'Tragwerk öffnen',
-                'm_tra_t': 'VERKEHR - Mobilität',
-                'm_tra_d': 'Verkehrserzeugung, Stellplätze, Erschließungslogik und Mobilitätskonzepte in frühen Phasen.',
-                'm_tra_in': 'Lageplan, lokale Normen',
-                'm_tra_out': 'Verkehrsmemo',
-                'm_tra_btn': 'Verkehr öffnen',
-                'm_sha_t': 'SHA - Sicherheit & Gesundheit',
-                'm_sha_d': 'Sicherheit, Gesundheit und Arbeitsumfeld. Erzeugt Routinen für Baustellenlogistik und risikoreiche Arbeiten.',
-                'm_sha_in': 'Projektdaten + Risiken',
-                'm_sha_out': 'Vollständiger SHA-Plan',
-                'm_sha_btn': 'SHA öffnen',
-                'm_breeam_t': 'BREEAM-Assistent',
-                'm_breeam_d': 'Frühe Bewertung von BREEAM-Potenzial, Credits und Materialstrategien.',
-                'm_breeam_in': 'Gebäudedaten + Ambition',
-                'm_breeam_out': 'BREEAM Pre-Assessment',
-                'm_breeam_btn': 'BREEAM öffnen',
-                'm_mop_t': 'MOP - Umweltplan',
-                'm_mop_d': 'Umweltbegleitplan für Abfall, Wiederverwendung, Emissionen und Naturbelange.',
-                'm_mop_in': 'Projektdaten + Umweltziele',
-                'm_mop_out': 'MOP-Dokument',
-                'm_mop_btn': 'MOP öffnen',
-                'mod_sec6': 'Bank & Finanzierung',
-                'mod_sec6_sub': 'Module für Baufinanzierungskontrolle, Kreditgrundlagen und Bankberichterstattung. Automatisierte Datenerfassung und strukturierte Entscheidungsunterstützung für Banken und Kreditgeber.',
-                'badge_byggelanskontroll': 'Baufinanzierung',
-                'badge_kredittgrunnlag': 'Kredit',
-                'm_byggelanskontroll_t': 'BAUFINANZIERUNGSKONTROLLE – Auszahlungsprüfung & Verifizierung',
-                'm_byggelanskontroll_d': 'Prüft Auszahlungsanforderungen gegen Baubudget, Terminplan und Vertragsgrundlage. Erstellt den Kontrollbericht der Bank mit Abweichungen und Genehmigungsgrundlage.',
-                'm_byggelanskontroll_in': 'Auszahlungsanforderung + Budget + Terminplan',
-                'm_byggelanskontroll_out': 'Kontrollbericht, Abweichungslog, Genehmigungsgrundlage',
-                'm_byggelanskontroll_btn': 'Finanzierungskontrolle öffnen',
-                'm_kredittgrunnlag_t': 'KREDITGRUNDLAGE – Entscheidungsunterstützung für Kreditkomitee',
-                'm_kredittgrunnlag_d': 'Konsolidiert technische, regulatorische und finanzielle Daten zu einer strukturierten Kreditgrundlage für Grundstücks-, Bau- und Mietkredite.',
-                'm_kredittgrunnlag_in': 'Projektdaten + Immobilieninfo + Finanzstruktur',
-                'm_kredittgrunnlag_out': 'Kreditmemorendum, Risikomat, Entscheidungsgrundlage',
-                'm_kredittgrunnlag_btn': 'Kreditgrundlage öffnen',
-                'btn_dev': 'In Entwicklung',
-                'cta_title': 'Mit einem Projekt starten. Rohdaten hochladen.',
-                'cta_desc': 'Builtly verbindet Self-Service für Kunden, deterministische Prüfungen, KI-Entwürfe und professionelle '
-                            'Freigabe in einem Portal.',
-                'cta_btn1': 'Im Projekt-Setup starten',
-                'cta_btn2': 'Zur Review-Warteschlange',
-                'cta_btn_plans': 'Kontopläne ansehen',
-                'footer_copy': 'KI-gestützte Planung. Menschlich verifiziert. Compliance-grade.',
-                'footer_meta': '© 2026 Builtly Engineering AS. Alle Rechte vorbehalten.',
-                'label_input': 'Input',
-                'label_output': 'Output',
-                'assistant_kicker': 'Builtly Assistent',
-                'assistant_title': 'Fragen über alle Baufächer hinweg stellen.',
-                'assistant_subtitle': 'Eine integrierte Fragefläche auf der Startseite für GEO, Tragwerk, Rückbau, Akustik, Brandschutz, '
-                                      'Umwelt, SHA, BREEAM und Immobilie. Der Assistent folgt der gewählten Sprache und orientiert sich am '
-                                      'passenden nationalen Regelwerk.',
-                'assistant_label_country': 'Land',
-                'assistant_label_rules': 'Regelwerk',
-                'assistant_label_status': 'Status',
-                'assistant_disciplines_label': 'Fachbereiche',
-                'assistant_question_label': 'Ihre Frage',
-                'assistant_placeholder': 'Beispiel: Was muss in der Frühphase für ein sechsgeschossiges Wohnprojekt mit Untergeschoss '
-                                         'geklärt werden?',
-                'assistant_btn': 'Builtly fragen',
-                'assistant_clear': 'Dialog leeren',
-                'assistant_loading': 'Builtly analysiert Ihre Frage...',
-                'assistant_examples_label': 'Beispielfragen',
-                'assistant_examples': ['Was sollten wir früh für einen Wohnblock mit Tiefgarage an einer stark befahrenen Straße klären?',
-                                       'Welche BREEAM-Themen sollten bei einem Büroprojekt früh priorisiert werden?',
-                                       'Was sollte eine Rückbau- und SHA-Strategie neben einer Schule abdecken?'],
-                'assistant_disclaimer': 'Die Antworten sind KI-gestützt und müssen vor Planungsentscheidungen oder Freigaben durch '
-                                        'verantwortliche Fachpersonen geprüft werden.',
-                'assistant_history_label': 'Letzte Dialoge',
-                'assistant_empty_title': 'Bereit für Live-Fragen',
-                'assistant_empty_body': 'Besucher können direkt auf der Startseite Fragen zu Gebäudetechnik und Immobilien stellen. Die '
-                                        'Antworten folgen Fachgebiet, Sprache und nationalem Regelwerk.',
-                'assistant_latest_answer': 'Letzte Antwort',
-                'assistant_status_live': 'KI bereit',
-                'assistant_status_setup': 'UI bereit',
-                'assistant_error_prefix': 'Antwort konnte nicht erzeugt werden',
-                'assistant_note_prefix': 'Hinweis',
-                'assistant_scope_value': 'GEO · Tragwerk · Rückbau · Akustik · Brandschutz · Umwelt · SHA · BREEAM · Immobilie · Verkehr'}}
-
-LANGUAGE_PROFILES = {'🇬🇧 English (UK)': {'country': 'United Kingdom',
-                     'rule_set': 'Building Regulations / Approved Documents (England default)',
-                     'language_name': 'British English',
-                     'variation_note': 'Default to England and flag where Scotland, Wales, Northern Ireland or local authority practice '
-                                       'may differ.',
-                     'project_land_label': 'United Kingdom (Building Regulations / Approved Documents)',
-                     'jurisdiction_short': 'England default; UK variations flagged'},
- '🇺🇸 English (US)': {'country': 'United States',
-                     'rule_set': 'IBC / IRC / state and local amendments',
-                     'language_name': 'American English',
-                     'variation_note': 'State, county and city amendments can materially change requirements, so the answer must flag '
-                                       'local code adoption where relevant.',
-                     'project_land_label': 'United States (IBC / IRC / local amendments)',
-                     'jurisdiction_short': 'Model codes + local adoption'},
- '🇳🇴 Norsk': {'country': 'Norge',
-              'rule_set': 'TEK17 / plan- og bygningsloven',
-              'language_name': 'Norsk bokmål',
-              'variation_note': 'Bruk TEK17 som hovedramme og flagg kommunale krav, veiledning og prosesskrav der det er relevant.',
-              'project_land_label': 'Norge (TEK17 / plan- og bygningsloven)',
-              'jurisdiction_short': 'TEK17 som standard'},
- '🇸🇪 Svenska': {'country': 'Sverige',
-                'rule_set': 'Boverkets regler / övergång 2025–2026',
-                'language_name': 'Svenska',
-                'variation_note': 'Förklara när svaret påverkas av övergången mellan äldre BBR-regler och de nya regler som trädde i kraft '
-                                  '1 juli 2025.',
-                'project_land_label': 'Sverige (Boverkets regler / övergång 2025–2026)',
-                'jurisdiction_short': 'BBR + nya regler i övergång'},
- '🇩🇰 Dansk': {'country': 'Danmark',
-              'rule_set': 'BR18 / nationale annekser',
-              'language_name': 'Dansk',
-              'variation_note': 'Brug BR18 som grundlag og flag konstruktionsklasse, brandklasse og nationale annekser når det er '
-                                'relevant.',
-              'project_land_label': 'Danmark (BR18 / nationale annekser)',
-              'jurisdiction_short': 'BR18 som standard'},
- '🇫🇮 Suomi': {'country': 'Suomi',
-              'rule_set': 'Construction Act / National Building Code of Finland',
-              'language_name': 'Finnish',
-              'variation_note': "Use Finland's Construction Act and the National Building Code as the baseline, and call out "
-                                'municipality-specific permit practice when relevant.',
-              'project_land_label': 'Suomi (rakentamislaki / Suomen rakentamismääräykset)',
-              'jurisdiction_short': 'Construction Act + code'},
- '🇩🇪 Deutsch': {'country': 'Deutschland',
-                'rule_set': 'Landesbauordnungen / MBO / MVV TB',
-                'language_name': 'Deutsch',
-                'variation_note': 'Use MBO and MVV TB only as a common baseline and explicitly flag that the applicable Landesbauordnung '
-                                  'and local authority practice must be confirmed.',
-                'project_land_label': 'Deutschland (Landesbauordnungen / MBO / MVV TB)',
-                'jurisdiction_short': 'LBO + MBO baseline'}}
-
-MODULE_EXPANSION_TEXTS = {
-    "🇬🇧 English (UK)": {
-        "mod_sec_title": "Specialized agents, commercial engines and scale layers in one platform",
-        "mod_sec_sub": "Builtly should combine vertical specialist modules with horizontal engines for tender, quantity, yield, climate risk and partner distribution. That is how the product scales without scaling like a consultancy.",
-        "mod_sec4": "Commercial & delivery intelligence",
-        "mod_sec4_sub": "Horizontal modules that reduce tender risk, quantify scope and improve project yield.",
-        "mod_sec5": "Climate, portfolio & partner scale",
-        "mod_sec5_sub": "Portfolio screening, climate risk and white-label/API distribution for enterprise growth.",
-        "m_tender_t": "TENDER CONTROL - Bid Package QA",
-        "m_tender_d": "Compare tender documents, drawings and bid inputs. Generates deviation matrix, missing-item log, ambiguity log and RFI suggestions.",
-        "m_tender_in": "Tender docs + drawings + IFC/PDF",
-        "m_tender_out": "Deviation matrix, scope log, RFIs",
-        "m_tender_btn": "Open Tender Control",
-        "m_quantity_t": "QUANTITY & SCOPE - Revision Intelligence",
-        "m_quantity_d": "Track quantities, areas, revision deltas and traceability between model, drawing and description.",
-        "m_quantity_in": "IFC / PDF / BOQ / room data",
-        "m_quantity_out": "Quantity set, area log, delta report",
-        "m_quantity_btn": "Open Quantity & Scope",
-        "m_yield_t": "AREA & YIELD - Development Optimizer",
-        "m_yield_d": "Analyze gross/net, saleable and lettable area, core ratio, technical rooms and scenario-based yield improvements.",
-        "m_yield_in": "Plan basis + area program",
-        "m_yield_out": "Yield note, scenarios, value uplift",
-        "m_yield_btn": "Open Yield Optimizer",
-        "m_climate_t": "CLIMATE RISK - Asset & Portfolio Screening",
-        "m_climate_d": "Scores flood, landslide, sea-level and heat stress risk and maps outputs to Taxonomy, SFDR and banking workflows.",
-        "m_climate_in": "Address / coordinates + exposure",
-        "m_climate_out": "Climate risk score, taxonomy mapping",
-        "m_climate_btn": "Open Climate Risk",
-        "m_partner_t": "WHITE-LABEL API - Partner Program",
-        "m_partner_d": "Tenant architecture, API access, webhooks and branded report delivery so partners can run Builtly inside their own systems.",
-        "m_partner_in": "Partner config + API setup",
-        "m_partner_out": "Tenant blueprint, API package",
-        "m_partner_btn": "Open Partner API"
-    },
-    "🇳🇴 Norsk": {
-        "mod_sec_title": "Spesialiserte moduler, kommersielle motorer og skaleringslag i én plattform",
-        "mod_sec_sub": "Builtly bør kombinere vertikale fagmoduler med horisontale motorer for anbud, mengder, yield, klimarisiko og partnerdistribusjon. Det er slik plattformen kan skalere uten å vokse som et konsulentselskap.",
-        "mod_sec4": "Kommersiell & leveranseintelligens",
-        "mod_sec4_sub": "Horisontale moduler som reduserer anbudsrisiko, kvantifiserer scope og forbedrer areal/yield.",
-        "mod_sec5": "Klima, portefølje & partnerskala",
-        "mod_sec5_sub": "Porteføljescreening, klimarisiko og white-label/API-distribusjon for enterprise-vekst.",
-        "m_tender_t": "ANBUDSKONTROLL - Tilbudsgrunnlag & QA",
-        "m_tender_d": "Sammenligner konkurransegrunnlag, tegninger og tilbudsinput. Genererer avviksmatrise, mangelliste, uklarhetslogg og forslag til spørsmål.",
-        "m_tender_in": "Anbudsgrunnlag + tegninger + IFC/PDF",
-        "m_tender_out": "Avviksmatrise, scope-logg, RFIs",
-        "m_tender_btn": "Åpne Tender Control",
-        "m_quantity_t": "MENGDE & SCOPE - Revisjon og sporbarhet",
-        "m_quantity_d": "Fanger mengder, arealer, revisjonsendringer og sporbarhet mellom modell, tegning og beskrivelse.",
-        "m_quantity_in": "IFC / PDF / BOQ / romdata",
-        "m_quantity_out": "Mengdeliste, areallogg, deltarapport",
-        "m_quantity_btn": "Åpne Mengde & Scope",
-        "m_yield_t": "AREAL & YIELD - Utvikleroptimalisering",
-        "m_yield_d": "Analyserer brutto/netto, salgbart og utleibart areal, kjerneandel, tekniske rom og scenarioer for mer verdiskaping.",
-        "m_yield_in": "Plangrunnlag + arealprogram",
-        "m_yield_out": "Yield-notat, scenarioer, verdiøkning",
-        "m_yield_btn": "Åpne Yield Optimizer",
-        "m_climate_t": "KLIMARISIKO - Eiendom & portefølje",
-        "m_climate_d": "Skårer flom, skred, havnivå og varmestress og mapper output mot Taxonomy, SFDR og bankrapportering.",
-        "m_climate_in": "Adresse / koordinater + eksponering",
-        "m_climate_out": "Klimarisikoscore, taxonomy-mapping",
-        "m_climate_btn": "Åpne Klimarisiko",
-        "m_partner_t": "WHITE-LABEL API - Partnerprogram",
-        "m_partner_d": "Tenant-arkitektur, API-tilgang, webhooks og brandede rapporter slik at partnere kan kjøre Builtly i egne systemer.",
-        "m_partner_in": "Partneroppsett + API-konfig",
-        "m_partner_out": "Tenant-blueprint, API-pakke",
-        "m_partner_btn": "Åpne Partner API"
-    }
-}
-
-for _lang_key, _payload in MODULE_EXPANSION_TEXTS.items():
-    TEXTS.setdefault(_lang_key, {}).update(_payload)
-
-DISCIPLINE_CATALOG = [{'code': 'geo',
-  'labels': {'🇬🇧 English (UK)': 'GEO / Ground',
-             '🇺🇸 English (US)': 'GEO / Ground',
-             '🇳🇴 Norsk': 'GEO / grunnforhold',
-             '🇸🇪 Svenska': 'GEO / mark',
-             '🇩🇰 Dansk': 'GEO / jordbund',
-             '🇫🇮 Suomi': 'GEO / maaperä',
-             '🇩🇪 Deutsch': 'GEO / Baugrund'}},
- {'code': 'rib',
-  'labels': {'🇬🇧 English (UK)': 'Structural / RIB',
-             '🇺🇸 English (US)': 'Structural / RIB',
-             '🇳🇴 Norsk': 'RIB / konstruksjon',
-             '🇸🇪 Svenska': 'Konstruktion / RIB',
-             '🇩🇰 Dansk': 'Konstruktion / RIB',
-             '🇫🇮 Suomi': 'Rakenteet / RIB',
-             '🇩🇪 Deutsch': 'Tragwerk / RIB'}},
- {'code': 'demolition',
-  'labels': {'🇬🇧 English (UK)': 'Demolition / Reuse',
-             '🇺🇸 English (US)': 'Demolition / Reuse',
-             '🇳🇴 Norsk': 'Rive / ombruk',
-             '🇸🇪 Svenska': 'Rivning / återbruk',
-             '🇩🇰 Dansk': 'Nedrivning / genbrug',
-             '🇫🇮 Suomi': 'Purku / uudelleenkäyttö',
-             '🇩🇪 Deutsch': 'Rückbau / Wiederverwendung'}},
- {'code': 'acoustics',
-  'labels': {'🇬🇧 English (UK)': 'Acoustics / RIAku',
-             '🇺🇸 English (US)': 'Acoustics / RIAku',
-             '🇳🇴 Norsk': 'RIAku / akustikk',
-             '🇸🇪 Svenska': 'Akustik / RIAku',
-             '🇩🇰 Dansk': 'Akustik / RIAku',
-             '🇫🇮 Suomi': 'Akustiikka / RIAku',
-             '🇩🇪 Deutsch': 'Akustik / RIAku'}},
- {'code': 'fire',
-  'labels': {'🇬🇧 English (UK)': 'Fire / RIBr',
-             '🇺🇸 English (US)': 'Fire / RIBr',
-             '🇳🇴 Norsk': 'RIBr / brann',
-             '🇸🇪 Svenska': 'Brand / RIBr',
-             '🇩🇰 Dansk': 'Brand / RIBr',
-             '🇫🇮 Suomi': 'Palo / RIBr',
-             '🇩🇪 Deutsch': 'Brandschutz / RIBr'}},
- {'code': 'environment',
-  'labels': {'🇬🇧 English (UK)': 'Environment',
-             '🇺🇸 English (US)': 'Environment',
-             '🇳🇴 Norsk': 'Miljø',
-             '🇸🇪 Svenska': 'Miljö',
-             '🇩🇰 Dansk': 'Miljø',
-             '🇫🇮 Suomi': 'Ympäristö',
-             '🇩🇪 Deutsch': 'Umwelt'}},
- {'code': 'sha',
-  'labels': {'🇬🇧 English (UK)': 'SHA / H&S',
-             '🇺🇸 English (US)': 'Site Safety / H&S',
-             '🇳🇴 Norsk': 'SHA',
-             '🇸🇪 Svenska': 'SHA',
-             '🇩🇰 Dansk': 'SHA',
-             '🇫🇮 Suomi': 'SHA',
-             '🇩🇪 Deutsch': 'SHA'}},
- {'code': 'breeam',
-  'labels': {'🇬🇧 English (UK)': 'BREEAM',
-             '🇺🇸 English (US)': 'BREEAM',
-             '🇳🇴 Norsk': 'BREEAM',
-             '🇸🇪 Svenska': 'BREEAM',
-             '🇩🇰 Dansk': 'BREEAM',
-             '🇫🇮 Suomi': 'BREEAM',
-             '🇩🇪 Deutsch': 'BREEAM'}},
- {'code': 'property',
-  'labels': {'🇬🇧 English (UK)': 'Property / Feasibility',
-             '🇺🇸 English (US)': 'Real Estate / Feasibility',
-             '🇳🇴 Norsk': 'Eiendom / mulighetsstudie',
-             '🇸🇪 Svenska': 'Fastighet / förstudie',
-             '🇩🇰 Dansk': 'Ejendom / forstudie',
-             '🇫🇮 Suomi': 'Kiinteistö / feasibility',
-             '🇩🇪 Deutsch': 'Immobilie / Machbarkeit'}},
- {'code': 'traffic',
-  'labels': {'🇬🇧 English (UK)': 'Traffic / Mobility',
-             '🇺🇸 English (US)': 'Traffic / Mobility',
-             '🇳🇴 Norsk': 'Trafikk / mobilitet',
-             '🇸🇪 Svenska': 'Trafik / mobilitet',
-             '🇩🇰 Dansk': 'Trafik / mobilitet',
-             '🇫🇮 Suomi': 'Liikenne / liikkuvuus',
-             '🇩🇪 Deutsch': 'Verkehr / Mobilität'}}]
-
-DEFAULT_DISCIPLINES = ['geo', 'rib', 'fire', 'sha', 'breeam']
-DISCIPLINE_LABELS = {item["code"]: item["labels"] for item in DISCIPLINE_CATALOG}
-
-DISCIPLINE_CATALOG.extend([
-    {
-        "code": "tender",
-        "labels": {
-            "🇬🇧 English (UK)": "Tender control",
-            "🇺🇸 English (US)": "Tender control",
-            "🇳🇴 Norsk": "Anbudskontroll",
-            "🇸🇪 Svenska": "Anbudskontroll",
-            "🇩🇰 Dansk": "Anbudskontrol",
-            "🇫🇮 Suomi": "Tarjouskontrolli",
-            "🇩🇪 Deutsch": "Ausschreibungskontrolle",
-        },
-    },
-    {
-        "code": "quantity",
-        "labels": {
-            "🇬🇧 English (UK)": "Quantity & scope",
-            "🇺🇸 English (US)": "Quantity & scope",
-            "🇳🇴 Norsk": "Mengde & scope",
-            "🇸🇪 Svenska": "Mängd & scope",
-            "🇩🇰 Dansk": "Mængde & scope",
-            "🇫🇮 Suomi": "Määrä & scope",
-            "🇩🇪 Deutsch": "Mengen & Scope",
-        },
-    },
-    {
-        "code": "yield",
-        "labels": {
-            "🇬🇧 English (UK)": "Area & yield",
-            "🇺🇸 English (US)": "Area & yield",
-            "🇳🇴 Norsk": "Areal & yield",
-            "🇸🇪 Svenska": "Area & yield",
-            "🇩🇰 Dansk": "Areal & yield",
-            "🇫🇮 Suomi": "Alue & yield",
-            "🇩🇪 Deutsch": "Fläche & Yield",
-        },
-    },
-    {
-        "code": "climate",
-        "labels": {
-            "🇬🇧 English (UK)": "Climate risk",
-            "🇺🇸 English (US)": "Climate risk",
-            "🇳🇴 Norsk": "Klimarisiko",
-            "🇸🇪 Svenska": "Klimatrisk",
-            "🇩🇰 Dansk": "Klimarisiko",
-            "🇫🇮 Suomi": "Ilmastoriski",
-            "🇩🇪 Deutsch": "Klimarisiko",
-        },
-    },
-    {
-        "code": "partner_api",
-        "labels": {
-            "🇬🇧 English (UK)": "White-label API",
-            "🇺🇸 English (US)": "White-label API",
-            "🇳🇴 Norsk": "White-label API",
-            "🇸🇪 Svenska": "White-label API",
-            "🇩🇰 Dansk": "White-label API",
-            "🇫🇮 Suomi": "White-label API",
-            "🇩🇪 Deutsch": "White-label API",
-        },
-    },
-])
-DISCIPLINE_LABELS.update({item["code"]: item["labels"] for item in DISCIPLINE_CATALOG})
-
-
-def get_text_bundle(lang_key: str) -> Dict:
-    base = dict(TEXTS["🇬🇧 English (UK)"])
-    base.update(TEXTS.get(lang_key, {}))
-    return base
-
-
-def get_locale_profile(lang_key: str) -> Dict:
-    return LANGUAGE_PROFILES.get(lang_key, LANGUAGE_PROFILES["🇳🇴 Norsk"])
-
-
-lang = get_text_bundle(st.session_state.app_lang)
-locale_profile = get_locale_profile(st.session_state.app_lang)
-
-MODULE_COPY_OVERRIDES = {
-    "default": {
-        "mod_sec_title": "Modules for analysis, documentation and decisions",
-        "mod_sec_sub": "Choose the workflow that fits your project. Every module uses the same project data, traceability and quality-controlled delivery flow inside Builtly.",
-        "mod_sec1": "Ground, sound & fire",
-        "mod_sec2": "Early phase, structure & mobility",
-        "mod_sec3": "Sustainability, safety & certification",
-        "mod_sec3_sub": "Modules for environmental follow-up, safety planning and certification support in one workflow.",
-        "mod_sec4": "Tender, quantities & area",
-        "mod_sec4_sub": "Workflows that help you control tender material, track quantities and improve area efficiency before decisions are locked.",
-        "mod_sec5": "Property & portfolio",
-        "mod_sec5_sub": "Workflows for climate screening and technical due diligence across single assets and portfolios.",
-        "m_tdd_t": "TDD - Technical Due Diligence",
-        "m_tdd_d": "Turn drawings, certificates and condition data into a structured TDD draft for transactions, financing and portfolio reviews.",
-        "m_tdd_in": "Drawings + certificates + condition docs",
-        "m_tdd_out": "TDD draft, risk matrix, remediation overview",
-        "m_tdd_btn": "Open TDD",
-        "mod_sec6": "Bank & Finance",
-        "mod_sec6_sub": "Modules for construction loan control, credit assessment and bank reporting. Automated data collection and structured decision support for lenders.",
-        "badge_byggelanskontroll": "Construction loan",
-        "badge_kredittgrunnlag": "Credit",
-        "m_byggelanskontroll_t": "CONSTRUCTION LOAN CONTROL – Draw verification & control",
-        "m_byggelanskontroll_d": "Verifies draw requests against construction budget, progress schedule and contract basis. Generates the bank control report with deviations and approval documentation.",
-        "m_byggelanskontroll_in": "Draw request + budget + progress plan",
-        "m_byggelanskontroll_out": "Control report, deviation log, approval basis",
-        "m_byggelanskontroll_btn": "Open Loan Control",
-        "m_kredittgrunnlag_t": "CREDIT ASSESSMENT – Decision support for credit committee",
-        "m_kredittgrunnlag_d": "Consolidates technical, regulatory and financial data into a structured credit memorandum for land loans, construction loans and rental loans.",
-        "m_kredittgrunnlag_in": "Project data + property info + financial structure",
-        "m_kredittgrunnlag_out": "Credit memo, risk matrix, decision basis",
-        "m_kredittgrunnlag_btn": "Open Credit Assessment",
-        "partner_line": "Are you a consulting engineering firm or system supplier? Contact us about integration.",
-        "contact_form_title": "Contact us about integration",
-        "contact_form_sub": "Tell us briefly what you want to connect, automate or deliver through Builtly. We will route your request to the right team.",
-        "contact_name": "Name",
-        "contact_email": "Work email",
-        "contact_company": "Company",
-        "contact_message": "How can we help?",
-        "contact_send": "Send request",
-        "contact_close": "Close form",
-        "contact_missing_fields": "Please complete name, work email and message before sending.",
-        "contact_invalid_email": "Please enter a valid work email address.",
-        "contact_success": "Thanks — your message has been sent to Builtly.",
-        "contact_fallback": "The server is not set up to send email directly yet. Open the prefilled email below and send it to continue.",
-        "contact_fallback_button": "Open prefilled email",
-        "contact_direct_email": "Or contact us directly at {email}.",
-        "contact_subject_prefix": "Builtly integration inquiry",
-        "badge_geo": "Ground",
-        "badge_acoustics": "Sound",
-        "badge_fire": "Fire",
-        "badge_feasibility": "Early phase",
-        "badge_structural": "Structure",
-        "badge_traffic": "Mobility",
-        "badge_sha": "Safety",
-        "badge_breeam": "Certification",
-        "badge_mop": "Environment",
-        "badge_tender": "Bid",
-        "badge_quantity": "Quantities",
-        "badge_yield": "Area",
-        "badge_climate": "Portfolio",
-        "badge_tdd": "Due diligence",
-    },
-    "🇳🇴 Norsk": {
-        "mod_sec_title": "Moduler for analyse, dokumentasjon og beslutningsstøtte",
-        "mod_sec_sub": "Velg arbeidsflaten som passer prosjektet ditt. Alle modulene bruker samme prosjektdata, sporbarhet og kvalitetssikrede leveranseflyt i Builtly.",
-        "mod_sec1": "Grunnforhold, lyd & brann",
-        "mod_sec2": "Tidligfase, konstruksjon & mobilitet",
-        "mod_sec3": "Bærekraft, sikkerhet & sertifisering",
-        "mod_sec3_sub": "Moduler for miljøoppfølging, sikkerhetsplaner og sertifiseringsstøtte samlet i én arbeidsflyt.",
-        "mod_sec4": "Anbud, mengder & areal",
-        "mod_sec4_sub": "Arbeidsflater som hjelper deg å kontrollere konkurransegrunnlag, følge mengder og forbedre arealeffektivitet før viktige beslutninger tas.",
-        "mod_sec5": "Eiendom & portefølje",
-        "mod_sec5_sub": "Arbeidsflater for klimarisiko og teknisk due diligence i eiendom, transaksjon og porteføljearbeid.",
-        "m_tender_t": "ANBUD - Kontroll før innlevering",
-        "m_tender_d": "Last opp konkurransegrunnlaget og få risikopunkter, mangelliste, spørsmål og tilbudsstruktur samlet i én arbeidsflate.",
-        "m_tender_in": "Konkurransegrunnlag + tegninger + IFC/PDF",
-        "m_tender_out": "Avviksmatrise, risikorapport, RFI-utkast",
-        "m_tender_btn": "Åpne Anbudsmodul",
-        "m_quantity_t": "MENGDE & SCOPE - Oversikt og sporbarhet",
-        "m_quantity_d": "Komplett oversikt over mengder, arealer og endringer mellom revisjoner med sporbarhet tilbake til kildene.",
-        "m_quantity_in": "IFC / tegninger / beskrivelser",
-        "m_quantity_out": "Mengdeliste, areallogg, revisjonsdelta",
-        "m_quantity_btn": "Åpne Mengde & Scope",
-        "m_yield_t": "AREAL & YIELD - Arealoptimalisering",
-        "m_yield_d": "Se hvor arealet går, hva som kan optimaliseres og hva det er verdt. Sammenlign scenarioer for mer salgbart eller utleibart areal.",
-        "m_yield_in": "Planløsning + arealoppsett",
-        "m_yield_out": "Yield-notat, scenarioer, forbedringsgrep",
-        "m_yield_btn": "Åpne Areal & Yield",
-        "m_climate_t": "KLIMARISIKO - Eiendom & portefølje",
-        "m_climate_d": "Screen eiendommer og porteføljer for flom, skred, havnivå og varmestress med eksport til videre rapportering.",
-        "m_climate_in": "Adresse / koordinat + eiendomsliste",
-        "m_climate_out": "Klimarisikoscore, datapunkter, porteføljeuttrekk",
-        "m_climate_btn": "Åpne Klimarisiko",
-        "m_tdd_t": "TDD - Teknisk Due Diligence",
-        "m_tdd_d": "Få oversikt over teknisk tilstand, risiko og vedlikeholdsbehov basert på tegninger, attester og tilstandsdata.",
-        "m_tdd_in": "Tegninger + attester + tilstandsgrunnlag",
-        "m_tdd_out": "TDD-utkast, risikomatrise, kostnadsoversikt",
-        "m_tdd_btn": "Åpne TDD",
-        "mod_sec6": "Bank & Finansiering",
-        "mod_sec6_sub": "Moduler for byggelånskontroll, kredittgrunnlag og bankrapportering. Automatisert datainnhenting og strukturert beslutningsstøtte for banker og kredittgivere.",
-        "badge_byggelanskontroll": "Byggelån",
-        "badge_kredittgrunnlag": "Kreditt",
-        "m_byggelanskontroll_t": "BYGGELÅNSKONTROLL – Utbetalingskontroll & verifisering",
-        "m_byggelanskontroll_d": "Verifiserer trekkforespørsler mot byggebudsjett, fremdriftsplan og kontraktsgrunnlag. Genererer bankens kontrollrapport med avvik og godkjenningsgrunnlag.",
-        "m_byggelanskontroll_in": "Trekkforespørsel + budsjett + fremdriftsplan",
-        "m_byggelanskontroll_out": "Kontrollrapport, avvikslogg, godkjenningsgrunnlag",
-        "m_byggelanskontroll_btn": "Åpne Byggelånskontroll",
-        "m_kredittgrunnlag_t": "KREDITTGRUNNLAG – Beslutningsstøtte for kredittkomité",
-        "m_kredittgrunnlag_d": "Sammenstiller tekniske, regulatoriske og finansielle data til et strukturert kredittgrunnlag for tomtelån, byggelån og utleielån.",
-        "m_kredittgrunnlag_in": "Prosjektdata + eiendomsinfo + finansstruktur",
-        "m_kredittgrunnlag_out": "Kredittmemo, risikomatrise, beslutningsgrunnlag",
-        "m_kredittgrunnlag_btn": "Åpne Kredittgrunnlag",
-        "partner_line": "Er du et rådgivende ingeniørfirma eller systemleverandør? Ta kontakt om integrering.",
-        "contact_form_title": "Kontakt oss om integrering",
-        "contact_form_sub": "Fortell kort hva du ønsker å koble på, automatisere eller levere gjennom Builtly, så sender vi henvendelsen til riktig team.",
-        "contact_name": "Navn",
-        "contact_email": "Jobb-e-post",
-        "contact_company": "Firma",
-        "contact_message": "Hva ønsker du hjelp med?",
-        "contact_send": "Send henvendelse",
-        "contact_close": "Lukk skjema",
-        "contact_missing_fields": "Fyll ut navn, jobb-e-post og melding før du sender.",
-        "contact_invalid_email": "Skriv inn en gyldig jobb-e-postadresse.",
-        "contact_success": "Takk — meldingen din er sendt til Builtly.",
-        "contact_fallback": "Serveren er ikke satt opp for direkte e-postsending ennå. Åpne e-posten under og send den videre derfra.",
-        "contact_fallback_button": "Åpne ferdig utfylt e-post",
-        "contact_direct_email": "Du kan også kontakte oss direkte på {email}.",
-        "contact_subject_prefix": "Builtly integreringshenvendelse",
-        "badge_geo": "Grunnlag",
-        "badge_acoustics": "Lyd",
-        "badge_fire": "Brann",
-        "badge_feasibility": "Tidligfase",
-        "badge_structural": "Konstruksjon",
-        "badge_traffic": "Mobilitet",
-        "badge_sha": "Sikkerhet",
-        "badge_breeam": "Sertifisering",
-        "badge_mop": "Miljø",
-        "badge_tender": "Tilbud",
-        "badge_quantity": "Mengder",
-        "badge_yield": "Areal",
-        "badge_climate": "Portefølje",
-        "badge_tdd": "Due diligence",
-    },
-    "🇬🇧 English (UK)": {
-        "mod_sec_title": "Modules for analysis, documentation and decision support",
-        "mod_sec_sub": "Choose the workflow that fits your project. Every module uses the same project data, traceability and quality-controlled delivery flow inside Builtly.",
-        "mod_sec1": "Ground, sound & fire",
-        "mod_sec2": "Early phase, structure & mobility",
-        "mod_sec3": "Sustainability, safety & certification",
-        "mod_sec3_sub": "Modules for environmental follow-up, safety planning and certification support in one workflow.",
-        "mod_sec4": "Tender, quantities & area",
-        "mod_sec4_sub": "Workflows that help you control tender material, track quantities and improve area efficiency before key decisions are locked.",
-        "mod_sec5": "Property & portfolio",
-        "mod_sec5_sub": "Workflows for climate screening and technical due diligence across single assets and portfolios.",
-        "m_tdd_t": "TDD - Technical Due Diligence",
-        "m_tdd_d": "Turn drawings, certificates and condition data into a structured TDD draft for transactions, financing and portfolio reviews.",
-        "m_tdd_in": "Drawings + certificates + condition docs",
-        "m_tdd_out": "TDD draft, risk matrix, remediation overview",
-        "m_tdd_btn": "Open TDD",
-        "partner_line": "Are you a consulting engineering firm or system supplier? Contact us about integration.",
-        "contact_form_title": "Contact us about integration",
-        "contact_form_sub": "Tell us briefly what you want to connect, automate or deliver through Builtly. We will route your request to the right team.",
-        "contact_name": "Name",
-        "contact_email": "Work email",
-        "contact_company": "Company",
-        "contact_message": "How can we help?",
-        "contact_send": "Send request",
-        "contact_close": "Close form",
-        "contact_missing_fields": "Please complete name, work email and message before sending.",
-        "contact_invalid_email": "Please enter a valid work email address.",
-        "contact_success": "Thanks — your message has been sent to Builtly.",
-        "contact_fallback": "The server is not set up to send email directly yet. Open the prefilled email below and send it to continue.",
-        "contact_fallback_button": "Open prefilled email",
-        "contact_direct_email": "Or contact us directly at {email}.",
-        "contact_subject_prefix": "Builtly integration inquiry",
-        "badge_geo": "Ground",
-        "badge_acoustics": "Sound",
-        "badge_fire": "Fire",
-        "badge_feasibility": "Early phase",
-        "badge_structural": "Structure",
-        "badge_traffic": "Mobility",
-        "badge_sha": "Safety",
-        "badge_breeam": "Certification",
-        "badge_mop": "Environment",
-        "badge_tender": "Bid",
-        "badge_quantity": "Quantities",
-        "badge_yield": "Area",
-        "badge_climate": "Portfolio",
-        "badge_tdd": "Due diligence",
-    },
-}
-for key, value in MODULE_COPY_OVERRIDES.get("default", {}).items():
-    lang.setdefault(key, value)
-for key, value in MODULE_COPY_OVERRIDES.get(st.session_state.app_lang, {}).items():
-    lang[key] = value
-st.session_state.project_data["land"] = locale_profile["project_land_label"]
-
-
-# -------------------------------------------------
-# 4) PAGE MAP & SMART ROUTING
-# -------------------------------------------------
-def find_page(base_name: str) -> str:
-    for name in [base_name, base_name.lower(), base_name.capitalize()]:
-        p = Path(f"pages/{name}.py")
-        if p.exists():
-            return str(p)
-    return f"pages/{base_name}.py"
-
-
-PAGES = {
-    "mulighetsstudie": find_page("Mulighetsstudie"),
-    "geo": find_page("Geo"),
-    "konstruksjon": find_page("Konstruksjon"),
-    "brann": find_page("Brannkonsept"),
-    "akustikk": find_page("Akustikk"),
-    "trafikk": find_page("Trafikk"),
-    "sha": find_page("SHA"),
-    "breeam": find_page("BREEAM"),
-    "mop": find_page("MOP"),
-    "tender_control": find_page("TenderControl"),
-    "quantity_scope": find_page("QuantityScope"),
-    "yield_optimizer": find_page("YieldOptimizer"),
-    "climate_risk": find_page("ClimateRisk"),
-    "tdd": find_page("TDD"),
-    "partner_api": find_page("PartnerAPI"),
-    "byggelanskontroll": find_page("Byggelanskontroll"),
-    "kredittgrunnlag": find_page("Kredittgrunnlag"),
-    "project": find_page("Project"),
-    "review": find_page("Review"),
-}
-
-
-# -------------------------------------------------
-# 5) HELPERS
-# -------------------------------------------------
-def page_exists(page_path: str) -> bool:
-    return Path(page_path).exists()
-
-
-def page_route(page_key: str) -> Optional[str]:
-    page_path = PAGES.get(page_key)
-    if not page_path or not page_exists(page_path):
-        return None
-    return Path(page_path).stem
-
-
-def href_or_none(page_key: str) -> Optional[str]:
-    route = page_route(page_key)
-    if route is None:
-        return None
-    # If user is not logged in, redirect to login page
-    if not st.session_state.get("site_access_granted"):
-        return "?auth=login"
-    # Pass current language so target page can pick it up
-    slug = language_slug(st.session_state.get("app_lang", "🇺🇸 English (US)"))
-    return f"{route}?lang={slug}"
-
-
-def hero_action(page_key: str, label: str, kind: str = "primary") -> str:
-    href = href_or_none(page_key)
-    if href:
-        return f'<a href="{href}" target="_self" class="hero-action {kind}">{label}</a>'
-    return f'<span class="hero-action {kind} disabled">{label}</span>'
-
-
-def render_html(html_string: str):
+# --- 2. HJELPEFUNKSJONER ---
+def render_html(html_string: str) -> None:
     st.markdown(html_string.replace("\n", " "), unsafe_allow_html=True)
 
 
@@ -1884,4724 +130,11858 @@ def logo_data_uri() -> str:
     return ""
 
 
-def discipline_label(code: str, lang_key: str) -> str:
-    return DISCIPLINE_LABELS.get(code, {}).get(lang_key, DISCIPLINE_LABELS.get(code, {}).get("🇬🇧 English (UK)", code))
+def find_page(base_name: str) -> str:
+    for name in [base_name, base_name.lower(), base_name.capitalize()]:
+        p = Path(f"pages/{name}.py")
+        if p.exists():
+            return str(p)
+    return ""
 
 
-def discipline_labels(codes: List[str], lang_key: str) -> List[str]:
-    return [discipline_label(code, lang_key) for code in codes]
+def _find_dejavu_font(style: str = "") -> Optional[str]:
+    """Finn DejaVuSans TTF-font på systemet."""
+    suffix_map = {"": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf", "I": "DejaVuSans-Oblique.ttf", "BI": "DejaVuSans-BoldOblique.ttf"}
+    filename = suffix_map.get(style, "DejaVuSans.ttf")
+    search_dirs = [
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/dejavu",
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.expanduser("~/.fonts"),
+    ]
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+HAS_DEJAVU = _find_dejavu_font("") is not None
 
 
-def module_card(
-    page_key: str,
-    icon: str,
-    badge: str,
-    badge_class: str,
-    title: str,
-    description: str,
-    input_text: str,
-    output_text: str,
-    cta_label: str,
-) -> str:
-    href = href_or_none(page_key)
-    action_html = (
-        f'<a href="{href}" target="_self" class="module-cta">{cta_label}</a>'
-        if href
-        else f'<span class="module-cta disabled">{lang["btn_dev"]}</span>'
+def _pil_font(size: int = 14, bold: bool = False) -> "ImageFont.FreeTypeFont":
+    """Load DejaVuSans TTF at given size, fallback to default."""
+    style = "B" if bold else ""
+    path = _find_dejavu_font(style)
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def clean_pdf_text(text: Any) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    # Universelle typografi-erstatninger
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+    text = text.replace("\u2026", "...")
+    # v16.2: NB: IKKE konverter \u2022 (•) til * globalt. PDF-rendereren bruker
+    # \u2022 som bullet-marker for DejaVu og forventer at tegnet overlever.
+    # Men vi MÅ sjekke PDF_FONT (faktisk aktivt font), ikke HAS_DEJAVU (fontfilen
+    # på disk). Registrering kan feile selv om filen finnes.
+    if PDF_FONT == "DejaVu":
+        return text
+    # Fallback: latin-1 for Helvetica — \u2022 finnes ikke i latin-1, må konverteres
+    text = text.replace("\u2022", "*")
+    text = text.replace("\u00b2", "2").replace("\u00b3", "3")
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def ironclad_text_formatter(text: str) -> str:
+    text = str(text).replace("$", "").replace("*", "").replace("_", "")
+    text = re.sub(r"[-|=]{3,}", " ", text)
+    text = re.sub(r"([^\s]{40})", r"\1 ", text)
+    return clean_pdf_text(text)
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        cleaned = str(value).strip().replace(" ", "").replace(",", ".")
+        match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+        if match:
+            return float(match.group(0))
+    except Exception:
+        pass
+    return default
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def normalize_norwegian_text(text: str) -> str:
+    """Normaliser tekst for regex-matching — behold originaltekst men gjør case-insensitive."""
+    return text or ""
+
+
+def pick_model_name() -> Optional[str]:
+    if not llm_available:
+        return None
+    try:
+        valid_models = [
+            model.name
+            for model in genai.list_models()
+            if "generateContent" in getattr(model, "supported_generation_methods", [])
+        ]
+    except Exception:
+        return None
+
+    preferred_fragments = [
+        "gemini-2.0-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-pro",
+    ]
+    for fragment in preferred_fragments:
+        for candidate in valid_models:
+            if fragment in candidate:
+                return candidate
+    return valid_models[0] if valid_models else None
+
+
+def generer_arkitekt_render(
+    base_image: Image.Image,
+    option: "OptionResult",
+    api_key: str,
+) -> Optional[Image.Image]:
+    """
+    Bruker Gemini 3.1 Flash Image (Nano Banana 2) til å transformere 3D-volumscenen
+    til en fotorealistisk arkitekturskisse. Gemini forstår scenen semantisk og kan
+    erstatte de fargede boksene med en realistisk bygning mens ortofotoet bevares.
+
+    api_key: GOOGLE_API_KEY (samme som appen bruker for Gemini ellers).
+    """
+    if not api_key:
+        st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
+        return None
+
+    if genai is None:
+        st.error("google-generativeai er ikke installert i miljøet.")
+        return None
+
+    # 1. Sikre RGB og rimelig størrelse
+    safe_image = base_image.convert("RGB")
+    safe_image.thumbnail((1536, 1536))
+
+    # 2. Typologi-mapping
+    typologi_map = {
+        "Lamell": "linear apartment block (lamell)",
+        "Punkthus": "point block residential tower (punkthus)",
+        "Karré": "perimeter block courtyard building (karré)",
+        "Tun": "cluster of townhouses around a shared courtyard (tun)",
+        "Tårn": "high-rise residential tower (tårn)",
+        "Rekke": "row of modern townhouses (rekkehus)",
+        "Podium + Tårn": "residential tower on a commercial podium",
+    }
+    typology_eng = typologi_map.get(option.typology, "residential apartment building")
+
+    floors = int(getattr(option, "floors", 0) or 0)
+    height_m = float(getattr(option, "building_height_m", 0.0) or 0.0)
+
+    # 3. Presis prompt — eksplisitt om at KUN det grønne volumet transformeres,
+    # og at de gjennomsiktige grå nabobygg-boksene ikke skal materialiseres.
+    # Dette var tidligere et problem: Gemini tolket noen av nabobyggene som
+    # del av utbyggingen og rendret dem som beboelseshus også.
+    prompt = (
+        f"Transform ONLY the solid green volume(s) in this 3D scene into a "
+        f"photorealistic {floors}-storey Norwegian apartment building with a flat roof. "
+        f"Keep the green volume's exact footprint, position, shape, and height — "
+        f"do not move it, do not change its outline, do not split it into multiple buildings. "
+        f"\n\n"
+        f"CRITICAL: The transparent/ghostly grey boxes in the scene are EXISTING neighbouring "
+        f"buildings shown as context only. Do NOT turn them into new apartment buildings, "
+        f"do NOT materialise them as part of the development. Leave them exactly as they "
+        f"appear in the aerial photo beneath — the real existing houses, garages, "
+        f"industrial sheds and roads in the ortofoto should be completely unchanged. "
+        f"\n\n"
+        f"Only the green volume becomes the new building. Everything else (ortofoto, "
+        f"existing buildings, terrain, vegetation, roads) stays identical to the input image."
     )
 
-    return f"""
-        <div class="module-card">
-            <div class="module-header">
-                <div class="module-icon">{icon}</div>
-                <div class="module-badge {badge_class}">{badge}</div>
-            </div>
-            <div class="module-title">{title}</div>
-            <div class="module-desc">{description}</div>
-            <div class="module-spacer"></div>
-            <div class="module-meta">
-                <strong>{lang["label_input"]}:</strong> {input_text}<br/>
-                <strong>{lang["label_output"]}:</strong> {output_text}
-            </div>
-            <div class="module-cta-wrap">
-                {action_html}
-            </div>
-        </div>
-    """
-
-
-def gemini_api_key() -> Optional[str]:
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-
-def gemini_ready() -> bool:
-    return bool(gemini_api_key())
-
-
-LANGUAGE_REFERENCE_SLUGS = {
-    "🇬🇧 English (UK)": "uk",
-    "🇺🇸 English (US)": "us",
-    "🇳🇴 Norsk": "no",
-    "🇸🇪 Svenska": "se",
-    "🇩🇰 Dansk": "dk",
-    "🇫🇮 Suomi": "fi",
-    "🇩🇪 Deutsch": "de",
-}
-
-COUNTRY_GUIDANCE_PACKS = {
-    "🇬🇧 English (UK)": [
-        "Use the Building Regulations and the Approved Documents as the default baseline for England.",
-        "Explicitly flag when Scotland, Wales or Northern Ireland may differ.",
-        "Call out Building Control interpretation, planning conditions and project-specific fire strategy where relevant.",
-    ],
-    "🇺🇸 English (US)": [
-        "Use IBC or IRC as the model-code baseline and always flag state, county and city adoption differences.",
-        "Separate permit-path questions, zoning questions and technical-code questions when they are mixed together.",
-        "When the answer depends on AHJ interpretation, say so clearly.",
-    ],
-    "🇳🇴 Norsk": [
-        "Bruk plan- og bygningsloven og TEK17 som hovedrammeverk.",
-        "Flagg når svaret også avhenger av regulering, kommuneplan, kommunal praksis eller byggesaksprosess.",
-        "Skill tydelig mellom forskriftskrav, vanlig prosjekteringspraksis og forhold som må avklares i prosjektet.",
-    ],
-    "🇸🇪 Svenska": [
-        "Utgå från Boverkets regler och förklara när övergången mellan äldre BBR/EKS och de nya reglerna från 1 juli 2025 påverkar svaret.",
-        "Påminn om att ett projekt normalt måste hålla sig till ett av regelverken under övergången.",
-        "Flagga kommunal tillämpning, detaljplan och bygglovsprocess när det är relevant.",
-    ],
-    "🇩🇰 Dansk": [
-        "Brug BR18 som udgangspunkt og fremhæv konstruktionsklasse, brandklasse og nationale annekser når de styrer svaret.",
-        "Skeln mellem krav i bygningsreglementet, almindelig rådgiverpraksis og emner der skal afklares med myndigheden.",
-        "Flag kommunal sagsbehandling og lokale forhold hvor det kan ændre vurderingen.",
-    ],
-    "🇫🇮 Suomi": [
-        "Use Finland's Construction Act and the National Building Code as the baseline.",
-        "Call out municipality-specific permit practice when it can materially affect the answer.",
-        "Separate mandatory compliance points from recommended early-phase risk reduction.",
-    ],
-    "🇩🇪 Deutsch": [
-        "Nutze Landesbauordnung, MBO und MVV TB nur als Ausgangspunkt und sage ausdrücklich, dass die zuständige Landesbauordnung und örtliche Praxis bestätigt werden müssen.",
-        "Trenne zwingende Anforderungen, übliche Fachpraxis und projektspezifische Annahmen klar voneinander.",
-        "Weise auf Genehmigungsbehörde, Brandschutzkonzept und Nachweisführung hin, wenn diese den Inhalt steuern.",
-    ],
-}
-
-DISCIPLINE_GUIDANCE_PACKS = {
-    "geo": [
-        "Focus on ground conditions, contamination, groundwater, excavation support, reuse or disposal routes, and impacts on neighbouring structures.",
-        "When useful, distinguish investigation stage, concept stage, permit stage and construction stage.",
-    ],
-    "rib": [
-        "Focus on load paths, spans, robustness, foundation strategy, temporary conditions and interfaces with architecture and geotechnics.",
-        "State clearly when conceptual guidance is not enough and project-specific calculations or code checks are needed.",
-    ],
-    "demolition": [
-        "Cover demolition sequencing, hazardous materials, waste streams, reuse potential, temporary stability and third-party impacts.",
-        "Flag permit, notification or environmental follow-up items when they are likely to matter.",
-    ],
-    "acoustics": [
-        "Address external noise, internal sound insulation, facade requirements, glazing, ventilation trade-offs and vibration where relevant.",
-        "Separate early-phase screening from final façade or room-acoustics documentation.",
-    ],
-    "fire": [
-        "Address use class, risk class, fire strategy, compartmentation, escape, fire resistance, smoke control and fire service access where relevant.",
-        "Make it explicit when the final answer depends on a coordinated fire concept rather than a single clause.",
-    ],
-    "environment": [
-        "Cover contamination, waste, mass handling, emissions, circularity, material choices, biodiversity and environmental follow-up where relevant.",
-        "Highlight where the project needs documented assumptions, measurements or material declarations.",
-    ],
-    "sha": [
-        "Address construction-phase risk, site logistics, interfaces between trades, high-risk work and responsibilities in the SHA or H&S setup.",
-        "Differentiate client duties, designer duties and contractor duties when the jurisdiction makes that distinction.",
-    ],
-    "breeam": [
-        "Treat the answer as early advisory guidance on certification strategy, credits, evidence planning and design consequences.",
-        "Flag where the scheme version, assessor input or evidence requirements can materially change the recommendation.",
-    ],
-    "property": [
-        "Focus on feasibility, permitting exposure, development risk, land-use constraints, phasing, value drivers and decision gates.",
-        "Separate commercial assumptions from technical constraints when both are present.",
-    ],
-    "traffic": [
-        "Cover access, servicing, traffic generation, parking, active mobility, road safety and local mobility requirements where relevant.",
-        "Flag when transport modelling, junction analysis or municipality-specific parking policy is needed.",
-    ],
-}
-
-ASSISTANT_CLOSE_LABELS = {
-    "🇬🇧 English (UK)": "Close assistant",
-    "🇺🇸 English (US)": "Close assistant",
-    "🇳🇴 Norsk": "Lukk spørrevindu",
-    "🇸🇪 Svenska": "Stäng frågefönstret",
-    "🇩🇰 Dansk": "Luk spørgevindu",
-    "🇫🇮 Suomi": "Sulje kysymysikkuna",
-    "🇩🇪 Deutsch": "Fragefenster schließen",
-}
-
-
-def assistant_close_label(lang_key: str) -> str:
-    return ASSISTANT_CLOSE_LABELS.get(lang_key, ASSISTANT_CLOSE_LABELS["🇬🇧 English (UK)"])
-
-
-def get_query_params_dict() -> Dict[str, str]:
-    if hasattr(st, "query_params"):
+    try:
+        # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
         try:
-            return dict(st.query_params.to_dict())
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
         except Exception:
-            try:
-                return dict(st.query_params)
-            except Exception:
-                return {}
+            # Fallback til 2.5 hvis 3.1 ikke tilgjengelig
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
 
-    if hasattr(st, "experimental_get_query_params"):
-        raw = st.experimental_get_query_params()
-        cleaned = {}
-        for key, values in raw.items():
-            if isinstance(values, list):
-                cleaned[key] = values[-1] if values else ""
-            else:
-                cleaned[key] = str(values)
-        return cleaned
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+        )
 
-    return {}
+        # Hent ut bildet fra responsen
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
+
+        # Hvis vi kommer hit fikk vi ikke noe bilde tilbake
+        text_parts = []
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if content and getattr(content, "parts", None):
+                    for part in content.parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+        err_msg = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata i respons."
+        st.error(f"Gemini returnerte ikke et bilde: {err_msg}")
+    except Exception as e:
+        st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
+    return None
 
 
-def set_query_params_dict(params: Dict[str, str]) -> None:
-    if hasattr(st, "query_params"):
+def generer_utsiktsrender(
+    view_image: Image.Image,
+    floor: int,
+    direction: str,
+    api_key: str,
+) -> Optional[Image.Image]:
+    """
+    Tar en first-person-snapshot fra Three.js-utsikten og ber Gemini om å
+    gjøre den fotorealistisk: legge til balkongrekkverk i forgrunnen,
+    planter, teksturer på nabobygg, samtidig som geometri og siktelinjer
+    bevares.
+    """
+    if not api_key:
+        st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
+        return None
+    if genai is None:
+        st.error("google-generativeai er ikke installert.")
+        return None
+
+    safe_image = view_image.convert("RGB")
+    safe_image.thumbnail((1536, 1536))
+
+    direction_norsk = {"N": "nord", "Ø": "øst", "S": "sør", "V": "vest"}.get(direction, direction)
+
+    prompt = (
+        "You are an architectural visualization artist. I am providing you with a "
+        "first-person 3D scene rendered from inside an apartment building, looking out "
+        f"from the {floor}th floor toward the {direction_norsk}. The scene shows grey "
+        "neighboring buildings, terrain, and sky — but it looks like a raw 3D model "
+        "without textures.\n\n"
+        "YOUR TASK: Transform this into a photorealistic view from an apartment balcony in "
+        "a modern Norwegian residential building. Add these elements naturally:\n"
+        "1. A glass balcony railing with thin dark metal frame in the foreground (bottom "
+        "edge of the image), as if the viewer is standing on the balcony looking out.\n"
+        "2. A few balcony plants or flower boxes on the railing (subtle, not dominating).\n"
+        "3. Realistic textures on the grey neighboring buildings: pitched tile roofs, "
+        "stucco or brick facades, windows with some warm light. Keep them in the exact "
+        "same positions and heights.\n"
+        "4. Natural vegetation — trees, hedges, gardens — around the buildings on the "
+        "ground level. Preserve the terrain shape.\n"
+        "5. Soft afternoon sunlight with realistic shadows. A natural sky with some clouds.\n\n"
+        "CRITICAL: Preserve the exact geometry, sight lines, and positions of all buildings. "
+        "The purpose is to evaluate view quality and how neighboring buildings block sight "
+        "lines — so their positions and heights must be identical to the input. Only add "
+        "photorealistic detail; do not move, resize, or remove any structures.\n\n"
+        "Output a single photorealistic image from the balcony perspective."
+    )
+
+    try:
         try:
-            st.query_params.clear()
-            if params:
-                st.query_params.from_dict(params)
-            return
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
+        except Exception:
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
+
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+        )
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
+        st.error("Gemini returnerte ikke et bilde for utsiktsvisualiseringen.")
+    except Exception as e:
+        st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
+    return None
+
+
+def geo_runtime_notes() -> List[str]:
+    notes: List[str] = []
+    if not HAS_PYPROJ:
+        notes.append("pyproj mangler: GeoJSON i lon/lat og OSM-nabohenting blir deaktivert eller mindre presis.")
+    if not HAS_RASTERIO:
+        notes.append("rasterio mangler: GeoTIFF/ASC terreng er deaktivert, men CSV/TXT med x,y,z virker fortsatt.")
+    return notes
+
+
+# --- 3. GEODATA / KART (SKUDDSIKKER VERSJON) ---
+
+def get_kommunenummer(input_str: str) -> Optional[str]:
+    """Oversatt bynavn til riktig 4-sifret kommunenummer fra Kartverket API."""
+    s = str(input_str).strip()
+    if s.isdigit() and len(s) >= 3:
+        return s.zfill(4)
+    try:
+        resp = requests.get("https://ws.geonorge.no/kommuneinfo/v1/kommuner", timeout=5)
+        if resp.status_code == 200:
+            for k in resp.json():
+                if k.get("kommunenavn", "").lower() == s.lower():
+                    return k.get("kommunenummer")
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_lat_lon(adresse: str, kommune: str) -> Tuple[Optional[float], Optional[float], str]:
+    query = ", ".join([x for x in [adresse, kommune, "Norway"] if x])
+    if not query:
+        return None, None, "Ingen adresse oppgitt"
+
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "jsonv2", "limit": 1},
+            headers={"User-Agent": "BuiltlyFeasibility/1.0"},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            hits = resp.json()
+            if hits:
+                return float(hits[0]["lat"]), float(hits[0]["lon"]), "OpenStreetMap/Nominatim"
+    except Exception:
+        pass
+    return None, None, "Kunne ikke geokode med Nominatim"
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def fetch_map_image(adresse: str, kommune: str, gnr: str, bnr: str, api_key: str, bounds: Optional[Tuple[float, float, float, float]] = None, _gdo_client: Any = None) -> Tuple[Optional[Image.Image], str]:
+    # 0. Ortofoto (førstevalg)
+    if bounds is not None and _gdo_client is not None:
+        try:
+            img, source = _gdo_client.fetch_ortofoto(bbox=bounds, buffer_m=80.0, width=1200, height=1200)
+            if img:
+                return img, source
         except Exception:
             pass
 
-    if hasattr(st, "experimental_set_query_params"):
-        st.experimental_set_query_params(**params)
+    # 1. HØYESTE PRIORITET: Bruk eksakte koordinater hvis tomt er hentet!
+    if bounds is not None:
+        minx, miny, maxx, maxy = bounds
+        # Legg på 80 meter margin rundt tomten for å se naboskapet
+        url_orto = (
+            "https://wms.geonorge.no/skwms1/wms.nib"
+            "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
+            f"&styles=&srs=EPSG:25833&bbox={minx-80},{miny-80},{maxx+80},{maxy+80}"
+            "&width=1000&height=1000&format=image/png"
+        )
+        try:
+            r1 = requests.get(url_orto, timeout=12)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Ortofoto (via Eksakt Tomtegrense)"
+        except Exception:
+            pass
+
+    # 2. MELLOMPRIORITET: Hvis vi ikke har tomt, prøv vanlig adressesøk
+    nord, ost = None, None
+    adr_clean = adresse.replace(",", "").strip() if adresse else ""
+    kom_clean = kommune.replace(",", "").strip() if kommune else ""
+
+    if adr_clean and kom_clean:
+        query = f"{adr_clean} {kom_clean}"
+        safe_query = urllib.parse.quote(query)
+        url = f"https://ws.geonorge.no/adresser/v1/sok?sok={safe_query}&fuzzy=true&utkoordsys=25833&treffPerSide=1"
+        try:
+            resp = requests.get(url, timeout=6)
+            if resp.status_code == 200 and resp.json().get("adresser"):
+                hit = resp.json()["adresser"][0]
+                nord = hit.get("representasjonspunkt", {}).get("nord")
+                ost = hit.get("representasjonspunkt", {}).get("øst")
+        except Exception:
+            pass
+
+    if nord and ost:
+        min_x, max_x = float(ost) - 100, float(ost) + 100
+        min_y, max_y = float(nord) - 100, float(nord) + 100
+        url_orto = (
+            "https://wms.geonorge.no/skwms1/wms.nib"
+            "?service=WMS&request=GetMap&version=1.1.1&layers=ortofoto"
+            f"&styles=&srs=EPSG:25833&bbox={min_x},{min_y},{max_x},{max_y}"
+            "&width=900&height=900&format=image/png"
+        )
+        try:
+            r1 = requests.get(url_orto, timeout=8)
+            if r1.status_code == 200 and len(r1.content) > 5000:
+                return Image.open(io.BytesIO(r1.content)).convert("RGB"), "Kartverket Adressesøk"
+        except Exception:
+            pass
+
+    return None, "Kunne ikke hente kart. Tips: Sørg for å trykke 'Søk opp og lagre tomt' i trinn 2B først, da vet systemet nøyaktig hvor det skal zoome!"
 
 
-def assistant_query_requested() -> bool:
-    value = str(get_query_params_dict().get("assistant", "")).strip().lower()
-    return value in {"1", "true", "open", "yes"}
+def _validated_upload_preview(
+    uploaded_files: Optional[List[Any]],
+    max_thumbs: int = 5,
+    thumb_height: int = 120,
+) -> Tuple[List[Image.Image], List[str]]:
+    """v16.3: Prosesser og vis umiddelbar preview av opplastede bilder.
+
+    Åpner hver fil med PIL for å verifisere at den er et gyldig bilde, og viser
+    en rad med thumbnails med grønn/rød indikator. Dette er workaround for at
+    Streamlit's file_uploader iblant viser røde sirkler i UI-en selv når filer
+    er akseptert av backenden — vår egen visning gir brukeren korrekt feedback.
+
+    Returnerer (gyldige_bilder, feilmeldinger).
+    """
+    if not uploaded_files:
+        return [], []
+
+    valid_images: List[Image.Image] = []
+    errors: List[str] = []
+    file_statuses: List[Dict[str, Any]] = []
+
+    for uf in uploaded_files:
+        try:
+            uf.seek(0)
+            img = Image.open(uf).convert("RGB")
+            # Lag thumbnail for visning (behold original for PDF)
+            thumb = img.copy()
+            thumb.thumbnail((thumb_height * 2, thumb_height * 2))
+            valid_images.append(img)
+            file_statuses.append({"name": uf.name, "ok": True, "thumb": thumb, "size_kb": uf.size / 1024})
+        except Exception as exc:
+            errors.append(f"{uf.name}: {str(exc)[:100]}")
+            file_statuses.append({"name": uf.name, "ok": False, "error": str(exc)[:60]})
+
+    # Vis preview-rad
+    if file_statuses:
+        n_show = min(len(file_statuses), max_thumbs)
+        cols = st.columns(n_show)
+        for i, status in enumerate(file_statuses[:max_thumbs]):
+            with cols[i]:
+                if status["ok"]:
+                    st.image(status["thumb"], use_container_width=True)
+                    st.caption(f"✅ **{status['name'][:22]}**")
+                else:
+                    st.error(f"❌ {status['name'][:22]}\n{status.get('error', '')[:40]}")
+        if len(file_statuses) > max_thumbs:
+            st.caption(f"_(+ {len(file_statuses) - max_thumbs} flere filer ikke vist som thumbnail)_")
+
+    return valid_images, errors
 
 
-def clear_assistant_query_param() -> None:
-    params = get_query_params_dict()
-    if "assistant" in params:
-        params.pop("assistant", None)
-        set_query_params_dict(params)
+def load_uploaded_visuals(uploaded_files: Optional[List[Any]]) -> List[Image.Image]:
+    images: List[Image.Image] = []
+    if not uploaded_files:
+        return images
+
+    for uploaded in uploaded_files:
+        try:
+            uploaded.seek(0)
+            if uploaded.name.lower().endswith(".pdf"):
+                if fitz is None:
+                    continue
+                data = uploaded.read()
+                doc = fitz.open(stream=data, filetype="pdf")
+                for page_num in range(min(4, len(doc))):
+                    pix = doc.load_page(page_num).get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                    img.thumbnail((1400, 1400))
+                    images.append(img)
+                doc.close()
+            else:
+                img = Image.open(uploaded).convert("RGB")
+                img.thumbnail((1400, 1400))
+                images.append(img)
+        except Exception:
+            continue
+    return images
 
 
-def open_assistant() -> None:
-    st.session_state.assistant_dialog_open = True
+# --- 4. GEOSPATIAL HJELPERE ---
+DEFAULT_FLOOR_HEIGHT_M = 3.2
 
+def fetch_noise_map_image(
+    bbox_utm: Tuple[float, float, float, float],
+    buffer_m: float = 150.0,
+    gdo_client: Any = None,
+    width: int = 800,
+    height: int = 800,
+) -> Tuple[Optional[Image.Image], str]:
+    """
+    Henter et visuelt støykart fra Geodata Online DOK Forurensning MapServer.
+    Returnerer (PIL Image, kilde-tekst) eller (None, feilmelding).
+    """
+    minx, miny, maxx, maxy = bbox_utm
+    minx -= buffer_m
+    miny -= buffer_m
+    maxx += buffer_m
+    maxy += buffer_m
 
-def close_assistant() -> None:
-    st.session_state.assistant_dialog_open = False
-    clear_assistant_query_param()
+    gdo_token = ""
+    if gdo_client is not None:
+        for attr in ['_token', 'token', '_access_token', 'access_token']:
+            tkn = getattr(gdo_client, attr, None)
+            if tkn and isinstance(tkn, str) and len(tkn) > 10:
+                gdo_token = tkn
+                break
+        if not gdo_token:
+            try:
+                sc = gdo_client.fetch_scene_config()
+                gdo_token = sc.get("token", "")
+            except Exception:
+                pass
 
+    if not gdo_token:
+        return None, "Ingen GDO-token tilgjengelig"
 
-def bump_assistant_input_nonce() -> None:
-    st.session_state.assistant_input_nonce = int(st.session_state.get("assistant_input_nonce", 0)) + 1
-
-
-def reset_assistant_conversation() -> None:
-    st.session_state.assistant_history = []
-    bump_assistant_input_nonce()
-
-
-LANGUAGE_QUERY_SLUGS = {
-    "🇬🇧 English (UK)": "en-gb",
-    "🇺🇸 English (US)": "en-us",
-    "🇳🇴 Norsk": "no",
-    "🇸🇪 Svenska": "sv",
-    "🇩🇰 Dansk": "da",
-    "🇫🇮 Suomi": "fi",
-    "🇩🇪 Deutsch": "de",
-}
-QUERY_LANGUAGE_SLUGS = {value: key for key, value in LANGUAGE_QUERY_SLUGS.items()}
-
-
-def language_slug(lang_key: str) -> str:
-    return LANGUAGE_QUERY_SLUGS.get(lang_key, LANGUAGE_QUERY_SLUGS["🇳🇴 Norsk"])
-
-
-def language_from_query_param() -> Optional[str]:
-    raw = str(get_query_params_dict().get("lang", "")).strip().lower()
-    return QUERY_LANGUAGE_SLUGS.get(raw)
-
-
-def apply_language_from_query() -> None:
-    requested_language = language_from_query_param()
-    if requested_language and requested_language != st.session_state.get("app_lang"):
-        st.session_state.app_lang = requested_language
-        st.session_state.project_data["land"] = get_locale_profile(requested_language)["project_land_label"]
-
-
-def assistant_href(lang_key: str) -> str:
-    return "?" + urlparse.urlencode({"assistant": "open", "lang": language_slug(lang_key)})
-
-
-def contact_query_requested() -> bool:
-    value = str(get_query_params_dict().get("contact", "")).strip().lower()
-    return value in {"1", "true", "open", "yes"}
-
-
-def clear_contact_query_param() -> None:
-    params = get_query_params_dict()
-    if "contact" in params:
-        params.pop("contact", None)
-        set_query_params_dict(params)
-
-
-def contact_href(lang_key: str) -> str:
-    params = {"contact": "open", "lang": language_slug(lang_key)}
-    if assistant_query_requested() or st.session_state.get("assistant_dialog_open"):
-        params["assistant"] = "open"
-    return "?" + urlparse.urlencode(params) + "#contact-form-anchor"
-
-
-def contact_close_href(lang_key: str) -> str:
-    params = {"lang": language_slug(lang_key)}
-    if assistant_query_requested() or st.session_state.get("assistant_dialog_open"):
-        params["assistant"] = "open"
-    return "?" + urlparse.urlencode(params)
-
-
-def sync_language_query_param(lang_key: str, keep_assistant: bool = False) -> None:
-    params = get_query_params_dict()
-    params["lang"] = language_slug(lang_key)
-    if keep_assistant or st.session_state.get("assistant_dialog_open"):
-        params["assistant"] = "open"
-    else:
-        params.pop("assistant", None)
-    if contact_query_requested():
-        params["contact"] = "open"
-    else:
-        params.pop("contact", None)
-    set_query_params_dict(params)
-
-
-def _safe_secret_get(name: str) -> Optional[str]:
+    gdo_base = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+    # Vis alle støylag: 211 (veg-gruppe), 212 (veg-flate), 203-208 (andre)
     try:
-        value = st.secrets.get(name)
-    except Exception:
-        return None
-    if value is None:
-        return None
-    value = str(value).strip()
-    return value or None
-
-
-def _env_or_secret(name: str) -> Optional[str]:
-    value = os.getenv(name)
-    if value is not None and str(value).strip():
-        return str(value).strip()
-    return _safe_secret_get(name)
-
-
-def _truthy_env(value: Optional[str], default: bool = False) -> bool:
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def contact_recipient() -> str:
-    return _env_or_secret("BUILTLY_CONTACT_TO") or "hello@builtly.ai"
-
-
-def contact_mailto_url(*, name: str, email: str, company: str, message: str, lang_bundle: Dict) -> str:
-    subject = f"{lang_bundle['contact_subject_prefix']} — {company or name}".strip()
-    body_lines = [
-        f"Name: {name}",
-        f"Company: {company}",
-        f"Email: {email}",
-        "",
-        "Message:",
-        message.strip(),
-        "",
-        "Source: Builtly front page integration form",
-    ]
-    query = urlparse.urlencode({
-        "subject": subject,
-        "body": "\n".join(body_lines).strip(),
-    })
-    recipient = contact_recipient()
-    return f"mailto:{recipient}?{query}"
-
-
-def send_contact_email(*, name: str, email: str, company: str, message: str, lang_bundle: Dict) -> tuple[bool, Optional[str]]:
-    host = _env_or_secret("BUILTLY_SMTP_HOST") or _env_or_secret("SMTP_HOST")
-    username = _env_or_secret("BUILTLY_SMTP_USER") or _env_or_secret("SMTP_USER")
-    password = _env_or_secret("BUILTLY_SMTP_PASSWORD") or _env_or_secret("SMTP_PASSWORD")
-    from_address = _env_or_secret("BUILTLY_CONTACT_FROM") or _env_or_secret("SMTP_FROM") or username or contact_recipient()
-    port_raw = _env_or_secret("BUILTLY_SMTP_PORT") or _env_or_secret("SMTP_PORT") or "587"
-    use_ssl = _truthy_env(_env_or_secret("BUILTLY_SMTP_USE_SSL") or _env_or_secret("SMTP_USE_SSL"), default=False)
-    use_tls = _truthy_env(_env_or_secret("BUILTLY_SMTP_USE_TLS") or _env_or_secret("SMTP_USE_TLS"), default=not use_ssl)
-
-    try:
-        port = int(str(port_raw).strip())
-    except Exception:
-        port = 587
-
-    mailto_url = contact_mailto_url(name=name, email=email, company=company, message=message, lang_bundle=lang_bundle)
-
-    if not host:
-        return False, mailto_url
-
-    msg = EmailMessage()
-    msg["To"] = contact_recipient()
-    msg["From"] = from_address
-    msg["Reply-To"] = email
-    msg["Subject"] = f"{lang_bundle['contact_subject_prefix']} — {company or name}".strip()
-    msg.set_content(
-        "\n".join(
-            [
-                f"Name: {name}",
-                f"Company: {company}",
-                f"Email: {email}",
-                "",
-                "Message:",
-                message.strip(),
-                "",
-                "Source: Builtly front page integration form",
-            ]
-        ).strip()
-    )
-
-    try:
-        if use_ssl:
-            with smtplib.SMTP_SSL(host, port, timeout=25, context=ssl.create_default_context()) as server:
-                if username and password:
-                    server.login(username, password)
-                server.send_message(msg)
+        params = {
+            "bbox": f"{minx},{miny},{maxx},{maxy}",
+            "bboxSR": "25833",
+            "imageSR": "25833",
+            "size": f"{width},{height}",
+            "format": "png32",
+            "transparent": "true",
+            "layers": "show:212,204,206,208,214",
+            "f": "image",
+            "token": gdo_token,
+        }
+        resp = requests.get(f"{gdo_base}/export", params=params, timeout=15)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+            from io import BytesIO
+            img = Image.open(BytesIO(resp.content)).convert("RGBA")
+            # Sjekk om bildet er helt tomt/transparent (ingen støy i området)
+            extrema = img.getextrema()
+            if extrema[3][1] < 10:  # Alpha-kanal maks < 10 = helt transparent
+                return None, "Ingen støysoner i dette området"
+            return img, "Geodata Online DOK Forurensning"
         else:
-            with smtplib.SMTP(host, port, timeout=25) as server:
-                server.ehlo()
-                if use_tls:
-                    server.starttls(context=ssl.create_default_context())
-                    server.ehlo()
-                if username and password:
-                    server.login(username, password)
-                server.send_message(msg)
-        return True, None
+            return None, f"Støykart HTTP {resp.status_code}"
+    except Exception as exc:
+        return None, f"Støykart-feil: {str(exc)[:60]}"
+
+
+def extract_geojson_features(obj: Any) -> List[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return []
+    gtype = obj.get("type")
+    if gtype == "FeatureCollection":
+        return [feature for feature in obj.get("features", []) if isinstance(feature, dict)]
+    if gtype == "Feature":
+        return [obj]
+    if gtype in {"Polygon", "MultiPolygon"}:
+        return [{"type": "Feature", "geometry": obj, "properties": {}}]
+    return []
+
+def hent_tomt_fra_geonorge(kommune_input: str, gnr_bnr_liste: List[Tuple[str, str]]) -> Tuple[Optional[Polygon], str]:
+    """SKUDDSIKKER VERSJON: Henter eiendomsgrenser fra Kartverket."""
+    knr = get_kommunenummer(kommune_input)
+    if not knr:
+        return None, f"Gjenkjente ikke kommunen '{kommune_input}'. Skriv f.eks. 'Oslo' eller '0301'."
+        
+    polygoner = []
+    feil = []
+    
+    for gnr, bnr in gnr_bnr_liste:
+        gnr_clean = str(gnr).strip()
+        bnr_clean = str(bnr).strip()
+        
+        # Kartverkets WFS servere (fallback innebygd)
+        services = [
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelen-teig", "matrikkelen-teig:Teig"),
+            ("https://wfs.geonorge.no/skwms1/wfs.matrikkelkart", "matrikkelkart:Teig")
+        ]
+        
+        # VIKTIG: Ingen fnutter (') rundt tallene i CQL! GeoServer krasjer hvis Gnr (int) har fnutter.
+        cql = f"kommunenummer='{knr}' AND gardsnummer={gnr_clean} AND bruksnummer={bnr_clean}"
+        
+        success_for_this_parcel = False
+        last_error = ""
+
+        for url, layer in services:
+            if success_for_this_parcel: break
+            
+            params = {
+                "service": "WFS",
+                "version": "2.0.0",
+                "request": "GetFeature",
+                "typenames": layer,
+                "srsName": "EPSG:25833",
+                "outputFormat": "application/json",
+                "cql_filter": cql
+            }
+            
+            try:
+                resp = requests.get(url, params=params, timeout=12)
+                # Hvis application/json feiler, prøv bare "json"
+                if resp.status_code != 200:
+                    params["outputFormat"] = "json"
+                    resp = requests.get(url, params=params, timeout=12)
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        features = extract_geojson_features(data)
+                        if features:
+                            for feature in features:
+                                geom = shape(feature["geometry"])
+                                poly = largest_polygon(geom)
+                                if poly:
+                                    polygoner.append(poly)
+                            success_for_this_parcel = True
+                            break
+                        else:
+                            last_error = "Ingen polygon funnet på dette Gnr/Bnr i matrikkelen."
+                    except json.JSONDecodeError:
+                        last_error = "Server returnerte ikke gyldig JSON."
+                else:
+                    last_error = f"API-feil (Kode: {resp.status_code})"
+            except Exception as e:
+                last_error = f"Nettverksfeil: {str(e)[:30]}"
+                
+        if not success_for_this_parcel:
+            feil.append(f"{gnr}/{bnr} ({last_error})")
+            
+    if not polygoner:
+        return None, "Feilet: " + " | ".join(feil)
+        
+    try:
+        samlet = unary_union(polygoner)
+        msg = f"Suksess! Hentet tomt i {knr}: " + ", ".join([f"{g}/{b}" for g,b in gnr_bnr_liste])
+        if feil:
+            msg += f" (Mangler: {', '.join(feil)})"
+        return samlet, msg
+    except Exception as e:
+        return None, f"Feil ved sammenslåing: {e}"
+
+
+def largest_polygon(geom: Any) -> Optional[Polygon]:
+    if geom is None:
+        return None
+    if isinstance(geom, Polygon):
+        return geom.buffer(0)
+    if isinstance(geom, MultiPolygon):
+        if not geom.geoms:
+            return None
+        return max((g.buffer(0) for g in geom.geoms), key=lambda g: g.area, default=None)
+    try:
+        if getattr(geom, "geom_type", "") == "Polygon":
+            return Polygon(geom).buffer(0)
     except Exception:
-        return False, mailto_url
-
-
-def configured_access_codes() -> List[str]:
-    values: List[str] = []
-    for env_name in ("BUILTLY_ACCESS_CODES", "BUILTLY_ACCESS_CODE", "BUILTLY_ENTRY_CODE"):
-        raw_value = _env_or_secret(env_name)
-        if not raw_value:
-            continue
-        parts = [part.strip() for part in str(raw_value).split(",") if part.strip()]
-        for part in parts:
-            if part not in values:
-                values.append(part)
-    return values
-
-
-def configured_access_hashes() -> List[str]:
-    values: List[str] = []
-    for env_name in ("BUILTLY_ACCESS_CODE_SHA256S", "BUILTLY_ACCESS_CODE_SHA256"):
-        raw_value = _env_or_secret(env_name)
-        if not raw_value:
-            continue
-        parts = [part.strip().lower() for part in str(raw_value).split(",") if part.strip()]
-        for part in parts:
-            if part not in values:
-                values.append(part)
-    return values
-
-
-def access_gate_configured() -> bool:
-    return bool(configured_access_codes() or configured_access_hashes())
-
-
-def access_gate_enabled() -> bool:
-    explicit_flag = _env_or_secret("BUILTLY_REQUIRE_ACCESS_CODE")
-    if explicit_flag is not None:
-        return explicit_flag.strip().lower() not in {"0", "false", "no", "off"}
-    return access_gate_configured()
-
-
-def bump_site_access_nonce() -> None:
-    st.session_state.site_access_input_nonce = int(st.session_state.get("site_access_input_nonce", 0)) + 1
-
-
-def verify_site_access_code(candidate: str) -> bool:
-    value = (candidate or "").strip()
-    if not value:
-        return False
-
-    for configured in configured_access_codes():
-        if hmac.compare_digest(value, configured):
-            return True
-
-    candidate_hash = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    for configured_hash in configured_access_hashes():
-        if hmac.compare_digest(candidate_hash, configured_hash):
-            return True
-
-    return False
-
-
-def _generate_session_token(code: str) -> str:
-    """Genererer en kort token fra koden som lagres i URL for persistent innlogging."""
-    raw = hashlib.sha256(f"builtly-session-{code.strip()}".encode("utf-8")).hexdigest()
-    return raw[:16]
-
-
-def _verify_session_token(token: str) -> bool:
-    """Sjekker om en session-token matcher en av de konfigurerte kodene."""
-    if not token or len(token) < 8:
-        return False
-    for code in configured_access_codes():
-        if hmac.compare_digest(_generate_session_token(code), token):
-            return True
-    for code_hash in configured_access_hashes():
         pass
-    return False
+    return None
 
 
-def _restore_session_from_url() -> bool:
-    """Sjekker om URL-en inneholder en gyldig session-token og gjenoppretter tilgangen."""
+def polygon_to_coords(poly: Optional[Polygon], precision: int = 2) -> List[List[float]]:
+    if poly is None or poly.is_empty:
+        return []
+    if isinstance(poly, MultiPolygon):
+        largest = max(poly.geoms, key=lambda g: g.area, default=None)
+        if largest is None:
+            return []
+        poly = largest
+    return [[round(float(x), precision), round(float(y), precision)] for x, y in list(poly.exterior.coords)]
+
+
+def geometry_to_coord_groups(geom: Any, precision: int = 2) -> List[List[List[float]]]:
+    if geom is None or getattr(geom, 'is_empty', True):
+        return []
+    if isinstance(geom, Polygon):
+        return [polygon_to_coords(geom, precision=precision)]
+    if isinstance(geom, MultiPolygon):
+        groups: List[List[List[float]]] = []
+        for part in geom.geoms:
+            coords = polygon_to_coords(part, precision=precision)
+            if coords:
+                groups.append(coords)
+        return groups
+    if getattr(geom, 'geom_type', '') == 'Polygon':
+        return [polygon_to_coords(geom, precision=precision)]
+    return []
+
+
+def flatten_coord_groups(groups: Any) -> List[List[float]]:
+    flat: List[List[float]] = []
+    if not groups:
+        return flat
+    if isinstance(groups, list) and groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
+        return groups
+    for group in groups:
+        if not group:
+            continue
+        if isinstance(group, list) and group and isinstance(group[0], list) and group[0] and isinstance(group[0][0], (int, float)):
+            flat.extend(group)
+    return flat
+
+
+def project_coord_groups_to_lonlat(groups: List[List[List[float]]], src_crs: str = 'EPSG:25833') -> List[List[List[float]]]:
+    if not groups:
+        return []
+    if not HAS_PYPROJ:
+        return groups
     try:
-        token = st.query_params.get("s", "")
+        transformer = Transformer.from_crs(CRS.from_string(src_crs), CRS.from_epsg(4326), always_xy=True)
     except Exception:
-        return False
-    if token and _verify_session_token(token):
-        st.session_state.site_access_granted = True
-        return True
-    return False
+        try:
+            transformer = Transformer.from_crs(25833, 4326, always_xy=True)
+        except Exception:
+            return groups
+    projected: List[List[List[float]]] = []
+    for group in groups:
+        ring: List[List[float]] = []
+        for x, y in group:
+            lon, lat = transformer.transform(float(x), float(y))
+            ring.append([round(float(lon), 7), round(float(lat), 7)])
+        if ring:
+            projected.append(ring)
+    return projected
 
 
-def render_site_access_gate(lang_key: str) -> None:
-    copy = get_access_copy(lang_key)
-    lang_bundle = get_text_bundle(lang_key)
-    locale_profile = get_locale_profile(lang_key)
-
-    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
-    with outer_center:
-        render_html(
-            f"""
-            <div class="access-gate-head">
-                <div class="assistant-kicker">{copy['eyebrow']}</div>
-                <div class="access-gate-title">{copy['title']}</div>
-                <div class="access-gate-subtitle">{copy['subtitle']}</div>
-                <div class="context-chips compact">
-                    <div class="context-chip"><span>{lang_bundle['assistant_label_country']}:</span> {locale_profile['country']}</div>
-                    <div class="context-chip"><span>{lang_bundle['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
-                </div>
-            </div>
-            """
-        )
-
-        if not access_gate_configured():
-            st.warning(copy["admin_missing"])
-            st.caption(copy["admin_help"])
-            return
-
-        input_key = f"site_access_code_{st.session_state.get('site_access_input_nonce', 0)}"
-        with st.form("builtly_site_access_gate"):
-            access_code = st.text_input(
-                copy["label"],
-                key=input_key,
-                type="password",
-                placeholder=copy["placeholder"],
-            )
-            submitted = st.form_submit_button(copy["button"], use_container_width=True)
-
-        if submitted:
-            if verify_site_access_code(access_code):
-                st.session_state.site_access_granted = True
-                st.session_state.site_access_error = ""
-                bump_site_access_nonce()
-                st.query_params["s"] = _generate_session_token(access_code)
-                st.rerun()
-            else:
-                st.session_state.site_access_error = copy["error_invalid"]
-                bump_site_access_nonce()
-                st.rerun()
-
-        if st.session_state.get("site_access_error"):
-            st.error(st.session_state.site_access_error)
-
-        st.caption(copy["info"])
+def split_geometry_to_polygons(geom: Any) -> List[Polygon]:
+    if geom is None or getattr(geom, 'is_empty', True):
+        return []
+    if isinstance(geom, Polygon):
+        return [geom.buffer(0)]
+    if isinstance(geom, MultiPolygon):
+        return [part.buffer(0) for part in geom.geoms if not part.is_empty]
+    return []
 
 
-def ensure_frontpage_access(lang_key: str) -> None:
-    if not access_gate_enabled():
-        return
-    if st.session_state.get("site_access_granted"):
-        return
-    if _restore_session_from_url():
-        return
-    render_site_access_gate(lang_key)
-    st.stop()
-
-
-@st.dialog("🔐 Tilgang kreves", width="small")
-def _module_gate_dialog(lang_key: str, dest_key: str) -> None:
-    """Shown when an unauthenticated user clicks a module card."""
-    copy = get_access_copy(lang_key)
-    lang_bundle = get_text_bundle(lang_key)
-
-    st.markdown(
-        f"<p style='color:var(--soft,#c8d3df);font-size:0.95rem;margin-bottom:1rem;'>{copy['subtitle']}</p>",
-        unsafe_allow_html=True,
+def bounds_look_like_lonlat(bounds: Tuple[float, float, float, float]) -> bool:
+    minx, miny, maxx, maxy = bounds
+    return (
+        -180.0 <= minx <= 180.0
+        and -180.0 <= maxx <= 180.0
+        and -90.0 <= miny <= 90.0
+        and -90.0 <= maxy <= 90.0
     )
 
-    if not access_gate_configured():
-        st.warning(copy["admin_missing"])
-        return
 
-    nonce = st.session_state.get("site_access_input_nonce", 0)
-    with st.form("module_gate_form"):
-        code = st.text_input(
-            copy["label"],
-            key=f"module_gate_code_{nonce}",
-            type="password",
-            placeholder=copy["placeholder"],
+def utm_crs_from_lonlat(lon: float, lat: float) -> Optional[CRS]:
+    if not HAS_PYPROJ:
+        return None
+    zone = int((lon + 180.0) // 6.0) + 1
+    epsg = 32600 + zone if lat >= 0 else 32700 + zone
+    return CRS.from_epsg(epsg)
+
+
+def transform_polygon(poly: Polygon, src_crs: Optional[CRS], dst_crs: Optional[CRS]) -> Polygon:
+    if poly is None or src_crs is None or dst_crs is None or src_crs == dst_crs or not HAS_PYPROJ:
+        return poly
+    transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+    coords = [transformer.transform(x, y) for x, y in list(poly.exterior.coords)]
+    return Polygon(coords).buffer(0)
+
+
+def parse_coordinate_text(text: str) -> Optional[Polygon]:
+    if not text or not text.strip():
+        return None
+    coords: List[Tuple[float, float]] = []
+    normalized = text.replace(";", "\n")
+    for raw_line in normalized.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"[\s,]+", line) if part.strip()]
+        if len(parts) < 2:
+            continue
+        x = safe_float(parts[0], None)
+        y = safe_float(parts[1], None)
+        if x is None or y is None:
+            continue
+        coords.append((float(x), float(y)))
+    if len(coords) < 3:
+        return None
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+    poly = Polygon(coords).buffer(0)
+    return largest_polygon(poly)
+
+
+def normalize_polygon_to_local(poly: Polygon) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
+    # Behold ALLE deler av en MultiPolygon via unary_union — ikke bare den største
+    if poly is None:
+        return None, None, {"is_geographic": False}
+    if hasattr(poly, 'geoms'):
+        poly = unary_union(list(poly.geoms)).buffer(0)
+    elif isinstance(poly, Polygon):
+        poly = poly.buffer(0)
+    else:
+        poly = largest_polygon(poly)
+    if poly is None or poly.is_empty:
+        return None, None, {"is_geographic": False}
+    info: Dict[str, Any] = {"is_geographic": False}
+    if bounds_look_like_lonlat(poly.bounds):
+        centroid = poly.centroid
+        info = {
+            "is_geographic": True,
+            "centroid_lon": float(centroid.x),
+            "centroid_lat": float(centroid.y),
+        }
+        dst_crs = utm_crs_from_lonlat(float(centroid.x), float(centroid.y))
+        if dst_crs is None:
+            info["warning"] = "pyproj mangler; lon/lat-GeoJSON kan ikke transformeres til meter i denne deployen."
+            return None, None, info
+        info["crs"] = dst_crs.to_string()
+        return transform_polygon(poly, CRS.from_epsg(4326), dst_crs), dst_crs, info
+    return poly, None, info
+
+
+def load_site_polygon_input(auto_polygon: Optional[Polygon], uploaded_geojson: Any, coordinate_text: str) -> Tuple[Optional[Polygon], Optional[CRS], Dict[str, Any]]:
+    
+    # 1. Høyeste prioritet: Tomt hentet fra Kartverket (Allerede i meter/UTM33)
+    if auto_polygon is not None:
+        poly_local, _, info = normalize_polygon_to_local(auto_polygon)
+        crs_obj = CRS.from_epsg(25833) if HAS_PYPROJ else None
+        info["source"] = st.session_state.get("auto_site_msg", "Eksakt polygon")
+        if "Eksakt" not in info["source"]:
+            info["source"] = "Eksakt polygon"
+        info["crs"] = "EPSG:25833"
+        return poly_local, crs_obj, info
+
+    # 2. Mellomprioritet: Opplastet GeoJSON
+    if uploaded_geojson is not None:
+        try:
+            uploaded_geojson.seek(0)
+            raw = uploaded_geojson.read()
+            if isinstance(raw, str):
+                raw = raw.encode("utf-8")
+            obj = json.loads(raw.decode("utf-8-sig"))
+            features = extract_geojson_features(obj)
+            polys: List[Polygon] = []
+            for feature in features:
+                geom = feature.get("geometry")
+                if not geom:
+                    continue
+                poly = largest_polygon(shape(geom))
+                if poly is not None:
+                    polys.append(poly)
+            if polys:
+                poly = max(polys, key=lambda p: p.area)
+                poly_local, crs_obj, info = normalize_polygon_to_local(poly)
+                info["source"] = f"GeoJSON: {getattr(uploaded_geojson, 'name', 'polygon')}"
+                return poly_local, crs_obj, info
+        except Exception as exc:
+            return None, None, {"source": "GeoJSON", "error": str(exc)}
+
+    # 3. Laveste prioritet: Tekstkoordinater
+    poly = parse_coordinate_text(coordinate_text)
+    if poly is not None:
+        poly_local, crs_obj, info = normalize_polygon_to_local(poly)
+        info["source"] = "Koordinatliste"
+        return poly_local, crs_obj, info
+
+    return None, None, {"source": "Manuell rektangeltomt"}
+
+
+def coerce_height_from_properties(properties: Dict[str, Any], default_height_m: float = 9.0) -> float:
+    if not properties:
+        return default_height_m
+    props = {str(k).lower(): v for k, v in properties.items()}
+    direct_keys = ["height_m", "height", "hoyde", "building:height", "gesimshoyde", "max_height", "z", "elevation_m"]
+    level_keys = ["building:levels", "levels", "etasjer", "floors", "stories"]
+    for key in direct_keys:
+        if key in props:
+            value = safe_float(props.get(key), 0.0)
+            if value > 0:
+                return value
+    for key in level_keys:
+        if key in props:
+            value = safe_float(props.get(key), 0.0)
+            if value > 0:
+                return value * DEFAULT_FLOOR_HEIGHT_M
+    return default_height_m
+
+
+def normalize_polygon_for_site(poly: Polygon, site_crs: Optional[CRS]) -> Tuple[Optional[Polygon], Optional[CRS]]:
+    poly = largest_polygon(poly)
+    if poly is None:
+        return None, site_crs
+    if bounds_look_like_lonlat(poly.bounds):
+        if not HAS_PYPROJ:
+            return None, site_crs
+        centroid = poly.centroid
+        src_crs = CRS.from_epsg(4326)
+        dst_crs = site_crs or utm_crs_from_lonlat(float(centroid.x), float(centroid.y))
+        return transform_polygon(poly, src_crs, dst_crs), dst_crs
+    return poly, site_crs
+
+
+def load_neighbors_from_geojson(uploaded_geojson: Any, site_polygon: Optional[Polygon], site_crs: Optional[CRS], default_height_m: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    neighbors: List[Dict[str, Any]] = []
+    meta: Dict[str, Any] = {"source": "Ingen nabofil"}
+    if uploaded_geojson is None:
+        return neighbors, meta
+    try:
+        uploaded_geojson.seek(0)
+        raw = uploaded_geojson.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        obj = json.loads(raw.decode("utf-8-sig"))
+        features = extract_geojson_features(obj)
+        for feature in features:
+            geom = feature.get("geometry")
+            if not geom:
+                continue
+            poly = largest_polygon(shape(geom))
+            poly, site_crs = normalize_polygon_for_site(poly, site_crs)
+            if poly is None:
+                continue
+            if site_polygon is not None and poly.distance(site_polygon) > 250.0:
+                continue
+            height_m = coerce_height_from_properties(feature.get("properties", {}), default_height_m=default_height_m)
+            neighbors.append(
+                {
+                    "polygon": poly.buffer(0),
+                    "height_m": float(height_m),
+                    "source": "GeoJSON",
+                    "distance_m": float(poly.distance(site_polygon)) if site_polygon is not None else 0.0,
+                }
+            )
+        meta = {"source": f"GeoJSON: {getattr(uploaded_geojson, 'name', 'naboer')}", "count": len(neighbors)}
+    except Exception as exc:
+        meta = {"source": "GeoJSON", "error": str(exc), "count": len(neighbors)}
+    return neighbors, meta
+
+
+def fetch_osm_neighbors(lat: Optional[float], lon: Optional[float], site_polygon: Optional[Polygon], site_crs: Optional[CRS], radius_m: float, default_height_m: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if lat is None or lon is None:
+        return [], {"source": "OSM", "error": "Mangler lat/lon for OSM-oppslag"}
+    if not HAS_PYPROJ:
+        return [], {"source": "OSM", "error": "pyproj mangler i deployen; OSM-nabohenting krever pyproj for sikker koordinattransformasjon."}
+    query = (
+        f'[out:json][timeout:25];'
+        f'(way["building"](around:{int(radius_m)},{lat},{lon});'
+        f'relation["building"](around:{int(radius_m)},{lat},{lon}););'
+        'out geom tags;'
+    )
+    try:
+        resp = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data=query.encode("utf-8"),
+            headers={"User-Agent": "BuiltlyFeasibility/1.0"},
+            timeout=20,
         )
-        submitted = st.form_submit_button(copy["button"], use_container_width=True)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        return [], {"source": "OSM", "error": str(exc)}
 
-    if submitted:
-        if verify_site_access_code(code):
-            st.session_state.site_access_granted = True
-            st.session_state.site_access_error = ""
-            token = _generate_session_token(code)
-            params = get_query_params_dict()
-            params.pop("gate", None)
-            params["s"] = token
-            set_query_params_dict(params)
-            dest_route = page_route(dest_key)
-            if dest_route:
-                st.switch_page(PAGES.get(dest_key, dest_route))
-            else:
-                st.rerun()
+    neighbors: List[Dict[str, Any]] = []
+    dst_crs = site_crs or utm_crs_from_lonlat(lon, lat)
+    transformer = Transformer.from_crs(CRS.from_epsg(4326), dst_crs, always_xy=True)
+    for element in payload.get("elements", []):
+        geometry = element.get("geometry") or []
+        if len(geometry) < 3:
+            continue
+        try:
+            coords = [transformer.transform(float(node["lon"]), float(node["lat"])) for node in geometry]
+            if coords[0] != coords[-1]:
+                coords.append(coords[0])
+            poly = largest_polygon(Polygon(coords).buffer(0))
+            if poly is None:
+                continue
+            if site_polygon is not None and poly.distance(site_polygon) > radius_m + 20.0:
+                continue
+            tags = element.get("tags", {}) or {}
+            height_m = coerce_height_from_properties(tags, default_height_m=default_height_m)
+            neighbors.append(
+                {
+                    "polygon": poly,
+                    "height_m": float(height_m),
+                    "source": "OSM",
+                    "distance_m": float(poly.distance(site_polygon)) if site_polygon is not None else 0.0,
+                }
+            )
+        except Exception:
+            continue
+    return neighbors, {"source": "OSM Overpass", "count": len(neighbors)}
+
+
+def terrain_points_from_csv_bytes(data: bytes, site_crs: Optional[CRS]) -> np.ndarray:
+    df = pd.read_csv(io.BytesIO(data), sep=None, engine="python")
+    cols = {str(col).lower(): col for col in df.columns}
+
+    x_col = next((cols[key] for key in ["x", "east", "easting", "ost", "utm_x", "lon", "longitude"] if key in cols), None)
+    y_col = next((cols[key] for key in ["y", "north", "northing", "nord", "utm_y", "lat", "latitude"] if key in cols), None)
+    z_col = next((cols[key] for key in ["z", "elev", "elevation", "kote", "height", "h"] if key in cols), None)
+    if x_col is None or y_col is None or z_col is None:
+        raise ValueError("Fant ikke x/y/z-kolonner i terrengfilen.")
+
+    x = df[x_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
+    y = df[y_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
+    z = df[z_col].apply(lambda v: safe_float(v, np.nan)).to_numpy(dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    x, y, z = x[mask], y[mask], z[mask]
+    if len(x) < 3:
+        raise ValueError("Terrengfilen trenger minst 3 gyldige punkter.")
+
+    if np.nanmax(np.abs(x)) <= 180 and np.nanmax(np.abs(y)) <= 90:
+        if not HAS_PYPROJ:
+            raise ValueError("Terreng i lon/lat krever pyproj. Last opp UTM/EPSG:25833 eller installer pyproj.")
+        if site_crs is None:
+            site_crs = utm_crs_from_lonlat(float(np.nanmean(x)), float(np.nanmean(y)))
+        transformer = Transformer.from_crs(CRS.from_epsg(4326), site_crs, always_xy=True)
+        x, y = transformer.transform(x.tolist(), y.tolist())
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+    return np.column_stack([x, y, z])
+
+
+def load_terrain_input(uploaded_terrain: Any, site_polygon: Optional[Polygon], site_crs: Optional[CRS]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    if uploaded_terrain is None:
+        return None, {"source": "Ingen terrengfil"}
+    try:
+        uploaded_terrain.seek(0)
+        raw = uploaded_terrain.read()
+        suffix = Path(getattr(uploaded_terrain, "name", "terrain")).suffix.lower()
+        if suffix in {".csv", ".txt"}:
+            points = terrain_points_from_csv_bytes(raw, site_crs)
         else:
-            st.error(copy["error_invalid"])
-            bump_site_access_nonce()
-            st.rerun()
+            raise ValueError("Støtter foreløpig kun CSV/TXT for terreng.")
+
+        x = points[:, 0]
+        y = points[:, 1]
+        z = points[:, 2]
+        A = np.column_stack([x, y, np.ones(len(x))])
+        coeff, *_ = np.linalg.lstsq(A, z, rcond=None)
+        a, b, c = [float(v) for v in coeff]
+        z_pred = A @ coeff
+        rmse = float(np.sqrt(np.mean((z - z_pred) ** 2)))
+        terrain = {
+            "a": a,
+            "b": b,
+            "c": c,
+            "min_elev_m": float(np.min(z)),
+            "max_elev_m": float(np.max(z)),
+            "relief_m": float(np.max(z) - np.min(z)),
+            "slope_pct": float(np.sqrt(a ** 2 + b ** 2) * 100.0),
+            "grade_ew_pct": float(a * 100.0),
+            "grade_ns_pct": float(b * 100.0),
+            "rmse_m": rmse,
+            "point_count": int(len(points)),
+            "source": getattr(uploaded_terrain, "name", "terreng"),
+        }
+        return terrain, {"source": terrain["source"], "point_count": int(len(points))}
+    except Exception as exc:
+        return None, {"source": "Terreng", "error": str(exc)}
 
 
-# -------------------------------------------------
-# 5b) SUBSCRIPTION TIERS & USER AUTH
-# -------------------------------------------------
+def terrain_elevation_at(x: float, y: float, terrain: Optional[Dict[str, Any]]) -> float:
+    if not terrain:
+        return 0.0
+    return float(terrain["a"] * x + terrain["b"] * y + terrain["c"])
 
-SUBSCRIPTION_PLANS_LOCALIZED = {
-    "🇳🇴 Norsk": {
-        "modul": {
-            "name": "Modul", "price_label": "5 000 kr/modul/mnd",
-            "price_detail": "+ 15 000–40 000 kr per rapport",
-            "features": ["Tilgang til enkeltmoduler", "AI-genererte rapporter (Nivå 1 — Auto)", "30 dagers rapportlagring", "E-poststøtte"],
-            "badge": "STARTER",
-        },
-        "team": {
-            "name": "Team", "price_label": "Fra 12 000 kr/mnd",
-            "price_detail": "Volumrabatter tilgjengelig",
-            "features": ["Alle moduler inkludert", "Nivå 1 & 2 rapporter (Auto + Reviewed)", "30 dagers rapportlagring", "Flerbrukertilgang", "Prioritert støtte"],
-            "badge": "POPULÆR",
-        },
-        "enterprise": {
-            "name": "Enterprise", "price_label": "50 000–200 000 kr/mnd",
-            "price_detail": "SSO, SLA, dedikert kontakt",
-            "features": ["Alle moduler + Nivå 3 (Attestert)", "Ubegrenset rapportlagring", "Portefølje-API for banker", "White-label muligheter", "Dedikert rådgiver", "SSO / SAML"],
-            "badge": "ENTERPRISE",
-        },
-    },
-    "_default": {
-        "modul": {
-            "name": "Module", "price_label": "$500/module/mo",
-            "price_detail": "+ $1,500–4,000 per report",
-            "features": ["Access to individual modules", "AI-generated reports (Level 1 — Auto)", "30-day report storage", "Email support"],
-            "badge": "STARTER",
-        },
-        "team": {
-            "name": "Team", "price_label": "From $1,200/mo",
-            "price_detail": "Volume discounts available",
-            "features": ["All modules included", "Level 1 & 2 reports (Auto + Reviewed)", "30-day report storage", "Multi-user access", "Priority support"],
-            "badge": "POPULAR",
-        },
-        "enterprise": {
-            "name": "Enterprise", "price_label": "$5,000–20,000/mo",
-            "price_detail": "SSO, SLA, dedicated contact",
-            "features": ["All modules + Level 3 (Attested)", "Unlimited report storage", "Portfolio API for banks", "White-label options", "Dedicated advisor", "SSO / SAML"],
-            "badge": "ENTERPRISE",
-        },
-    },
+
+def terrain_slope_along_azimuth(terrain: Optional[Dict[str, Any]], azimuth_deg: float) -> float:
+    if not terrain:
+        return 0.0
+    ux = math.sin(math.radians(azimuth_deg))
+    uy = math.cos(math.radians(azimuth_deg))
+    return float((terrain["a"] * ux) + (terrain["b"] * uy))
+
+
+def minimum_rotated_dims(poly: Polygon) -> Tuple[float, float, float]:
+    rect = poly.minimum_rotated_rectangle
+    coords = list(rect.exterior.coords)[:4]
+    edges = []
+    for i in range(4):
+        x1, y1 = coords[i]
+        x2, y2 = coords[(i + 1) % 4]
+        dist = math.hypot(x2 - x1, y2 - y1)
+        angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        edges.append((dist, angle))
+    edges.sort(key=lambda item: item[0], reverse=True)
+    width = edges[0][0]
+    depth = edges[1][0] if len(edges) > 1 else edges[0][0]
+    angle = edges[0][1]
+    return float(width), float(depth), float(angle)
+
+
+def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygon], polygon_setback_m: float, neighbors: Optional[List[Dict[str, Any]]] = None, terrain: Optional[Dict[str, Any]] = None, polygon_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    neighbors = neighbors or []
+    polygon_meta = polygon_meta or {}
+    if site_polygon_input is None:
+        site_polygon = box(0.0, 0.0, site.site_width_m, site.site_depth_m)
+        buildable_polygon = box(
+            max(0.0, site.side_setback_m),
+            max(0.0, site.front_setback_m),
+            max(site.side_setback_m + 8.0, site.site_width_m - site.side_setback_m),
+            max(site.front_setback_m + 8.0, site.site_depth_m - site.rear_setback_m),
+        ).intersection(site_polygon)
+        source = "Rektangulert fallback"
+    else:
+        # Bruk hele polygonen — unary_union samler alle deler i stedet for å kaste bort teiger
+        if hasattr(site_polygon_input, 'geoms'):
+            site_polygon = unary_union(list(site_polygon_input.geoms)).buffer(0)
+        else:
+            site_polygon = site_polygon_input.buffer(0) if site_polygon_input is not None else None
+        if site_polygon is None or site_polygon.is_empty:
+            site_polygon = largest_polygon(site_polygon_input)
+        source = polygon_meta.get("source", "Tomtepolygon")
+
+        # ADAPTIV BUFFER: reduser buffer hvis den spiser for mye av smal dimensjon
+        major, minor, _ = minimum_rotated_dims(site_polygon)
+        # v16.1: Effektiv buffer er maksverdien av polygonbuffer OG byggegrensene
+        # (front/bak/side). Tidligere brukte vi bare polygonbuffer, som ga buggen at
+        # når polygonbuffer=0 ble hele tomten brukt som byggefelt — byggegrensene
+        # ble da aldri applisert på site_polygon.
+        max_legal_setback = max(
+            float(getattr(site, "front_setback_m", 0.0) or 0.0),
+            float(getattr(site, "rear_setback_m", 0.0) or 0.0),
+            float(getattr(site, "side_setback_m", 0.0) or 0.0),
+        )
+        effective_setback = max(float(polygon_setback_m), max_legal_setback)
+        if minor > 0 and effective_setback > 0:
+            # Buffer paa begge sider = 2x setback. Behold maks 35% av smal side.
+            max_allowed = minor * 0.175  # 17.5% per side = 35% totalt
+            effective_setback = min(effective_setback, max(1.5, max_allowed))
+
+        buildable_polygon = site_polygon.buffer(-effective_setback) if effective_setback > 0 else site_polygon
+        # Behold hele geometrien, ikke bare største del
+        if hasattr(buildable_polygon, 'geoms'):
+            buildable_polygon = unary_union(list(buildable_polygon.geoms)).buffer(0)
+        if buildable_polygon is None or buildable_polygon.is_empty or buildable_polygon.area < 20.0:
+            # Progressiv fallback: proev halvert buffer, deretter 1.5m, deretter 0
+            for fallback_buf in [effective_setback * 0.5, 1.5, 0.5, 0.0]:
+                buildable_polygon = largest_polygon(site_polygon.buffer(-fallback_buf))
+                if buildable_polygon is not None and not buildable_polygon.is_empty and buildable_polygon.area >= 20.0:
+                    break
+            if buildable_polygon is None or buildable_polygon.is_empty:
+                buildable_polygon = site_polygon
+
+    site_width, site_depth, orientation_deg = minimum_rotated_dims(site_polygon)
+    buildable_area = float(buildable_polygon.area) if buildable_polygon is not None else 0.0
+    site_area = float(site_polygon.area)
+    filtered_neighbors = []
+    for neighbor in neighbors:
+        poly = largest_polygon(neighbor.get("polygon"))
+        if poly is None:
+            continue
+        if poly.intersects(site_polygon):
+            continue
+        if poly.distance(site_polygon) > 250.0:
+            continue
+        filtered_neighbors.append(
+            {
+                **neighbor,
+                "polygon": poly,
+                "distance_m": float(poly.distance(site_polygon)),
+            }
+        )
+    filtered_neighbors.sort(key=lambda item: item.get("distance_m", 0.0))
+
+    return {
+        "site_polygon": site_polygon,
+        "buildable_polygon": buildable_polygon,
+        "site_area_m2": site_area,
+        "site_width_m": site_width,
+        "site_depth_m": site_depth,
+        "buildable_area_m2": buildable_area,
+        "orientation_deg": orientation_deg,
+        "neighbors": filtered_neighbors,
+        "terrain": terrain,
+        "source": source,
+        "polygon_meta": polygon_meta,
+    }
+
+
+def rects_to_polygon(rects: List[Dict[str, float]]) -> Polygon:
+    polys = [box(r["x"], r["y"], r["x"] + r["w"], r["y"] + r["h"]) for r in rects]
+    return unary_union(polys).buffer(0)
+
+
+# --- POLYGON-NATIVE FOTAVTRYKK-MOTOR (erstatter gammel bounding-box-logikk) ---
+
+def _analyze_polygon(poly: Polygon) -> Dict[str, Any]:
+    """Analyser tomtens form: aspektratio, orientering, kompakthet."""
+    major, minor, angle = minimum_rotated_dims(poly)
+    aspect = major / max(minor, 1.0)
+    # Kompakthet: 1.0 = sirkel, lavere = mer irregulaer
+    compactness = (4.0 * math.pi * poly.area) / max(poly.length ** 2, 1.0)
+    # Rektangularitet: hvor mye av bounding-boksen fylles
+    rect_area = major * minor
+    rectangularity = poly.area / max(rect_area, 1.0)
+    return {
+        "major_m": major,
+        "minor_m": minor,
+        "orientation_deg": angle,
+        "aspect_ratio": aspect,
+        "compactness": compactness,
+        "rectangularity": rectangularity,
+        "area_m2": poly.area,
+        "is_elongated": aspect > 2.2,
+        "is_very_elongated": aspect > 3.5,
+        "is_narrow": minor < 18.0,
+        "is_compact": aspect < 1.8 and compactness > 0.6,
+    }
+
+
+def _find_inscribed_rect(poly: Polygon, target_depth_m: float, angle_deg: float,
+                         max_width_m: float = 200.0) -> Optional[Polygon]:
+    """
+    Finn det stoerste rektangelet med gitt dybde som passer inne i polygonet
+    orientert langs angle_deg. Bruker binaert soek paa bredde.
+    """
+    rad = math.radians(angle_deg)
+    cx, cy = poly.centroid.x, poly.centroid.y
+
+    # Soek langs hovedaksen for beste plassering
+    best_rect = None
+    best_area = 0.0
+
+    # Proev forskjellige posisjoner langs aksen
+    for offset_frac in [0.0, -0.1, 0.1, -0.2, 0.2, -0.3, 0.3]:
+        ox = cx + offset_frac * poly.length * 0.15 * math.cos(rad)
+        oy = cy + offset_frac * poly.length * 0.15 * math.sin(rad)
+
+        # Binaert soek paa bredde
+        lo, hi = 8.0, max_width_m
+        best_w = 0.0
+        for _ in range(20):
+            mid = (lo + hi) / 2.0
+            hw, hd = mid / 2.0, target_depth_m / 2.0
+            corners = [
+                (ox + hw * math.cos(rad) - hd * math.sin(rad),
+                 oy + hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) - hd * math.sin(rad),
+                 oy - hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) + hd * math.sin(rad),
+                 oy - hw * math.sin(rad) - hd * math.cos(rad)),
+                (ox + hw * math.cos(rad) + hd * math.sin(rad),
+                 oy + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            candidate = Polygon(corners)
+            if poly.contains(candidate):
+                best_w = mid
+                lo = mid
+            else:
+                hi = mid
+
+        if best_w >= 8.0:
+            hw, hd = best_w / 2.0, target_depth_m / 2.0
+            corners = [
+                (ox + hw * math.cos(rad) - hd * math.sin(rad),
+                 oy + hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) - hd * math.sin(rad),
+                 oy - hw * math.sin(rad) + hd * math.cos(rad)),
+                (ox - hw * math.cos(rad) + hd * math.sin(rad),
+                 oy - hw * math.sin(rad) - hd * math.cos(rad)),
+                (ox + hw * math.cos(rad) + hd * math.sin(rad),
+                 oy + hw * math.sin(rad) - hd * math.cos(rad)),
+            ]
+            rect = Polygon(corners)
+            if rect.area > best_area:
+                best_rect = rect
+                best_area = rect.area
+
+    return best_rect
+
+
+def _make_oriented_rect(cx: float, cy: float, width: float, depth: float, angle_rad: float) -> Polygon:
+    """Lag et rektangel sentrert paa (cx, cy) med gitt orientering."""
+    hw, hd = width / 2.0, depth / 2.0
+    cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+    corners = [
+        (cx + hw * cos_a - hd * sin_a, cy + hw * sin_a + hd * cos_a),
+        (cx - hw * cos_a - hd * sin_a, cy - hw * sin_a + hd * cos_a),
+        (cx - hw * cos_a + hd * sin_a, cy - hw * sin_a - hd * cos_a),
+        (cx + hw * cos_a + hd * sin_a, cy + hw * sin_a - hd * cos_a),
+    ]
+    return Polygon(corners)
+
+
+def _place_grid_buildings(
+    poly: Polygon,
+    building_width_m: float,
+    building_depth_m: float,
+    angle_deg: float,
+    spacing_along: float = 18.0,
+    spacing_across: float = 22.0,
+    max_buildings: int = 12,
+    max_footprint_m2: float = 99999.0,
+) -> List[Polygon]:
+    """
+    Plasser bygninger innenfor polygonet. Sampler kandidatpunkter direkte
+    innenfor polygonet og plasserer orienterte rektangler ved hvert punkt.
+    """
+    rad = math.radians(angle_deg)
+    bld_area = building_width_m * building_depth_m
+
+    # Sample kandidatpunkter — bruk TETT grid for å finne mange kandidater
+    # min_dist-sjekken under håndterer faktisk avstand mellom bygninger
+    sample_spacing = max(6.0, min(building_width_m, building_depth_m) * 0.8)
+    pts = sample_points_in_polygon(poly, spacing_m=sample_spacing, max_points=max_buildings * 8)
+
+    if not pts:
+        pts = [poly.representative_point()]
+
+    buildings: List[Polygon] = []
+    total_area = 0.0
+    used_centers: List[Tuple[float, float]] = []
+    min_dist = min(building_width_m, building_depth_m) + min(spacing_along, spacing_across)  # Gap mellom nærmeste kanter
+
+    for pt in pts:
+        if len(buildings) >= max_buildings or total_area >= max_footprint_m2:
+            break
+
+        bx, by = pt.x, pt.y
+
+        # Sjekk avstand fra allerede plasserte bygninger
+        too_close = False
+        for cx, cy in used_centers:
+            if math.hypot(bx - cx, by - cy) < min_dist:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        candidate = _make_oriented_rect(bx, by, building_width_m, building_depth_m, rad)
+
+        if poly.contains(candidate):
+            buildings.append(candidate)
+            total_area += candidate.area
+            used_centers.append((bx, by))
+        else:
+            try:
+                clipped = candidate.intersection(poly).buffer(0)
+                # Senket fra 40% til 30% for å beholde flere bygg på irregulære polygoner
+                if not clipped.is_empty and clipped.area >= bld_area * 0.30 and clipped.area >= 25:
+                    buildings.append(clipped)
+                    total_area += clipped.area
+                    used_centers.append((bx, by))
+            except Exception:
+                pass
+
+    return buildings
+
+
+def _make_courtyard_block(
+    poly: Polygon,
+    outer_side: float,
+    ring_depth: float,
+    angle_deg: float,
+    cx: float,
+    cy: float,
+) -> Optional[Polygon]:
+    """Lag en karre-blokk med gaardrom paa angitt posisjon."""
+    rad = math.radians(angle_deg)
+    outer = _make_oriented_rect(cx, cy, outer_side, outer_side, rad)
+    if not poly.contains(outer):
+        # Skalere ned til det passer
+        lo_s, hi_s = 0.5, 1.0
+        best_s = 0.0
+        for _ in range(14):
+            mid = (lo_s + hi_s) / 2.0
+            scaled = affinity.scale(outer, xfact=mid, yfact=mid, origin=(cx, cy))
+            if poly.contains(scaled):
+                best_s = mid
+                lo_s = mid
+            else:
+                hi_s = mid
+        if best_s < 0.5:
+            return None
+        outer = affinity.scale(outer, xfact=best_s, yfact=best_s, origin=(cx, cy))
+
+    # Lag gaardrom (indre rektangel)
+    inner_inset = min(ring_depth, math.sqrt(outer.area) * 0.25)
+    inner = outer.buffer(-inner_inset)
+    if inner is not None and not inner.is_empty and inner.area > 30:
+        result = outer.difference(inner).buffer(0)
+        if result.area > 50:
+            return result
+    return outer  # Fallback: solid blokk
+
+
+# --- REALISTISKE BYGNINGSDIMENSJONER ---
+TYPOLOGY_LIMITS = {
+    "Lamell":        {"bld_w": 50.0, "bld_d": 14.0, "sp_along": 18.0, "sp_across": 24.0, "max_n": 12},
+    "Punkthus":      {"bld_w": 22.0, "bld_d": 21.0, "sp_along": 18.0, "sp_across": 18.0, "max_n": 8},
+    "Rekke":         {"bld_w": 50.0, "bld_d": 14.0, "sp_along": 18.0, "sp_across": 24.0, "max_n": 12},
+    "Tun":           {"bld_w": 42.0, "bld_d": 11.0, "sp_along": 14.0, "sp_across": 16.0, "max_n": 6},
+    "Karré":         {"bld_w": 45.0, "bld_d": 45.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 4, "ring_d": 11.0},
+    "Tårn":          {"bld_w": 18.0, "bld_d": 18.0, "sp_along": 28.0, "sp_across": 28.0, "max_n": 1},
+    "Podium + Tårn": {"bld_w": 45.0, "bld_d": 22.0, "sp_along": 22.0, "sp_across": 22.0, "max_n": 3},
 }
 
 
-def get_subscription_plans(lang_key: str = "") -> dict:
-    lk = lang_key or st.session_state.get("app_lang", "")
-    return SUBSCRIPTION_PLANS_LOCALIZED.get(lk, SUBSCRIPTION_PLANS_LOCALIZED["_default"])
+def create_typology_footprint(buildable_polygon: Polygon, typology: str, target_footprint_m2: float) -> Tuple[Polygon, Dict[str, Any]]:
+    """
+    REALISTISK fotavtrykk-motor med 2D-grid-plassering.
+
+    Fordeler bygninger over hele tomten i et rutenett — ikke bare langs en linje.
+    Karré-typologien lager ekte kvartaler med gaardrom.
+    """
+    shape_info = _analyze_polygon(buildable_polygon)
+    major = shape_info['major_m']
+    minor = shape_info['minor_m']
+    angle = shape_info['orientation_deg']
+    area = shape_info['area_m2']
+
+    # Originalt target (før cap) brukes til å dimensjonere selve bygningene.
+    # Cappet target brukes kun som øvre grense for plasseringen i grid.
+    original_target_m2 = target_footprint_m2
+
+    # Ved ambisiøs %-BRA-utnyttelse tillater vi target å overskride buildable_polygon
+    # (clip-logikken i _place_grid_buildings håndterer bygg som delvis går utenfor).
+    # Hvis target er merkbart større enn area, indikerer det at %-BRA er driver
+    # og motoren skal få forsøke å fylle så mye som mulig.
+    if target_footprint_m2 > area * 0.92:
+        # Behold opp til 130% — lar oss plassere fler/større bygg langs kantene
+        target_footprint_m2 = min(target_footprint_m2, area * 1.30)
+    else:
+        target_footprint_m2 = min(target_footprint_m2, area * 0.92)
+    limits = TYPOLOGY_LIMITS.get(typology, TYPOLOGY_LIMITS["Lamell"])
+
+    placement_info = {
+        'fit_scale': 1.0, 'containment_ratio': 1.0,
+        'footprint_width_m': 0.0, 'footprint_depth_m': 0.0,
+        'orientation_deg': round(angle, 1),
+        'polygon_shape': 'elongated' if shape_info['is_elongated'] else 'compact',
+        'n_buildings': 1,
+    }
+
+    footprint: Any = None
+
+    # Tilpass bygningsdybde — men behold typologisk karakter
+    # Reduser spacing ved høy utnyttelse — gradert etter ORIGINAL target
+    # (ikke capped versjon, ellers ville vi ikke oppdaget ambisiøse mål)
+    util_ratio = original_target_m2 / max(area, 1.0)
+    if util_ratio > 0.55:
+        sp_factor = 0.35  # Veldig høy utnyttelse: aggressiv reduksjon
+    elif util_ratio > 0.4:
+        sp_factor = 0.5   # Høy utnyttelse
+    else:
+        sp_factor = 1.0   # Normal
+    high_utilization = util_ratio > 0.4
+
+    if typology == "Punkthus":
+        # Punkthus: tilnærmet kvadratisk, dimensjonert fra ORIGINAL target
+        desired_count = clamp(round(original_target_m2 / 462.0), 2, 6)  # 400m²/bygg er ideelt
+        ideal_area = original_target_m2 / desired_count
+        ideal_side = math.sqrt(ideal_area)
+        bld_w = clamp(ideal_side, 14.0, 22.0)
+        bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
+    elif typology == "Tårn":
+        # Tårn: kompakt fotavtrykk, dimensjonert fra ORIGINAL target (1 bygg)
+        ideal_side = math.sqrt(original_target_m2)
+        bld_w = clamp(ideal_side, 14.0, 22.0)
+        bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
+    elif typology == "Rekke":
+        # Fallback til Lamell-oppførsel
+        bld_w = min(limits.get("bld_w", 50.0), major * 0.85)
+        bld_d = min(14.0, minor * 0.40)
+        bld_w = max(20.0, bld_w)
+        bld_d = max(11.0, bld_d)
+    elif typology == "Karré":
+        bld_w = min(limits["bld_w"], minor * 0.8)
+        bld_d = bld_w  # Kvadratisk ytre
+        bld_w = max(20.0, bld_w)
+        bld_d = max(20.0, bld_d)
+    elif typology == "Tun":
+        bld_w = min(limits["bld_w"], major * 0.55)
+        bld_d = min(12.0, minor * 0.40)
+        bld_w = max(15.0, bld_w)
+        bld_d = max(8.0, bld_d)
+    elif typology == "Lamell":
+        # Lamell: lang og grunn, dimensjonert for å nå ORIGINAL target
+        # (ikke capped) slik at lamellene blir lange nok til å nå ambisiøst %-BRA
+        bld_d = clamp(minor * 0.25, 11.0, 14.0)  # Dybde: alltid 11-14m
+        desired_bars = clamp(math.ceil(original_target_m2 / (major * 0.6 * bld_d)), 2, 4)
+        bld_w = clamp(original_target_m2 / (desired_bars * bld_d), 18.0, 75.0)
+        bld_w = min(bld_w, major * 0.92)  # Aldri bredere enn tomten (litt løsere: 92%)
+    else:
+        # Podium+Tårn: standard
+        bld_w = min(limits["bld_w"], major * 0.7)
+        bld_d = min(limits["bld_d"], minor * 0.45)
+        bld_w = max(12.0, bld_w)
+        bld_d = max(10.0, bld_d)
+
+    # Juster spacing for høy utnyttelse
+    effective_sp_along = limits["sp_along"] * sp_factor
+    effective_sp_across = limits["sp_across"] * sp_factor
+
+    # Punkthus: ALDRI reduser spacing under bygningsbredden × 0.7 — de MÅ se separate ut
+    if typology == "Punkthus":
+        min_sp = max(12.0, bld_w * 0.65)
+        effective_sp_along = max(min_sp, effective_sp_along)
+        effective_sp_across = max(min_sp, effective_sp_across)
+
+    if typology == 'Karré':
+        # Ekte kvartaler med gaardrom
+        ring_d = limits.get("ring_d", 11.0)
+        karre_side = min(bld_w, bld_d)
+        single_area = karre_side * karre_side - max(0, (karre_side - 2*ring_d))**2
+        n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+
+        # Plasser kvartaler i grid
+        step = karre_side + effective_sp_along
+        n_along = max(1, int(math.sqrt(n_needed) + 0.5))
+        n_across = max(1, math.ceil(n_needed / n_along))
+
+        rad = math.radians(angle)
+        perp_rad = rad + math.pi / 2.0
+        pcx, pcy = buildable_polygon.centroid.x, buildable_polygon.centroid.y
+        span_a = (n_along - 1) * step
+        span_c = (n_across - 1) * step
+
+        blocks: List[Polygon] = []
+        for row in range(n_along):
+            for col in range(n_across):
+                if len(blocks) >= n_needed:
+                    break
+                oa = -span_a / 2.0 + row * step
+                oc = -span_c / 2.0 + col * step
+                bx = pcx + oa * math.cos(perp_rad) + oc * math.cos(rad)
+                by = pcy + oa * math.sin(perp_rad) + oc * math.sin(rad)
+                block = _make_courtyard_block(buildable_polygon, karre_side, ring_d, angle, bx, by)
+                if block is not None and block.area > 50:
+                    blocks.append(block)
+
+        if blocks:
+            footprint = unary_union(blocks).buffer(0)
+            placement_info['n_buildings'] = len(blocks)
+            placement_info['courtyard_count'] = len(blocks)
+
+    elif typology == 'Tun':
+        # L/U-form: hoveddel + vinkelrette floeyer
+        wing_d = bld_d
+        main_w = min(bld_w, target_footprint_m2 * 0.40 / max(wing_d, 1.0))
+        main = _find_inscribed_rect(buildable_polygon, wing_d, angle, max_width_m=main_w)
+        if main is not None:
+            remaining_poly = buildable_polygon.difference(main.buffer(3.0))
+            wings: List[Polygon] = []
+            for wing_angle in [angle + 90, angle - 90]:
+                w_w = min(bld_w * 0.7, target_footprint_m2 * 0.22 / max(wing_d, 1.0))
+                wr = _find_inscribed_rect(remaining_poly, wing_d, wing_angle, max_width_m=w_w)
+                if wr is not None and wr.area > 40:
+                    wings.append(wr)
+                    remaining_poly = remaining_poly.difference(wr.buffer(2.0))
+            footprint = unary_union([main] + wings).buffer(0) if wings else main
+            placement_info['n_buildings'] = 1 + len(wings)
+
+    elif typology == 'Podium + Tårn':
+        # Podium (stort, lavt) + taarn plassert paa toppen
+        podium_w = min(bld_w, target_footprint_m2 * 0.5 / max(bld_d, 1.0))
+        podium = _find_inscribed_rect(buildable_polygon, bld_d, angle, max_width_m=podium_w)
+        if podium is not None:
+            tower_side = min(18.0, math.sqrt(podium.area) * 0.35)
+            pcx2, pcy2 = podium.centroid.x, podium.centroid.y
+            tower = _make_oriented_rect(pcx2, pcy2, tower_side, tower_side, math.radians(angle))
+            tower_clipped = tower.intersection(podium).buffer(0)
+            if not tower_clipped.is_empty and tower_clipped.area > 60:
+                footprint = unary_union([podium, tower_clipped]).buffer(0)
+                placement_info['n_buildings'] = 2
+            else:
+                footprint = podium
+
+    else:
+        # Lamell, Punkthus, Rekke, Tårn: 2D-grid plassering
+        single_area = bld_w * bld_d
+        n_needed = max(1, min(limits["max_n"], math.ceil(target_footprint_m2 / max(single_area, 1.0))))
+
+        # Minimum antall bygg per typologi for visuell differensiering
+        min_buildings = {"Punkthus": 4, "Tårn": 1, "Lamell": 2, "Rekke": 1}.get(typology, 1)
+        # Tårn: ALDRI mer enn 1 bygning — hele poenget er høyde
+        if typology == "Tårn":
+            n_needed = 1
+        else:
+            n_needed = max(min_buildings, n_needed)
+
+        # For irregulære tomter: forsøk FLERE posisjoner enn n_needed
+        # fordi mange vil bli clipset bort. max_footprint_m2 stopper når target er nådd.
+        shape_rect = _analyze_polygon(buildable_polygon).get('rectangularity', 1.0)
+        clip_factor = max(1.0, 1.0 / max(shape_rect, 0.15))  # 1.0 for rekt., 6.7 for L-form
+        max_attempts = min(limits["max_n"], max(n_needed, int(n_needed * clip_factor)))
+
+        buildings = _place_grid_buildings(
+            buildable_polygon, bld_w, bld_d, angle,
+            spacing_along=effective_sp_along,
+            spacing_across=effective_sp_across,
+            max_buildings=max_attempts,
+            max_footprint_m2=original_target_m2,
+        )
+        if buildings:
+            footprint = unary_union(buildings).buffer(0)
+            placement_info['n_buildings'] = len(buildings)
+
+    # Fallback
+    if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
+        for d_try in [14.0, 12.0, 10.0, 8.0]:
+            if d_try > minor * 0.85:
+                continue
+            footprint = _find_inscribed_rect(buildable_polygon, d_try, angle, max_width_m=min(bld_w, major * 0.6))
+            if footprint is not None and not footprint.is_empty and float(getattr(footprint, 'area', 0.0)) >= 30:
+                break
+
+    if footprint is None or footprint.is_empty or float(getattr(footprint, 'area', 0.0)) < 30:
+        sf = math.sqrt(min(target_footprint_m2, area * 0.4) / max(area, 1.0))
+        footprint = affinity.scale(buildable_polygon, xfact=sf, yfact=sf, origin=buildable_polygon.centroid).buffer(0)
+
+    fp_parts = split_geometry_to_polygons(footprint)
+    if fp_parts:
+        fp_major = max(minimum_rotated_dims(p)[0] for p in fp_parts)
+        fp_minor = max(minimum_rotated_dims(p)[1] for p in fp_parts)
+    else:
+        fp_major, fp_minor, _ = minimum_rotated_dims(largest_polygon(footprint) or buildable_polygon)
+    placement_info['footprint_width_m'] = round(float(fp_major), 1)
+    placement_info['footprint_depth_m'] = round(float(fp_minor), 1)
+    placement_info['fit_scale'] = round(float(getattr(footprint, 'area', 0.0) / max(target_footprint_m2, 1.0)), 3)
+    placement_info['containment_ratio'] = round(float(footprint.intersection(buildable_polygon).area / max(getattr(footprint, 'area', 1.0), 1.0)), 3)
+    placement_info['component_count'] = len(fp_parts)
+
+    return footprint.buffer(0), placement_info
 
 
-# Keep backward compat reference
-SUBSCRIPTION_PLANS = SUBSCRIPTION_PLANS_LOCALIZED["🇳🇴 Norsk"]
 
-REPORT_RETENTION_DAYS = 30  # Reports auto-deleted after 30 days
-REVISION_NOTICE = (
-    "Eventuelle revideringer av rapport som følge av endring av forutsetninger "
-    "fra kundens ståsted må avtales direkte med rådgiver tilknyttet Builtly Engineering AS."
-)
+def sample_points_in_polygon(poly: Polygon, spacing_m: float = 6.0, max_points: int = 180) -> List[Point]:
+    poly = largest_polygon(poly) or poly
+    if poly is None or poly.is_empty:
+        return []
+    minx, miny, maxx, maxy = poly.bounds
+    points: List[Point] = []
+    x = minx + (spacing_m / 2.0)
+    while x < maxx:
+        y = miny + (spacing_m / 2.0)
+        while y < maxy:
+            p = Point(x, y)
+            if poly.contains(p):
+                points.append(p)
+            y += spacing_m
+        x += spacing_m
+    if not points:
+        points = [poly.representative_point()]
+    if len(points) > max_points:
+        idx = np.linspace(0, len(points) - 1, max_points).astype(int)
+        points = [points[i] for i in idx]
+    return points
 
-AVAILABLE_COUNTRIES = [
-    ("NO", "Norge (TEK17 / NS-standarder)"),
-    ("SE", "Sverige (BBR / Boverket)"),
-    ("DK", "Danmark (BR18 / SBi)"),
-    ("FI", "Finland (Ympäristöministeriö)"),
-    ("DE", "Deutschland (DIN / EnEV)"),
-    ("GB", "United Kingdom (Building Regs)"),
-    ("NL", "Nederland (Bouwbesluit)"),
-    ("US", "United States (IBC / ASCE)"),
-]
 
-CONTRACT_BINDING_MONTHS = 12
+def solar_azimuth_deg(latitude_deg: float, day_of_year: int, solar_hour: float) -> float:
+    lat = math.radians(latitude_deg)
+    decl = solar_declination_rad(day_of_year)
+    hour_angle = math.radians(15.0 * (solar_hour - 12.0))
+    az = math.degrees(
+        math.atan2(
+            math.sin(hour_angle),
+            (math.cos(hour_angle) * math.sin(lat)) - (math.tan(decl) * math.cos(lat)),
+        )
+    )
+    return (az + 180.0) % 360.0
 
-_AUTH_TEXTS = {
-    "🇳🇴 Norsk": {
-        "gdpr": (
-            "Jeg bekrefter at jeg har lest og aksepterer Builtly Engineering AS sine "
-            "[vilkår for bruk](https://builtly.ai/terms) og "
-            "[personvernerklæring](https://builtly.ai/privacy). "
-            "Builtly behandler personopplysninger i henhold til GDPR / personopplysningsloven. "
-            "Data lagres innenfor EØS og slettes ved oppsigelse av abonnement. "
-            "Du kan når som helst be om innsyn, retting eller sletting av dine data ved å kontakte post@builtly.ai."
-        ),
-        "contract": (
-            "Abonnementet har {months} måneders bindingstid fra aktivering. "
-            "Etter bindingstiden fornyes abonnementet månedlig med 1 måneds oppsigelsestid. "
-            "Priser gjelder per land — tilgang til flere land faktureres separat per land."
-        ),
-        "contract_accept": "Jeg aksepterer kontraktsvilkårene.",
-        "revision": (
-            "Eventuelle revideringer av rapport som følge av endring av forutsetninger "
-            "fra kundens ståsted må avtales direkte med rådgiver tilknyttet Builtly Engineering AS."
-        ),
-        "register_kicker": "OPPRETT KONTO",
-        "register_title": "Kom i gang med Builtly",
-        "register_subtitle": "Opprett bedriftskonto for å få tilgang til AI-drevne prosjekteringsverktøy.",
-        "plans_kicker": "ABONNEMENTER",
-        "plans_title": "Tre nivåer — fra fullt automatisert til attestert",
-        "plans_subtitle": "Alle priser gjelder per land. {months} måneders bindingstid.",
-        "login_kicker": "LOGG INN",
-        "login_title": "Velkommen tilbake",
-        "login_subtitle": "Logg inn for å se dine rapporter og administrere abonnement.",
-        "has_account": "Har du allerede konto? Logg inn",
-        "contact_person": "Kontaktperson",
-        "company_info": "Bedriftsinformasjon",
-        "full_name": "Fullt navn *",
-        "phone": "Telefon",
-        "email": "E-post *",
-        "company_name": "Selskapsnavn *",
-        "org_nr": "Org.nr.",
-        "country_select": "Land for prosjektering *",
-        "password": "Passord *",
-        "confirm_password": "Bekreft passord *",
-        "create_account": "Opprett konto og velg abonnement",
-        "login_btn": "Logg inn",
-        "register_link": "Opprett konto",
-        "no_account": "Har du ikke konto? Opprett konto",
-        "demo_link": "Demo-tilgang",
-        "demo_kicker": "DEMO-TILGANG",
-        "resend_btn": "Send bekreftelseslenke på nytt",
-        "auth_not_installed": "Auth-modul (builtly_auth) er ikke installert. Kontakt administrator.",
-        "fill_email_pw": "Vennligst fyll ut e-post og passord.",
-        "email_confirmed_info": "Etter at du har bekreftet e-posten, kan du logge inn og velge abonnement.",
-        "err_name_required": "Fullt navn er påkrevd.",
-        "err_email_required": "Gyldig e-postadresse er påkrevd.",
-        "err_company_required": "Selskapsnavn er påkrevd.",
-        "err_country_required": "Velg minst ett land.",
-        "err_pw_length": "Passord må være minst 8 tegn.",
-        "err_pw_mismatch": "Passordene stemmer ikke overens.",
-        "err_gdpr_required": "Du må akseptere personvernerklæringen.",
-        "err_terms_required": "Du må akseptere kontraktsvilkårene.",
-        "acct_label": "👤 Konto",
-        "acct_my_page": "Min side",
-        "acct_logout": "Logg ut",
-        "acct_login": "Logg inn",
-        "acct_plans": "Se planer / Opprett konto",
-    },
-    "🇬🇧 English (UK)": {
-        "gdpr": (
-            "I confirm that I have read and accept Builtly Engineering AS "
-            "[terms of service](https://builtly.ai/terms) and "
-            "[privacy policy](https://builtly.ai/privacy). "
-            "Builtly processes personal data in accordance with GDPR. "
-            "Data is stored within the EEA and deleted upon subscription cancellation. "
-            "You may request access, correction, or deletion of your data at any time by contacting post@builtly.ai."
-        ),
-        "contract": (
-            "The subscription has a {months}-month binding period from activation. "
-            "After the binding period, the subscription renews monthly with 1 month notice. "
-            "Prices apply per country — access to multiple countries is billed separately."
-        ),
-        "contract_accept": "I accept the contract terms.",
-        "revision": (
-            "Any report revisions due to changes in client assumptions must be arranged "
-            "directly with an advisor at Builtly Engineering AS."
-        ),
-        "register_kicker": "CREATE ACCOUNT",
-        "register_title": "Get started with Builtly",
-        "register_subtitle": "Create a business account to access AI-powered engineering tools.",
-        "plans_kicker": "SUBSCRIPTIONS",
-        "plans_title": "Three levels — from fully automated to attested",
-        "plans_subtitle": "All prices apply per country. {months}-month commitment.",
-        "login_kicker": "LOG IN",
-        "login_title": "Welcome back",
-        "login_subtitle": "Log in to view your reports and manage your subscription.",
-        "has_account": "Already have an account? Log in",
-        "contact_person": "Contact person",
-        "company_info": "Company information",
-        "full_name": "Full name *",
-        "phone": "Phone",
-        "email": "Email *",
-        "company_name": "Company name *",
-        "org_nr": "Org. no.",
-        "country_select": "Countries for engineering *",
-        "password": "Password *",
-        "confirm_password": "Confirm password *",
-        "create_account": "Create account and choose plan",
-        "login_btn": "Log in",
-        "register_link": "Create account",
-        "no_account": "Don't have an account? Sign up",
-        "demo_link": "Demo access",
-        "demo_kicker": "DEMO ACCESS",
-        "resend_btn": "Resend verification link",
-        "auth_not_installed": "Auth module (builtly_auth) is not installed. Contact administrator.",
-        "fill_email_pw": "Please enter email and password.",
-        "email_confirmed_info": "Once you have confirmed your email, you can log in and choose a plan.",
-        "err_name_required": "Full name is required.",
-        "err_email_required": "A valid email address is required.",
-        "err_company_required": "Company name is required.",
-        "err_country_required": "Please select at least one country.",
-        "err_pw_length": "Password must be at least 8 characters.",
-        "err_pw_mismatch": "Passwords do not match.",
-        "err_gdpr_required": "You must accept the privacy policy.",
-        "err_terms_required": "You must accept the contract terms.",
-        "acct_label": "👤 Account",
-        "acct_my_page": "My page",
-        "acct_logout": "Log out",
-        "acct_login": "Log in",
-        "acct_plans": "Plans / Sign up",
-    },
-    "🇺🇸 English (US)": {
-        "gdpr": (
-            "I confirm that I have read and accept Builtly Engineering AS "
-            "[terms of service](https://builtly.ai/terms) and "
-            "[privacy policy](https://builtly.ai/privacy). "
-            "Builtly processes personal data in accordance with GDPR. "
-            "Data is stored within the EEA and deleted upon subscription cancellation. "
-            "You may request access, correction, or deletion of your data at any time by contacting post@builtly.ai."
-        ),
-        "contract": (
-            "The subscription has a {months}-month binding period from activation. "
-            "After the binding period, the subscription renews monthly with 1 month notice. "
-            "Prices apply per country — access to multiple countries is billed separately."
-        ),
-        "contract_accept": "I accept the contract terms.",
-        "revision": (
-            "Any report revisions due to changes in client assumptions must be arranged "
-            "directly with an advisor at Builtly Engineering AS."
-        ),
-        "register_kicker": "CREATE ACCOUNT",
-        "register_title": "Get started with Builtly",
-        "register_subtitle": "Create a business account to access AI-powered engineering tools.",
-        "plans_kicker": "SUBSCRIPTIONS",
-        "plans_title": "Three levels — from fully automated to attested",
-        "plans_subtitle": "All prices apply per country. {months}-month commitment.",
-        "login_kicker": "LOG IN",
-        "login_title": "Welcome back",
-        "login_subtitle": "Log in to view your reports and manage your subscription.",
-        "has_account": "Already have an account? Log in",
-        "contact_person": "Contact person",
-        "company_info": "Company information",
-        "full_name": "Full name *",
-        "phone": "Phone",
-        "email": "Email *",
-        "company_name": "Company name *",
-        "org_nr": "Org. no.",
-        "country_select": "Countries for engineering *",
-        "password": "Password *",
-        "confirm_password": "Confirm password *",
-        "create_account": "Create account and choose plan",
-        "login_btn": "Log in",
-        "register_link": "Create account",
-        "no_account": "Don't have an account? Sign up",
-        "demo_link": "Demo access",
-        "demo_kicker": "DEMO ACCESS",
-        "resend_btn": "Resend verification link",
-        "auth_not_installed": "Auth module (builtly_auth) is not installed. Contact administrator.",
-        "fill_email_pw": "Please enter email and password.",
-        "email_confirmed_info": "Once you have confirmed your email, you can log in and choose a plan.",
-        "err_name_required": "Full name is required.",
-        "err_email_required": "A valid email address is required.",
-        "err_company_required": "Company name is required.",
-        "err_country_required": "Please select at least one country.",
-        "err_pw_length": "Password must be at least 8 characters.",
-        "err_pw_mismatch": "Passwords do not match.",
-        "err_gdpr_required": "You must accept the privacy policy.",
-        "err_terms_required": "You must accept the contract terms.",
-        "acct_label": "👤 Account",
-        "acct_my_page": "My page",
-        "acct_logout": "Log out",
-        "acct_login": "Log in",
-        "acct_plans": "Plans / Sign up",
-    },
-    "🇸🇪 Svenska": {
-        "gdpr": (
-            "Jag bekräftar att jag har läst och accepterar Builtly Engineering AS "
-            "[användarvillkor](https://builtly.ai/terms) och "
-            "[integritetspolicy](https://builtly.ai/privacy). "
-            "Builtly behandlar personuppgifter i enlighet med GDPR. "
-            "Data lagras inom EES och raderas vid avslutad prenumeration. "
-            "Du kan när som helst begära tillgång, rättelse eller radering av dina uppgifter genom att kontakta post@builtly.ai."
-        ),
-        "contract": (
-            "Prenumerationen har {months} månaders bindningstid från aktivering. "
-            "Efter bindningstiden förnyas prenumerationen månadsvis med 1 månads uppsägningstid. "
-            "Priser gäller per land — tillgång till flera länder faktureras separat."
-        ),
-        "contract_accept": "Jag accepterar avtalsvillkoren.",
-        "revision": (
-            "Eventuella revideringar av rapport på grund av ändrade förutsättningar "
-            "från kundens sida måste avtalas direkt med rådgivare hos Builtly Engineering AS."
-        ),
-        "register_kicker": "SKAPA KONTO",
-        "register_title": "Kom igång med Builtly",
-        "register_subtitle": "Skapa ett företagskonto för att få tillgång till AI-drivna projekteringsverktyg.",
-        "plans_kicker": "PRENUMERATIONER",
-        "plans_title": "Tre nivåer — från helautomatiserat till certifierat",
-        "plans_subtitle": "Alla priser gäller per land. {months} månaders bindningstid.",
-        "login_kicker": "LOGGA IN",
-        "login_title": "Välkommen tillbaka",
-        "login_subtitle": "Logga in för att se dina rapporter och hantera prenumeration.",
-        "has_account": "Har du redan ett konto? Logga in",
-        "contact_person": "Kontaktperson",
-        "company_info": "Företagsinformation",
-        "full_name": "Fullständigt namn *",
-        "phone": "Telefon",
-        "email": "E-post *",
-        "company_name": "Företagsnamn *",
-        "org_nr": "Org.nr.",
-        "country_select": "Länder för projektering *",
-        "password": "Lösenord *",
-        "confirm_password": "Bekräfta lösenord *",
-        "create_account": "Skapa konto och välj plan",
-        "login_btn": "Logga in",
-        "register_link": "Skapa konto",
-        "no_account": "Har du inget konto? Skapa konto",
-        "demo_link": "Demo-åtkomst",
-        "demo_kicker": "DEMO-ÅTKOMST",
-        "resend_btn": "Skicka verifieringslänk igen",
-        "auth_not_installed": "Auth-modul (builtly_auth) är inte installerad. Kontakta administratör.",
-        "fill_email_pw": "Vänligen fyll i e-post och lösenord.",
-        "email_confirmed_info": "När du har bekräftat din e-post kan du logga in och välja plan.",
-        "err_name_required": "Fullständigt namn krävs.",
-        "err_email_required": "En giltig e-postadress krävs.",
-        "err_company_required": "Företagsnamn krävs.",
-        "err_country_required": "Välj minst ett land.",
-        "err_pw_length": "Lösenordet måste vara minst 8 tecken.",
-        "err_pw_mismatch": "Lösenorden matchar inte.",
-        "err_gdpr_required": "Du måste acceptera integritetspolicyn.",
-        "err_terms_required": "Du måste acceptera avtalsvillkoren.",
-        "acct_label": "👤 Konto",
-        "acct_my_page": "Min sida",
-        "acct_logout": "Logga ut",
-        "acct_login": "Logga in",
-        "acct_plans": "Planer / Skapa konto",
-    },
-    "🇩🇰 Dansk": {
-        "gdpr": (
-            "Jeg bekræfter, at jeg har læst og accepterer Builtly Engineering AS' "
-            "[brugsvilkår](https://builtly.ai/terms) og "
-            "[privatlivspolitik](https://builtly.ai/privacy). "
-            "Builtly behandler personoplysninger i overensstemmelse med GDPR. "
-            "Data opbevares inden for EØS og slettes ved opsigelse af abonnement. "
-            "Du kan til enhver tid anmode om indsigt, rettelse eller sletning af dine data ved at kontakte post@builtly.ai."
-        ),
-        "contract": (
-            "Abonnementet har {months} måneders bindingsperiode fra aktivering. "
-            "Efter bindingsperioden fornyes abonnementet månedligt med 1 måneds opsigelsesvarsel. "
-            "Priser gælder per land — adgang til flere lande faktureres separat."
-        ),
-        "contract_accept": "Jeg accepterer kontraktvilkårene.",
-        "revision": (
-            "Eventuelle revideringer af rapport som følge af ændrede forudsætninger "
-            "fra kundens side skal aftales direkte med rådgiver hos Builtly Engineering AS."
-        ),
-        "register_kicker": "OPRET KONTO",
-        "register_title": "Kom i gang med Builtly",
-        "register_subtitle": "Opret en virksomhedskonto for at få adgang til AI-drevne projekteringsværktøjer.",
-        "plans_kicker": "ABONNEMENTER",
-        "plans_title": "Tre niveauer — fra fuldautomatisk til attesteret",
-        "plans_subtitle": "Alle priser gælder per land. {months} måneders binding.",
-        "login_kicker": "LOG IND",
-        "login_title": "Velkommen tilbage",
-        "login_subtitle": "Log ind for at se dine rapporter og administrere abonnement.",
-        "has_account": "Har du allerede en konto? Log ind",
-        "contact_person": "Kontaktperson",
-        "company_info": "Virksomhedsinformation",
-        "full_name": "Fulde navn *",
-        "phone": "Telefon",
-        "email": "E-mail *",
-        "company_name": "Virksomhedsnavn *",
-        "org_nr": "CVR-nr.",
-        "country_select": "Lande til projektering *",
-        "password": "Adgangskode *",
-        "confirm_password": "Bekræft adgangskode *",
-        "create_account": "Opret konto og vælg plan",
-        "login_btn": "Log ind",
-        "register_link": "Opret konto",
-        "no_account": "Har du ikke en konto? Opret konto",
-        "demo_link": "Demo-adgang",
-        "demo_kicker": "DEMO-ADGANG",
-        "resend_btn": "Send bekræftelseslink igen",
-        "auth_not_installed": "Auth-modul (builtly_auth) er ikke installeret. Kontakt administrator.",
-        "fill_email_pw": "Udfyld venligst e-mail og adgangskode.",
-        "email_confirmed_info": "Når du har bekræftet din e-mail, kan du logge ind og vælge plan.",
-        "err_name_required": "Fulde navn er påkrævet.",
-        "err_email_required": "En gyldig e-mailadresse er påkrævet.",
-        "err_company_required": "Virksomhedsnavn er påkrævet.",
-        "err_country_required": "Vælg mindst ét land.",
-        "err_pw_length": "Adgangskoden skal være mindst 8 tegn.",
-        "err_pw_mismatch": "Adgangskoderne stemmer ikke overens.",
-        "err_gdpr_required": "Du skal acceptere privatlivspolitikken.",
-        "err_terms_required": "Du skal acceptere kontraktvilkårene.",
-        "acct_label": "👤 Konto",
-        "acct_my_page": "Min side",
-        "acct_logout": "Log ud",
-        "acct_login": "Log ind",
-        "acct_plans": "Planer / Opret konto",
-    },
-    "🇫🇮 Suomi": {
-        "gdpr": (
-            "Vahvistan lukeneeni ja hyväksyväni Builtly Engineering AS:n "
-            "[käyttöehdot](https://builtly.ai/terms) ja "
-            "[tietosuojakäytännön](https://builtly.ai/privacy). "
-            "Builtly käsittelee henkilötietoja GDPR:n mukaisesti. "
-            "Tiedot tallennetaan ETA-alueelle ja poistetaan tilauksen päättyessä. "
-            "Voit milloin tahansa pyytää pääsyä tietoihisi, niiden oikaisua tai poistamista ottamalla yhteyttä post@builtly.ai."
-        ),
-        "contract": (
-            "Tilauksessa on {months} kuukauden sitoutumisaika aktivoinnista. "
-            "Sitoutumisajan jälkeen tilaus uusitaan kuukausittain 1 kuukauden irtisanomisajalla. "
-            "Hinnat ovat maakohtaisia — usean maan käyttö laskutetaan erikseen."
-        ),
-        "contract_accept": "Hyväksyn sopimusehdot.",
-        "revision": (
-            "Mahdolliset raportin muutokset asiakkaan lähtökohtien muuttuessa on sovittava "
-            "suoraan Builtly Engineering AS:n neuvonantajan kanssa."
-        ),
-        "register_kicker": "LUO TILI",
-        "register_title": "Aloita Builtlyn käyttö",
-        "register_subtitle": "Luo yritystili saadaksesi pääsyn AI-pohjaisiin suunnittelutyökaluihin.",
-        "plans_kicker": "TILAUKSET",
-        "plans_title": "Kolme tasoa — täysin automatisoidusta sertifioituun",
-        "plans_subtitle": "Kaikki hinnat maakohtaisia. {months} kuukauden sitoutumisaika.",
-        "login_kicker": "KIRJAUDU",
-        "login_title": "Tervetuloa takaisin",
-        "login_subtitle": "Kirjaudu sisään nähdäksesi raporttisi ja hallitaksesi tilaustasi.",
-        "has_account": "Onko sinulla jo tili? Kirjaudu sisään",
-        "contact_person": "Yhteyshenkilö",
-        "company_info": "Yritystiedot",
-        "full_name": "Koko nimi *",
-        "phone": "Puhelin",
-        "email": "Sähköposti *",
-        "company_name": "Yrityksen nimi *",
-        "org_nr": "Y-tunnus",
-        "country_select": "Suunnittelumaat *",
-        "password": "Salasana *",
-        "confirm_password": "Vahvista salasana *",
-        "create_account": "Luo tili ja valitse tilaus",
-        "login_btn": "Kirjaudu",
-        "register_link": "Luo tili",
-        "no_account": "Eikö sinulla ole tiliä? Luo tili",
-        "demo_link": "Demo-käyttö",
-        "demo_kicker": "DEMO-KÄYTTÖ",
-        "resend_btn": "Lähetä vahvistuslinkki uudelleen",
-        "auth_not_installed": "Auth-moduuli (builtly_auth) ei ole asennettu. Ota yhteyttä ylläpitäjään.",
-        "fill_email_pw": "Täytä sähköposti ja salasana.",
-        "email_confirmed_info": "Vahvistettuasi sähköpostisi voit kirjautua sisään ja valita tilauksen.",
-        "err_name_required": "Koko nimi on pakollinen.",
-        "err_email_required": "Kelvollinen sähköpostiosoite on pakollinen.",
-        "err_company_required": "Yrityksen nimi on pakollinen.",
-        "err_country_required": "Valitse vähintään yksi maa.",
-        "err_pw_length": "Salasanan on oltava vähintään 8 merkkiä.",
-        "err_pw_mismatch": "Salasanat eivät täsmää.",
-        "err_gdpr_required": "Sinun on hyväksyttävä tietosuojakäytäntö.",
-        "err_terms_required": "Sinun on hyväksyttävä sopimusehdot.",
-        "acct_label": "👤 Tili",
-        "acct_my_page": "Oma sivu",
-        "acct_logout": "Kirjaudu ulos",
-        "acct_login": "Kirjaudu",
-        "acct_plans": "Tilaukset / Luo tili",
-    },
-    "🇩🇪 Deutsch": {
-        "gdpr": (
-            "Ich bestätige, dass ich die "
-            "[Nutzungsbedingungen](https://builtly.ai/terms) und die "
-            "[Datenschutzerklärung](https://builtly.ai/privacy) von Builtly Engineering AS "
-            "gelesen habe und akzeptiere. "
-            "Builtly verarbeitet personenbezogene Daten gemäß DSGVO. "
-            "Daten werden im EWR gespeichert und bei Kündigung des Abonnements gelöscht. "
-            "Sie können jederzeit Auskunft, Berichtigung oder Löschung Ihrer Daten verlangen unter post@builtly.ai."
-        ),
-        "contract": (
-            "Das Abonnement hat eine Mindestlaufzeit von {months} Monaten ab Aktivierung. "
-            "Nach der Mindestlaufzeit verlängert sich das Abonnement monatlich mit 1 Monat Kündigungsfrist. "
-            "Preise gelten pro Land — Zugang zu mehreren Ländern wird separat berechnet."
-        ),
-        "contract_accept": "Ich akzeptiere die Vertragsbedingungen.",
-        "revision": (
-            "Eventuelle Berichtsrevisionen aufgrund geänderter Kundenannahmen müssen "
-            "direkt mit einem Berater von Builtly Engineering AS vereinbart werden."
-        ),
-        "register_kicker": "KONTO ERSTELLEN",
-        "register_title": "Starten Sie mit Builtly",
-        "register_subtitle": "Erstellen Sie ein Geschäftskonto für den Zugang zu KI-gestützten Ingenieurtools.",
-        "plans_kicker": "ABONNEMENTS",
-        "plans_title": "Drei Stufen — von vollautomatisiert bis zertifiziert",
-        "plans_subtitle": "Alle Preise gelten pro Land. {months} Monate Mindestlaufzeit.",
-        "login_kicker": "ANMELDEN",
-        "login_title": "Willkommen zurück",
-        "login_subtitle": "Melden Sie sich an, um Ihre Berichte zu sehen und Ihr Abonnement zu verwalten.",
-        "has_account": "Haben Sie schon ein Konto? Anmelden",
-        "contact_person": "Kontaktperson",
-        "company_info": "Unternehmensinformationen",
-        "full_name": "Vollständiger Name *",
-        "phone": "Telefon",
-        "email": "E-Mail *",
-        "company_name": "Firmenname *",
-        "org_nr": "Handelsreg.-Nr.",
-        "country_select": "Länder für Planung *",
-        "password": "Passwort *",
-        "confirm_password": "Passwort bestätigen *",
-        "create_account": "Konto erstellen und Plan wählen",
-        "login_btn": "Anmelden",
-        "register_link": "Konto erstellen",
-        "no_account": "Noch kein Konto? Registrieren",
-        "demo_link": "Demo-Zugang",
-        "demo_kicker": "DEMO-ZUGANG",
-        "resend_btn": "Bestätigungslink erneut senden",
-        "auth_not_installed": "Auth-Modul (builtly_auth) ist nicht installiert. Kontaktieren Sie den Administrator.",
-        "fill_email_pw": "Bitte E-Mail und Passwort eingeben.",
-        "email_confirmed_info": "Sobald Sie Ihre E-Mail bestätigt haben, können Sie sich anmelden und einen Plan wählen.",
-        "err_name_required": "Vollständiger Name ist erforderlich.",
-        "err_email_required": "Eine gültige E-Mail-Adresse ist erforderlich.",
-        "err_company_required": "Firmenname ist erforderlich.",
-        "err_country_required": "Bitte wählen Sie mindestens ein Land.",
-        "err_pw_length": "Das Passwort muss mindestens 8 Zeichen lang sein.",
-        "err_pw_mismatch": "Die Passwörter stimmen nicht überein.",
-        "err_gdpr_required": "Sie müssen die Datenschutzerklärung akzeptieren.",
-        "err_terms_required": "Sie müssen die Vertragsbedingungen akzeptieren.",
-        "acct_label": "👤 Konto",
-        "acct_my_page": "Meine Seite",
-        "acct_logout": "Abmelden",
-        "acct_login": "Anmelden",
-        "acct_plans": "Pläne / Registrieren",
-    },
+
+def adjusted_shadow_length_m(height_m: float, altitude_deg: float, terrain: Optional[Dict[str, Any]], shadow_azimuth_deg: float) -> float:
+    if altitude_deg <= 0.5:
+        return height_m * 50.0
+    slope = terrain_slope_along_azimuth(terrain, shadow_azimuth_deg)
+    denom = math.tan(math.radians(altitude_deg)) + slope
+    denom = max(0.02, denom)
+    return float(height_m / denom)
+
+
+def build_shadow_polygon(footprint: Polygon, height_m: float, sun_azimuth_deg: float, altitude_deg: float, terrain: Optional[Dict[str, Any]]) -> Optional[Polygon]:
+    if footprint is None or footprint.is_empty or altitude_deg <= 0.5 or height_m <= 0.0:
+        return None
+    shadow_az = (sun_azimuth_deg + 180.0) % 360.0
+    length = adjusted_shadow_length_m(height_m, altitude_deg, terrain, shadow_az)
+    dx = math.sin(math.radians(shadow_az)) * length
+    dy = math.cos(math.radians(shadow_az)) * length
+    translated = affinity.translate(footprint, xoff=dx, yoff=dy)
+    return unary_union([footprint, translated]).convex_hull.buffer(0)
+
+
+def serialize_neighbor_geometries(neighbors: List[Dict[str, Any]], max_neighbors: int = 20) -> List[Dict[str, Any]]:
+    serialized = []
+    for neighbor in neighbors[:max_neighbors]:
+        serialized.append(
+            {
+                "coords": geometry_to_coord_groups(neighbor.get("polygon")),
+                "height_m": round(float(neighbor.get("height_m", 0.0)), 1),
+                "distance_m": round(float(neighbor.get("distance_m", 0.0)), 1),
+            }
+        )
+    return serialized
+
+
+# --- 4. ANALYSEMOTOR ---
+@dataclass
+class MixSpec:
+    name: str
+    share_pct: float
+    avg_size_m2: float
+
+
+@dataclass
+class SiteInputs:
+    site_area_m2: float
+    site_width_m: float
+    site_depth_m: float
+    front_setback_m: float
+    rear_setback_m: float
+    side_setback_m: float
+    max_bya_pct: float
+    max_bra_m2: float
+    desired_bta_m2: float
+    max_floors: int
+    max_height_m: float
+    floor_to_floor_m: float
+    efficiency_ratio: float
+    parking_ratio_per_unit: float
+    parking_area_per_space_m2: float
+    latitude_deg: float
+    north_rotation_deg: float
+    polygon_setback_m: float = 0.0
+    site_geometry_source: str = "Rektangel"
+    polygon_crs: str = ""
+    neighbor_count: int = 0
+    terrain_slope_pct: float = 0.0
+    terrain_relief_m: float = 0.0
+    utnyttelsesgrad_bra_pct: float = 0.0  # %-BRA: overstyrer BYA som volumdriver
+
+
+@dataclass
+class OptionResult:
+    name: str
+    typology: str
+    floors: int
+    building_height_m: float
+    footprint_area_m2: float
+    gross_bta_m2: float
+    saleable_area_m2: float
+    footprint_width_m: float
+    footprint_depth_m: float
+    buildable_area_m2: float
+    open_space_ratio: float
+    target_fit_pct: float
+    unit_count: int
+    mix_counts: Dict[str, int]
+    parking_spaces: int
+    parking_pressure_pct: float
+    solar_score: float
+    estimated_equinox_sun_hours: float
+    estimated_winter_sun_hours: float
+    sunlit_open_space_pct: float
+    winter_noon_shadow_m: float
+    equinox_noon_shadow_m: float
+    summer_afternoon_shadow_m: float
+    efficiency_ratio: float
+    neighbor_count: int
+    terrain_slope_pct: float
+    terrain_relief_m: float
+    notes: List[str]
+    score: float
+    geometry: Dict[str, Any]
+
+
+def parse_regulation_hints(free_text: str) -> Dict[str, float]:
+    text = normalize_norwegian_text(free_text or "")
+    out: Dict[str, float] = {}
+
+    bya_patterns = [
+        r"%-?\s*BYA[^0-9]*(\d+(?:[.,]\d+)?)",
+        r"BYA[^0-9]*(\d+(?:[.,]\d+)?)\s*%",
+        r"utnyttelse[^0-9]*(\d+(?:[.,]\d+)?)\s*%",
+    ]
+    bra_patterns = [
+        r"BRA[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+        r"maks[^0-9]*(\d+(?:[.,]\d+)?)\s*m2",
+    ]
+    floor_patterns = [
+        r"(\d+)\s*etasj",
+        r"maks[^0-9]*(\d+)\s*plan",
+    ]
+    height_patterns = [
+        r"gesimsh[oø]yde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+        r"byggeh[oø]yde[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+        r"maks[^0-9]*(\d+(?:[.,]\d+)?)\s*m",
+    ]
+
+    for pattern in bya_patterns:
+        if match := re.search(pattern, text, re.IGNORECASE):
+            out["max_bya_pct"] = safe_float(match.group(1))
+            break
+    for pattern in bra_patterns:
+        if match := re.search(pattern, text, re.IGNORECASE):
+            out["max_bra_m2"] = safe_float(match.group(1))
+            break
+    for pattern in floor_patterns:
+        if match := re.search(pattern, text, re.IGNORECASE):
+            out["max_floors"] = int(safe_float(match.group(1), 0))
+            break
+    for pattern in height_patterns:
+        if match := re.search(pattern, text, re.IGNORECASE):
+            out["max_height_m"] = safe_float(match.group(1))
+            break
+
+    return out
+
+
+def normalize_mix_specs(mix_specs: List[MixSpec]) -> List[MixSpec]:
+    cleaned = [spec for spec in mix_specs if spec.avg_size_m2 > 0 and spec.share_pct >= 0]
+    if not cleaned:
+        cleaned = [
+            MixSpec("1-rom", 15, 38),
+            MixSpec("2-rom", 35, 52),
+            MixSpec("3-rom", 35, 72),
+            MixSpec("4-rom+", 15, 95),
+        ]
+    total_share = sum(spec.share_pct for spec in cleaned)
+    if total_share <= 0:
+        equal = 100.0 / len(cleaned)
+        return [MixSpec(spec.name, equal, spec.avg_size_m2) for spec in cleaned]
+    return [MixSpec(spec.name, (spec.share_pct / total_share) * 100.0, spec.avg_size_m2) for spec in cleaned]
+
+
+def allocate_unit_mix(saleable_area_m2: float, mix_specs: List[MixSpec]) -> Tuple[Dict[str, int], float]:
+    specs = normalize_mix_specs(mix_specs)
+    if saleable_area_m2 <= 0:
+        return {spec.name: 0 for spec in specs}, 0.0
+
+    target_areas = [saleable_area_m2 * (spec.share_pct / 100.0) for spec in specs]
+    counts = [int(area // spec.avg_size_m2) for area, spec in zip(target_areas, specs)]
+    used_area = sum(count * spec.avg_size_m2 for count, spec in zip(counts, specs))
+
+    remainders = [
+        ((target_areas[idx] / specs[idx].avg_size_m2) - counts[idx], idx)
+        for idx in range(len(specs))
+    ]
+    remainders.sort(reverse=True)
+
+    leftover = saleable_area_m2 - used_area
+    guard = 0
+    while leftover >= min(spec.avg_size_m2 for spec in specs) and guard < 50:
+        placed = False
+        for _, idx in remainders:
+            size = specs[idx].avg_size_m2
+            if leftover >= size:
+                counts[idx] += 1
+                leftover -= size
+                placed = True
+                break
+        if not placed:
+            smallest_idx = min(range(len(specs)), key=lambda i: specs[i].avg_size_m2)
+            size = specs[smallest_idx].avg_size_m2
+            if leftover >= size:
+                counts[smallest_idx] += 1
+                leftover -= size
+            else:
+                break
+        guard += 1
+
+    return {spec.name: count for spec, count in zip(specs, counts)}, saleable_area_m2 - leftover
+
+
+def solar_declination_rad(day_of_year: int) -> float:
+    return math.radians(23.44) * math.sin(math.radians((360.0 / 365.0) * (day_of_year - 81)))
+
+
+def solar_altitude_deg(latitude_deg: float, day_of_year: int, solar_hour: float) -> float:
+    lat = math.radians(latitude_deg)
+    decl = solar_declination_rad(day_of_year)
+    hour_angle = math.radians(15.0 * (solar_hour - 12.0))
+    sin_alt = (
+        math.sin(lat) * math.sin(decl)
+        + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)
+    )
+    sin_alt = clamp(sin_alt, -1.0, 1.0)
+    return math.degrees(math.asin(sin_alt))
+
+
+def shadow_length_m(height_m: float, altitude_deg: float) -> float:
+    if altitude_deg <= 0.5:
+        return height_m * 50.0
+    return height_m / max(0.03, math.tan(math.radians(altitude_deg)))
+
+
+def derive_limits(site: SiteInputs, geodata_context: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    if geodata_context:
+        buildable_width = max(8.0, geodata_context.get("site_width_m", site.site_width_m))
+        buildable_depth = max(8.0, geodata_context.get("site_depth_m", site.site_depth_m))
+        buildable_area = max(0.0, geodata_context.get("buildable_area_m2", site.site_area_m2))
+        site_area = max(1.0, geodata_context.get("site_area_m2", site.site_area_m2))
+    else:
+        buildable_width = max(8.0, site.site_width_m - (2.0 * site.side_setback_m))
+        buildable_depth = max(8.0, site.site_depth_m - site.front_setback_m - site.rear_setback_m)
+        buildable_area = buildable_width * buildable_depth
+        site_area = site.site_area_m2
+
+    floors_from_height = max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))) if site.max_height_m > 0 else site.max_floors
+    allowed_floors = max(1, min(site.max_floors, floors_from_height))
+
+    # %-BRA overstyrer ALT — bruker tomteareal, ikke bebbyggbart areal
+    if site.utnyttelsesgrad_bra_pct > 0:
+        target_bra = site_area * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta = target_bra / max(site.efficiency_ratio, 0.6)
+        needed_footprint = target_bta / max(allowed_floors, 1)
+        # Bruk tomteareal som øvre grense (ikke setback-krympet felt)
+        max_footprint = min(site_area * 0.95, needed_footprint * 1.1)
+        buildable_area = max(buildable_area, max_footprint)
+    else:
+        max_footprint_by_bya = site_area * (site.max_bya_pct / 100.0) if site.max_bya_pct > 0 else buildable_area
+        max_footprint = min(buildable_area, max_footprint_by_bya)
+
+    return {
+        "buildable_width": buildable_width,
+        "buildable_depth": buildable_depth,
+        "buildable_area": buildable_area,
+        "max_footprint": max_footprint,
+        "allowed_floors": float(allowed_floors),
+        "target_bra_from_pct": round(site_area * site.utnyttelsesgrad_bra_pct / 100.0, 0) if site.utnyttelsesgrad_bra_pct > 0 else 0.0,
+        "volume_driver": "%-BRA" if site.utnyttelsesgrad_bra_pct > 0 else "BYA",
+    }
+
+
+def evaluate_solar(
+    site: SiteInputs,
+    site_polygon: Polygon,
+    footprint_polygon: Polygon,
+    building_height_m: float,
+    typology: str,
+    neighbors: Optional[List[Dict[str, Any]]] = None,
+    terrain: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    neighbors = neighbors or []
+    open_space = site_polygon.difference(footprint_polygon).buffer(0)
+    if open_space.is_empty:
+        open_space = site_polygon
+
+    spacing = max(4.5, min(10.0, math.sqrt(max(open_space.area, 1.0) / 85.0)))
+    sample_points = sample_points_in_polygon(largest_polygon(open_space) or open_space, spacing_m=spacing)
+    if not sample_points:
+        sample_points = [site_polygon.representative_point()]
+
+    def sunlit_fraction(day_of_year: int, solar_hour: float) -> float:
+        altitude = solar_altitude_deg(site.latitude_deg, day_of_year, solar_hour)
+        if altitude <= 0.5:
+            return 0.0
+        azimuth = (solar_azimuth_deg(site.latitude_deg, day_of_year, solar_hour) - site.north_rotation_deg) % 360.0
+        shadow_polys: List[Polygon] = []
+        own_shadow = build_shadow_polygon(footprint_polygon, building_height_m, azimuth, altitude, terrain)
+        if own_shadow is not None:
+            shadow_polys.append(own_shadow)
+        for neighbor in neighbors:
+            shadow = build_shadow_polygon(neighbor["polygon"], float(neighbor.get("height_m", 0.0)), azimuth, altitude, terrain)
+            if shadow is not None:
+                shadow_polys.append(shadow)
+        if not shadow_polys:
+            return 1.0
+        shadow_union = unary_union(shadow_polys).buffer(0)
+        sunlit = 0
+        for point in sample_points:
+            if not shadow_union.covers(point):
+                sunlit += 1
+        return float(sunlit / max(1, len(sample_points)))
+
+    equinox_hours = [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    winter_hours = [10.0, 11.0, 12.0, 13.0, 14.0]
+
+    equinox_fracs = [sunlit_fraction(80, hour) for hour in equinox_hours]
+    winter_fracs = [sunlit_fraction(355, hour) for hour in winter_hours]
+    equinox_hours_sum = float(sum(equinox_fracs))
+    winter_hours_sum = float(sum(winter_fracs))
+    mean_equinox = float(np.mean(equinox_fracs)) if equinox_fracs else 0.0
+    winter_noon_frac = sunlit_fraction(355, 12.0)
+    noon_equinox_frac = sunlit_fraction(80, 12.0)
+
+    winter_alt = solar_altitude_deg(site.latitude_deg, 355, 12.0)
+    equinox_alt = solar_altitude_deg(site.latitude_deg, 80, 12.0)
+    summer_alt = solar_altitude_deg(site.latitude_deg, 172, 15.0)
+    winter_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) + 180.0) % 360.0
+    equinox_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 80, 12.0) - site.north_rotation_deg) + 180.0) % 360.0
+    summer_shadow_az = ((solar_azimuth_deg(site.latitude_deg, 172, 15.0) - site.north_rotation_deg) + 180.0) % 360.0
+    winter_shadow = adjusted_shadow_length_m(building_height_m, winter_alt, terrain, winter_shadow_az)
+    equinox_shadow = adjusted_shadow_length_m(building_height_m, equinox_alt, terrain, equinox_shadow_az)
+    summer_shadow = adjusted_shadow_length_m(building_height_m, summer_alt, terrain, summer_shadow_az)
+
+    typology_bonus = {"Punkthus": 0.06, "Lamell": 0.04, "Tun": -0.02, "Rekke": 0.05}.get(typology, 0.0)
+    neighbor_penalty = min(0.12, 0.012 * len(neighbors))
+    solar_score = 100.0 * clamp(
+        (0.54 * mean_equinox) + (0.26 * winter_noon_frac) + (0.14 * noon_equinox_frac) + typology_bonus - neighbor_penalty,
+        0.18,
+        1.0,
+    )
+    solar_score = clamp(solar_score, 18.0, 100.0)
+
+    return {
+        "solar_score": solar_score,
+        "estimated_equinox_sun_hours": round(equinox_hours_sum, 2),
+        "estimated_winter_sun_hours": round(winter_hours_sum, 2),
+        "sunlit_open_space_pct": round(mean_equinox * 100.0, 1),
+        "winter_noon_shadow_m": round(winter_shadow, 1),
+        "equinox_noon_shadow_m": round(equinox_shadow, 1),
+        "summer_afternoon_shadow_m": round(summer_shadow, 1),
+    }
+
+
+def rank_score(
+    target_fit_pct: float,
+    solar_score: float,
+    open_space_ratio: float,
+    efficiency_ratio: float,
+    parking_pressure_pct: float,
+) -> float:
+    target_score = max(0.0, 100.0 - abs(100.0 - target_fit_pct))
+    return round(
+        0.34 * target_score
+        + 0.28 * solar_score
+        + 0.18 * (open_space_ratio * 100.0)
+        + 0.14 * (efficiency_ratio * 100.0)
+        + 0.06 * max(0.0, 100.0 - parking_pressure_pct),
+        1,
+    )
+
+
+def build_massing_parts(
+    footprint_polygon: Any,
+    typology: str,
+    floors: int,
+    floor_to_floor_m: float,
+) -> List[Dict[str, Any]]:
+    """
+    Bryt et fotavtrykk-polygon ned i volumdeler med individuelle hoyder.
+
+    Returnerer liste med dicts:
+        name, height_m, floors, color, coords (geometry_to_coord_groups-format)
+    """
+    parts: List[Dict[str, Any]] = []
+    components = split_geometry_to_polygons(footprint_polygon)
+    if not components:
+        return parts
+
+    full_height = max(floor_to_floor_m, 2.8) * max(floors, 1)
+
+    # Fargepalett per typologi
+    COLORS = {
+        "Lamell":        [34, 197, 94, 0.80],    # groenn
+        "Punkthus":      [56, 189, 248, 0.80],   # blaa
+        "Tun":           [168, 130, 240, 0.80],   # lilla
+        "Rekke":         [250, 180, 60, 0.80],    # gul/oransje
+        "Podium + Tårn": [220, 80, 120, 0.80],    # rosa/roed
+        "Karré":         [100, 200, 180, 0.80],   # teal
+        "Tårn":          [56, 140, 248, 0.80],    # moerkere blaa
+    }
+    base_color = COLORS.get(typology, [34, 197, 94, 0.80])
+
+    if typology == "Podium + Tårn" and len(components) >= 1:
+        # Podium: lav og bred (2 etg). Tårn: høyt og smalt (dobbel høyde av podium eller mer)
+        sorted_comps = sorted(components, key=lambda p: p.area, reverse=True)
+        podium_floors = 2
+        podium_height = podium_floors * floor_to_floor_m
+        tower_floors = max(floors, podium_floors + 4)  # Tårnet minst 4 etg over podium
+        tower_height = tower_floors * floor_to_floor_m
+
+        # Podium
+        podium = sorted_comps[0]
+        parts.append({
+            "name": "Podium",
+            "height_m": round(podium_height, 1),
+            "floors": podium_floors,
+            "color": [180, 180, 190, 0.65],
+            "coords": geometry_to_coord_groups(podium),
+        })
+
+        # Tårn: plasser i sentrum av podium, maks 35% av podiumets areal
+        if len(sorted_comps) > 1:
+            for i, comp in enumerate(sorted_comps[1:], start=1):
+                parts.append({
+                    "name": f"Tårn {i}",
+                    "height_m": round(tower_height, 1),
+                    "floors": tower_floors,
+                    "color": COLORS.get("Tårn", base_color),
+                    "coords": geometry_to_coord_groups(comp),
+                })
+        else:
+            # Lag et tårn-fotavtrykk fra sentrum av podium — 30% av podiumets areal
+            cx, cy = podium.centroid.x, podium.centroid.y
+            tower_side = min(18.0, math.sqrt(podium.area * 0.30))
+            tower_side = max(12.0, tower_side)
+            half = tower_side / 2.0
+            tower_box = box(cx - half, cy - half, cx + half, cy + half)
+            tower_clipped = tower_box.intersection(podium).buffer(0)
+            if not tower_clipped.is_empty and tower_clipped.area > 20:
+                parts.append({
+                    "name": "Tårn",
+                    "height_m": round(tower_height, 1),
+                    "floors": tower_floors,
+                    "color": COLORS.get("Tårn", base_color),
+                    "coords": geometry_to_coord_groups(tower_clipped),
+                })
+
+    elif typology == "Tun" and len(components) >= 2:
+        # Stoerste = hovedfloey (full hoyde), resten = sidefloyer (1 etasje lavere)
+        sorted_comps = sorted(components, key=lambda p: p.area, reverse=True)
+        for i, comp in enumerate(sorted_comps):
+            if i == 0:
+                part_floors = floors
+                part_name = "Hovedfloey"
+            else:
+                part_floors = max(2, floors - 1)
+                part_name = f"Sidefloey {i}"
+            parts.append({
+                "name": part_name,
+                "height_m": round(part_floors * floor_to_floor_m, 1),
+                "floors": part_floors,
+                "color": base_color if i == 0 else [base_color[0], base_color[1], base_color[2], 0.65],
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    elif typology == "Rekke":
+        # Alle enheter paa samme hoyde (typisk 2-3 etasjer)
+        for i, comp in enumerate(components):
+            parts.append({
+                "name": f"Enhet {i + 1}",
+                "height_m": round(full_height, 1),
+                "floors": floors,
+                "color": base_color,
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    else:
+        # Lamell, Punkthus, Karre, Taarn, og alt annet: hver komponent paa full hoyde
+        for i, comp in enumerate(components):
+            label = typology if len(components) == 1 else f"{typology} {i + 1}"
+            parts.append({
+                "name": label,
+                "height_m": round(full_height, 1),
+                "floors": floors,
+                "color": base_color,
+                "coords": geometry_to_coord_groups(comp),
+            })
+
+    return parts
+
+
+def _typology_polygon_fill(
+    placement_polygon: Polygon,
+    typology: str,
+    target_footprint_m2: float,
+    angle_deg: float,
+) -> Tuple[Optional[Polygon], Dict[str, Any]]:
+    """
+    Typologi-differensiert polygon-fill for høy utnyttelse.
+
+    I stedet for å skalere tomtepolygonen generisk, lages ULIKE former
+    per typologi slik at volumskissene er visuelt distinkte.
+
+    Returnerer (footprint_polygon, placement_info_updates) eller (None, {})
+    hvis fallback ikke lykkes.
+    """
+    rad = math.radians(angle_deg)
+    pcx, pcy = placement_polygon.centroid.x, placement_polygon.centroid.y
+    perp_rad = rad + math.pi / 2.0
+    shape = _analyze_polygon(placement_polygon)
+    major, minor = shape['major_m'], shape['minor_m']
+    poly_area = shape['area_m2']
+    result: Optional[Polygon] = None
+    info: Dict[str, Any] = {"source": "polygon-fill"}
+
+    if typology == "Lamell":
+        # 2-5 parallelle rektangler langs major-aksen, 6-10m gap
+        # For ambisiøse %-BRA-mål (>250%): bruker tynnere bygg (10m i stedet for 11-13m)
+        # og tillater opptil 5 lameller for å passe flere på trange tomter.
+        aggressive = target_footprint_m2 > poly_area * 0.60
+        super_aggressive = target_footprint_m2 > poly_area * 0.72
+        if super_aggressive:
+            # Tynnere bygg + mindre gap for å nå 75%+ dekning
+            bld_depth = min(11.0, max(10.0, minor * 0.26))
+            gap_min, gap_max = 5.5, 8.0
+            max_bars = 5
+            width_share = 0.95
+        elif aggressive:
+            bld_depth = min(12.0, max(10.5, minor * 0.27))
+            gap_min, gap_max = 6.0, 10.0
+            max_bars = 4
+            width_share = 0.92
+        else:
+            bld_depth = min(13.0, max(11.0, minor * 0.28))
+            gap_min, gap_max = 8.0, 12.0
+            max_bars = 3
+            width_share = 0.85
+        gap = min(gap_max, max(gap_min, minor * 0.13))
+        # Beregn hvor mange bars som faktisk passer, og hvor mange som trengs
+        n_bars_fit = max(2, min(max_bars, int(minor / (bld_depth + gap))))
+        # Hvis aggresivt: beregn behov fra target og velg flere bars hvis plass tillater
+        if aggressive and bld_depth > 0:
+            # Hvor bredt kan hver lamell maks være?
+            max_bld_width = major * width_share
+            # Antall bars som trengs for å dekke target
+            n_bars_needed = math.ceil(target_footprint_m2 / max(max_bld_width * bld_depth, 1.0))
+            n_bars = max(2, min(max_bars, min(n_bars_fit, n_bars_needed)))
+            # Men ikke velg flere enn det fysisk er plass til
+            n_bars = min(n_bars, n_bars_fit)
+        else:
+            n_bars = n_bars_fit
+        # Juster bredde: maksimer innenfor tomtens kapasitet
+        bld_width = min(major * width_share, target_footprint_m2 / max(n_bars * bld_depth, 1.0))
+        bld_width = max(20.0, bld_width)
+
+        bars: List[Polygon] = []
+        total_span = (n_bars - 1) * (bld_depth + gap)
+        for i in range(n_bars):
+            offset_across = -total_span / 2.0 + i * (bld_depth + gap)
+            bx = pcx + offset_across * math.cos(perp_rad)
+            by = pcy + offset_across * math.sin(perp_rad)
+            bar = _make_oriented_rect(bx, by, bld_width, bld_depth, rad)
+            clipped = bar.intersection(placement_polygon).buffer(0)
+            if not clipped.is_empty and clipped.area > 40:
+                bars.append(clipped)
+        if bars:
+            result = unary_union(bars).buffer(0)
+            info["n_buildings"] = len(bars)
+
+        # Fallback for svært ambisiøse mål: hvis vi ikke nådde 80% av target,
+        # prøv én tykk sammenhengende blokk som dekker mer av tomten.
+        # Dette gir en typisk "stor Lamell"/"slab"-tolkning når flere lameller
+        # ikke passer fysisk.
+        if super_aggressive and result is not None and result.area < target_footprint_m2 * 0.80:
+            thick_depth = min(minor * 0.55, 22.0)
+            thick_width = min(major * 0.95, target_footprint_m2 / max(thick_depth, 1.0))
+            thick_rect = _make_oriented_rect(pcx, pcy, thick_width, thick_depth, rad)
+            thick_clipped = thick_rect.intersection(placement_polygon).buffer(0)
+            if not thick_clipped.is_empty and thick_clipped.area > result.area:
+                result = thick_clipped
+                info["n_buildings"] = 1
+                info["fallback"] = "thick-slab"
+
+    elif typology == "Punkthus":
+        # Punkthus: dimensjonert fra target med 3-5 bygg
+        desired_count = clamp(round(target_footprint_m2 / 462.0), 2, 6)
+        ideal_area = target_footprint_m2 / desired_count
+        bld_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
+        bld_d = clamp(bld_w * 0.95, 13.0, 21.0)
+        spacing = max(10.0, bld_w * 0.6)
+        n_pts = max(3, min(8, math.ceil(target_footprint_m2 / max(bld_w * bld_d, 1.0))))
+        n_along = max(1, min(n_pts, int(major / (bld_d + spacing)) + 1))
+        n_across = max(1, math.ceil(n_pts / n_along))
+        step_a = bld_d + spacing
+        step_c = bld_w + spacing
+
+        boxes: List[Polygon] = []
+        span_a = (n_along - 1) * step_a
+        span_c = (n_across - 1) * step_c
+        for row in range(n_along):
+            for col in range(n_across):
+                if len(boxes) >= n_pts:
+                    break
+                oa = -span_a / 2.0 + row * step_a
+                oc = -span_c / 2.0 + col * step_c
+                bx = pcx + oa * math.cos(rad) + oc * math.cos(perp_rad)
+                by = pcy + oa * math.sin(rad) + oc * math.sin(perp_rad)
+                bx_box = _make_oriented_rect(bx, by, bld_w, bld_d, rad)
+                clipped = bx_box.intersection(placement_polygon).buffer(0)
+                if not clipped.is_empty and clipped.area >= bld_w * bld_d * 0.45:
+                    boxes.append(clipped)
+        if boxes:
+            result = unary_union(boxes).buffer(0)
+            info["n_buildings"] = len(boxes)
+
+    elif typology == "Karré":
+        # Ring-form med gårdsrom via buffer-difference
+        ring_depth = min(12.0, minor * 0.18)
+        ring_depth = max(8.0, ring_depth)
+        # Skaler polygonen ned til å matche target
+        sf = math.sqrt(min(target_footprint_m2 * 1.8, poly_area * 0.85) / max(poly_area, 1.0))
+        sf = min(sf, 0.92)
+        outer = affinity.scale(placement_polygon, xfact=sf, yfact=sf,
+                               origin=placement_polygon.centroid).buffer(0)
+        inner = outer.buffer(-ring_depth)
+        if inner.is_valid and not inner.is_empty and inner.area > 30:
+            ring = outer.difference(inner).buffer(0)
+            if not ring.is_empty and ring.area > 50:
+                result = ring
+                info["n_buildings"] = 1
+                info["courtyard_count"] = 1
+
+    elif typology == "Tun":
+        # L-form eller U-form — hovedfløy langs major + 1-2 sidefløyer
+        wing_depth = min(12.0, minor * 0.25)
+        wing_depth = max(8.0, wing_depth)
+        main_w = min(major * 0.75, target_footprint_m2 * 0.45 / max(wing_depth, 1.0))
+        main_w = max(18.0, main_w)
+
+        # Hovedfløy
+        main_rect = _make_oriented_rect(pcx, pcy, main_w, wing_depth, rad)
+        main_clipped = main_rect.intersection(placement_polygon).buffer(0)
+        wings: List[Polygon] = []
+
+        if not main_clipped.is_empty and main_clipped.area > 30:
+            # Plasser sidefløyer i ender (U-form)
+            for side_sign in [1.0, -1.0]:
+                wing_w = min(minor * 0.5, target_footprint_m2 * 0.2 / max(wing_depth, 1.0))
+                wing_w = max(12.0, wing_w)
+                end_offset = (main_w / 2.0 - wing_depth / 2.0) * side_sign
+                wx = pcx + end_offset * math.cos(rad) + (wing_w / 2.0 + wing_depth / 2.0) * 0.5 * math.cos(perp_rad)
+                wy = pcy + end_offset * math.sin(rad) + (wing_w / 2.0 + wing_depth / 2.0) * 0.5 * math.sin(perp_rad)
+                wing_rect = _make_oriented_rect(wx, wy, wing_depth, wing_w, rad)
+                wing_clipped = wing_rect.intersection(placement_polygon).buffer(0)
+                if not wing_clipped.is_empty and wing_clipped.area > 30:
+                    wings.append(wing_clipped)
+
+            parts = [main_clipped] + wings
+            result = unary_union(parts).buffer(0)
+            info["n_buildings"] = len(parts)
+
+    elif typology == "Tårn":
+        # Lite fotavtrykk (20×20m), mange etasjer — overstyrer floor_range
+        side = min(20.0, minor * 0.35)
+        side = max(16.0, side)
+        tower = _make_oriented_rect(pcx, pcy, side, side, rad)
+        clipped = tower.intersection(placement_polygon).buffer(0)
+        if not clipped.is_empty and clipped.area > 100:
+            result = clipped
+            info["n_buildings"] = 1
+            info["tower_override_floors"] = True  # Signal til generate_options
+
+    elif typology == "Podium + Tårn":
+        # Stort podium (dekker mye av tomten) + lite tårn oppå
+        pod_sf = math.sqrt(min(target_footprint_m2 * 0.7, poly_area * 0.6) / max(poly_area, 1.0))
+        pod_sf = min(pod_sf, 0.88)
+        podium = affinity.scale(placement_polygon, xfact=pod_sf, yfact=pod_sf,
+                                origin=placement_polygon.centroid).buffer(0)
+        tower_side = min(20.0, math.sqrt(podium.area) * 0.4)
+        tower_side = max(14.0, tower_side)
+        tower = _make_oriented_rect(pcx, pcy, tower_side, tower_side, rad)
+        tower_clipped = tower.intersection(podium).buffer(0)
+
+        if not podium.is_empty and podium.area > 80:
+            parts_list = [podium]
+            if not tower_clipped.is_empty and tower_clipped.area > 50:
+                parts_list.append(tower_clipped)
+            result = unary_union(parts_list).buffer(0)
+            info["n_buildings"] = 2
+            info["podium_tower_split"] = True
+
+    elif typology == "Rekke":
+        # 1 lang smal bygning langs major
+        bld_depth = min(10.0, minor * 0.25)
+        bld_depth = max(8.0, bld_depth)
+        bld_width = min(major * 0.90, target_footprint_m2 / max(bld_depth, 1.0))
+        bld_width = max(25.0, bld_width)
+        row_rect = _make_oriented_rect(pcx, pcy, bld_width, bld_depth, rad)
+        clipped = row_rect.intersection(placement_polygon).buffer(0)
+        if not clipped.is_empty and clipped.area > 50:
+            result = clipped
+            info["n_buildings"] = 1
+
+    # Generic fallback: skalert polygon (gammel oppførsel)
+    if result is None or result.is_empty or result.area < 30:
+        return None, {}
+
+    info["fit_scale"] = round(float(result.area) / max(target_footprint_m2, 1.0), 3)
+    return result, info
+
+
+def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context: Optional[Dict[str, Any]] = None) -> List[OptionResult]:
+    geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
+    limits = derive_limits(site, geodata_context)
+    site_polygon = geodata_context["site_polygon"]
+    buildable_polygon = geodata_context["buildable_polygon"]
+    neighbors = geodata_context.get("neighbors", [])
+    terrain = geodata_context.get("terrain")
+
+    max_footprint = limits["max_footprint"]
+    allowed_floors = int(limits["allowed_floors"])
+    if max_footprint <= 0 or buildable_polygon is None or buildable_polygon.is_empty:
+        return []
+
+    # Når %-BRA overstyrer, bruk STØRSTE tilgjengelige polygon — ignorer setbacks
+    placement_polygon = buildable_polygon
+    if site.utnyttelsesgrad_bra_pct > 0:
+        # Prøv site_polygon først, deretter buildable, velg den største
+        candidates = [p for p in [site_polygon, buildable_polygon] if p is not None and not p.is_empty]
+        if candidates:
+            biggest = max(candidates, key=lambda p: p.area)
+            # Minimal 1m buffer for å ikke treffe tomtegrensen eksakt
+            try:
+                buffered = biggest.buffer(-1.0)
+                if buffered is not None and not buffered.is_empty and buffered.area > biggest.area * 0.3:
+                    placement_polygon = buffered
+                else:
+                    placement_polygon = biggest
+            except Exception:
+                placement_polygon = biggest
+
+    templates = [
+        {"name": "Alt A - Lamell", "typology": "Lamell", "coverage": 0.75, "floor_range": (3, 6), "eff_adj": 0.02},
+        {"name": "Alt B - Karré", "typology": "Karré", "coverage": 0.80, "floor_range": (3, 6), "eff_adj": 0.00},
+        {"name": "Alt C - Punkthus", "typology": "Punkthus", "coverage": 0.35, "floor_range": (4, 8), "eff_adj": -0.01},
+        {"name": "Alt D - Tårn", "typology": "Tårn", "coverage": 0.15, "floor_range": (10, 15), "eff_adj": -0.03},
+        {"name": "Alt E - Podium + Tårn", "typology": "Podium + Tårn", "coverage": 0.55, "floor_range": (5, 10), "eff_adj": -0.02},
+        {"name": "Alt F - Tun", "typology": "Tun", "coverage": 0.70, "floor_range": (3, 5), "eff_adj": -0.02},
+    ]
+
+    # --- TYPOLOGI-FEASIBILITY FILTER ---
+    # Fjern typologier som er geometrisk umulige for tomten
+    # Bruk sqrt(area) som karakteristisk dimensjon — mer robust for irregulære polygoner
+    shape_info = _analyze_polygon(placement_polygon)
+    site_major = shape_info['major_m']
+    site_minor = shape_info['minor_m']
+    char_dim = math.sqrt(max(placement_polygon.area, 1.0))  # "ekvivalent bredde"
+    rectangularity = shape_info.get('rectangularity', 1.0)
+    feasible_templates = []
+    for t in templates:
+        typo = t["typology"]
+        skip = False
+        # Karré krever kompakt, regulær tomt (kan lage gårdsrom)
+        if typo == "Karré" and (rectangularity < 0.40 or char_dim < 28):
+            skip = True
+        # Tun krever nok areal og bredde for fløyer
+        elif typo == "Tun" and (rectangularity < 0.30 or char_dim < 22):
+            skip = True
+        # Tårn krever høyde
+        elif typo == "Tårn" and allowed_floors < 10:
+            skip = True
+        # Podium + Tårn krever minst 5 etasjer
+        elif typo == "Podium + Tårn" and allowed_floors < 5:
+            skip = True
+        if not skip:
+            feasible_templates.append(t)
+    # Alltid behold minst Lamell + Punkthus + Podium+Tårn som fallback
+    if len(feasible_templates) < 3:
+        fallback_types = ("Lamell", "Punkthus", "Podium + Tårn")
+        for t in templates:
+            if t["typology"] in fallback_types and t not in feasible_templates:
+                # Sjekk bare etasjekrav
+                if t["typology"] == "Podium + Tårn" and allowed_floors < 5:
+                    continue
+                feasible_templates.append(t)
+    templates = feasible_templates
+
+    options: List[OptionResult] = []
+    # Mål-BTA: bruk %-BRA hvis satt, ellers desired_bta_m2
+    if site.utnyttelsesgrad_bra_pct > 0:
+        site_area_for_pct = max(1.0, geodata_context.get("site_area_m2", site.site_area_m2))
+        target_bra = site_area_for_pct * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta = max(target_bra / max(site.efficiency_ratio, 0.6), 1.0)
+    else:
+        target_bta = max(site.desired_bta_m2, 1.0)
+    serialized_neighbors = serialize_neighbor_geometries(neighbors)
+    terrain_summary = {
+        "slope_pct": round(float((terrain or {}).get("slope_pct", 0.0)), 1),
+        "relief_m": round(float((terrain or {}).get("relief_m", 0.0)), 1),
+        "grade_ns_pct": round(float((terrain or {}).get("grade_ns_pct", 0.0)), 2),
+        "grade_ew_pct": round(float((terrain or {}).get("grade_ew_pct", 0.0)), 2),
+        "point_count": int((terrain or {}).get("point_count", 0)),
+        "source": (terrain or {}).get("source", ""),
+    }
+
+    for template in templates:
+        typology = template["typology"]
+
+        # Når %-BRA overstyrer: beregn target_footprint direkte fra BTA-mål
+        if site.utnyttelsesgrad_bra_pct > 0:
+            fl_min, fl_max = template.get("floor_range", (3, 5))
+            # Høy %-BRA (>150%): ignorer template floor_range og bruk allowed_floors
+            # slik at motoren kan nå målet med færre m² fotavtrykk
+            if site.utnyttelsesgrad_bra_pct > 150:
+                fl_max_eff = allowed_floors
+                fl_min_eff = max(fl_min, 2)
+            else:
+                fl_max_eff = min(fl_max, allowed_floors)
+                fl_min_eff = max(fl_min, 2)
+            # Velg etasjer som gir fotavtrykk innenfor TOMTEAREAL (ikke placement_polygon)
+            site_area_limit = max(geodata_context.get("site_area_m2", site.site_area_m2), 100.0)
+            best_fp = 0
+            best_fl = fl_min_eff
+            for f in range(fl_min_eff, fl_max_eff + 1):
+                fp = target_bta / max(f, 1)
+                if fp <= site_area_limit * 0.92 and fp > best_fp:
+                    best_fp = fp
+                    best_fl = f
+            if best_fp < 50:
+                best_fp = target_bta / max(fl_max_eff, 1)
+                best_fl = fl_max_eff
+            # INGEN cap mot placement_polygon — %-BRA overstyrer alt
+            target_footprint = best_fp
+        else:
+            target_footprint = max_footprint * template["coverage"]
+
+        ai_result = None
+        ai_massing = None
+
+        # --- AI-DREVET PLASSERING (foerstevalg) ---
+        if HAS_AI_PLANNER and ai_site_planner is not None and ai_site_planner.is_available():
+            try:
+                ai_result = ai_site_planner.plan_site(
+                    site_polygon=site_polygon,
+                    buildable_polygon=buildable_polygon,
+                    typology=typology,
+                    neighbors=neighbors,
+                    terrain=terrain,
+                    site_intelligence=geodata_context.get('site_intelligence'),
+                    site_inputs={"latitude_deg": site.latitude_deg, "site_area_m2": site.site_area_m2},
+                    target_bta_m2=target_bta,
+                    max_floors=int(allowed_floors),
+                    max_height_m=site.max_height_m,
+                    max_bya_pct=site.max_bya_pct,
+                    floor_to_floor_m=site.floor_to_floor_m,
+                )
+                if ai_result and ai_result.get("buildings") and ai_result.get("footprint"):
+                    footprint_polygon = ai_result["footprint"]
+                    ai_buildings = ai_result["buildings"]
+                    footprint_area = float(footprint_polygon.area)
+                    placement = {
+                        "fit_scale": round(footprint_area / max(target_footprint, 1.0), 3),
+                        "containment_ratio": 1.0,
+                        "footprint_width_m": round(max(b.get("width_m", 0) for b in ai_buildings), 1),
+                        "footprint_depth_m": round(max(b.get("depth_m", 0) for b in ai_buildings), 1),
+                        "orientation_deg": round(ai_buildings[0].get("angle_deg", 0), 1) if ai_buildings else 0.0,
+                        "n_buildings": len(ai_buildings),
+                        "component_count": len(ai_buildings),
+                        "source": ai_result.get("source", "AI"),
+                    }
+                    # Bygg massing_parts fra AI-bygninger
+                    PART_COLORS = {
+                        "Lamell": [34, 197, 94, 200], "Punkthus": [56, 189, 248, 200],
+                        "Tun": [168, 130, 240, 200], "Rekke": [250, 180, 60, 200],
+                        "Karré": [100, 200, 180, 200], "Tårn": [56, 140, 248, 200],
+                        "Podium + Tårn": [220, 80, 120, 200],
+                    }
+                    base_color = PART_COLORS.get(typology, [34, 197, 94, 200])
+                    ai_massing = []
+                    for bld in ai_buildings:
+                        bld_poly = bld.get("polygon")
+                        if bld_poly is None:
+                            continue
+                        role = bld.get("role", "main")
+                        color = list(base_color)
+                        if role == "wing":
+                            color = [int(c * 0.8) for c in base_color[:3]] + [180]
+                        elif role == "tower":
+                            color = [56, 140, 248, 230]
+                        ai_massing.append({
+                            "name": bld.get("name", typology),
+                            "height_m": float(bld.get("height_m", site.floor_to_floor_m * 4)),
+                            "floors": int(bld.get("floors", 4)),
+                            "color": color,
+                            "coords": geometry_to_coord_groups(bld_poly),
+                        })
+                else:
+                    ai_result = None  # Fell through to geometric
+            except Exception:
+                ai_result = None
+
+        # --- GEOMETRISK FALLBACK ---
+        if ai_result is None or not ai_result.get("buildings"):
+            footprint_polygon, placement = create_typology_footprint(placement_polygon, typology, target_footprint)
+
+        footprint_area = float(footprint_polygon.area)
+
+        # --- HØY UTNYTTELSE FALLBACK (typologi-differensiert) ---
+        # Når %-BRA er aktiv og fotavtrykket er under terskelen av mål:
+        # lager ULIKE former per typologi i stedet for generisk skalert polygon
+        # Ambisiøse mål (>150%) krever høyere terskel (95%) for å sikre at
+        # AI-planneren eller geometrisk motor som ikke traff nok, blir overstyrt
+        if site.utnyttelsesgrad_bra_pct > 250:
+            pct_bra_fill_threshold = 0.95  # Meget ambisiøs: krev nær-perfekt fit
+        elif site.utnyttelsesgrad_bra_pct > 150:
+            pct_bra_fill_threshold = 0.90
+        else:
+            pct_bra_fill_threshold = 0.50
+        if site.utnyttelsesgrad_bra_pct > 0 and footprint_area < target_footprint * pct_bra_fill_threshold:
+            fill_angle = placement.get("orientation_deg", 0.0)
+            filled_fp, fill_info = _typology_polygon_fill(
+                placement_polygon, typology, target_footprint, fill_angle,
+            )
+            # Godta hvis fill-resultat er større enn forrige, ELLER >= 70% av target.
+            # Tidligere kastet vi fill-resultater som var mindre enn 70% av target,
+            # selv om de var større enn AI-planner-resultatet. Det førte til at
+            # vi beholdt et dårligere footprint. Nå: ta det største.
+            accept_fill = (
+                filled_fp is not None
+                and not filled_fp.is_empty
+                and (
+                    filled_fp.area > footprint_area  # større enn forrige → alltid bedre
+                    or filled_fp.area >= target_footprint * 0.70  # eller rimelig treff av target
+                )
+            )
+            if accept_fill:
+                footprint_polygon = filled_fp
+                footprint_area = float(footprint_polygon.area)
+                placement.update(fill_info)
+                # Fallback overstyrte footprint — nuller ai_massing slik at
+                # massing_parts bygges fra nytt footprint i stedet for gamle AI-bygg
+                ai_massing = None
+            else:
+                # SMART FALLBACK: Fyll placement_polygon med typologi-riktige bygninger
+                # Bruk _place_grid_buildings med tett spacing for å treffe target
+                shape = _analyze_polygon(placement_polygon)
+                fp_major, fp_minor = shape['major_m'], shape['minor_m']
+                fp_angle = shape['orientation_deg']
+                new_fp = None
+
+                if typology == "Lamell":
+                    # Lamell: lange grunne bygninger, dimensjonert fra target
+                    bld_d_fb = clamp(fp_minor * 0.25, 11.0, 14.0)
+                    desired_bars = clamp(math.ceil(target_footprint / (fp_major * 0.6 * bld_d_fb)), 2, 4)
+                    # Utvidet max-bredde til 75m (fra 65) og 92% av major (fra 85%)
+                    # for å tillate lengre lameller som faktisk treffer ambisiøse %-BRA mål
+                    bld_w_fb = clamp(target_footprint / (desired_bars * bld_d_fb), 18.0, 75.0)
+                    bld_w_fb = min(bld_w_fb, fp_major * 0.92)
+                    n_needed = max(2, math.ceil(target_footprint / max(bld_w_fb * bld_d_fb, 1.0)))
+                    buildings = _place_grid_buildings(
+                        placement_polygon, bld_w_fb, bld_d_fb, fp_angle,
+                        spacing_along=6.0, spacing_across=6.0,
+                        max_buildings=min(n_needed + 3, 10),
+                        max_footprint_m2=target_footprint * 1.15,
+                    )
+                    if buildings:
+                        new_fp = unary_union(buildings).buffer(0)
+                        placement["n_buildings"] = len(buildings)
+
+                elif typology == "Punkthus":
+                    # Punkthus: tilnærmet kvadratisk, dimensjonert fra target
+                    desired_count = clamp(round(target_footprint / 462.0), 2, 6)
+                    ideal_area = target_footprint / desired_count
+                    side_w = clamp(math.sqrt(ideal_area), 14.0, 22.0)
+                    side_d = clamp(side_w * 0.95, 13.0, 21.0)
+                    n_needed = max(4, math.ceil(target_footprint / max(side_w * side_d, 1.0)))
+                    sp = max(10.0, side_w * 0.6)
+                    buildings = _place_grid_buildings(
+                        placement_polygon, side_w, side_d, fp_angle,
+                        spacing_along=sp, spacing_across=sp,
+                        max_buildings=min(n_needed + 3, 10),
+                        max_footprint_m2=target_footprint * 1.15,
+                    )
+                    if buildings:
+                        new_fp = unary_union(buildings).buffer(0)
+                        placement["n_buildings"] = len(buildings)
+
+                elif typology == "Karré":
+                    # Ring med gårdsrom via buffer-difference
+                    ring_d = 11.0
+                    sf = math.sqrt(min(target_footprint * 1.8, placement_polygon.area * 0.90) / max(placement_polygon.area, 1.0))
+                    sf = min(sf, 0.96)
+                    outer = affinity.scale(placement_polygon, xfact=sf, yfact=sf,
+                                           origin=placement_polygon.centroid).buffer(0)
+                    inner = outer.buffer(-ring_d)
+                    if inner.is_valid and not inner.is_empty and inner.area > 20:
+                        ring = outer.difference(inner).buffer(0)
+                        if not ring.is_empty:
+                            new_fp = ring
+                            placement["courtyard_count"] = 1
+
+                elif typology == "Tun":
+                    # Hovedkropp langs major-aksen + vinkelrett fløy
+                    main_d = 12.0
+                    main_w = min(fp_major * 0.80, target_footprint * 0.55 / main_d)
+                    main_w = max(20.0, main_w)
+                    main = _find_inscribed_rect(placement_polygon, main_d, fp_angle, max_width_m=main_w)
+                    if main is not None:
+                        remaining = placement_polygon.difference(main.buffer(3.0))
+                        wing = _find_inscribed_rect(remaining, main_d, fp_angle + 90, max_width_m=fp_major * 0.5)
+                        if wing is not None and wing.area > 60:
+                            new_fp = unary_union([main, wing]).buffer(0)
+                            placement["n_buildings"] = 2
+                        else:
+                            new_fp = main
+
+                else:
+                    # Podium+Tårn og andre: grid-fill med mellomstore bygninger
+                    bld_w = 20.0
+                    bld_d = 15.0
+                    n_needed = max(2, math.ceil(target_footprint / max(bld_w * bld_d, 1.0)))
+                    buildings = _place_grid_buildings(
+                        placement_polygon, bld_w, bld_d, fp_angle,
+                        spacing_along=8.0, spacing_across=8.0,
+                        max_buildings=min(n_needed + 1, 6),
+                        max_footprint_m2=target_footprint * 1.15,
+                    )
+                    if buildings:
+                        new_fp = unary_union(buildings).buffer(0)
+                        placement["n_buildings"] = len(buildings)
+
+                if new_fp is not None and not new_fp.is_empty and new_fp.area > footprint_area:
+                    footprint_polygon = new_fp
+                    footprint_area = float(footprint_polygon.area)
+                    placement["source"] = f"grid-fill-{typology.lower().replace(' ', '_')}"
+                    placement["fit_scale"] = round(footprint_area / max(target_footprint, 1.0), 3)
+                    # Smart fallback overstyrte footprint — nuller ai_massing
+                    ai_massing = None
+
+        # Etasjer: bruk typologiens floor_range, begrenset av allowed_floors
+        fl_min, fl_max = template.get("floor_range", (3, 5))
+        # Høy %-BRA (>150%): bruk allowed_floors som tak for ALLE typologier
+        if site.utnyttelsesgrad_bra_pct > 150:
+            fl_max = allowed_floors
+        # Tårn: ALLTID minimum 10 etasjer (det er definisjonen av et tårn)
+        if typology == "Tårn":
+            fl_min = max(fl_min, 10)
+            fl_max = max(fl_max, min(15, allowed_floors))
+        fl_min = max(2, min(fl_min, allowed_floors))
+        fl_max = min(fl_max, allowed_floors)
+        if fl_min > fl_max:
+            fl_max = fl_min
+
+        # Finn optimalt etasjetall som treffer nærmest target_bta
+        best_floor_fit = fl_min
+        best_delta = float("inf")
+        for f_candidate in range(fl_min, fl_max + 1):
+            candidate_bta = footprint_area * f_candidate
+            delta = abs(candidate_bta - target_bta)
+            if delta < best_delta:
+                best_delta = delta
+                best_floor_fit = f_candidate
+        floors = best_floor_fit
+
+        gross_bta = footprint_area * floors
+        if site.max_bra_m2 > 0 and site.utnyttelsesgrad_bra_pct <= 0:
+            gross_bta = min(gross_bta, site.max_bra_m2)
+
+        actual_efficiency = clamp(site.efficiency_ratio + template["eff_adj"], 0.64, 0.88)
+        saleable_area = gross_bta * actual_efficiency
+
+        mix_counts, _ = allocate_unit_mix(saleable_area, mix_specs)
+        unit_count = sum(mix_counts.values())
+        parking_spaces = int(math.ceil(unit_count * site.parking_ratio_per_unit)) if unit_count > 0 else 0
+        open_space_ratio = max(0.0, 1.0 - (footprint_area / max(geodata_context["site_area_m2"], 1.0)))
+        parking_pressure_area = parking_spaces * site.parking_area_per_space_m2
+        parking_pressure_pct = (
+            100.0 * parking_pressure_area / max(geodata_context["site_area_m2"] * open_space_ratio, 1.0)
+            if open_space_ratio > 0
+            else 100.0
+        )
+
+        height_m = floors * site.floor_to_floor_m
+        solar = evaluate_solar(
+            site=site,
+            site_polygon=site_polygon,
+            footprint_polygon=footprint_polygon,
+            building_height_m=height_m,
+            typology=typology,
+            neighbors=neighbors,
+            terrain=terrain,
+        )
+        target_fit_pct = 100.0 * gross_bta / target_bta if target_bta > 0 else 100.0
+
+        notes: List[str] = []
+        if target_fit_pct < 85:
+            notes.append("Lav måloppnåelse mot ønsket volum; krever høyere utnyttelse eller omprosjektering.")
+        elif target_fit_pct > 110:
+            notes.append("Ligger over ønsket volum; vurder nedskalering eller større leiligheter.")
+        else:
+            notes.append("Treffer ønsket volum relativt godt i tidligfase.")
+
+        if placement.get("fit_scale", 1.0) < 0.92:
+            notes.append("Tomtepolygonen gir et mer krevende byggefelt; volumet er skalert ned for å holde seg innenfor reelle grenser.")
+
+        if solar["solar_score"] < 55:
+            notes.append("Svakere solforhold når faktisk tomtepolygon og naboer tas med; videre 3D-kontroll anbefales.")
+        elif solar["solar_score"] < 70:
+            notes.append("Middels solforhold med reell kontekst; verifiser uteareal og nord-/sydvendte fasader videre.")
+        else:
+            notes.append("God indikativ soltilgang også når nabohøyder og terreng legges inn i modellen.")
+
+        if terrain and terrain.get("slope_pct", 0.0) > 12.0:
+            notes.append("Terrenget er relativt bratt; sokkel, kjeller og adkomst bør testes videre mot kotegrunnlag.")
+        elif terrain and terrain.get("slope_pct", 0.0) > 5.0:
+            notes.append("Terrenget er merkbart skrånende og vil påvirke parkering, innganger og uteopphold.")
+
+        if typology == "Lamell":
+            notes.append("Lamell er som regel sterkest på effektivitet, dagslys og repetérbar boliglogikk.")
+        elif typology == "Karré":
+            notes.append("Karré gir tydelig byrom og robust kvartalsstruktur, men krever mer presis kontroll på gårdsrom, lys og innkjøring.")
+        elif typology == "Punkthus":
+            notes.append("Punkthus gir ofte best lys og sikt, men taper gjerne litt effektivitet og kjerneøkonomi.")
+        elif typology == "Tårn":
+            notes.append("Tårn kan gi høy måloppnåelse på små fotavtrykk, men er mest sårbart for regulering, kjerneøkonomi og vind/skygge.")
+        elif typology == "Podium + Tårn":
+            notes.append("Podium + tårn kombinerer urbant gategrep med høyde, men krever presis kontroll på sokkel, uteareal og planrisiko.")
+        elif typology == "Rekke":
+            notes.append("Rekkehus gir flest enheter, lav byggehøyde og effektiv arealbruk, men gir lavere BTA per tomt enn blokk.")
+        else:
+            notes.append("Tun/U-form gir høy arealutnyttelse og tydelig uterom, men er mest sårbar for skygge fra egne fløyer og naboer.")
+
+        score = rank_score(
+            target_fit_pct=target_fit_pct,
+            solar_score=solar["solar_score"],
+            open_space_ratio=open_space_ratio,
+            efficiency_ratio=actual_efficiency,
+            parking_pressure_pct=parking_pressure_pct,
+        )
+
+        # Tomteform-bonus: favoriser typologier som passer tomtens form
+        site_shape = _analyze_polygon(placement_polygon)
+        if site_shape.get('is_elongated', False):
+            # Smal/avlang tomt → Lamell passer klart best
+            shape_bonus = {"Lamell": 10.0, "Tun": 4.0, "Karré": -6.0, "Punkthus": -5.0, "Tårn": -2.0, "Podium + Tårn": -3.0}
+        else:
+            # Kompakt/kvadratisk tomt → Karré og Punkthus passer godt
+            shape_bonus = {"Lamell": 0.0, "Tun": 1.0, "Karré": 4.0, "Punkthus": 3.0, "Tårn": 2.0, "Podium + Tårn": 3.0}
+        score = round(score + shape_bonus.get(typology, 0.0), 1)
+
+        # Ekstra straff: typologier som brukte polygon-fill mister differensiering
+        if placement.get("source", "").startswith("polygon-fill"):
+            # Lamell er den naturlige polygon-fill-formen — andre typologier straffes
+            if typology != "Lamell":
+                score = round(score - 3.0, 1)
+
+        winter_alt = solar_altitude_deg(site.latitude_deg, 355, 12.0)
+        winter_az = (solar_azimuth_deg(site.latitude_deg, 355, 12.0) - site.north_rotation_deg) % 360.0
+        winter_shadow_poly = build_shadow_polygon(footprint_polygon, height_m, winter_az, winter_alt, terrain)
+
+        massing_parts = ai_massing if ai_massing else build_massing_parts(footprint_polygon, typology, floors, site.floor_to_floor_m)
+        ai_source = placement.get("source", "") if ai_result else ""
+        geometry = {
+            "site_polygon_coords": geometry_to_coord_groups(site_polygon),
+            "buildable_polygon_coords": geometry_to_coord_groups(buildable_polygon),
+            "footprint_polygon_coords": geometry_to_coord_groups(footprint_polygon),
+            "winter_shadow_polygon_coords": geometry_to_coord_groups(winter_shadow_poly) if winter_shadow_poly is not None else [],
+            "neighbor_polygons": serialized_neighbors,
+            "terrain_summary": terrain_summary,
+            "placement": placement,
+            "site_source": (ai_source + " + " if ai_source else "") + geodata_context.get("source", "Tomt"),
+            "massing_parts": massing_parts,
+            "component_count": len(split_geometry_to_polygons(footprint_polygon)),
+        }
+
+        options.append(
+            OptionResult(
+                name=template["name"],
+                typology=typology,
+                floors=floors,
+                building_height_m=round(height_m, 1),
+                footprint_area_m2=round(footprint_area, 1),
+                gross_bta_m2=round(gross_bta, 1),
+                saleable_area_m2=round(saleable_area, 1),
+                footprint_width_m=placement["footprint_width_m"],
+                footprint_depth_m=placement["footprint_depth_m"],
+                buildable_area_m2=round(geodata_context["buildable_area_m2"], 1),
+                open_space_ratio=round(open_space_ratio, 3),
+                target_fit_pct=round(target_fit_pct, 1),
+                unit_count=unit_count,
+                mix_counts=mix_counts,
+                parking_spaces=parking_spaces,
+                parking_pressure_pct=round(parking_pressure_pct, 1),
+                solar_score=round(solar["solar_score"], 1),
+                estimated_equinox_sun_hours=round(solar["estimated_equinox_sun_hours"], 1),
+                estimated_winter_sun_hours=round(solar["estimated_winter_sun_hours"], 1),
+                sunlit_open_space_pct=round(solar["sunlit_open_space_pct"], 1),
+                winter_noon_shadow_m=round(solar["winter_noon_shadow_m"], 1),
+                equinox_noon_shadow_m=round(solar["equinox_noon_shadow_m"], 1),
+                summer_afternoon_shadow_m=round(solar["summer_afternoon_shadow_m"], 1),
+                efficiency_ratio=round(actual_efficiency, 3),
+                neighbor_count=len(neighbors),
+                terrain_slope_pct=round(float((terrain or {}).get("slope_pct", 0.0)), 1),
+                terrain_relief_m=round(float((terrain or {}).get("relief_m", 0.0)), 1),
+                notes=notes,
+                score=score,
+                geometry=geometry,
+            )
+        )
+
+    options.sort(key=lambda option: option.score, reverse=True)
+    return options
+
+
+# --- AI-RAFFINERING AV SKISSE ---
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+
+
+def _call_claude_json(system_prompt: str, user_prompt: str, max_tokens: int = 4000) -> Optional[Dict[str, Any]]:
+    """Kall Claude API og returner parset JSON."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        # Ekstraher JSON fra respons
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _call_claude_text(system_prompt: str, user_prompt: str, max_tokens: int = 6000) -> Optional[str]:
+    """Kall Claude API og returner ren tekst (ikke JSON)."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_prompt}],
+            },
+            timeout=90,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        return text.strip() if text.strip() else None
+    except Exception:
+        return None
+
+
+def _call_claude_vision(
+    system_prompt: str,
+    user_text: str,
+    images: List[Image.Image],
+    max_tokens: int = 4000,
+) -> Optional[str]:
+    """Kall Claude API med bilder (vision) og returner ren tekst."""
+    if not ANTHROPIC_API_KEY:
+        return None
+    try:
+        content_blocks: List[Dict[str, Any]] = []
+        for img in images[:5]:
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, format="JPEG", quality=85)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            content_blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            })
+        content_blocks.append({"type": "text", "text": user_text})
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": ANTHROPIC_MODEL,
+                "max_tokens": max_tokens,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": content_blocks}],
+            },
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        text = ""
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+        return text.strip() if text.strip() else None
+    except Exception:
+        return None
+
+
+def analyze_plan_views_with_ai(
+    plan_images: List[Image.Image],
+    options: List["OptionResult"],
+    site: "SiteInputs",
+    environment_data: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """
+    Sender planvisninger til Claude for arkitektonisk vurdering.
+    Returnerer en liste med korte kommentarer (1 per alternativ).
+    """
+    if not ANTHROPIC_API_KEY or not plan_images or not options:
+        return []
+    analyses: List[str] = []
+    env = environment_data or {}
+    noise = env.get("noise", {})
+    noise_text = ""
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        noise_text = f"Støy: {worst.get('zone', '')} — {worst.get('db', 0):.0f} dB fra {worst.get('source_type', 'ukjent')}."
+
+    system = (
+        "Du er en erfaren norsk arkitekt som vurderer planvisninger fra en mulighetsstudie. "
+        "Skriv konsist på norsk bokmål. Maks 80 ord per vurdering. "
+        "Kommenter: volumvirkning mot nabobebyggelse, siktlinjer og mellomrom, "
+        "solforhold basert på orientering, og eventuelle støykonsekvenser for planløsning."
+    )
+    for i, (img, opt) in enumerate(zip(plan_images[:3], options[:3])):
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        user_text = (
+            f"Planvisning for {opt.name} ({opt.typology}).\n"
+            f"Tomteareal: {site.site_area_m2:.0f} m², Byggefelt: {opt.buildable_area_m2:.0f} m², "
+            f"BTA: {opt.gross_bta_m2:.0f} m², BRA: {bra:.0f} m², {opt.floors} etasjer, "
+            f"{opt.unit_count} boliger, solscore {opt.solar_score:.0f}/100.\n"
+            f"Nabobygg i modell: {opt.neighbor_count}.\n"
+            f"{noise_text}\n"
+            f"Gi en kort arkitektonisk vurdering av volumplasseringen vist i bildet."
+        )
+        result = _call_claude_vision(system, user_text, [img], max_tokens=600)
+        analyses.append(result or "")
+    return analyses
+
+
+def generate_ai_report_for_locked_sketch(
+    sketch_option: "OptionResult",
+    motor_options: List["OptionResult"],
+    site: "SiteInputs",
+    geodata_context: Dict[str, Any],
+    environment_data: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Sekundær AI-analyse: Claude skriver en profesjonell mulighetsstudie-rapport
+    basert på den låste skissen, sammenlignet med motorens alternativer.
+    
+    Returnerer fullstendig rapporttekst (markdown-format) eller None ved feil.
+    """
+    # Bygg kontekst for AI
+    pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+    site_area = max(site.site_area_m2, 1.0)
+    sketch_bra = sketch_option.saleable_area_m2
+    sketch_pct_bra = round(sketch_bra / site_area * 100, 0) if pct_bra_active else 0
+
+    motor_summary = []
+    for opt in motor_options[:6]:
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        motor_summary.append(
+            f"{opt.name} ({opt.typology}): {opt.gross_bta_m2:.0f} m² BTA, ~{bra:.0f} m² BRA, "
+            f"{opt.unit_count} boliger, {opt.floors} etg, sol {opt.solar_score:.0f}/100"
+        )
+
+    terrain_info = ""
+    terrain = geodata_context.get("terrain")
+    if terrain and terrain.get("slope_pct", 0) > 0:
+        terrain_info = f"Terreng: {terrain.get('slope_pct', 0):.1f}% fall, {terrain.get('relief_m', 0):.1f} m relieff."
+
+    # Miljødata
+    env = environment_data or {}
+    noise_info = ""
+    noise = env.get("noise", {})
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        noise_info = f"Støy: {worst.get('zone', '')} — {worst.get('db', 0):.0f} dB Lden fra {worst.get('source_type', 'vei')}. Kilde: {noise.get('source', 'kartlegging')}."
+        if len(noise["zones"]) > 1:
+            noise_info += f" Totalt {len(noise['zones'])} støysoner registrert."
+    daylight_info = ""
+    dl = env.get("daylight", {})
+    if dl.get("available") and dl.get("overall_score", 0) > 0:
+        daylight_info = f"Dagslysindikator: {dl['overall_score']:.0f}/100."
+    wind_info = ""
+    wc = env.get("wind_comfort", {})
+    if wc.get("available"):
+        wind_info = f"Vindkomfort: Klasse {wc.get('lawson_class', '?')} ({wc.get('overall', '')})."
+
+    system_prompt = """Du er en erfaren norsk arkitekt som skriver profesjonelle mulighetsstudier.
+Du skriver konsise, faglig presise rapporter på norsk bokmål. Bruk riktig norsk (æ, ø, å).
+
+Skriv rapporten med disse seksjonene, markert med # for overskrift:
+# 1. OPPSUMMERING
+# 2. GRUNNLAG
+# 3. VALGT VOLUMLØSNING
+# 4. ARKITEKTONISK VURDERING
+# 5. SOL- OG DAGSLYSFORHOLD
+# 6. STØY OG MILJØFORHOLD
+# 7. SAMMENLIGNING MED ALTERNATIVER
+# 8. RISIKO OG AVKLARINGSPUNKTER
+# 9. ANBEFALING OG NESTE STEG
+
+Regler:
+- Bruk BRA (salgbart/bruksareal) som primærtall, BTA som sekundærtall
+- Vær konkret om styrker og svakheter ved den valgte løsningen
+- Kommenter sol/skygge basert på solscore og plassering
+- OBLIGATORISK: Hvis støydata finnes, SKAL du i seksjon 6 kommentere: støynivå i dB, kildetype, konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
+- Referer til visuelt materiale der det er relevant: «Se volumskisser (side X)», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger og sol/skygge-diagrammer som leseren kan slå opp.
+- Nevn kort motorens alternativer som referanse, men fokuser på den valgte løsningen
+- Skriv 600-900 ord totalt. Ikke bruk bullet points med - i rapporten, skriv sammenhengende tekst.
+- Ikke dikter opp tall — bruk KUN tallene du får i konteksten
+"""
+
+    user_prompt = f"""Skriv en mulighetsstudie-rapport for dette prosjektet.
+
+TOMT OG REGULERING:
+- Adresse/prosjekt: {sketch_option.name}
+- Tomteareal: {site_area:.0f} m²
+- Byggefelt: {sketch_option.buildable_area_m2:.0f} m²
+- Maks BYA: {site.max_bya_pct:.1f}%
+- Maks etasjer: {site.max_floors}
+- Maks høyde: {site.max_height_m:.1f} m
+- Geometri: {site.site_geometry_source}
+- Nabobygg: {site.neighbor_count} stk i modellen
+{terrain_info}
+{"- %-BRA mål: " + str(site.utnyttelsesgrad_bra_pct) + "% → " + str(round(site_area * site.utnyttelsesgrad_bra_pct / 100)) + " m² BRA" if pct_bra_active else "- Ønsket BTA: " + str(site.desired_bta_m2) + " m²"}
+
+MILJØFORHOLD:
+{noise_info if noise_info else "Ingen støydata registrert."}
+{daylight_info if daylight_info else ""}
+{wind_info if wind_info else ""}
+
+VALGT LØSNING (manuell skisse):
+- Antall bygg: {sketch_option.geometry.get('component_count', '?')}
+- Fotavtrykk: {sketch_option.footprint_area_m2:.0f} m²
+- BTA: {sketch_option.gross_bta_m2:.0f} m²
+- BRA (salgbart): {sketch_bra:.0f} m²
+{"- %-BRA oppnådd: " + str(sketch_pct_bra) + "%" if pct_bra_active else ""}
+- Etasjer: {sketch_option.floors}
+- Byggehøyde: {sketch_option.building_height_m:.1f} m
+- Leiligheter: {sketch_option.unit_count}
+- Fordeling: {json.dumps(sketch_option.mix_counts, ensure_ascii=False)}
+- Solscore: {sketch_option.solar_score:.0f}/100
+- Solbelyst uteareal: {sketch_option.sunlit_open_space_pct:.0f}%
+- Vinterskygge kl 12: {sketch_option.winter_noon_shadow_m:.0f} m
+
+MOTORENS ALTERNATIVER (referanse):
+{chr(10).join(motor_summary)}
+"""
+
+    result = _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
+    if result:
+        # Post-filter: samme rydding som i hoved-AI-rapport
+        result = _strip_hallucinated_preamble(result)
+        result = _strip_hallucinated_appendix(result)
+        result = _normalize_bullets(result)
+    return result
+
+
+def refine_sketch_with_ai(
+    sketch_buildings: List[Dict[str, Any]],
+    site_polygon_coords: List[List[float]],
+    site_area_m2: float,
+    latitude_deg: float,
+    max_bya_pct: float,
+    max_floors: int,
+    max_height_m: float,
+    floor_to_floor_m: float,
+    neighbors: Optional[List[Dict[str, Any]]] = None,
+    **kwargs: Any,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    AI-raffinering: Claude optimerer skissens bygningsplassering.
+
+    Returnerer liste med raffinerte bygninger eller None.
+    """
+    system = """Du er en norsk arkitekt som optimerer bygningsplassering på tomter.
+Du mottar en bruker-skisse med bygningsbokser og tomtekontekst.
+Optimer plasseringen med fokus på:
+1. FASADEORIENTERING: Roter bygninger for å maksimere sør/sørvest-vendte fasader og dagslys
+2. AVSTAND: Sørg for min. 8m mellom bygninger (TEK17), helst 12-18m for lameller
+3. SOLFORHOLD: Plasser lavere bygg mot sør, høyere mot nord for å unngå skygge på uteareal
+4. UTEROM: Skap tydelige, solrike uterom mellom bygningene
+5. ADKOMST: Plasser innganger mot vei/tilkomst
+6. STØY: Hvis det er støy fra vei, plasser soverom/stille sider bort fra støykilden, bruk bygningskroppen som skjerm
+7. DAGSLYS (TEK17 §13-7): Sørg for at alle leiligheter har tilstrekkelig dagslys — unngå at bygg skygger for hverandre
+8. UTSIKT: Orienter bygninger for å maksimere utsikt mot åpne retninger, unngå å blokkere nabobygningers utsikt
+9. VIND: Unngå smale passasjer mellom bygninger (venturi-effekt), plasser lavere bygg i dominerende vindretning
+
+Svar KUN med en JSON-array med bygninger. Hver bygning har:
+{"name": "str", "cx": float, "cy": float, "w": float, "d": float, "angle_deg": float, "floors": int, "role": "main|wing|tower", "reasoning": "kort begrunnelse for endring inkl. miljøhensyn"}
+
+Hold deg innenfor tomtegrensen. Behold omtrent samme totale BTA (±15%).
+IKKE inkluder noe annet enn JSON-arrayen i svaret."""
+
+    user_data = {
+        "sketch_buildings": sketch_buildings,
+        "site_polygon": site_polygon_coords[:50],  # Begrens antall punkter
+        "site_area_m2": round(site_area_m2, 0),
+        "latitude_deg": round(latitude_deg, 2),
+        "max_bya_pct": max_bya_pct,
+        "max_floors": max_floors,
+        "max_height_m": max_height_m,
+        "floor_to_floor_m": floor_to_floor_m,
+        "neighbor_count": len(neighbors or []),
+        "nearby_neighbors": [
+            {"height_m": n.get("height_m", 9), "distance_m": round(n.get("distance_m", 50), 0)}
+            for n in (neighbors or [])[:10]
+        ],
+    }
+
+    # Legg til miljødata hvis tilgjengelig
+    if kwargs.get("environment"):
+        env = kwargs["environment"]
+        env_summary = {}
+        if env.get("noise", {}).get("available"):
+            zones = env["noise"].get("zones", [])
+            if zones:
+                env_summary["noise"] = f"Støysone: {zones[0].get('zone', '–')}, {zones[0].get('db', 0):.0f} dB fra {zones[0].get('source_type', 'vei')}"
+        if env.get("wind", {}).get("available"):
+            env_summary["wind"] = f"Dominerende vind: {env['wind'].get('dominant_direction', '–')}, snitt {env['wind'].get('avg_speed_ms', 0):.1f} m/s"
+        if env.get("daylight", {}).get("available"):
+            env_summary["daylight_score"] = env["daylight"].get("overall_score", 0)
+        if env.get("views", {}).get("available"):
+            env_summary["view_score"] = env["views"].get("overall_score", 0)
+        if env_summary:
+            user_data["environment"] = env_summary
+
+    user_prompt = f"""Optimer denne bygningsskissen for tomten.
+
+SKISSE-DATA:
+{json.dumps(user_data, ensure_ascii=False, indent=2)}
+
+Returner den optimerte bygningslisten som JSON-array. Behold antall bygg og omtrent samme dimensjoner,
+men juster posisjon (cx/cy), rotasjon (angle_deg) og eventuelt dybde/bredde for bedre arkitektonisk kvalitet.
+Ta hensyn til miljøforhold (støy, vind, dagslys, utsikt) der dette er oppgitt.
+Forklar kort i "reasoning" hva du endret for hvert bygg, inkludert miljøhensyn."""
+
+    result = _call_claude_json(system, user_prompt)
+    if isinstance(result, list) and len(result) > 0:
+        return result
+    return None
+
+
+def generate_sketch_variants(
+    sketch_buildings: List[Dict[str, Any]],
+    site_polygon_coords: List[List[float]],
+    site_area_m2: float,
+    latitude_deg: float,
+    max_bya_pct: float,
+    max_floors: int,
+    max_height_m: float,
+    floor_to_floor_m: float,
+    neighbors: Optional[List[Dict[str, Any]]] = None,
+    n_variants: int = 2,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    AI-generering av alternative volumløsninger innenfor skissens bounding box.
+    Returnerer dict med "variants" liste, hver med "name", "buildings", "description".
+    """
+    system = """Du er en norsk arkitekt som genererer alternative volumløsninger for tomter.
+Du mottar en bruker-skisse og skal lage varianter som holder seg innenfor omtrent
+samme bounding box og BTA, men varierer typologisk grep.
+
+Eksempler på varianter:
+- Variant A: "Kompakt lamell" — færre, lengre bygninger med flere etasjer
+- Variant B: "Punkthus-grep" — flere, mindre bygninger med mer åpent mellomrom
+- Variant C: "L-form / Tun" — bygninger i vinkel som skaper tydelig uterom
+
+Svar KUN med JSON:
+{
+  "variants": [
+    {
+      "name": "Variant A - Kompakt lamell",
+      "description": "Kort begrunnelse",
+      "buildings": [{"name":"Bygg A","cx":...,"cy":...,"w":...,"d":...,"angle_deg":...,"floors":...}]
+    }
+  ]
+}"""
+
+    user_data = {
+        "sketch_buildings": sketch_buildings,
+        "site_polygon": site_polygon_coords[:50],
+        "site_area_m2": round(site_area_m2, 0),
+        "latitude_deg": round(latitude_deg, 2),
+        "max_bya_pct": max_bya_pct,
+        "max_floors": max_floors,
+        "max_height_m": max_height_m,
+        "floor_to_floor_m": floor_to_floor_m,
+        "n_variants": n_variants,
+    }
+
+    user_prompt = f"""Generer {n_variants} alternative volumløsninger basert på denne skissen.
+Hold deg innenfor tomtens bounding box og ±20% av skissens totale BTA.
+
+SKISSE-DATA:
+{json.dumps(user_data, ensure_ascii=False, indent=2)}
+
+Returner JSON med "variants"-array."""
+
+    result = _call_claude_json(system, user_prompt, max_tokens=6000)
+    if isinstance(result, dict) and "variants" in result:
+        return result
+    return None
+
+
+def _deterministic_solar_refinement(
+    sketch_buildings: List[Dict[str, Any]],
+    latitude_deg: float,
+) -> List[Dict[str, Any]]:
+    """Deterministisk fallback: roter bygninger for optimal solorientering."""
+    # Optimal langside-orientering for skandinavisk breddegrad: øst-vest (vinkelrett på sør)
+    # dvs. bygningsdybden (kort side) peker mot sør for maks dagslys
+    optimal_angle = 0.0  # 0° = lang side øst-vest, kort side mot sør
+
+    refined = []
+    for bld in sketch_buildings:
+        b = dict(bld)
+        current = float(b.get("angle_deg", 0))
+        w = float(b.get("w", 40))
+        d = float(b.get("d", 14))
+
+        # Hvis bygningen er dyp (>16m), er det en lamell — orienter lang side øst-vest
+        if w > d * 1.5:
+            # Allerede bred — sjekk om den bør roteres
+            delta = abs(current - optimal_angle) % 180
+            if delta > 45 and delta < 135:
+                b["angle_deg"] = round(optimal_angle, 1)
+                b["reasoning"] = f"Rotert til {optimal_angle}° for å orientere langfasade øst-vest (best dagslys på breddegrad {latitude_deg:.0f}°)"
+            else:
+                b["reasoning"] = "Beholdt orientering — allerede god solretning"
+        else:
+            b["reasoning"] = "Kompakt fotavtrykk — orientering påvirker dagslys minimalt"
+
+        refined.append(b)
+    return refined
+
+
+# --- MILJØANALYSE: STØY, DAGSLYS, UTSIKT, VIND ---
+
+def fetch_noise_zones(bbox_utm: Tuple[float, float, float, float], buffer_m: float = 100.0, gdo_client: Any = None) -> Dict[str, Any]:
+    """Hent støysonekart. Prøver Geodata Online DOK Forurensning først, deretter Geonorge WFS."""
+    minx, miny, maxx, maxy = bbox_utm
+    minx -= buffer_m
+    miny -= buffer_m
+    maxx += buffer_m
+    maxy += buffer_m
+
+    result: Dict[str, Any] = {"available": False, "zones": [], "source": "Ingen støydata", "debug": []}
+
+    result["debug"].append(f"bbox: {minx:.0f},{miny:.0f},{maxx:.0f},{maxy:.0f} | gdo: {'ja' if gdo_client else 'nei'}")
+
+    # --- 1. GEODATA ONLINE: DOK Forurensning ---
+    gdo_base = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+
+    # Ekstraher token fra GDO-klienten
+    gdo_token = ""
+    if gdo_client is not None:
+        for attr in ['_token', 'token', '_access_token', 'access_token']:
+            tkn = getattr(gdo_client, attr, None)
+            if tkn and isinstance(tkn, str) and len(tkn) > 10:
+                gdo_token = tkn
+                break
+        # Prøv scene_config som siste utvei
+        if not gdo_token:
+            try:
+                sc = gdo_client.fetch_scene_config()
+                gdo_token = sc.get("token", "")
+            except Exception:
+                pass
+
+    if gdo_token:
+        result["debug"].append(f"token: {gdo_token[:8]}...")
+        # Strategi A: identify med hele kartet
+        try:
+            identify_url = f"{gdo_base}/identify"
+            params = {
+                "geometry": json.dumps({"xmin": minx, "ymin": miny, "xmax": maxx, "ymax": maxy, "spatialReference": {"wkid": 25833}}),
+                "geometryType": "esriGeometryEnvelope",
+                "sr": "25833",
+                "layers": "all",
+                "tolerance": "10",
+                "mapExtent": f"{minx},{miny},{maxx},{maxy}",
+                "imageDisplay": "600,600,96",
+                "returnGeometry": "false",
+                "f": "json",
+                "token": gdo_token,
+            }
+            resp = requests.get(identify_url, params=params, timeout=15)
+            result["debug"].append(f"identify: HTTP {resp.status_code}")
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if "error" in data:
+                    result["debug"].append(f"identify error: {data['error'].get('message', '')[:80]}")
+                else:
+                    _parse_gdo_noise_results(data.get("results", []), result)
+        except Exception as exc:
+            result["debug"].append(f"identify exception: {str(exc)[:60]}")
+
+        # Strategi B: query kjente støylag direkte (hardkodede lag-IDer fra DOK Forurensning)
+        if not result["available"]:
+            noise_layers = [
+                (212, "Støykartlegging veg T-1442", "veg"),
+                (206, "Støysoner jernbane", "jernbane"),
+                (204, "Støysoner lufthavn", "flyplass"),
+                (214, "Støysoner Forsvarets flyplasser", "flyplass"),
+                (208, "Støysoner skyte- og øvingsfelt", "skytefelt"),
+            ]
+            geom_json = json.dumps({
+                "xmin": minx, "ymin": miny, "xmax": maxx, "ymax": maxy,
+                "spatialReference": {"wkid": 25833}
+            })
+            for layer_id, layer_label, src_type in noise_layers:
+                try:
+                    query_url = f"{gdo_base}/{layer_id}/query"
+                    q_params = {
+                        "where": "1=1",
+                        "geometry": geom_json,
+                        "geometryType": "esriGeometryEnvelope",
+                        "inSR": "25833",
+                        "spatialRel": "esriSpatialRelIntersects",
+                        "outFields": "stoysonekategori,stoykilde,stoykildenavn,kommune,objtype",
+                        "returnGeometry": "false",
+                        "f": "json",
+                        "token": gdo_token,
+                    }
+                    q_resp = requests.get(query_url, params=q_params, timeout=10)
+                    if q_resp.status_code == 200:
+                        q_data = q_resp.json()
+                        if "error" in q_data:
+                            result["debug"].append(f"layer {layer_id}: {q_data['error'].get('message', '')[:50]}")
+                            continue
+                        features = q_data.get("features", [])
+                        result["debug"].append(f"lag {layer_id}: {len(features)} treff")
+                        for feat in features:
+                            attrs = feat.get("attributes", {})
+                            _parse_single_noise_feature(attrs, layer_label, result)
+                            if result["zones"]:
+                                result["zones"][-1]["source_type"] = src_type
+                    else:
+                        result["debug"].append(f"lag {layer_id}: HTTP {q_resp.status_code}")
+                except Exception as exc:
+                    result["debug"].append(f"layer {layer_id} feil: {str(exc)[:40]}")
+                    continue
+
+            # Sjekk også forurenset grunn (lag 202) for kontekst
+            try:
+                q_resp = requests.get(f"{gdo_base}/202/query", params={
+                    "geometry": geom_json,
+                    "geometryType": "esriGeometryEnvelope",
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "outFields": "*",
+                    "returnGeometry": "false",
+                    "f": "json",
+                    "token": gdo_token,
+                }, timeout=10)
+                if q_resp.status_code == 200:
+                    q_data = q_resp.json()
+                    features = q_data.get("features", [])
+                    if features:
+                        result["debug"].append(f"Forurenset grunn: {len(features)} treff")
+                        result["contaminated_ground"] = True
+                        result["contaminated_count"] = len(features)
+            except Exception:
+                pass
+
+        if result["zones"]:
+            result["available"] = True
+            result["source"] = "Geodata Online DOK Forurensning"
+            result["zones"].sort(key=lambda z: z.get("db", 0), reverse=True)
+            return result
+    else:
+        result["debug"].append("Ingen GDO-token funnet")
+
+    # --- 2. FALLBACK: Geonorge WFS ---
+    services = [
+        ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneFelles"),
+        ("https://wfs.geonorge.no/skwms1/wfs.stoykartlegging", "Stoykartlegging:StoysoneVeg"),
+    ]
+    for url, layer in services:
+        try:
+            resp = requests.get(url, params={
+                "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                "typenames": layer, "srsName": "EPSG:25833",
+                "outputFormat": "application/json",
+                "bbox": f"{minx},{miny},{maxx},{maxy},EPSG:25833",
+                "count": "50",
+            }, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                features = data.get("features", [])
+                for f in features:
+                    props = f.get("properties", {})
+                    zone = props.get("stoysone", props.get("sone", props.get("navn", "ukjent")))
+                    db_val = safe_float(props.get("db_verdi", props.get("lden", props.get("lydniva", 0))), 0)
+                    result["zones"].append({
+                        "zone": str(zone),
+                        "db": round(db_val, 1),
+                        "source_type": props.get("kildetype", props.get("type", "vei")),
+                    })
+                if features:
+                    result["available"] = True
+                    result["source"] = "Geonorge støykartlegging"
+                    break
+        except Exception:
+            continue
+    return result
+
+
+def _parse_gdo_noise_results(gdo_results: List[Dict[str, Any]], result: Dict[str, Any]) -> None:
+    """Parser GDO identify-resultater til støysoner."""
+    for feat in gdo_results:
+        attrs = feat.get("attributes", {})
+        layer_name = feat.get("layerName", "Støysone")
+        _parse_single_noise_feature(attrs, layer_name, result)
+
+
+def _parse_single_noise_feature(attrs: Dict[str, Any], layer_name: str, result: Dict[str, Any]) -> None:
+    """Parser ett støy-feature fra GDO DOK Forurensning. Bruker T-1442 feltnavn."""
+    db_val = 0.0
+    zone_name = ""
+    source_type = "ukjent"
+
+    # T-1442 kategori: G = Gul (55-65 dB Lden), R = Rød (>65 dB Lden)
+    kategori = str(attrs.get("stoysonekategori", attrs.get("Stoysonekategori", ""))).strip().upper()
+    if kategori == "R":
+        zone_name = "Rød støysone"
+        db_val = 65.0
+    elif kategori == "G":
+        zone_name = "Gul støysone"
+        db_val = 55.0
+
+    # Direkte dB-verdier (andre lag)
+    if db_val == 0:
+        for db_key in ["Lden", "LDEN", "lden", "db", "lydniva", "stoyniva", "desibel",
+                        "Lnight", "lnight", "DB", "db_verdi"]:
+            val = attrs.get(db_key)
+            if val is not None:
+                db_val = safe_float(val, 0)
+                if db_val > 0:
+                    break
+
+    # Sonenavn
+    if not zone_name:
+        for zone_key in ["stoysone", "sone", "navn", "klasse", "objtype"]:
+            val = attrs.get(zone_key)
+            if val is not None and str(val).strip():
+                zone_name = str(val).strip()
+                break
+    if not zone_name:
+        zone_name = layer_name
+
+    # Kildetype fra felt eller lagnavn
+    stoykilde = str(attrs.get("stoykilde", "")).strip()
+    stoykildenavn = str(attrs.get("stoykildenavn", "")).strip()
+    if stoykilde:
+        source_type = stoykilde.lower()
+        # Mapp enkeltbokstav-koder til lesbare navn
+        _stoykilde_map = {"b": "bane", "v": "veg", "j": "jernbane", "f": "flyplass", "s": "sammensatt", "i": "industri"}
+        if source_type in _stoykilde_map:
+            source_type = _stoykilde_map[source_type]
+    else:
+        ln = layer_name.lower()
+        if any(k in ln for k in ["veg", "vei", "road"]):
+            source_type = "veg"
+        elif any(k in ln for k in ["jernbane", "bane", "rail"]):
+            source_type = "jernbane"
+        elif any(k in ln for k in ["fly", "luft"]):
+            source_type = "flyplass"
+        elif any(k in ln for k in ["skyte"]):
+            source_type = "skytefelt"
+        else:
+            source_type = "sammensatt"
+
+    if db_val > 0 or (zone_name and zone_name != layer_name):
+        entry: Dict[str, Any] = {
+            "zone": zone_name,
+            "db": round(db_val, 1),
+            "source_type": source_type,
+            "layer": layer_name,
+        }
+        if stoykildenavn:
+            entry["source_name"] = stoykildenavn
+        if kategori:
+            entry["kategori"] = kategori
+        result["zones"].append(entry)
+
+
+def calculate_daylight_tek17(
+    site_polygon: Polygon,
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbor_polygons: List[Dict[str, Any]],
+    latitude_deg: float,
+) -> Dict[str, Any]:
+    """
+    Forenklet TEK17 §13-7 dagslysanalyse.
+
+    Beregner sky view factor (SVF) og dagslysindikator for sør/nord/øst/vest-fasader.
+    Ikke en full Radiance-simulering, men gir indikasjon på dagslystilgang.
+    """
+    result = {"available": True, "facades": [], "overall_score": 0.0}
+    if not building_polygons:
+        result["available"] = False
+        return result
+
+    all_obstructions = []
+    for nb in neighbor_polygons:
+        nb_poly = nb.get("polygon")
+        if nb_poly is None:
+            continue
+        all_obstructions.append({"polygon": nb_poly, "height": float(nb.get("height_m", 9))})
+
+    facade_scores = []
+    cardinal_names = ["Sør", "Øst", "Nord", "Vest"]
+    cardinal_azimuths = [180, 90, 0, 270]
+
+    for bld_idx, (bld_poly, bld_h) in enumerate(zip(building_polygons, building_heights)):
+        centroid = bld_poly.centroid
+        bld_name = f"Bygg {chr(65 + bld_idx)}"
+
+        for card_idx, (card_name, azimuth) in enumerate(zip(cardinal_names, cardinal_azimuths)):
+            # Sky view factor: sjekk obstruksjoner i denne retningen
+            check_dist = 80.0
+            az_rad = math.radians(azimuth)
+            check_x = centroid.x + math.sin(az_rad) * check_dist
+            check_y = centroid.y + math.cos(az_rad) * check_dist
+
+            max_obstruction_angle = 0.0
+            for obs in all_obstructions:
+                obs_poly = obs["polygon"]
+                obs_h = obs["height"]
+                dist = bld_poly.distance(obs_poly)
+                if dist < 1.0 or dist > check_dist:
+                    continue
+                # Er obstruksjonen i denne retningen?
+                obs_cx = obs_poly.centroid.x - centroid.x
+                obs_cy = obs_poly.centroid.y - centroid.y
+                obs_az = math.degrees(math.atan2(obs_cx, obs_cy)) % 360
+                angle_diff = abs(obs_az - azimuth)
+                if angle_diff > 180:
+                    angle_diff = 360 - angle_diff
+                if angle_diff < 60:  # Innenfor ±60° av fasaderetningen
+                    obstruction_angle = math.degrees(math.atan2(max(obs_h - bld_h * 0.5, 0), max(dist, 1)))
+                    max_obstruction_angle = max(max_obstruction_angle, obstruction_angle)
+
+            # Dagslysindikator: 0-100 basert på obstruksjonsvinkel
+            # <10° = utmerket, 10-20° = god, 20-30° = akseptabel, >30° = svak
+            if max_obstruction_angle < 10:
+                score = 95.0
+                rating = "Utmerket"
+            elif max_obstruction_angle < 20:
+                score = 75.0
+                rating = "God"
+            elif max_obstruction_angle < 30:
+                score = 55.0
+                rating = "Akseptabel"
+            elif max_obstruction_angle < 45:
+                score = 35.0
+                rating = "Svak"
+            else:
+                score = 15.0
+                rating = "Utilstrekkelig"
+
+            # Sør-fasade har naturlig mer dagslys
+            if card_name == "Sør":
+                score = min(100, score * 1.15)
+            elif card_name == "Nord":
+                score = score * 0.85
+
+            facade_scores.append({
+                "building": bld_name,
+                "direction": card_name,
+                "score": round(score, 0),
+                "rating": rating,
+                "obstruction_deg": round(max_obstruction_angle, 1),
+            })
+
+    result["facades"] = facade_scores
+    if facade_scores:
+        result["overall_score"] = round(sum(f["score"] for f in facade_scores) / len(facade_scores), 1)
+    return result
+
+
+def calculate_view_score(
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbor_polygons: List[Dict[str, Any]],
+    terrain: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Utsiktsanalyse: beregner fri horisont per bygg og retning.
+
+    Bruker nabobygg og terreng for å estimere visuell åpenhet.
+    """
+    result = {"available": True, "buildings": [], "overall_score": 0.0}
+    if not building_polygons:
+        result["available"] = False
+        return result
+
+    building_scores = []
+    for bld_idx, (bld_poly, bld_h) in enumerate(zip(building_polygons, building_heights)):
+        centroid = bld_poly.centroid
+        bld_name = f"Bygg {chr(65 + bld_idx)}"
+
+        # Sjekk 8 retninger for fri sikt fra øverste etasje
+        directions = ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"]
+        azimuths = [0, 45, 90, 135, 180, 225, 270, 315]
+        dir_scores = []
+
+        for direction, azimuth in zip(directions, azimuths):
+            az_rad = math.radians(azimuth)
+            max_block_angle = 0.0
+
+            for nb in neighbor_polygons:
+                nb_poly = nb.get("polygon")
+                if nb_poly is None:
+                    continue
+                nb_h = float(nb.get("height_m", 9))
+                dist = bld_poly.distance(nb_poly)
+                if dist < 1.0 or dist > 200.0:
+                    continue
+
+                nb_cx = nb_poly.centroid.x - centroid.x
+                nb_cy = nb_poly.centroid.y - centroid.y
+                nb_az = math.degrees(math.atan2(nb_cx, nb_cy)) % 360
+                angle_diff = abs(nb_az - azimuth)
+                if angle_diff > 180:
+                    angle_diff = 360 - angle_diff
+                if angle_diff < 30:
+                    height_diff = max(nb_h - bld_h, 0)
+                    if height_diff > 0:
+                        block_angle = math.degrees(math.atan2(height_diff, max(dist, 1)))
+                        max_block_angle = max(max_block_angle, block_angle)
+
+            # Score: 100 = helt fri sikt, 0 = fullstendig blokkert
+            view = max(0.0, 100.0 - max_block_angle * 4.0)
+            dir_scores.append({"direction": direction, "score": round(view, 0)})
+
+        avg = sum(d["score"] for d in dir_scores) / max(len(dir_scores), 1)
+        best_dir = max(dir_scores, key=lambda d: d["score"])
+        building_scores.append({
+            "building": bld_name,
+            "average_score": round(avg, 0),
+            "best_direction": best_dir["direction"],
+            "best_score": best_dir["score"],
+            "directions": dir_scores,
+        })
+
+    result["buildings"] = building_scores
+    if building_scores:
+        result["overall_score"] = round(sum(b["average_score"] for b in building_scores) / len(building_scores), 1)
+    return result
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_wind_data(latitude: float, longitude: float) -> Dict[str, Any]:
+    """Hent vinddata fra MET Frost API (nærmeste stasjon)."""
+    client_id = os.environ.get("MET_FROST_CLIENT_ID", "")
+    result: Dict[str, Any] = {"available": False, "source": "Ingen vinddata"}
+
+    if not client_id:
+        # Fallback: bruk generelle norske vinddata basert på kystlinje/innland
+        is_coastal = longitude > 5.0 and latitude > 58.0  # Grov sjekk
+        result["available"] = True
+        result["source"] = "Estimat basert på plassering"
+        result["dominant_direction"] = "SV" if is_coastal else "S"
+        result["avg_speed_ms"] = 4.5 if is_coastal else 2.8
+        result["max_gust_ms"] = 18.0 if is_coastal else 12.0
+        result["exposure"] = "Moderat eksponert" if is_coastal else "Lav eksponering"
+        return result
+
+    try:
+        # Finn nærmeste stasjon
+        resp = requests.get(
+            "https://frost.met.no/sources/v0.jsonld",
+            params={"geometry": f"nearest(POINT({longitude} {latitude}))", "nearestmaxcount": "1"},
+            auth=(client_id, ""),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            sources = resp.json().get("data", [])
+            if sources:
+                station_id = sources[0].get("id", "")
+                station_name = sources[0].get("name", "")
+                # Hent vindstatistikk
+                wind_resp = requests.get(
+                    "https://frost.met.no/observations/v0.jsonld",
+                    params={
+                        "sources": station_id,
+                        "elements": "wind_speed,wind_from_direction,max(wind_speed_of_gust PT1H)",
+                        "referencetime": "latest",
+                    },
+                    auth=(client_id, ""),
+                    timeout=10,
+                )
+                if wind_resp.status_code == 200:
+                    obs = wind_resp.json().get("data", [])
+                    if obs:
+                        result["available"] = True
+                        result["source"] = f"MET Frost: {station_name}"
+                        result["station"] = station_name
+                        for o in obs:
+                            for v in o.get("observations", []):
+                                eid = v.get("elementId", "")
+                                val = safe_float(v.get("value"), 0)
+                                if "wind_speed" in eid and "gust" not in eid:
+                                    result["avg_speed_ms"] = round(val, 1)
+                                elif "direction" in eid:
+                                    result["dominant_direction_deg"] = round(val, 0)
+                                    dirs = ["N", "NØ", "Ø", "SØ", "S", "SV", "V", "NV"]
+                                    result["dominant_direction"] = dirs[int((val + 22.5) % 360 / 45)]
+                                elif "gust" in eid:
+                                    result["max_gust_ms"] = round(val, 1)
+    except Exception:
+        pass
+    return result
+
+
+def _wind_comfort_estimate(
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    wind_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Forenklet vindkomfort basert på Lawson-kriteriene."""
+    result = {"available": bool(wind_data.get("available")), "zones": [], "overall": "Ikke vurdert"}
+    if not result["available"] or not building_polygons:
+        return result
+
+    avg_wind = float(wind_data.get("avg_speed_ms", 3.0))
+    n_buildings = len(building_polygons)
+
+    # Forenklet vurdering basert på bygningskonfigurasjon
+    if n_buildings <= 1:
+        amplification = 1.0
+    else:
+        # Sjekk avstand mellom bygninger — trang passasje gir venturi-effekt
+        min_gap = float("inf")
+        for i in range(n_buildings):
+            for j in range(i + 1, n_buildings):
+                gap = building_polygons[i].distance(building_polygons[j])
+                if gap > 0:
+                    min_gap = min(min_gap, gap)
+
+        max_h = max(building_heights) if building_heights else 10
+        if min_gap < max_h * 0.5:
+            amplification = 1.6  # Sterk venturi
+        elif min_gap < max_h:
+            amplification = 1.3  # Moderat
+        else:
+            amplification = 1.1  # Minimal
+
+    effective_wind = avg_wind * amplification
+    # Lawson-kriterier (forenklet)
+    if effective_wind < 3.5:
+        result["overall"] = "Komfortabel (sitting/opphold)"
+        result["lawson_class"] = "A"
+    elif effective_wind < 5.5:
+        result["overall"] = "Akseptabel (gange)"
+        result["lawson_class"] = "B"
+    elif effective_wind < 8.0:
+        result["overall"] = "Ukomfortabel (rask gange)"
+        result["lawson_class"] = "C"
+    else:
+        result["overall"] = "Ubehagelig (vurdér vindskjerming)"
+        result["lawson_class"] = "D"
+
+    result["effective_wind_ms"] = round(effective_wind, 1)
+    result["amplification_factor"] = round(amplification, 2)
+    result["min_building_gap_m"] = round(min_gap, 1) if min_gap < float("inf") else None
+    return result
+
+
+def build_environment_analysis(
+    site_polygon: Optional[Polygon],
+    building_polygons: List[Polygon],
+    building_heights: List[float],
+    neighbors: List[Dict[str, Any]],
+    latitude_deg: float,
+    longitude_deg: Optional[float] = None,
+    terrain: Optional[Dict[str, Any]] = None,
+    gdo_client: Any = None,
+) -> Dict[str, Any]:
+    """Kjør komplett miljøanalyse: støy, dagslys, utsikt, vind."""
+    env: Dict[str, Any] = {"available": False}
+
+    # 1. Støy (Geodata Online DOK Forurensning → Geonorge fallback)
+    if site_polygon is not None:
+        try:
+            env["noise"] = fetch_noise_zones(site_polygon.bounds, gdo_client=gdo_client)
+        except Exception as noise_exc:
+            env["noise"] = {"available": False, "debug": [f"Exception: {str(noise_exc)[:80]}"]}
+    else:
+        env["noise"] = {"available": False, "debug": ["Ingen site_polygon"]}
+
+    # 2. Dagslys (TEK17 §13-7)
+    try:
+        env["daylight"] = calculate_daylight_tek17(
+            site_polygon or Polygon(),
+            building_polygons,
+            building_heights,
+            neighbors,
+            latitude_deg,
+        )
+    except Exception:
+        env["daylight"] = {"available": False}
+
+    # 3. Utsikt
+    try:
+        env["views"] = calculate_view_score(
+            building_polygons,
+            building_heights,
+            neighbors,
+            terrain,
+        )
+    except Exception:
+        env["views"] = {"available": False}
+
+    # 4. Vind
+    try:
+        wind = fetch_wind_data(latitude_deg, longitude_deg or 10.4)
+        env["wind"] = wind
+        env["wind_comfort"] = _wind_comfort_estimate(building_polygons, building_heights, wind)
+    except Exception:
+        env["wind"] = {"available": False}
+        env["wind_comfort"] = {"available": False}
+
+    env["available"] = any(
+        env.get(k, {}).get("available", False)
+        for k in ["noise", "daylight", "views", "wind"]
+    )
+    return env
+
+
+def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
+    """
+    Isometrisk 3D-volumskisse.
+    Viser foreslåtte volumer, nabobygg og tomtegrense fra skrå vinkel
+    slik at siktlinjer, hoyder og romlige forhold er tydelige.
+    """
+    canvas_w, canvas_h = 1100, 900
+    img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = _pil_font(16)
+    font_bold = _pil_font(16, bold=True)
+    font_info = _pil_font(14)
+    font_north = _pil_font(18, bold=True)
+
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    footprint_coords = option.geometry.get('footprint_polygon_coords') or []
+    shadow_coords = option.geometry.get('winter_shadow_polygon_coords') or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+    massing_parts = option.geometry.get('massing_parts', []) or []
+
+    # --- Isometrisk projeksjon ---
+    ISO_ANGLE = math.radians(30)
+    COS_A = math.cos(ISO_ANGLE)
+    SIN_A = math.sin(ISO_ANGLE)
+    Z_SCALE = 1.2
+
+    site_pts = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    target_screen_span = min(canvas_w, canvas_h) * 0.48
+    pixel_scale = target_screen_span / site_span
+
+    screen_cx = canvas_w * 0.50
+    screen_cy = canvas_h * 0.65  # Langt ned for å gi maks plass til høyde
+
+    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
+        return sx, sy
+
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
+
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), int(c[3]) if len(c)>3 else 255)
+
+    def lighten(c, a):
+        return (min(255,int(c[0]+a)), min(255,int(c[1]+a)), min(255,int(c[2]+a)), int(c[3]) if len(c)>3 else 255)
+
+    def draw_iso_flat(coords, z, fill, outline, w=1):
+        pts = iso_pts(coords, z)
+        if len(pts) < 3:
+            return
+        draw.polygon(pts, fill=fill, outline=outline)
+        if w > 1:
+            draw.line(pts + [pts[0]], fill=outline, width=w)
+
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return 0.0
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return 0.0
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
+        return sum(p[0] for p in coords)/len(coords) - cx + sum(p[1] for p in coords)/len(coords) - cy
+
+    # --- Samle volumer for depth-sorting ---
+    volumes = []
+    view_radius = site_span * 0.45
+    for neighbor in neighbor_polys:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
+            continue
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        volumes.append({'coords': ncoords, 'height_m': float(neighbor.get('height_m', 9.0)),
+                        'type': 'neighbor', 'depth': (avg_x - cx) + (avg_y - cy)})
+
+    if massing_parts:
+        for part in massing_parts:
+            pcoords = flatten_coord_groups(part.get('coords', []))
+            if not pcoords:
+                continue
+            avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+            avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+            volumes.append({'coords': pcoords, 'height_m': float(part.get('height_m', option.building_height_m)),
+                            'name': part.get('name', option.typology),
+                            'color': tuple(part.get('color', [34,197,94,200])),
+                            'floors': int(part.get('floors', option.floors)),
+                            'type': 'proposed', 'depth': (avg_x - cx) + (avg_y - cy)})
+    else:
+        fcoords = flatten_coord_groups(footprint_coords)
+        if fcoords:
+            avg_x = sum(p[0] for p in fcoords) / len(fcoords)
+            avg_y = sum(p[1] for p in fcoords) / len(fcoords)
+            volumes.append({'coords': fcoords, 'height_m': option.building_height_m,
+                            'name': option.typology, 'color': (34,197,94,200),
+                            'floors': option.floors, 'type': 'proposed',
+                            'depth': (avg_x - cx) + (avg_y - cy)})
+
+    volumes.sort(key=lambda v: v['depth'])
+
+    # --- TEGNING ---
+    # Himmelgradient
+    for row in range(canvas_h // 2):
+        t = row / (canvas_h / 2.0)
+        draw.line([(0, row), (canvas_w, row)], fill=(int(6+t*10), int(17+t*18), int(26+t*28), 255))
+
+    # Bakkeplan: tomt
+    draw_iso_flat(flatten_coord_groups(site_coords), 0.0, (15,28,42,200), (80,100,130,180), 2)
+    draw_iso_flat(flatten_coord_groups(buildable_coords), 0.0, (56,189,248,15), (56,189,248,80), 1)
+    draw_iso_flat(flatten_coord_groups(shadow_coords), 0.0, (255,213,79,20), (255,213,79,50), 1)
+
+    # Volumer
+    for vol in volumes:
+        coords, h = vol['coords'], vol['height_m']
+        if vol['type'] == 'neighbor':
+            # Dempet naboer: lav alpha så Gemini tolker dem som "kontekst-wireframes"
+            # i stedet for solid grå bygninger. Verdier satt slik at de er synlige for
+            # menneskelig bruker men ikke dominerende for Gemini.
+            alpha = min(95, int(45 + h * 3))
+            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(130,alpha+25)), 1)
+            # Nabohøyde-label (grå, over bygget)
+            if h > 3:
+                avg_x = sum(p[0] for p in coords) / len(coords)
+                avg_y = sum(p[1] for p in coords) / len(coords)
+                lx, ly = iso_project(avg_x, avg_y, h * 1.05)
+                draw.text((lx - 10, ly - 6), f"{h:.0f}m", fill=(180,190,205,160), font=font_info)
+        else:
+            base = vol.get('color', (34,197,94,200))
+            base = tuple(int(v) if v > 1 else int(v * 255) for v in base)  # handle 0.0-1.0 alpha
+            if len(base) < 4:
+                base = (base[0], base[1], base[2], 220)
+            draw_extruded(coords, h, (int(base[0]),int(base[1]),int(base[2]),230), darken(base, 0.72), lighten(base, 50), 2)
+            # Hoyde-label
+            avg_x = sum(p[0] for p in coords) / len(coords)
+            avg_y = sum(p[1] for p in coords) / len(coords)
+            lx, ly = iso_project(avg_x, avg_y, h * 1.08)
+            floors = vol.get('floors', 0)
+            draw.text((lx - 22, ly - 10), f"{floors}et / {h:.0f}m", fill=(255,255,255,240), font=font_bold)
+
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay+22, ax, ay-16), fill=(245,247,251,200), width=3)
+    draw.polygon([(ax, ay-25), (ax-7, ay-7), (ax+7, ay-7)], fill=(245,247,251,200))
+    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font_north)
+
+    # Infopanel
+    yt = canvas_h - 75
+    draw.rectangle([(0, yt-4), (canvas_w, canvas_h)], fill=(6,17,26,230))
+    n_parts = len(massing_parts)
+    title = f"{option.name} | {option.typology}"
+    if n_parts > 1:
+        title += f" | {n_parts} deler"
+    draw.text((30, yt), title, fill=(245,247,251,255), font=font_bold)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Høyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
+    draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font_info)
+    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font_info)
+
+    return img.convert('RGB')
+
+
+def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
+    """
+    Planvisning (fugleperspektiv / top-down) av volumskisse.
+    Viser tomtegrense, byggefelt, fotavtrykk og bygninger med etasjefarge-koding.
+    """
+    canvas_w, canvas_h = 1100, 780
+    img = Image.new('RGBA', (canvas_w, canvas_h), (240, 243, 248, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = _pil_font(14)
+    font_bold = _pil_font(14, bold=True)
+    font_north = _pil_font(16, bold=True)
+
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+
+    site_pts = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    margin = 60
+    target_span = min(canvas_w, canvas_h) - 2 * margin
+    scale = target_span / site_span
+    ox = canvas_w / 2.0
+    oy = canvas_h / 2.0
+
+    def proj(x: float, y: float) -> Tuple[float, float]:
+        return ox + (x - cx) * scale, oy + (y - cy) * scale
+
+    def pts(coords):
+        return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
+
+    # Tomtegrense
+    sp = pts(flatten_coord_groups(site_coords))
+    if len(sp) >= 3:
+        draw.polygon(sp, fill=(220, 225, 233, 180), outline=(100, 110, 130, 220))
+
+    # Byggefelt
+    bp = pts(flatten_coord_groups(buildable_coords))
+    if len(bp) >= 3:
+        draw.polygon(bp, fill=(200, 218, 240, 60), outline=(56, 140, 248, 120))
+
+    # Nabobygg
+    for neighbor in neighbor_polys:
+        ncoords = neighbor.get('coords') or neighbor.get('polygon_coords', [])
+        if isinstance(ncoords, str):
+            continue
+        np_ = pts(flatten_coord_groups(ncoords))
+        if len(np_) >= 3:
+            draw.polygon(np_, fill=(180, 185, 195, 120), outline=(140, 145, 155, 180))
+
+    # Bygningsvolumer
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords:
+            continue
+        pp = pts(pcoords)
+        if len(pp) < 3:
+            continue
+        base_c = part.get('color', [34, 197, 94, 200])
+        base_c = tuple(int(v) if v > 1 else int(v * 255) for v in base_c)
+        if len(base_c) < 4:
+            base_c = (base_c[0], base_c[1], base_c[2], 200)
+        draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 220))
+        draw.line(pp + [pp[0]], fill=(255, 255, 255, 220), width=2)
+
+        # Label
+        avg_x = sum(p[0] for p in pp) / len(pp)
+        avg_y = sum(p[1] for p in pp) / len(pp)
+        floors = part.get('floors', 0)
+        name = part.get('name', '')
+        draw.text((avg_x - 20, avg_y - 8), f"{name}", fill=(30, 30, 30, 255), font=font)
+        draw.text((avg_x - 15, avg_y + 4), f"{floors} et.", fill=(60, 60, 60, 220), font=font)
+
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay + 22, ax, ay - 16), fill=(60, 70, 90, 200), width=3)
+    draw.polygon([(ax, ay - 25), (ax - 7, ay - 7), (ax + 7, ay - 7)], fill=(60, 70, 90, 200))
+    draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font_north)
+
+    # Målestokk
+    scale_bar_m = 10.0
+    while scale_bar_m * scale < 40:
+        scale_bar_m *= 2
+    while scale_bar_m * scale > 200:
+        scale_bar_m /= 2
+    bar_px = scale_bar_m * scale
+    bx, by_s = 40, canvas_h - 50
+    draw.line([(bx, by_s), (bx + bar_px, by_s)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx, by_s - 4), (bx, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx + bar_px, by_s - 4), (bx + bar_px, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.text((bx + bar_px / 2 - 10, by_s - 16), f"{scale_bar_m:.0f} m", fill=(60, 70, 90, 220), font=font)
+
+    # Infopanel
+    yt = canvas_h - 35
+    draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(240, 243, 248, 240))
+    title = f"PLANVISNING | {option.name} | {option.typology}"
+    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font_bold)
+    draw.text((30, yt + 14), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(80, 90, 110, 220), font=font)
+
+    return img.convert('RGB')
+
+
+def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[Image.Image]:
+    """
+    Renderer multiple visninger av en manuell skisse for PDF-rapport.
+
+    Returnerer [isometrisk, planvisning] — begge som PIL Image.
+    """
+    views: List[Image.Image] = []
+
+    # 1. Isometrisk volumskisse (standard)
+    try:
+        iso_img = render_plan_diagram(site, sketch_option)
+        views.append(iso_img)
+    except Exception:
+        pass
+
+    # 2. Planvisning (fugleperspektiv)
+    try:
+        plan_img = render_plan_view(site, sketch_option)
+        views.append(plan_img)
+    except Exception:
+        pass
+
+    return views
+
+
+def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
+    geometry = option.geometry or {}
+    src_crs = site.polygon_crs or 'EPSG:25833'
+    site_rings = project_coord_groups_to_lonlat(geometry.get('site_polygon_coords') or [], src_crs=src_crs)
+    buildable_rings = project_coord_groups_to_lonlat(geometry.get('buildable_polygon_coords') or [], src_crs=src_crs)
+    footprint_rings = project_coord_groups_to_lonlat(geometry.get('footprint_polygon_coords') or [], src_crs=src_crs)
+
+    massing_parts = []
+    for part in geometry.get('massing_parts', []) or []:
+        massing_parts.append({
+            'name': part.get('name', option.typology),
+            'height_m': float(part.get('height_m', option.building_height_m)),
+            'floors': int(part.get('floors', option.floors)),
+            'color': part.get('color', [34, 197, 94, 0.80]),
+            'rings': project_coord_groups_to_lonlat(part.get('coords') or [], src_crs=src_crs),
+        })
+
+    neighbors = []
+    for neighbor in geometry.get('neighbor_polygons', []) or []:
+        neighbors.append({
+            'height_m': float(neighbor.get('height_m', 9.0)),
+            'distance_m': float(neighbor.get('distance_m', 0.0)),
+            'rings': project_coord_groups_to_lonlat(neighbor.get('coords') or [], src_crs=src_crs),
+        })
+
+    # Beregn senterpunkt i lon/lat for kameraposisjon
+    site_centroid_lonlat = [10.75, 59.91]  # fallback Oslo
+    all_site_pts = [pt for ring in site_rings for pt in ring]
+    if all_site_pts:
+        avg_lon = sum(pt[0] for pt in all_site_pts) / len(all_site_pts)
+        avg_lat = sum(pt[1] for pt in all_site_pts) / len(all_site_pts)
+        site_centroid_lonlat = [avg_lon, avg_lat]
+
+    return {
+        'site_name': option.name,
+        'typology': option.typology,
+        'scene_config': scene_config,
+        'site_centroid': site_centroid_lonlat,
+        'site': {'rings': site_rings},
+        'buildable': {'rings': buildable_rings},
+        'footprint': {'rings': footprint_rings, 'height_m': float(option.building_height_m)},
+        'massing_parts': massing_parts,
+        'neighbors': neighbors[:40],
+        'shadow': {'rings': project_coord_groups_to_lonlat(geometry.get('winter_shadow_polygon_coords') or [], src_crs=src_crs)},
+        'placement': geometry.get('placement', {}),
+        'stats': {
+            'bta_m2': round(option.gross_bta_m2, 0),
+            'bra_m2': round(option.saleable_area_m2, 0),
+            'pct_bra': round(option.gross_bta_m2 * option.efficiency_ratio / max(site.site_area_m2, 1) * 100, 0),
+            'boliger': option.unit_count,
+            'etasjer': option.floors,
+            'hoyde_m': round(option.building_height_m, 1),
+            'sol': round(option.solar_score, 0),
+            'fotavtrykk_m2': round(option.footprint_area_m2, 0),
+        },
+    }
+
+
+# --- AUTO-CAPTURE 3D-SCENE COMPONENT (v13) ---
+_SCENE_CAPTURE_DIR = Path(__file__).parent / "scene_capture_component"
+_scene_capture_error = ""
+
+
+def _get_scene_capture_component():
+    """Lazy-init for declare_component — unngår Streamlit pages/ module-bug."""
+    global _scene_capture_error
+    if not _SCENE_CAPTURE_DIR.exists():
+        return None
+    if "_scene_comp_cache" not in st.session_state:
+        try:
+            st.session_state._scene_comp_cache = components.declare_component(
+                "scene_capture", path=str(_SCENE_CAPTURE_DIR)
+            )
+            _scene_capture_error = ""
+        except Exception as exc:
+            st.session_state._scene_comp_cache = None
+            _scene_capture_error = str(exc)
+    return st.session_state.get("_scene_comp_cache")
+
+
+def auto_capture_3d_scenes(
+    site: SiteInputs,
+    options: List[OptionResult],
+    scene_config: Dict[str, Any],
+    height_px: int = 620,
+    capture_width: int = 1280,
+    capture_height: int = 720,
+) -> Optional[List[Image.Image]]:
+    """
+    Rendrer ArcGIS 3D-scene for topp 3 alternativer og returnerer screenshots som PIL-bilder.
+    Bruker en custom Streamlit-komponent med bi-directional kommunikasjon.
+    Returnerer None hvis komponenten ikke er tilgjengelig.
+    """
+    if _get_scene_capture_component() is None:
+        return None
+
+    all_payloads = []
+    for opt in options[:3]:
+        p = build_geodata_scene_payload(site, opt, scene_config)
+        all_payloads.append(p)
+
+    if not all_payloads:
+        return None
+
+    comp = _get_scene_capture_component()
+    result = comp(
+        payloads=all_payloads,
+        height=height_px,
+        capture_width=capture_width,
+        capture_height=capture_height,
+        show_neighbor_labels=True,
+        key="scene_auto_capture",
+    )
+
+    if result and isinstance(result, dict) and result.get("captures"):
+        images = []
+        for cap in result["captures"]:
+            try:
+                data_url = cap.get("dataUrl", "")
+                if "," in data_url:
+                    b64_data = data_url.split(",", 1)[1]
+                else:
+                    b64_data = data_url
+                img_bytes = base64.b64decode(b64_data)
+                img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                images.append(img)
+            except Exception:
+                pass
+        return images if images else None
+    return None
+
+
+def _build_batch_capture_html(all_payloads_json: str, height_px: int = 620) -> str:
+    """
+    Lager en ArcGIS SceneView som automatisk cycler gjennom alle alternativer,
+    tar screenshot av hvert, og laster dem ned som PNG-filer.
+    """
+    return f"""
+    <div id="batchContainer" style="position:relative;width:100%;height:{height_px}px;border-radius:14px;overflow:hidden;border:2px solid rgba(56,189,248,0.5);">
+      <div id="batchView" style="width:100%;height:100%;"></div>
+      <div id="batchStatus" style="position:absolute;top:12px;left:12px;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.4);border-radius:8px;padding:10px 16px;color:#38bdf8;font-family:system-ui;font-size:13px;font-weight:600;">
+        Starter batch-capture...
+      </div>
+      <div id="batchStats" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;color:#ecf0f5;font-family:system-ui;font-size:13px;line-height:1.6;min-width:180px;"></div>
+    </div>
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
+    <script>
+    const allPayloads = {all_payloads_json};
+    let currentIdx = 0;
+
+    require([
+      'esri/Map', 'esri/views/SceneView', 'esri/layers/ImageryLayer',
+      'esri/layers/ElevationLayer', 'esri/layers/GraphicsLayer', 'esri/Graphic',
+      'esri/geometry/Polygon', 'esri/geometry/Point', 'esri/geometry/SpatialReference',
+      'esri/geometry/Extent', 'esri/identity/IdentityManager'
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, Point, SpatialReference, Extent, IdentityManager) {{
+      const sr = new SpatialReference({{ wkid: 4326 }});
+      const p0 = allPayloads[0] || {{}};
+      const sc = p0.scene_config || {{}};
+      const services = sc.services || {{}};
+      const tkn = sc.token || '';
+
+      if (tkn) {{
+        IdentityManager.registerToken({{ server: 'https://services.geodataonline.no/arcgis', token: tkn }});
+      }}
+
+      const map = new Map({{ basemap: 'satellite', ground: 'world-elevation' }});
+      if (services.elevation_url && tkn) {{
+        map.ground.layers.add(new ElevationLayer({{ url: services.elevation_url, customParameters: {{ token: tkn }} }}));
+      }}
+      if (services.imagery_latest_url && tkn) {{
+        map.add(new ImageryLayer({{ url: services.imagery_latest_url, opacity: 0.92, customParameters: {{ token: tkn }} }}));
+      }}
+
+      const graphicsLayer = new GraphicsLayer();
+      map.add(graphicsLayer);
+
+      function polygonFromRings(rings) {{
+        return new Polygon({{ rings: rings, spatialReference: sr }});
+      }}
+
+      function loadOption(payload) {{
+        graphicsLayer.removeAll();
+        // Tomtegrense
+        (payload.site.rings || []).forEach(ring => {{
+          graphicsLayer.add(new Graphic({{
+            geometry: polygonFromRings([ring]),
+            symbol: {{ type: 'simple-fill', color: [255,255,255,0.02], outline: {{ color: [210,220,235,0.6], width: 1.2 }} }}
+          }}));
+        }});
+        // Volumer
+        (payload.massing_parts || []).forEach(item => {{
+          (item.rings || []).forEach(ring => {{
+            const useColor = Array.isArray(item.color) ? [item.color[0], item.color[1], item.color[2], 0.82] : [34,197,94,0.82];
+            graphicsLayer.add(new Graphic({{
+              geometry: polygonFromRings([ring]),
+              symbol: {{ type: 'polygon-3d', symbolLayers: [{{ type: 'extrude', size: item.height_m || 3, material: {{ color: useColor }}, edges: {{ type: 'solid', color: [255,255,255,0.45], size: 0.6 }} }}] }}
+            }}));
+          }});
+        }});
+        // Naboer
+        (payload.neighbors || []).forEach(item => {{
+          (item.rings || []).forEach(ring => {{
+            graphicsLayer.add(new Graphic({{
+              geometry: polygonFromRings([ring]),
+              symbol: {{ type: 'polygon-3d', symbolLayers: [{{ type: 'extrude', size: item.height_m || 3, material: {{ color: [140,140,150,0.32] }}, edges: {{ type: 'solid', color: [200,200,210,0.25], size: 0.6 }} }}] }}
+            }}));
+          }});
+        }});
+        // Nøkkeltall
+        const s = payload.stats || {{}};
+        document.getElementById('batchStats').innerHTML =
+          '<div style="color:#38bdf8;font-weight:700;font-size:11px;letter-spacing:0.5px;margin-bottom:4px;">' + (payload.site_name || '') + '</div>' +
+          '<div style="font-weight:700;font-size:15px;">BTA: ' + (s.bta_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">BRA: ' + (s.bra_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">Boliger: ~' + (s.boliger||0) + '</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">' + (s.etasjer||0) + ' et. / ' + (s.hoyde_m||0) + ' m</div>' +
+          '<div style="font-size:12px;color:#9fb0c3;">Sol: ' + (s.sol||0) + '/100</div>';
+      }}
+
+      const centroid = p0.site_centroid || [10.75, 59.91];
+      const view = new SceneView({{
+        container: 'batchView', map: map, qualityProfile: 'high',
+        camera: {{ position: {{ x: centroid[0], y: centroid[1], z: 900 }}, tilt: 68, heading: 20, spatialReference: sr }},
+        environment: {{ atmosphereEnabled: true, starsEnabled: false }}
+      }});
+
+      function captureAndNext() {{
+        if (currentIdx >= allPayloads.length) {{
+          document.getElementById('batchStatus').textContent = 'Ferdig! ' + allPayloads.length + ' bilder lastet ned.';
+          document.getElementById('batchStatus').style.color = '#22c55e';
+          return;
+        }}
+        const payload = allPayloads[currentIdx];
+        document.getElementById('batchStatus').textContent = 'Rendrer ' + (currentIdx+1) + '/' + allPayloads.length + ': ' + (payload.site_name || '');
+        loadOption(payload);
+
+        setTimeout(function() {{
+          view.takeScreenshot({{ format: 'png', quality: 95, width: 1920, height: 1080 }}).then(function(screenshot) {{
+            const a = document.createElement('a');
+            a.href = screenshot.dataUrl;
+            a.download = 'terreng_' + (payload.site_name || 'alt').replace(/[^a-zA-Z0-9]/g, '_') + '.png';
+            a.click();
+            currentIdx++;
+            setTimeout(captureAndNext, 1500);
+          }});
+        }}, 3000);
+      }}
+
+      view.when(function() {{
+        // Zoom til tomten
+        let extent = null;
+        const rings = [].concat(p0.site.rings || []);
+        rings.forEach(ring => {{
+          ring.forEach(pt => {{
+            if (!extent) {{ extent = new Extent({{ xmin: pt[0], ymin: pt[1], xmax: pt[0], ymax: pt[1], spatialReference: sr }}); }}
+            else {{ extent.xmin = Math.min(extent.xmin, pt[0]); extent.ymin = Math.min(extent.ymin, pt[1]); extent.xmax = Math.max(extent.xmax, pt[0]); extent.ymax = Math.max(extent.ymax, pt[1]); }}
+          }});
+        }});
+        if (extent) {{
+          view.goTo(extent.expand(1.8)).then(function() {{
+            setTimeout(captureAndNext, 2000);
+          }});
+        }} else {{
+          setTimeout(captureAndNext, 2000);
+        }}
+      }});
+    }});
+    </script>
+    """
+
+
+def render_geodata_scene(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any], height_px: int = 640) -> None:
+    payload = build_geodata_scene_payload(site, option, scene_config)
+    payload_json = json.dumps(payload, ensure_ascii=False)
+    html_template = """
+    <div id="sceneContainer" style="position:relative;width:100%;height:__HEIGHT__px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,0.08);">
+      <div id="viewDiv" style="width:100%;height:100%;"></div>
+      <div id="statsPanel" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;color:#ecf0f5;font-family:-apple-system,system-ui,sans-serif;font-size:13px;line-height:1.6;pointer-events:none;min-width:180px;backdrop-filter:blur(8px);">
+        <div style="color:#38bdf8;font-weight:700;font-size:11px;letter-spacing:0.5px;margin-bottom:4px;">NØKKELTALL</div>
+        <div style="font-weight:700;font-size:16px;" id="statBTA"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statBRA"></div>
+        <div style="font-size:12px;color:#f87171;font-weight:600;" id="statPctBRA"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statBoliger"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statEtasjer"></div>
+        <div style="font-size:12px;color:#9fb0c3;" id="statSol"></div>
+      </div>
+      <button id="screenshotBtn" onclick="captureScene()" style="position:absolute;bottom:12px;right:12px;background:rgba(56,189,248,0.9);color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:12px;font-weight:600;cursor:pointer;pointer-events:auto;backdrop-filter:blur(4px);display:flex;align-items:center;gap:6px;">
+        📸 Last ned bilde
+      </button>
+    </div>
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
+    <script>
+    const payload = __PAYLOAD__;
+    // Fyll stats-panel
+    const s = payload.stats || {};
+    document.getElementById('statBTA').textContent = 'BTA: ' + (s.bta_m2 || 0).toLocaleString('nb-NO') + ' m²';
+    document.getElementById('statBRA').textContent = 'BRA: ' + (s.bra_m2 || 0).toLocaleString('nb-NO') + ' m²';
+    document.getElementById('statPctBRA').textContent = '%-BRA: ' + (s.pct_bra || 0) + '%';
+    document.getElementById('statBoliger').textContent = 'Boliger: ~' + (s.boliger || 0);
+    document.getElementById('statEtasjer').textContent = (s.etasjer || 0) + ' etasjer / ' + (s.hoyde_m || 0) + ' m';
+    document.getElementById('statSol').textContent = 'Sol: ' + (s.sol || 0) + '/100';
+
+    let _sceneView = null;
+    function captureScene() {
+      if (!_sceneView) return;
+      _sceneView.takeScreenshot({ format: 'png', quality: 95, width: 1920, height: 1080 }).then(function(screenshot) {
+        const a = document.createElement('a');
+        a.href = screenshot.dataUrl;
+        a.download = 'terrengscene_' + (payload.site_name || 'scene').replace(/[^a-zA-Z0-9]/g, '_') + '.png';
+        a.click();
+      });
+    }
+
+    require([
+      'esri/Map',
+      'esri/views/SceneView',
+      'esri/layers/ImageryLayer',
+      'esri/layers/ElevationLayer',
+      'esri/layers/GraphicsLayer',
+      'esri/Graphic',
+      'esri/geometry/Polygon',
+      'esri/geometry/Point',
+      'esri/geometry/SpatialReference',
+      'esri/geometry/Extent',
+      'esri/identity/IdentityManager'
+    ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, Point, SpatialReference, Extent, IdentityManager) {
+      const sr = new SpatialReference({ wkid: 4326 });
+      const sc = payload.scene_config || {};
+      const services = sc.services || {};
+      const tkn = sc.token || '';
+
+      // Pre-register token for map services
+      if (tkn) {
+        IdentityManager.registerToken({
+          server: 'https://services.geodataonline.no/arcgis',
+          token: tkn
+        });
+      }
+
+      const map = new Map({ basemap: 'satellite', ground: 'world-elevation' });
+      if (services.elevation_url && tkn) {
+        map.ground.layers.add(new ElevationLayer({ url: services.elevation_url, customParameters: { token: tkn } }));
+      }
+      if (services.imagery_latest_url && tkn) {
+        map.add(new ImageryLayer({ url: services.imagery_latest_url, opacity: 0.92, customParameters: { token: tkn } }));
+      }
+      const graphicsLayer = new GraphicsLayer();
+      map.add(graphicsLayer);
+
+      function polygonFromRings(rings) {
+        return new Polygon({ rings: rings, spatialReference: sr });
+      }
+      function addExtrusions(items, fallbackColor, opacity, edgeColor) {
+        (items || []).forEach(item => {
+          (item.rings || []).forEach(ring => {
+            const polygon = polygonFromRings([ring]);
+            const useColor = Array.isArray(item.color) ? [item.color[0], item.color[1], item.color[2], opacity] : [fallbackColor[0], fallbackColor[1], fallbackColor[2], opacity];
+            graphicsLayer.add(new Graphic({
+              geometry: polygon,
+              symbol: {
+                type: 'polygon-3d',
+                symbolLayers: [{
+                  type: 'extrude',
+                  size: item.height_m || 3,
+                  material: { color: useColor },
+                  edges: { type: 'solid', color: edgeColor || [255,255,255,0.35], size: 0.6 }
+                }]
+              },
+              popupTemplate: { title: item.name || payload.typology, content: 'Høyde: ' + (item.height_m || 0) + ' m' }
+            }));
+          });
+        });
+      }
+      function addSurface(rings, fillColor, outlineColor) {
+        (rings || []).forEach(ring => {
+          graphicsLayer.add(new Graphic({
+            geometry: polygonFromRings([ring]),
+            symbol: { type: 'simple-fill', color: fillColor, outline: { color: outlineColor, width: 1.2 } }
+          }));
+        });
+      }
+
+      addSurface(payload.site.rings, [255,255,255,0.02], [210,220,235,0.6]);
+      addSurface(payload.buildable.rings, [56,189,248,0.08], [56,189,248,0.8]);
+      addSurface(payload.shadow.rings, [255,213,79,0.10], [255,213,79,0.28]);
+      addExtrusions(payload.neighbors, [140,140,150], 0.32, [200,200,210,0.25]);
+      addExtrusions(payload.massing_parts, [34,197,94], 0.82, [255,255,255,0.45]);
+
+      // Høyde-labels over foreslåtte bygninger
+      (payload.massing_parts || []).forEach(item => {
+        (item.rings || []).forEach(ring => {
+          if (!ring || ring.length < 3) return;
+          let cx = 0, cy = 0;
+          ring.forEach(pt => { cx += pt[0]; cy += pt[1]; });
+          cx /= ring.length; cy /= ring.length;
+          const h = item.height_m || 3;
+          const fl = item.floors || '?';
+          const label = (item.name || '') + '\\n' + fl + ' et. / ' + h.toFixed(0) + ' m';
+          graphicsLayer.add(new Graphic({
+            geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
+            symbol: {
+              type: 'point-3d',
+              verticalOffset: { screenLength: 30, maxWorldLength: h + 12, minWorldLength: h + 2 },
+              callout: { type: 'line', size: 1, color: [255, 255, 255, 150] },
+              symbolLayers: [{
+                type: 'text',
+                material: { color: [255, 255, 255] },
+                text: label,
+                size: 11,
+                font: { weight: 'bold' },
+                halo: { color: [0, 0, 0], size: 1.5 }
+              }]
+            }
+          }));
+        });
+      });
+
+      // Høyde-labels over nabobygg (dempet stil)
+      (payload.neighbors || []).forEach(item => {
+        if (!item.height_m || item.height_m < 3) return;
+        (item.rings || []).forEach(ring => {
+          if (!ring || ring.length < 3) return;
+          let cx = 0, cy = 0;
+          ring.forEach(pt => { cx += pt[0]; cy += pt[1]; });
+          cx /= ring.length; cy /= ring.length;
+          const h = item.height_m || 3;
+          graphicsLayer.add(new Graphic({
+            geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
+            symbol: {
+              type: 'point-3d',
+              verticalOffset: { screenLength: 20, maxWorldLength: h + 8, minWorldLength: h },
+              symbolLayers: [{
+                type: 'text',
+                material: { color: [200, 210, 225] },
+                text: h.toFixed(0) + ' m',
+                size: 9,
+                font: { weight: 'normal' },
+                halo: { color: [0, 0, 0], size: 1.2 }
+              }]
+            }
+          }));
+        });
+      });
+
+      let extent = null;
+      const allRings = [].concat(payload.site.rings || [], payload.buildable.rings || [], payload.footprint.rings || []);
+      allRings.forEach(ring => {
+        ring.forEach(pt => {
+          const x = pt[0], y = pt[1];
+          if (!extent) {
+            extent = new Extent({ xmin: x, ymin: y, xmax: x, ymax: y, spatialReference: sr });
+          } else {
+            extent.xmin = Math.min(extent.xmin, x);
+            extent.ymin = Math.min(extent.ymin, y);
+            extent.xmax = Math.max(extent.xmax, x);
+            extent.ymax = Math.max(extent.ymax, y);
+          }
+        });
+      });
+
+      const centroid = payload.site_centroid || [10.75, 59.91];
+      const view = new SceneView({
+        container: 'viewDiv',
+        map: map,
+        qualityProfile: 'high',
+        camera: { position: { x: centroid[0], y: centroid[1], z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
+        environment: { atmosphereEnabled: true, starsEnabled: false }
+      });
+      _sceneView = view;
+      view.when(() => { if (extent) { view.goTo(extent.expand(1.8)).catch(() => {}); } });
+    });
+    </script>
+    """
+    html = html_template.replace('__PAYLOAD__', payload_json).replace('__HEIGHT__', str(int(height_px)))
+    components.html(html, height=height_px + 20, scrolling=False)
+
+
+def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int = 650, terrain_ctx: Optional[Dict[str, Any]] = None) -> None:
+    """Interaktiv Three.js 3D-modell med terreng, nabobygg og volumalternativer."""
+    geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or []
+    buildable_coords = geometry.get('buildable_polygon_coords') or []
+    footprint_coords = geometry.get('footprint_polygon_coords') or []
+    neighbor_polys = geometry.get('neighbor_polygons', [])
+    massing_parts = geometry.get('massing_parts', []) or []
+
+    flat_site = flatten_coord_groups(site_coords)
+    if not flat_site:
+        st.warning("Ingen tomtegeometri tilgjengelig for 3D-visning.")
+        return
+    center_x = sum(p[0] for p in flat_site) / len(flat_site)
+    center_y = sum(p[1] for p in flat_site) / len(flat_site)
+    site_span = max(
+        max(p[0] for p in flat_site) - min(p[0] for p in flat_site),
+        max(p[1] for p in flat_site) - min(p[1] for p in flat_site),
+        1.0
+    )
+
+    def to_local(groups):
+        out = []
+        for ring in groups:
+            local_ring = []
+            for pt in ring:
+                local_ring.append([round(pt[0] - center_x, 2), round(pt[1] - center_y, 2)])
+            out.append(local_ring)
+        return out
+
+    scene_data = {
+        "site_span": round(site_span, 1),
+        "site_rings": to_local(flatten_coord_groups(site_coords) and [flatten_coord_groups(site_coords)] or []),
+        "buildable_rings": to_local(flatten_coord_groups(buildable_coords) and [flatten_coord_groups(buildable_coords)] or []),
+        "volumes": [],
+        "neighbors": [],
+        "terrain": None,
+    }
+
+    # Terrengdata
+    if terrain_ctx and terrain_ctx.get('sample_points'):
+        samples = terrain_ctx['sample_points']
+        min_elev = terrain_ctx.get('min_elev_m', 0.0)
+        scene_data["terrain"] = {
+            "points": [
+                {"x": round(s["x"] - center_x, 2), "y": round(s["y"] - center_y, 2), "z": round(s["z"] - min_elev, 2)}
+                for s in samples
+            ],
+            "min_elev": round(float(min_elev), 2),
+            "max_elev": round(float(terrain_ctx.get('max_elev_m', min_elev)), 2),
+            "relief": round(float(terrain_ctx.get('relief_m', 0)), 2),
+            "a": float(terrain_ctx.get('a', 0)),
+            "b": float(terrain_ctx.get('b', 0)),
+            "c": float(terrain_ctx.get('c', 0)),
+            "center_x": round(center_x, 2),
+            "center_y": round(center_y, 2),
+        }
+
+    if massing_parts:
+        for part in massing_parts:
+            pc = flatten_coord_groups(part.get('coords', []))
+            if not pc:
+                continue
+            color = part.get('color', [34, 197, 94, 200])
+            scene_data["volumes"].append({
+                "rings": to_local([pc]),
+                "height": float(part.get('height_m', option.building_height_m)),
+                "name": part.get('name', option.typology),
+                "color": [int(c) for c in color[:3]],
+                "floors": int(part.get('floors', option.floors)),
+            })
+    else:
+        fc = flatten_coord_groups(footprint_coords)
+        if fc:
+            scene_data["volumes"].append({
+                "rings": to_local([fc]),
+                "height": float(option.building_height_m),
+                "name": option.typology,
+                "color": [34, 197, 94],
+                "floors": int(option.floors),
+            })
+
+    view_r = site_span * 0.7
+    for nb in neighbor_polys:
+        nc = flatten_coord_groups(nb.get('coords', []))
+        if not nc:
+            continue
+        avg_x = sum(p[0] for p in nc) / len(nc) - center_x
+        avg_y = sum(p[1] for p in nc) / len(nc) - center_y
+        if math.hypot(avg_x, avg_y) > view_r:
+            continue
+        scene_data["neighbors"].append({
+            "rings": to_local([nc]),
+            "height": float(nb.get('height_m', 9.0)),
+        })
+
+    payload_json = json.dumps(scene_data, ensure_ascii=False)
+
+    html = """
+<!DOCTYPE html>
+<html><head><style>
+  body { margin: 0; overflow: hidden; background: #060d14; }
+  canvas { display: block; }
+  #info {
+    position: absolute; bottom: 10px; left: 14px; color: #b0bec5;
+    font: 11px/1.4 -apple-system, sans-serif; pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+  }
+  #help {
+    position: absolute; top: 10px; right: 14px; color: #78909c;
+    font: 10px/1.3 -apple-system, sans-serif; pointer-events: none;
+    text-align: right;
+  }
+</style></head><body>
+<div id="info">__INFO__</div>
+<div id="help">Venstre mus: roter | Scroll: zoom | Shift+dra: panorer</div>
+<div id="sunControls" style="position:absolute;bottom:40px;left:14px;right:14px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:10px 16px;display:flex;gap:16px;align-items:center;font:12px -apple-system,sans-serif;">
+  <span style="color:#38bdf8;font-weight:700;white-space:nowrap;">☀ Sol/skygge</span>
+  <label style="color:#9fb0c3;white-space:nowrap;">Kl:
+    <input id="sunHour" type="range" min="6" max="20" step="0.5" value="12" style="width:120px;accent-color:#38bdf8;vertical-align:middle;">
+    <span id="sunHourLabel" style="color:#f5f7fb;font-weight:600;">12:00</span>
+  </label>
+  <label style="color:#9fb0c3;white-space:nowrap;">Dato:
+    <select id="sunSeason" style="background:#0d1824;border:1px solid rgba(120,145,170,0.3);color:#fff;padding:2px 6px;border-radius:4px;font-size:11px;">
+      <option value="80">Vår/høst</option>
+      <option value="172">Sommer</option>
+      <option value="355">Vinter</option>
+    </select>
+  </label>
+  <span id="sunInfo" style="color:#c8d3df;font-size:11px;"></span>
+  <button id="captureSolar" style="margin-left:auto;background:linear-gradient(135deg,rgba(56,194,201,0.96),rgba(120,220,225,0.96));color:#041018;border:none;border-radius:8px;padding:6px 14px;font-weight:700;font-size:11px;cursor:pointer;white-space:nowrap;">
+    📥 Fang sol/skygge til PDF
+  </button>
+  <span id="captureStatus" style="color:#38c2c9;font-size:11px;font-weight:600;"></span>
+</div>
+<div id="captureDownloads" style="display:none;padding:14px 16px;background:linear-gradient(180deg,rgba(10,22,40,0.92),rgba(8,18,32,0.96));border-top:1px solid rgba(56,194,201,0.4);">
+  <div style="color:#9fd0d5;font-size:12px;margin-bottom:10px;font-weight:700;display:flex;align-items:center;gap:8px;">
+    <span style="font-size:14px;">✓</span>
+    <span>5 bilder er klare — slik får du dem inn i rapporten:</span>
+  </div>
+  <ol style="color:#c8d3df;font-size:11px;margin:0 0 10px 20px;padding:0;line-height:1.7;">
+    <li>Klikk på <strong style="color:#9fd0d5;">alle 5 nedlastingslenkene</strong> under (én etter én)</li>
+    <li>Scroll ned til <strong style="color:#9fd0d5;">«Sol/skygge fra 3D-scenen i rapporten»</strong></li>
+    <li>Dra alle 5 filene inn i opplastingsboksen</li>
+    <li>Klikk <strong style="color:#9fd0d5;">«Bruk disse bildene i rapporten»</strong> → PDF regenereres</li>
+  </ol>
+  <div id="captureDownloadLinks" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const D = __DATA__;
+const W = window.innerWidth, H = __HEIGHT__;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a1628);
+scene.fog = new THREE.FogExp2(0x0a1628, 0.0008);
+
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.5, D.site_span * 10);
+const camDist = D.site_span * 0.85;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+// Lys
+scene.add(new THREE.AmbientLight(0x8899aa, 0.5));
+const sun = new THREE.DirectionalLight(0xfff5e0, 1.1);
+sun.position.set(camDist * 0.6, camDist * 1.4, camDist * 0.9);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+const sh = D.site_span * 0.9;
+sun.shadow.camera.left = -sh; sun.shadow.camera.right = sh;
+sun.shadow.camera.top = sh; sun.shadow.camera.bottom = -sh;
+sun.shadow.camera.near = 0.5; sun.shadow.camera.far = D.site_span * 4;
+scene.add(sun);
+scene.add(sun.target);
+scene.add(new THREE.DirectionalLight(0x99bbdd, 0.25).translateX(-camDist).translateY(camDist * 0.3));
+scene.add(new THREE.HemisphereLight(0x8899cc, 0x334422, 0.3));
+
+// --- SOL/SKYGGE MOTOR ---
+const LAT = __LATITUDE__;
+function solarDeclRad(doy) { return 0.4093 * Math.sin(2 * Math.PI / 365 * (doy - 81)); }
+function solarAlt(lat, doy, hour) {
+  const latR = lat * Math.PI / 180;
+  const decl = solarDeclRad(doy);
+  const ha = (hour - 12) * 15 * Math.PI / 180;
+  const sinAlt = Math.sin(latR) * Math.sin(decl) + Math.cos(latR) * Math.cos(decl) * Math.cos(ha);
+  return Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
+}
+function solarAz(lat, doy, hour) {
+  const latR = lat * Math.PI / 180;
+  const decl = solarDeclRad(doy);
+  const ha = (hour - 12) * 15 * Math.PI / 180;
+  const az = Math.atan2(Math.sin(ha), Math.cos(ha) * Math.sin(latR) - Math.tan(decl) * Math.cos(latR));
+  return (az * 180 / Math.PI + 180) % 360;
+}
+function updateSunPosition(hour, doy) {
+  const alt = solarAlt(LAT, doy, hour);
+  const az = solarAz(LAT, doy, hour);
+  const dist = D.site_span * 1.5;
+  if (alt <= 0) {
+    sun.intensity = 0.05;
+    sun.position.set(0, -dist * 0.2, 0);
+    document.getElementById('sunInfo').textContent = 'Under horisonten';
+  } else {
+    const altRad = alt * Math.PI / 180;
+    const azRad = (az - 180) * Math.PI / 180;
+    sun.position.set(
+      dist * Math.cos(altRad) * Math.sin(azRad),
+      dist * Math.sin(altRad),
+      dist * Math.cos(altRad) * Math.cos(azRad)
+    );
+    sun.target.position.set(0, 0, 0);
+    sun.intensity = 0.4 + 0.8 * Math.sin(altRad);
+    const warmth = Math.max(0, 1 - alt / 50);
+    sun.color.setRGB(1.0, 0.96 - warmth * 0.08, 0.88 - warmth * 0.15);
+    const shadowLen = alt > 1 ? (16 / Math.tan(altRad)).toFixed(0) : '∞';
+    document.getElementById('sunInfo').textContent = 'Solhøyde: ' + alt.toFixed(1) + '° | Skygge ~' + shadowLen + 'm (16m bygg)';
+  }
+  const hh = Math.floor(hour); const mm = Math.round((hour - hh) * 60);
+  document.getElementById('sunHourLabel').textContent = hh + ':' + (mm < 10 ? '0' : '') + mm;
+}
+document.getElementById('sunHour').addEventListener('input', function() {
+  updateSunPosition(parseFloat(this.value), parseInt(document.getElementById('sunSeason').value));
+});
+document.getElementById('sunSeason').addEventListener('change', function() {
+  updateSunPosition(parseFloat(document.getElementById('sunHour').value), parseInt(this.value));
+});
+updateSunPosition(12, 80);
+
+// --- SOL/SKYGGE CAPTURE (parent.localStorage + postMessage, maksimal robusthet) ---
+// 5 faste snapshots matcher PDF-ens sol/skygge-sider
+const captureTimes = [
+  { doy: 80,  hour: 12.0, label: 'Varjevndogn - 21. mars kl. 12.00' },
+  { doy: 80,  hour: 15.0, label: 'Varjevndogn - 21. mars kl. 15.00' },
+  { doy: 172, hour: 12.0, label: 'Sommersolverv - 21. juni kl. 12.00' },
+  { doy: 172, hour: 15.0, label: 'Sommersolverv - 21. juni kl. 15.00' },
+  { doy: 172, hour: 18.0, label: 'Sommersolverv - 21. juni kl. 18.00' },
+];
+
+// PRIMÆR: Skriv direkte til parent.localStorage (same-origin garantert på Streamlit
+// iframe med allow-same-origin-flagg). localStorage er delt mellom same-origin frames.
+// FALLBACK 1: postMessage til parent + top
+// FALLBACK 2: Brukeren laster ned bilder manuelt (vises som nedlastingslenker)
+function sendToParent(payload) {
+  try { window.parent.postMessage(payload, '*'); } catch (e) {}
+  try { if (window.top !== window.parent) window.top.postMessage(payload, '*'); } catch (e) {}
+}
+function writeToAllStorages(key, value) {
+  // Skriv til alle tilgjengelige storages for maksimal sannsynlighet for at Python ser det
+  let wrote = 0;
+  try { window.parent.localStorage.setItem(key, value); wrote++; } catch (e) {}
+  try { window.parent.sessionStorage.setItem(key, value); wrote++; } catch (e) {}
+  try { if (window.top !== window.parent) { window.top.localStorage.setItem(key, value); wrote++; } } catch (e) {}
+  try { window.localStorage.setItem(key, value); wrote++; } catch (e) {}
+  try { window.sessionStorage.setItem(key, value); wrote++; } catch (e) {}
+  return wrote;
+}
+function removeFromAllStorages(key) {
+  try { window.parent.localStorage.removeItem(key); } catch (e) {}
+  try { window.parent.sessionStorage.removeItem(key); } catch (e) {}
+  try { if (window.top !== window.parent) window.top.localStorage.removeItem(key); } catch (e) {}
+  try { window.localStorage.removeItem(key); } catch (e) {}
+  try { window.sessionStorage.removeItem(key); } catch (e) {}
 }
 
-# _default fallback = English (UK)
-_AUTH_TEXTS["_default"] = _AUTH_TEXTS["🇬🇧 English (UK)"]
+async function captureSolarSnapshots() {
+  const btn = document.getElementById('captureSolar');
+  const status = document.getElementById('captureStatus');
+  const downloadContainer = document.getElementById('captureDownloads');
+  const downloadLinks = document.getElementById('captureDownloadLinks');
+  btn.disabled = true;
+  btn.style.opacity = '0.6';
+  const originalLabel = btn.textContent;
+
+  // Rydd tidligere nedlastingslenker
+  if (downloadLinks) downloadLinks.innerHTML = '';
+  if (downloadContainer) downloadContainer.style.display = 'none';
+
+  // Rydd tidligere state i alle storages
+  removeFromAllStorages('builtly_solar_state');
+  removeFromAllStorages('builtly_solar_count');
+  for (let i = 0; i < 10; i++) {
+    removeFromAllStorages('builtly_solar_img_' + i);
+    removeFromAllStorages('builtly_solar_label_' + i);
+    removeFromAllStorages('builtly_solar_doy_' + i);
+    removeFromAllStorages('builtly_solar_hour_' + i);
+  }
+
+  // Signaliser at capture starter
+  const storageOk = writeToAllStorages('builtly_solar_state', 'running');
+  writeToAllStorages('builtly_solar_count', String(captureTimes.length));
+  sendToParent({ source: 'builtly_solar_capture', type: 'start', count: captureTimes.length });
+
+  console.log('[Builtly] Capture start. Storage writes succeeded:', storageOk);
+
+  const origHour = parseFloat(document.getElementById('sunHour').value);
+  const origSeason = parseInt(document.getElementById('sunSeason').value);
+
+  for (let i = 0; i < captureTimes.length; i++) {
+    const t = captureTimes[i];
+    status.textContent = `Tar bilde ${i + 1}/${captureTimes.length}`;
+    updateSunPosition(t.hour, t.doy);
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    await new Promise(r => setTimeout(r, 400));
+    renderer.render(scene, camera);
+
+    // JPEG 0.78 = ca 350-550 KB per bilde, 5 bilder = under 3 MB total
+    const dataUrl = renderer.domElement.toDataURL('image/jpeg', 0.78);
+
+    // Primær: skriv til parent.localStorage (og alle andre)
+    const w = writeToAllStorages('builtly_solar_img_' + i, dataUrl);
+    writeToAllStorages('builtly_solar_label_' + i, t.label);
+    writeToAllStorages('builtly_solar_doy_' + i, String(t.doy));
+    writeToAllStorages('builtly_solar_hour_' + i, String(t.hour));
+    console.log(`[Builtly] Frame ${i+1}/5 stored in ${w} storage(s), size ${Math.round(dataUrl.length/1024)}KB`);
+
+    // Fallback: postMessage til parent
+    sendToParent({
+      source: 'builtly_solar_capture',
+      type: 'frame',
+      index: i,
+      total: captureTimes.length,
+      label: t.label,
+      doy: t.doy,
+      hour: t.hour,
+      dataUrl: dataUrl,
+    });
+
+    // FALLBACK 2: nedlastbare lenker — én per bilde, med tydelig label
+    try {
+      if (downloadLinks) {
+        const filename = `solskygge_${String(i + 1).padStart(2, '0')}_doy${t.doy}_kl${String(t.hour).replace('.', '')}.jpg`;
+        // Kort label: "21.mars 12:00" / "21.juni 15:00" etc.
+        const dateStr = t.doy === 80 ? '21.mars' : (t.doy === 172 ? '21.juni' : `dag${t.doy}`);
+        const hourStr = `${String(Math.floor(t.hour)).padStart(2, '0')}:${String(Math.round((t.hour % 1) * 60)).padStart(2, '0')}`;
+        const link = document.createElement('a');
+        link.href = dataUrl;
+        link.download = filename;
+        link.innerHTML = `📥 <strong>${i + 1}.</strong> ${dateStr} ${hourStr}`;
+        link.style.cssText = 'display:inline-block;background:#1e2a3f;color:#9fd0d5;text-decoration:none;padding:7px 12px;border-radius:5px;font-size:11px;border:1px solid rgba(120,145,170,0.4);margin-right:2px;transition:background 0.15s;';
+        link.onmouseover = function(){ this.style.background = '#2a3b56'; };
+        link.onmouseout = function(){ this.style.background = '#1e2a3f'; };
+        link.title = `Last ned: ${t.label}`;
+        downloadLinks.appendChild(link);
+      }
+    } catch (e) {}
+  }
+
+  // Gjenopprett original visning
+  updateSunPosition(origHour, origSeason);
+
+  // Signaliser at capture er ferdig
+  writeToAllStorages('builtly_solar_state', 'ready');
+  sendToParent({ source: 'builtly_solar_capture', type: 'done', count: captureTimes.length });
+  console.log('[Builtly] Capture complete. State = ready.');
+
+  if (downloadContainer) downloadContainer.style.display = 'block';
+  status.textContent = '✓ Klart! Last ned bildene under og last opp i rapporten.';
+  btn.disabled = false;
+  btn.style.opacity = '1';
+  btn.textContent = originalLabel;
+}
+
+document.getElementById('captureSolar').addEventListener('click', captureSolarSnapshots);
+
+// --- TERRENG ---
+const terrainGroup = new THREE.Group();
+scene.add(terrainGroup);
+
+function getTerrainY(lx, ly) {
+  // Bruk regresjonsplan for aa beregne terrenghoeyde
+  if (!D.terrain) return 0;
+  const t = D.terrain;
+  const wx = lx + t.center_x;
+  const wy = ly + t.center_y;
+  return (t.a * wx + t.b * wy + t.c) - t.min_elev;
+}
+
+if (D.terrain && D.terrain.points && D.terrain.points.length >= 3) {
+  const t = D.terrain;
+  const gridSize = D.site_span * 2.5;
+  const segs = 60;
+  const geo = new THREE.PlaneGeometry(gridSize, gridSize, segs, segs);
+  const positions = geo.attributes.position.array;
+  const colors = new Float32Array(positions.length);
+
+  const maxRelief = Math.max(t.relief, 1.0);
+
+  for (let i = 0; i < positions.length; i += 3) {
+    const lx = positions[i];
+    const ly = positions[i + 1];
+    const elev = getTerrainY(lx, ly);
+    positions[i + 2] = elev;
+
+    // Fargegradient basert paa hoeyde
+    const frac = Math.max(0, Math.min(1, elev / maxRelief));
+    colors[i]     = 0.12 + frac * 0.15;  // R
+    colors[i + 1] = 0.22 + frac * 0.12;  // G
+    colors[i + 2] = 0.10 + frac * 0.06;  // B
+  }
+
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.92,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+    flatShading: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.receiveShadow = true;
+  terrainGroup.add(mesh);
+
+  // Hoeydelinjer (konturlinjer)
+  const contourInterval = Math.max(0.5, maxRelief / 8);
+  for (let elev = contourInterval; elev < maxRelief; elev += contourInterval) {
+    const pts = [];
+    const halfGrid = gridSize / 2;
+    const step = gridSize / 80;
+    for (let x = -halfGrid; x <= halfGrid; x += step) {
+      for (let y = -halfGrid; y <= halfGrid; y += step) {
+        const z = getTerrainY(x, y);
+        if (Math.abs(z - elev) < contourInterval * 0.12) {
+          pts.push(new THREE.Vector3(x, elev + 0.05, y));
+        }
+      }
+    }
+    if (pts.length > 5) {
+      const cGeo = new THREE.BufferGeometry().setFromPoints(pts);
+      const cMat = new THREE.PointsMaterial({ color: 0x5a6a5a, size: 0.6, transparent: true, opacity: 0.35 });
+      terrainGroup.add(new THREE.Points(cGeo, cMat));
+    }
+  }
+} else {
+  // Flatt bakkeplan hvis ingen terrengdata
+  const gGeo = new THREE.PlaneGeometry(D.site_span * 4, D.site_span * 4);
+  const gMat = new THREE.MeshStandardMaterial({ color: 0x1a2a3a, roughness: 0.95 });
+  const gMesh = new THREE.Mesh(gGeo, gMat);
+  gMesh.rotation.x = -Math.PI / 2;
+  gMesh.position.y = -0.05;
+  gMesh.receiveShadow = true;
+  terrainGroup.add(gMesh);
+}
+
+// Grid
+const grid = new THREE.GridHelper(D.site_span * 2.5, 30, 0x2a3a4a, 0x1a2530);
+grid.position.y = 0.01;
+scene.add(grid);
+
+function shapeFromRing(ring) {
+  const shape = new THREE.Shape();
+  ring.forEach((pt, i) => {
+    if (i === 0) shape.moveTo(pt[0], pt[1]);
+    else shape.lineTo(pt[0], pt[1]);
+  });
+  shape.closePath();
+  return shape;
+}
+
+function addFlatPoly(rings, color, opacity, y) {
+  (rings || []).forEach(ring => {
+    if (ring.length < 3) return;
+    const shape = shapeFromRing(ring);
+    const geo = new THREE.ShapeGeometry(shape);
+    const mat = new THREE.MeshStandardMaterial({
+      color: color, transparent: true, opacity: opacity,
+      roughness: 0.8, side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = y;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+  });
+}
+
+function addVolume(rings, height, color, opacity, castShadow, baseY) {
+  (rings || []).forEach(ring => {
+    if (ring.length < 3) return;
+    const shape = shapeFromRing(ring);
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: height, bevelEnabled: false
+    });
+    const mat = new THREE.MeshStandardMaterial({
+      color: color, roughness: 0.50, metalness: 0.06,
+      transparent: opacity < 1.0, opacity: opacity
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.y = baseY || 0;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    const edges = new THREE.EdgesGeometry(geo);
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12 });
+    const line = new THREE.LineSegments(edges, lineMat);
+    line.rotation.x = -Math.PI / 2;
+    line.position.y = baseY || 0;
+    scene.add(line);
+  });
+}
+
+// Tomtegrense
+addFlatPoly(D.site_rings, 0x38bdf8, 0.15, 0.05);
+
+// Nabobygg — med høyde-labels
+D.neighbors.forEach(n => {
+  const cx = n.rings[0] ? n.rings[0].reduce((s,p) => s + p[0], 0) / n.rings[0].length : 0;
+  const cy = n.rings[0] ? n.rings[0].reduce((s,p) => s + p[1], 0) / n.rings[0].length : 0;
+  const baseY = D.terrain ? getTerrainY(cx, cy) : 0;
+  addVolume(n.rings, n.height, 0x8a8e99, 0.50, false, baseY);
+  // Diskret høyde-label
+  if (n.height > 0) {
+    const lc = document.createElement('canvas');
+    lc.width = 128; lc.height = 32;
+    const lx = lc.getContext('2d');
+    lx.fillStyle = 'rgba(0,0,0,0.0)';
+    lx.fillRect(0, 0, 128, 32);
+    lx.fillStyle = 'rgba(180,185,195,0.8)';
+    lx.font = '14px sans-serif';
+    lx.textAlign = 'center';
+    lx.fillText(n.height.toFixed(0) + 'm', 64, 20);
+    const lt = new THREE.CanvasTexture(lc);
+    const lm = new THREE.SpriteMaterial({ map: lt, transparent: true, opacity: 0.7, depthTest: false });
+    const ls = new THREE.Sprite(lm);
+    ls.position.set(cx, baseY + n.height + D.site_span * 0.015, cy);
+    ls.scale.set(D.site_span * 0.10, D.site_span * 0.025, 1);
+    scene.add(ls);
+  }
+});
+
+// Foreslatte volumer
+D.volumes.forEach(v => {
+  const c = new THREE.Color('rgb(' + v.color[0] + ',' + v.color[1] + ',' + v.color[2] + ')');
+  const cx = v.rings[0] ? v.rings[0].reduce((s,p) => s + p[0], 0) / v.rings[0].length : 0;
+  const cy = v.rings[0] ? v.rings[0].reduce((s,p) => s + p[1], 0) / v.rings[0].length : 0;
+  const baseY = D.terrain ? getTerrainY(cx, cy) : 0;
+  addVolume(v.rings, v.height, c, 0.92, true, baseY);
+
+  // 3D-label
+  const canvas2 = document.createElement('canvas');
+  canvas2.width = 256; canvas2.height = 64;
+  const ctx = canvas2.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, 256, 64);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText(v.name + '  ' + v.floors + 'et / ' + v.height.toFixed(0) + 'm', 8, 24);
+  ctx.font = '14px sans-serif';
+  ctx.fillStyle = '#aabbcc';
+  const tex = new THREE.CanvasTexture(canvas2);
+  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.9 });
+  const sprite = new THREE.Sprite(spriteMat);
+  sprite.position.set(cx, baseY + v.height + D.site_span * 0.04, cy);
+  sprite.scale.set(D.site_span * 0.22, D.site_span * 0.055, 1);
+  scene.add(sprite);
+});
+
+// --- ORBIT CONTROLS ---
+let isDown = false, isPan = false, prevX = 0, prevY = 0;
+let theta = Math.PI / 4, phi = Math.PI / 4.5, radius = camDist;
+const target = new THREE.Vector3(0, D.site_span * 0.04, 0);
+
+function updateCamera() {
+  camera.position.x = target.x + radius * Math.sin(phi) * Math.cos(theta);
+  camera.position.y = target.y + radius * Math.cos(phi);
+  camera.position.z = target.z + radius * Math.sin(phi) * Math.sin(theta);
+  camera.lookAt(target);
+}
+updateCamera();
+
+renderer.domElement.addEventListener('mousedown', e => {
+  isDown = true;
+  isPan = e.button === 2 || e.shiftKey;
+  prevX = e.clientX; prevY = e.clientY;
+  e.preventDefault();
+});
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('mouseup', () => { isDown = false; });
+window.addEventListener('mousemove', e => {
+  if (!isDown) return;
+  const dx = e.clientX - prevX, dy = e.clientY - prevY;
+  prevX = e.clientX; prevY = e.clientY;
+  if (isPan) {
+    const panSpeed = radius * 0.002;
+    const right = new THREE.Vector3();
+    right.crossVectors(camera.up, new THREE.Vector3().subVectors(target, camera.position)).normalize();
+    target.addScaledVector(right, dx * panSpeed);
+    target.y -= dy * panSpeed;
+    updateCamera();
+  } else {
+    theta -= dx * 0.006;
+    phi = Math.max(0.08, Math.min(Math.PI / 2.1, phi + dy * 0.006));
+    updateCamera();
+  }
+});
+renderer.domElement.addEventListener('wheel', e => {
+  radius = Math.max(D.site_span * 0.12, Math.min(D.site_span * 5, radius * (1 + e.deltaY * 0.001)));
+  updateCamera();
+  e.preventDefault();
+}, { passive: false });
+
+// Touch
+let touchDist = 0;
+renderer.domElement.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    isDown = true; isPan = false;
+    prevX = e.touches[0].clientX; prevY = e.touches[0].clientY;
+  } else if (e.touches.length === 2) {
+    touchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  }
+  e.preventDefault();
+}, { passive: false });
+renderer.domElement.addEventListener('touchmove', e => {
+  if (e.touches.length === 1 && isDown) {
+    const dx = e.touches[0].clientX - prevX, dy = e.touches[0].clientY - prevY;
+    prevX = e.touches[0].clientX; prevY = e.touches[0].clientY;
+    theta -= dx * 0.006;
+    phi = Math.max(0.08, Math.min(Math.PI / 2.1, phi + dy * 0.006));
+    updateCamera();
+  } else if (e.touches.length === 2) {
+    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    radius = Math.max(D.site_span * 0.12, Math.min(D.site_span * 5, radius * (touchDist / Math.max(d, 1))));
+    touchDist = d;
+    updateCamera();
+  }
+  e.preventDefault();
+}, { passive: false });
+renderer.domElement.addEventListener('touchend', () => { isDown = false; });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / H;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, H);
+});
+
+function animate() {
+  requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+}
+animate();
+</script></body></html>
+""".replace('__DATA__', payload_json).replace('__HEIGHT__', str(int(height_px))).replace(
+        '__LATITUDE__', str(round(site.latitude_deg, 4))
+    ).replace(
+        '__INFO__',
+        f"{option.name} | {option.typology} | BTA {option.gross_bta_m2:.0f} m² | {option.unit_count} boliger"
+        + (f" | Terreng: {terrain_ctx.get('relief_m', 0):.1f}m relieff" if terrain_ctx and terrain_ctx.get('relief_m') else "")
+    )
+
+    components.html(html, height=height_px + 10, scrolling=False)
 
 
-def get_auth_text(lang_key: str = "") -> dict:
-    lk = lang_key or st.session_state.get("app_lang", "")
-    return _AUTH_TEXTS.get(lk, _AUTH_TEXTS["_default"])
+# URL til Vercel-hosted 3D viewer (view.builtly.ai eller localhost for utvikling)
+_VIEW_3D_BASE_URL = os.environ.get("VIEW_3D_URL", "https://view-builtly.vercel.app")
 
 
-# Backward compat
-GDPR_CONSENT_TEXT = _AUTH_TEXTS["🇳🇴 Norsk"]["gdpr"]
-CONTRACT_TERMS_TEXT = _AUTH_TEXTS["🇳🇴 Norsk"]["contract"]
-REVISION_NOTICE = _AUTH_TEXTS["🇳🇴 Norsk"]["revision"]
-
-# Payment provider: Stripe recommended for card payments
-# Env vars needed: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, STRIPE_WEBHOOK_SECRET
-PAYMENT_PROVIDER = "stripe"  # "stripe" or "vipps"
-
-
-def save_user_report(
-    project_name: str,
-    report_name: str,
-    module: str,
-    download_url: str = "",
-    file_path: str = "",
+def render_view_from_building(
+    site: "SiteInputs",
+    option: "OptionResult",
+    floor: int,
+    direction: str,
+    height_px: int = 520,
+    terrain_ctx: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Call this from ANY module when a report is generated.
-    Adds the report to the user's dashboard with automatic 30-day expiry.
+    Fotorealistisk utsikt fra balkong via Google Photorealistic 3D Maps.
+    Bygger en URL med kameraposisjon og volumer, og embedder via iframe
+    til en Vercel-hosted viewer-side (view.builtly.ai).
 
-    Usage in modules (e.g. Mulighetsstudie, GEO, RIB, TDD, etc.):
-        from frontpage import save_user_report
-        save_user_report(
-            project_name="Linås Ski",
-            report_name="Mulighetsstudie — Alternativ B",
-            module="Mulighetsstudie",
-            file_path="/path/to/generated_report.pdf",
-        )
-
-    Parameters:
-        project_name: The project this report belongs to (from st.session_state.project_data["p_name"])
-        report_name:  Display name for the report
-        module:       Module code/name (e.g. "Mulighetsstudie", "GEO", "RIB", "TDD", "Klimarisiko", etc.)
-        download_url: URL to download the report (if hosted)
-        file_path:    Local file path to the generated PDF/file
+    Denne tilnærmingen omgår Streamlits iframe-sandbox som blokkerer
+    Google Maps JavaScript API ved direkte bruk av components.html().
     """
-    from datetime import datetime, timedelta
-
-    now = datetime.now()
-    expires = now + timedelta(days=REPORT_RETENTION_DAYS)
-
-    report_entry = {
-        "project": project_name or st.session_state.get("project_data", {}).get("p_name", "Uten prosjekt"),
-        "name": report_name,
-        "module": module,
-        "created": now.strftime("%Y-%m-%d %H:%M"),
-        "expires": expires.strftime("%Y-%m-%d"),
-        "download_url": download_url,
-        "file_path": file_path,
-    }
-
-    if "user_reports" not in st.session_state:
-        st.session_state.user_reports = []
-    st.session_state.user_reports.append(report_entry)
-
-    # TODO: In production, also persist to database (Supabase, etc.)
-    # and set up a cron/scheduled task to delete expired reports.
-
-
-def purge_expired_reports() -> None:
-    """Remove reports older than REPORT_RETENTION_DAYS. Call on login or page load."""
-    from datetime import datetime
-    if "user_reports" not in st.session_state:
-        return
-    today = datetime.now().strftime("%Y-%m-%d")
-    st.session_state.user_reports = [
-        r for r in st.session_state.user_reports
-        if r.get("expires", "9999-99-99") >= today
-    ]
-
-
-def _is_user_logged_in() -> bool:
-    return st.session_state.get("user_authenticated", False) and bool(st.session_state.get("user_email"))
-
-
-def _user_has_plan() -> bool:
-    return _is_user_logged_in() and bool(st.session_state.get("user_plan"))
-
-
-def _get_auth_page() -> str:
-    """Check query params for auth page routing."""
-    try:
-        return st.query_params.get("auth", "").strip()
-    except Exception:
-        return ""
-
-
-def render_login_page(lang_key: str) -> None:
-    """Render login form. Currently mock — connect to Supabase/Auth0 for production."""
-    copy = get_access_copy(lang_key)
-    at = get_auth_text(lang_key)
-
-    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
-    with outer_center:
-        render_html(f"""
-            <div class="access-gate-head">
-                <div class="assistant-kicker">{at['login_kicker']}</div>
-                <div class="access-gate-title">{at['login_title']}</div>
-                <div class="access-gate-subtitle">{at['login_subtitle']}</div>
-            </div>
-        """)
-
-        with st.form("login_form"):
-            email = st.text_input(at["email"].replace(" *", ""), placeholder="you@company.com")
-            password = st.text_input(at["password"].replace(" *", ""), type="password", placeholder="••••••••")
-            submitted = st.form_submit_button(at["login_btn"], use_container_width=True)
-
-        if submitted:
-            if email.strip() and password.strip():
-                if _HAS_AUTH:
-                    ok, msg = builtly_auth.login(email.strip(), password.strip(), lang=lang_key)
-                    if ok:
-                        st.session_state.site_access_granted = True
-                        try:
-                            params = get_query_params_dict()
-                            params.pop("auth", None)
-                            set_query_params_dict(params)
-                        except Exception:
-                            pass
-                        st.rerun()
-                    else:
-                        st.error(msg)
-                        # Check for unconfirmed email — match key phrases across languages
-                        _msg_lc = msg.lower()
-                        if any(kw in _msg_lc for kw in ["bekreftet", "confirmed", "bekräftad", "bekræftet", "vahvistettu", "bestätigt"]):
-                            if st.button(at.get("resend_btn", "Resend verification link")):
-                                rok, rmsg = builtly_auth.resend_verification(email.strip(), lang=lang_key)
-                                if rok:
-                                    st.success(rmsg)
-                                else:
-                                    st.error(rmsg)
-                else:
-                    st.error(at.get("auth_not_installed", "Auth module not installed."))
-            else:
-                st.error(at.get("fill_email_pw", "Please enter email and password."))
-
-        st.markdown("---")
-        render_html(f'<div style="text-align:center;"><a href="?auth=register" target="_self" style="color:var(--cyan,#38bdf8);">{at["no_account"]}</a></div>')
-
-
-def render_register_page(lang_key: str) -> None:
-    """Render registration form with company, country, and GDPR consent."""
-
-    at = get_auth_text(lang_key)
-
-    # Plans overview first
-    render_html(f"""
-        <div style="text-align:center;margin-bottom:1.5rem;margin-top:1rem;">
-            <div style="color:#22d3ee;font-weight:700;font-size:0.75rem;letter-spacing:0.08em;margin-bottom:0.5rem;">{at['plans_kicker']}</div>
-            <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;">{at['plans_title']}</div>
-            <div style="color:var(--soft,#c8d3df);font-size:0.9rem;">{at['plans_subtitle'].format(months=CONTRACT_BINDING_MONTHS)}</div>
-        </div>
-    """)
-    plan_cols = st.columns(3, gap="medium")
-    for idx, (plan_key, plan) in enumerate(get_subscription_plans().items()):
-        with plan_cols[idx]:
-            is_pop = plan_key == "team"
-            bc = "#38bdf8" if is_pop else "rgba(56,189,248,0.10)"
-            feats = "".join(f'<div style="padding:0.2rem 0;color:var(--soft,#c8d3df);font-size:0.85rem;">✓ {f}</div>' for f in plan["features"])
-            render_html(f"""
-                <div style="border:1px solid {bc};border-radius:1rem;padding:1.5rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:320px;">
-                    <div style="color:#22d3ee;font-weight:700;font-size:0.7rem;letter-spacing:0.08em;margin-bottom:0.3rem;">{plan['badge']}</div>
-                    <div style="color:var(--bright,#f1f5f9);font-size:1.3rem;font-weight:700;">{plan['name']}</div>
-                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:800;margin-bottom:0.2rem;">{plan['price_label']}</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:1rem;">{plan['price_detail']}</div>
-                    {feats}
-                </div>
-            """)
-
-    # Registration form below plans
-    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
-    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
-    with outer_center:
-        render_html(f"""
-            <div class="access-gate-head">
-                <div class="assistant-kicker">{at['register_kicker']}</div>
-                <div class="access-gate-title">{at['register_title']}</div>
-                <div class="access-gate-subtitle">{at['register_subtitle']}</div>
-            </div>
-        """)
-
-        with st.form("register_form"):
-            st.markdown(f"##### {at['contact_person']}")
-            r_col1, r_col2 = st.columns(2)
-            with r_col1:
-                reg_name = st.text_input(at["full_name"], placeholder="John Smith")
-            with r_col2:
-                reg_phone = st.text_input(at["phone"], placeholder="+1 555 000 0000")
-
-            reg_email = st.text_input(at["email"], placeholder="you@company.com")
-
-            st.markdown(f"##### {at['company_info']}")
-            b_col1, b_col2 = st.columns(2)
-            with b_col1:
-                reg_company = st.text_input(at["company_name"], placeholder="Company Inc.")
-            with b_col2:
-                reg_org_nr = st.text_input(at["org_nr"], placeholder="123 456 789")
-
-            _default_country = "United States (IBC / ASCE)" if "English" in lang_key or "US" in lang_key else "Norge (TEK17 / NS-standarder)"
-            reg_countries = st.multiselect(
-                at["country_select"],
-                options=[c[1] for c in AVAILABLE_COUNTRIES],
-                default=[_default_country] if _default_country in [c[1] for c in AVAILABLE_COUNTRIES] else [AVAILABLE_COUNTRIES[0][1]],
-            )
-
-            n_countries = max(len(reg_countries), 1)
-
-            st.markdown(f"##### {at['password'].replace(' *', '')}")
-            p_col1, p_col2 = st.columns(2)
-            with p_col1:
-                reg_password = st.text_input(at["password"], type="password", placeholder="Min. 8 characters")
-            with p_col2:
-                reg_password2 = st.text_input(at["confirm_password"], type="password", placeholder="Repeat password")
-
-            st.markdown("---")
-
-            # GDPR consent
-            reg_gdpr = st.checkbox(at["gdpr"], value=False)
-
-            # Contract terms
-            reg_terms = st.checkbox(
-                at["contract"].format(months=CONTRACT_BINDING_MONTHS) + " " + at.get("contract_accept", "I accept the contract terms."),
-                value=False,
-            )
-
-            reg_submitted = st.form_submit_button(at["create_account"], use_container_width=True)
-
-        if reg_submitted:
-            errors = []
-            if not reg_name.strip():
-                errors.append(at.get("err_name_required", "Full name is required."))
-            if not reg_email.strip() or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", reg_email.strip()):
-                errors.append(at.get("err_email_required", "A valid email address is required."))
-            if not reg_company.strip():
-                errors.append(at.get("err_company_required", "Company name is required."))
-            if not reg_countries:
-                errors.append(at.get("err_country_required", "Please select at least one country."))
-            if len(reg_password) < 8:
-                errors.append(at.get("err_pw_length", "Password must be at least 8 characters."))
-            if reg_password != reg_password2:
-                errors.append(at.get("err_pw_mismatch", "Passwords do not match."))
-            if not reg_gdpr:
-                errors.append(at.get("err_gdpr_required", "You must accept the privacy policy."))
-            if not reg_terms:
-                errors.append(at.get("err_terms_required", "You must accept the contract terms."))
-
-            if errors:
-                for e in errors:
-                    st.error(e)
-            else:
-                # Map display names back to country codes
-                country_codes = []
-                for sel in reg_countries:
-                    for code, label in AVAILABLE_COUNTRIES:
-                        if label == sel:
-                            country_codes.append(code)
-                            break
-
-                if _HAS_AUTH:
-                    ok, msg = builtly_auth.register(
-                        email=reg_email.strip(),
-                        password=reg_password,
-                        name=reg_name.strip(),
-                        company=reg_company.strip(),
-                        org_nr=reg_org_nr.strip(),
-                        phone=reg_phone.strip(),
-                        countries=country_codes,
-                        lang=lang_key,
-                    )
-                    if ok:
-                        st.success(msg)
-                        st.info(at.get("email_confirmed_info", "Once you have confirmed your email, you can log in and choose a plan."))
-                    else:
-                        st.error(msg)
-                else:
-                    st.error(at.get("auth_not_installed", "Auth module not installed."))
-
-        st.markdown("---")
-        render_html(f'<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">{at["has_account"]}</a></div>')
-
-
-def render_demo_gate(lang_key: str) -> None:
-    """Render the original demo access code gate."""
-    copy = get_access_copy(lang_key)
-    at = get_auth_text(lang_key)
-    outer_left, outer_center, outer_right = st.columns([0.3, 3, 0.3], gap="medium")
-    with outer_center:
-        render_html(f"""
-            <div class="access-gate-head">
-                <div class="assistant-kicker">{at.get('demo_kicker', 'DEMO ACCESS')}</div>
-                <div class="access-gate-title">{copy['title']}</div>
-                <div class="access-gate-subtitle">{copy['subtitle']}</div>
-            </div>
-        """)
-
-        if not access_gate_configured():
-            st.warning(copy["admin_missing"])
-            return
-
-        nonce = st.session_state.get("site_access_input_nonce", 0)
-        with st.form("demo_gate_form"):
-            code = st.text_input(
-                copy["label"],
-                key=f"demo_gate_code_{nonce}",
-                type="password",
-                placeholder=copy["placeholder"],
-            )
-            submitted = st.form_submit_button(copy["button"], use_container_width=True)
-
-        if submitted:
-            if verify_site_access_code(code):
-                st.session_state.site_access_granted = True
-                st.session_state.site_access_error = ""
-                token = _generate_session_token(code)
-                params = get_query_params_dict()
-                params.pop("auth", None)
-                params.pop("gate", None)
-                params["s"] = token
-                set_query_params_dict(params)
-                st.rerun()
-            else:
-                st.error(copy["error_invalid"])
-                bump_site_access_nonce()
-                st.rerun()
-
-        st.markdown("---")
-        render_html('<div style="text-align:center;"><a href="?auth=login" target="_self" style="color:var(--cyan,#38bdf8);">Logg inn med konto i stedet</a></div>')
-
-
-def render_plans_page(lang_key: str) -> None:
-    """Render subscription plan selection with payment method choice."""
-    # Require registration before viewing plans
-    at = get_auth_text(lang_key)
-    if not _is_user_logged_in():
-        _plans_gate = {
-            "🇳🇴 Norsk": ("REGISTRERING PÅKREVD", "Opprett konto først", "Du må registrere deg før du kan velge abonnement og betale."),
-            "🇸🇪 Svenska": ("REGISTRERING KRÄVS", "Skapa konto först", "Du måste registrera dig innan du kan välja plan och betala."),
-            "🇩🇰 Dansk": ("REGISTRERING PÅKRÆVET", "Opret konto først", "Du skal registrere dig, før du kan vælge plan og betale."),
-            "🇫🇮 Suomi": ("REKISTERÖITYMINEN VAADITAAN", "Luo tili ensin", "Sinun on rekisteröidyttävä ennen kuin voit valita tilauksen ja maksaa."),
-            "🇩🇪 Deutsch": ("REGISTRIERUNG ERFORDERLICH", "Erstellen Sie zuerst ein Konto", "Sie müssen sich registrieren, bevor Sie einen Plan wählen und bezahlen können."),
-        }
-        _pg = _plans_gate.get(lang_key, ("REGISTRATION REQUIRED", "Create an account first", "You must register before you can choose a plan and pay."))
-        render_html(f"""
-            <div class="access-gate-head" style="text-align:center;">
-                <div class="assistant-kicker">{_pg[0]}</div>
-                <div class="access-gate-title">{_pg[1]}</div>
-                <div class="access-gate-subtitle">{_pg[2]}</div>
-            </div>
-        """)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button(at.get("register_link", "Create account"), type="primary", use_container_width=True):
-                try:
-                    st.query_params["auth"] = "register"
-                except Exception:
-                    pass
-                st.rerun()
-        with col_b:
-            if st.button(at.get("login_btn", "Log in"), type="secondary", use_container_width=True):
-                try:
-                    st.query_params["auth"] = "login"
-                except Exception:
-                    pass
-                st.rerun()
-        return
-
-    user_countries = st.session_state.get("user_countries", ["NO"])
-    n_countries = max(len(user_countries), 1)
-    country_names = []
-    for code in user_countries:
-        for c_code, c_label in AVAILABLE_COUNTRIES:
-            if c_code == code:
-                country_names.append(c_label.split(" (")[0])
-                break
-
-    render_html(f"""
-        <div class="access-gate-head" style="text-align:center;">
-            <div class="assistant-kicker">VELG ABONNEMENT</div>
-            <div class="access-gate-title">Tre nivåer — fra fullt automatisert til attestert</div>
-            <div class="access-gate-subtitle">
-                {'Land: ' + ', '.join(country_names) + '.' if country_names else ''}
-                {'Prisene nedenfor gjelder per land ×' + str(n_countries) + '.' if n_countries > 1 else 'Prisene gjelder for 1 land.'}
-                Alle planer har {CONTRACT_BINDING_MONTHS} måneders bindingstid.
-            </div>
-        </div>
-    """)
-
-    cols = st.columns(3, gap="medium")
-    for idx, (plan_key, plan) in enumerate(get_subscription_plans().items()):
-        with cols[idx]:
-            is_popular = plan_key == "team"
-            border_color = "#38bdf8" if is_popular else "var(--card-border, rgba(56,189,248,0.10))"
-            badge_color = "#38bdf8" if is_popular else "#22d3ee"
-
-            features_html = "".join(
-                f'<div style="padding:0.3rem 0;color:var(--soft,#c8d3df);font-size:0.9rem;">✓ {f}</div>'
-                for f in plan["features"]
-            )
-
-            multi_note = ""
-            if n_countries > 1:
-                multi_note = f'<div style="color:#f59e0b;font-size:0.8rem;margin-top:0.5rem;">× {n_countries} land</div>'
-
-            render_html(f"""
-                <div style="border:1px solid {border_color};border-radius:1rem;padding:1.8rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));min-height:450px;
-                            display:flex;flex-direction:column;position:relative;">
-                    <div style="color:{badge_color};font-weight:700;font-size:0.75rem;
-                                letter-spacing:0.08em;margin-bottom:0.5rem;">{plan['badge']}</div>
-                    <div style="color:var(--bright,#f1f5f9);font-size:1.5rem;font-weight:700;
-                                margin-bottom:0.25rem;">{plan['name']}</div>
-                    <div style="color:#22d3ee;font-size:1.4rem;font-weight:800;
-                                margin-bottom:0.25rem;">{plan['price_label']}</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;
-                                margin-bottom:0.3rem;">{plan['price_detail']}</div>
-                    {multi_note}
-                    <div style="color:var(--soft,#c8d3df);font-size:0.75rem;
-                                margin-bottom:1rem;">{CONTRACT_BINDING_MONTHS} mnd bindingstid</div>
-                    <div style="flex:1;">{features_html}</div>
-                </div>
-            """)
-            if st.button(f"Velg {plan['name']}", key=f"select_plan_{plan_key}", use_container_width=True):
-                st.session_state.user_plan = plan_key
-                st.rerun()
-
-    # -- Payment method selection (shown after plan is selected) --
-    selected_plan = st.session_state.get("user_plan", "")
-    if selected_plan and selected_plan in get_subscription_plans():
-        plan_info = get_subscription_plans()[selected_plan]
-        st.markdown("---")
-
-        render_html(f"""
-            <div style="text-align:center;margin-bottom:1.5rem;">
-                <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;">
-                    Valgt plan: {plan_info['name']} — {plan_info['price_label']}
-                    {' × ' + str(n_countries) + ' land' if n_countries > 1 else ''}
-                </div>
-            </div>
-        """)
-
-        render_html("""
-            <div style="text-align:center;margin-bottom:1rem;">
-                <div style="color:var(--bright,#f1f5f9);font-size:1rem;font-weight:600;">Velg betalingsmetode</div>
-            </div>
-        """)
-
-        pay_col1, pay_col2 = st.columns(2, gap="large")
-        with pay_col1:
-            render_html("""
-                <div style="border:1px solid rgba(56,189,248,0.15);border-radius:1rem;padding:1.5rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));text-align:center;">
-                    <div style="font-size:2rem;margin-bottom:0.5rem;">💳</div>
-                    <div style="color:var(--bright,#f1f5f9);font-weight:700;margin-bottom:0.3rem;">Kortbetaling</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:0.5rem;">
-                        Automatisk aktivering ved godkjent betaling. Stripe sikker betaling.
-                    </div>
-                    <div style="color:#22d3ee;font-size:0.8rem;">Aktiv umiddelbart</div>
-                </div>
-            """)
-            if st.button("Betal med kort", key="pay_card", use_container_width=True):
-                if _HAS_AUTH:
-                    checkout_url, err = builtly_auth.create_checkout(selected_plan, n_countries)
-                    if checkout_url:
-                        st.markdown(f'<meta http-equiv="refresh" content="0;url={checkout_url}">', unsafe_allow_html=True)
-                        st.info("Omdirigerer til Stripe...")
-                    else:
-                        st.error(err)
-                else:
-                    st.error("Betalingsmodul ikke installert.")
-
-        with pay_col2:
-            render_html("""
-                <div style="border:1px solid rgba(56,189,248,0.15);border-radius:1rem;padding:1.5rem;
-                            background:var(--card-bg,rgba(6,17,26,0.55));text-align:center;">
-                    <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
-                    <div style="color:var(--bright,#f1f5f9);font-weight:700;margin-bottom:0.3rem;">Faktura</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:0.5rem;">
-                        Faktura sendes til oppgitt e-post. Konto aktiveres manuelt etter mottatt betaling.
-                    </div>
-                    <div style="color:#f59e0b;font-size:0.8rem;">Manuell godkjenning (1–3 virkedager)</div>
-                </div>
-            """)
-            if st.button("Bestill på faktura", key="pay_invoice", use_container_width=True):
-                if _HAS_AUTH:
-                    ok, msg = builtly_auth.request_invoice(selected_plan, n_countries)
-                    if ok:
-                        st.info(msg)
-                    else:
-                        st.error(msg)
-                else:
-                    st.error("Betalingsmodul ikke installert.")
-
-        # Contract summary
-        render_html(f"""
-            <div style="text-align:center;color:var(--soft,#c8d3df);font-size:0.8rem;
-                        max-width:600px;margin:1.5rem auto 0 auto;padding:1rem;
-                        border:1px solid rgba(56,189,248,0.08);border-radius:0.75rem;">
-                <strong>Kontraktsvilkår:</strong> {CONTRACT_TERMS_TEXT.format(months=CONTRACT_BINDING_MONTHS)}<br><br>
-                <strong>Personvern:</strong> Data behandles iht. GDPR/personopplysningsloven og lagres innenfor EØS.<br><br>
-                <strong>Betalingsleverandør:</strong> Stripe (PCI DSS-sertifisert). Builtly lagrer ikke kortinformasjon.
-            </div>
-        """)
-
-    # Platform pricing info
-    st.markdown("---")
-    render_html(f"""
-        <div style="text-align:center;color:var(--soft,#c8d3df);font-size:0.85rem;
-                    max-width:700px;margin:0 auto;padding:1rem 0;">
-            <strong style="color:#22d3ee;">PLATTFORMPRISING (SaaS)</strong><br>
-            <strong>Portefølje-API (bank):</strong> 150 000–500 000 kr/år · 10 banker = 2 MNOK ARR uten én fagpersontime<br>
-            <strong>White-label partnerprogram:</strong> Lisens + revenue share · 25 000–2 000 000 kr/år<br><br>
-            <em>{REVISION_NOTICE}</em>
-        </div>
-    """)
-
-
-def render_user_dashboard(lang_key: str) -> None:
-    """Render user dashboard with saved reports and account info."""
-    user_name = st.session_state.get("user_name", "Bruker")
-    user_email = st.session_state.get("user_email", "")
-    user_company = st.session_state.get("user_company", "")
-    user_plan = st.session_state.get("user_plan", "")
-    user_countries = st.session_state.get("user_countries", [])
-    user_status = st.session_state.get("user_account_status", "inactive")
-    user_payment = st.session_state.get("user_payment_method", "")
-    reports = st.session_state.get("user_reports", [])
-
-    # Reload from Supabase if list is empty (may have been lost during navigation)
-    if not reports and _HAS_AUTH and st.session_state.get("user_id"):
-        builtly_auth.reload_user_reports()
-        reports = st.session_state.get("user_reports", [])
-
-    _DASH = {
-        "🇳🇴 Norsk": {"my_account": "MIN KONTO", "hi": "Hei", "dashboard_desc": f"Her finner du oversikt over ditt abonnement, kontoinformasjon og alle rapporter du har generert. Rapporter lagres i {REPORT_RETENTION_DAYS} dager og kan lastes ned når som helst i denne perioden. Gå til <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">forsiden</a> for å opprette nye prosjekter og generere rapporter.", "view_plans": "Se kontoplaner og priser →", "pending_title": "Kontoen venter på betalingsbekreftelse.", "pending_desc": "Faktura er sendt — kontoen aktiveres når betaling er registrert (1–3 virkedager). Kontakt post@builtly.ai ved spørsmål.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Velg et abonnement for å få tilgang til Builtly sine moduler.", "acct_info": "KONTOINFORMASJON", "name": "Navn", "company": "Selskap", "email_label": "E-post", "countries": "Land", "not_selected": "Ikke valgt", "payment": "Betaling", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Ikke satt opp", "your_sub": "DITT ABONNEMENT", "no_plan": "Ingen aktiv plan.", "choose_plan": "Velg abonnement", "my_reports": "Mine rapporter", "reports_stored": f"Rapporter lagres i {REPORT_RETENTION_DAYS} dager.", "no_reports": "Ingen rapporter ennå. Opprett ditt første prosjekt for å komme i gang.", "sort_label": "Sorter etter", "sort_proj_az": "Prosjekt (A–Å)", "sort_proj_za": "Prosjekt (Å–A)", "sort_newest": "Nyeste først", "sort_oldest": "Eldste først", "sort_module": "Modul", "filter_label": "Filtrer på prosjekt", "filter_all": "Alle prosjekter", "no_project": "Uten prosjekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Opprettet", "expires": "Utløper", "download": "Last ned", "status_active": "✅ Aktiv", "status_pending": "⏳ Venter på betaling", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Ukjent"},
-        "🇸🇪 Svenska": {"my_account": "MITT KONTO", "hi": "Hej", "dashboard_desc": f"Här hittar du en översikt av din prenumeration, kontoinformation och alla rapporter du har genererat. Rapporter sparas i {REPORT_RETENTION_DAYS} dagar och kan laddas ner när som helst under denna period. Gå till <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">startsidan</a> för att skapa nya projekt och generera rapporter.", "view_plans": "Se planer och priser →", "pending_title": "Kontot väntar på betalningsbekräftelse.", "pending_desc": "Faktura har skickats — kontot aktiveras när betalning registrerats (1–3 arbetsdagar). Kontakta post@builtly.ai vid frågor.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Välj en prenumeration för att få tillgång till Builtlys moduler.", "acct_info": "KONTOINFORMATION", "name": "Namn", "company": "Företag", "email_label": "E-post", "countries": "Länder", "not_selected": "Inte valt", "payment": "Betalning", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Inte inställt", "your_sub": "DIN PRENUMERATION", "no_plan": "Ingen aktiv plan.", "choose_plan": "Välj prenumeration", "my_reports": "Mina rapporter", "reports_stored": f"Rapporter sparas i {REPORT_RETENTION_DAYS} dagar.", "no_reports": "Inga rapporter ännu. Skapa ditt första projekt för att komma igång.", "sort_label": "Sortera efter", "sort_proj_az": "Projekt (A–Ö)", "sort_proj_za": "Projekt (Ö–A)", "sort_newest": "Senaste först", "sort_oldest": "Äldsta först", "sort_module": "Modul", "filter_label": "Filtrera på projekt", "filter_all": "Alla projekt", "no_project": "Utan projekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Skapad", "expires": "Utgår", "download": "Ladda ner", "status_active": "✅ Aktiv", "status_pending": "⏳ Väntar på betalning", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Okänd"},
-        "🇩🇰 Dansk": {"my_account": "MIN KONTO", "hi": "Hej", "dashboard_desc": f"Her finder du en oversigt over dit abonnement, kontooplysninger og alle rapporter du har genereret. Rapporter gemmes i {REPORT_RETENTION_DAYS} dage og kan downloades når som helst i denne periode. Gå til <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">forsiden</a> for at oprette nye projekter og generere rapporter.", "view_plans": "Se planer og priser →", "pending_title": "Kontoen venter på betalingsbekræftelse.", "pending_desc": "Faktura er sendt — kontoen aktiveres, når betaling er registreret (1–3 hverdage). Kontakt post@builtly.ai ved spørgsmål.", "inactive_title": "Ingen aktiv plan.", "inactive_desc": "Vælg et abonnement for at få adgang til Builtlys moduler.", "acct_info": "KONTOOPLYSNINGER", "name": "Navn", "company": "Virksomhed", "email_label": "E-mail", "countries": "Lande", "not_selected": "Ikke valgt", "payment": "Betaling", "card": "Kort (Stripe)", "invoice": "Faktura", "not_set": "Ikke opsat", "your_sub": "DIT ABONNEMENT", "no_plan": "Ingen aktiv plan.", "choose_plan": "Vælg abonnement", "my_reports": "Mine rapporter", "reports_stored": f"Rapporter gemmes i {REPORT_RETENTION_DAYS} dage.", "no_reports": "Ingen rapporter endnu. Opret dit første projekt for at komme i gang.", "sort_label": "Sortér efter", "sort_proj_az": "Projekt (A–Å)", "sort_proj_za": "Projekt (Å–A)", "sort_newest": "Nyeste først", "sort_oldest": "Ældste først", "sort_module": "Modul", "filter_label": "Filtrér på projekt", "filter_all": "Alle projekter", "no_project": "Uden projekt", "report_s": "rapport", "reports_p": "rapporter", "created": "Oprettet", "expires": "Udløber", "download": "Download", "status_active": "✅ Aktiv", "status_pending": "⏳ Venter på betaling", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Ukendt"},
-        "🇫🇮 Suomi": {"my_account": "OMA TILI", "hi": "Hei", "dashboard_desc": f"Täältä löydät yleiskatsauksen tilauksestasi, tilitiedoistasi ja kaikista luomistasi raporteista. Raportit säilytetään {REPORT_RETENTION_DAYS} päivää ja ne voidaan ladata milloin tahansa tänä aikana. Siirry <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">etusivulle</a> luodaksesi uusia projekteja ja raportteja.", "view_plans": "Katso suunnitelmat ja hinnoittelu →", "pending_title": "Tili odottaa maksuvahvistusta.", "pending_desc": "Lasku on lähetetty — tili aktivoidaan, kun maksu on rekisteröity (1–3 arkipäivää). Ota yhteyttä post@builtly.ai kysymyksissä.", "inactive_title": "Ei aktiivista tilausta.", "inactive_desc": "Valitse tilaus saadaksesi pääsyn Builtlyn moduuleihin.", "acct_info": "TILITIEDOT", "name": "Nimi", "company": "Yritys", "email_label": "Sähköposti", "countries": "Maat", "not_selected": "Ei valittu", "payment": "Maksu", "card": "Kortti (Stripe)", "invoice": "Lasku", "not_set": "Ei asetettu", "your_sub": "TILAUKSESI", "no_plan": "Ei aktiivista tilausta.", "choose_plan": "Valitse tilaus", "my_reports": "Omat raportit", "reports_stored": f"Raportit säilytetään {REPORT_RETENTION_DAYS} päivää.", "no_reports": "Ei raportteja vielä. Luo ensimmäinen projektisi aloittaaksesi.", "sort_label": "Lajittele", "sort_proj_az": "Projekti (A–Ö)", "sort_proj_za": "Projekti (Ö–A)", "sort_newest": "Uusin ensin", "sort_oldest": "Vanhin ensin", "sort_module": "Moduuli", "filter_label": "Suodata projektin mukaan", "filter_all": "Kaikki projektit", "no_project": "Ilman projektia", "report_s": "raportti", "reports_p": "raporttia", "created": "Luotu", "expires": "Vanhenee", "download": "Lataa", "status_active": "✅ Aktiivinen", "status_pending": "⏳ Odottaa maksua", "status_inactive": "⚠️ Ei aktiivinen", "status_unknown": "Tuntematon"},
-        "🇩🇪 Deutsch": {"my_account": "MEIN KONTO", "hi": "Hallo", "dashboard_desc": f"Hier finden Sie eine Übersicht über Ihr Abonnement, Kontoinformationen und alle generierten Berichte. Berichte werden {REPORT_RETENTION_DAYS} Tage gespeichert und können jederzeit heruntergeladen werden. Gehen Sie zur <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">Startseite</a>, um neue Projekte zu erstellen und Berichte zu generieren.", "view_plans": "Pläne und Preise ansehen →", "pending_title": "Konto wartet auf Zahlungsbestätigung.", "pending_desc": "Rechnung wurde gesendet — Konto wird aktiviert, sobald Zahlung registriert ist (1–3 Werktage). Kontaktieren Sie post@builtly.ai bei Fragen.", "inactive_title": "Kein aktiver Plan.", "inactive_desc": "Wählen Sie ein Abonnement, um Zugang zu Builtly-Modulen zu erhalten.", "acct_info": "KONTOINFORMATIONEN", "name": "Name", "company": "Unternehmen", "email_label": "E-Mail", "countries": "Länder", "not_selected": "Nicht ausgewählt", "payment": "Zahlung", "card": "Karte (Stripe)", "invoice": "Rechnung", "not_set": "Nicht eingerichtet", "your_sub": "IHR ABONNEMENT", "no_plan": "Kein aktiver Plan.", "choose_plan": "Plan wählen", "my_reports": "Meine Berichte", "reports_stored": f"Berichte werden {REPORT_RETENTION_DAYS} Tage gespeichert.", "no_reports": "Noch keine Berichte. Erstellen Sie Ihr erstes Projekt, um loszulegen.", "sort_label": "Sortieren nach", "sort_proj_az": "Projekt (A–Z)", "sort_proj_za": "Projekt (Z–A)", "sort_newest": "Neueste zuerst", "sort_oldest": "Älteste zuerst", "sort_module": "Modul", "filter_label": "Nach Projekt filtern", "filter_all": "Alle Projekte", "no_project": "Ohne Projekt", "report_s": "Bericht", "reports_p": "Berichte", "created": "Erstellt", "expires": "Läuft ab", "download": "Herunterladen", "status_active": "✅ Aktiv", "status_pending": "⏳ Warte auf Zahlung", "status_inactive": "⚠️ Inaktiv", "status_unknown": "Unbekannt"},
-    }
-    _DASH["🇬🇧 English (UK)"] = {"my_account": "MY ACCOUNT", "hi": "Hi", "dashboard_desc": f"Here you find an overview of your subscription, account information and all reports you have generated. Reports are stored for {REPORT_RETENTION_DAYS} days and can be downloaded at any time during this period. Go to the <a href=\"/\" target=\"_self\" style=\"color:#38bdf8;\">front page</a> to create new projects and generate reports.", "view_plans": "View plans and pricing →", "pending_title": "Account awaiting payment confirmation.", "pending_desc": f"Invoice has been sent — account will be activated when payment is registered (1–3 business days). Contact post@builtly.ai with questions.", "inactive_title": "No active plan.", "inactive_desc": "Choose a subscription to access Builtly modules.", "acct_info": "ACCOUNT INFORMATION", "name": "Name", "company": "Company", "email_label": "Email", "countries": "Countries", "not_selected": "Not selected", "payment": "Payment", "card": "Card (Stripe)", "invoice": "Invoice", "not_set": "Not set up", "your_sub": "YOUR SUBSCRIPTION", "no_plan": "No active plan.", "choose_plan": "Choose plan", "my_reports": "My reports", "reports_stored": f"Reports are stored for {REPORT_RETENTION_DAYS} days.", "no_reports": "No reports yet. Create your first project to get started.", "sort_label": "Sort by", "sort_proj_az": "Project (A–Z)", "sort_proj_za": "Project (Z–A)", "sort_newest": "Newest first", "sort_oldest": "Oldest first", "sort_module": "Module", "filter_label": "Filter by project", "filter_all": "All projects", "no_project": "No project", "report_s": "report", "reports_p": "reports", "created": "Created", "expires": "Expires", "download": "Download", "status_active": "✅ Active", "status_pending": "⏳ Awaiting payment", "status_inactive": "⚠️ Inactive", "status_unknown": "Unknown"}
-    _DASH["🇺🇸 English (US)"] = _DASH["🇬🇧 English (UK)"]
-    dt = _DASH.get(lang_key, _DASH["🇬🇧 English (UK)"])
-
-    status_labels = {
-        "active": (dt["status_active"], "#22c55e"),
-        "pending_invoice": (dt["status_pending"], "#f59e0b"),
-        "inactive": (dt["status_inactive"], "#ef4444"),
-    }
-    status_text, status_color = status_labels.get(user_status, (dt["status_unknown"], "#c8d3df"))
-
-    country_names = []
-    for code in user_countries:
-        for c_code, c_label in AVAILABLE_COUNTRIES:
-            if c_code == code:
-                country_names.append(c_label.split(" (")[0])
-                break
-
-    _front_href = f"/?lang={language_slug(lang_key)}"
-    _dash_desc = dt['dashboard_desc'].replace('href="/"', f'href="{_front_href}"')
-
-    render_html(f"""
-        <div class="access-gate-head">
-            <div class="assistant-kicker">{dt['my_account']}</div>
-            <div class="access-gate-title">{dt['hi']}, {html.escape(user_name)}</div>
-            <div style="color:var(--soft,#c8d3df);font-size:0.95rem;line-height:1.6;max-width:700px;margin-top:0.5rem;">
-                {_dash_desc}
-                <a href="?auth=plans" target="_self" style="color:#22d3ee;margin-left:0.3rem;">{dt['view_plans']}</a>
-            </div>
-        </div>
-    """)
-
-    # -- Account status banner --
-    if user_status == "pending_invoice":
-        render_html(f"""
-            <div style="background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);
-                        border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
-                        color:#f59e0b;font-size:0.9rem;">
-                ⏳ <strong>{dt['pending_title']}</strong>
-                {dt['pending_desc']}
-            </div>
-        """)
-    elif user_status == "inactive":
-        render_html(f"""
-            <div style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.3);
-                        border-radius:0.75rem;padding:1rem 1.5rem;margin-bottom:1.5rem;
-                        color:#ef4444;font-size:0.9rem;">
-                ⚠️ <strong>{dt['inactive_title']}</strong>
-                {dt['inactive_desc']}
-            </div>
-        """)
-
-    # -- Account info --
-    info_col, plan_col = st.columns([1, 1], gap="large")
-    with info_col:
-        _payment_label = dt["card"] if user_payment == "card" else dt["invoice"] if user_payment == "invoice" else dt["not_set"]
-        render_html(f"""
-            <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
-                        padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{dt['acct_info']}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['name']}:</strong> {html.escape(user_name)}</div>
-                {'<div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>' + dt['company'] + ':</strong> ' + html.escape(user_company) + '</div>' if user_company else ''}
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['email_label']}:</strong> {html.escape(user_email)}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['countries']}:</strong> {html.escape(', '.join(country_names)) if country_names else dt['not_selected']}</div>
-                <div style="color:var(--bright,#f1f5f9);margin-bottom:0.3rem;"><strong>{dt['payment']}:</strong> {_payment_label}</div>
-                <div style="margin-top:0.5rem;"><strong style="color:{status_color};">{status_text}</strong></div>
-            </div>
-        """)
-    with plan_col:
-        plan_info = get_subscription_plans().get(user_plan, {})
-        if plan_info:
-            render_html(f"""
-                <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:1rem;
-                            padding:1.5rem;background:var(--card-bg,rgba(6,17,26,0.55));">
-                    <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-bottom:0.5rem;">{dt['your_sub']}</div>
-                    <div style="color:#22d3ee;font-size:1.2rem;font-weight:700;">{plan_info['name']} — {plan_info['price_label']}</div>
-                    <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-top:0.3rem;">{plan_info['price_detail']}</div>
-                </div>
-            """)
-        else:
-            render_html('<div style="border:1px solid rgba(56,189,248,0.10);border-radius:1rem;padding:1.5rem;background:rgba(6,17,26,0.55);">')
-            render_html(f'<div style="color:var(--soft,#c8d3df);">{dt["no_plan"]}</div>')
-            render_html('</div>')
-            if st.button(dt["choose_plan"], use_container_width=True):
-                try:
-                    st.query_params["auth"] = "plans"
-                except Exception:
-                    pass
-                st.rerun()
-
-    # -- Saved reports --
-    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
-    render_html(f"""
-        <div style="color:var(--bright,#f1f5f9);font-size:1.2rem;font-weight:700;margin-bottom:0.5rem;">
-            {dt['my_reports']}
-        </div>
-        <div style="color:var(--soft,#c8d3df);font-size:0.85rem;margin-bottom:1rem;">
-            {dt['reports_stored']} {REVISION_NOTICE}
-        </div>
-    """)
-
-    if not reports:
-        render_html(f"""
-            <div style="border:1px dashed rgba(56,189,248,0.20);border-radius:1rem;padding:3rem;
-                        text-align:center;color:var(--soft,#c8d3df);">
-                <div style="font-size:2rem;margin-bottom:0.5rem;">📄</div>
-                <div>{dt['no_reports']}</div>
-            </div>
-        """)
-    else:
-        # Sort options
-        sort_col, filter_col = st.columns([1, 1])
-        with sort_col:
-            _sort_options = [dt["sort_proj_az"], dt["sort_proj_za"], dt["sort_newest"], dt["sort_oldest"], dt["sort_module"]]
-            sort_by = st.selectbox(
-                dt["sort_label"],
-                _sort_options,
-                index=0,
-                key="report_sort",
-            )
-        with filter_col:
-            # Collect unique project names
-            all_projects = sorted(set(r.get("project", dt["no_project"]) for r in reports))
-            filter_project = st.selectbox(
-                dt["filter_label"],
-                [dt["filter_all"]] + all_projects,
-                index=0,
-                key="report_filter_project",
-            )
-
-        # Filter
-        filtered = reports
-        if filter_project != dt["filter_all"]:
-            filtered = [r for r in reports if r.get("project", dt["no_project"]) == filter_project]
-
-        # Sort
-        if sort_by == dt["sort_proj_az"]:
-            filtered = sorted(filtered, key=lambda r: (r.get("project", dt["no_project"]).lower(), r.get("created", "")))
-        elif sort_by == dt["sort_proj_za"]:
-            filtered = sorted(filtered, key=lambda r: r.get("project", dt["no_project"]).lower(), reverse=True)
-        elif sort_by == dt["sort_newest"]:
-            filtered = sorted(filtered, key=lambda r: r.get("created", ""), reverse=True)
-        elif sort_by == dt["sort_oldest"]:
-            filtered = sorted(filtered, key=lambda r: r.get("created", ""))
-        elif sort_by == dt["sort_module"]:
-            filtered = sorted(filtered, key=lambda r: (r.get("module", ""), r.get("created", "")))
-
-        # Group by project
-        from collections import OrderedDict
-        grouped: dict = OrderedDict()
-        for r in filtered:
-            proj = r.get("project", dt["no_project"])
-            grouped.setdefault(proj, []).append(r)
-
-        for proj_name, proj_reports in grouped.items():
-            _rcount = len(proj_reports)
-            render_html(f"""
-                <div style="color:#38bdf8;font-weight:700;font-size:0.95rem;margin-top:1.2rem;
-                            margin-bottom:0.4rem;padding-bottom:0.3rem;
-                            border-bottom:1px solid rgba(56,189,248,0.15);">
-                    📁 {html.escape(proj_name)}
-                    <span style="color:var(--soft,#c8d3df);font-weight:400;font-size:0.8rem;margin-left:0.5rem;">
-                        {_rcount} {dt['report_s'] if _rcount == 1 else dt['reports_p']}
-                    </span>
-                </div>
-            """)
-            for r_idx, report in enumerate(proj_reports):
-                exp_text = report.get("expires", "—") or report.get("expires_at", "—")
-                created_text = report.get("created", "—") or report.get("created_at", "—")
-                storage_path = report.get("storage_path") or ""
-                legacy_download_url = report.get("download_url") or ""
-                report_name = report.get("name", "Rapport")
-                module_name = report.get("module", "")
-                file_size = report.get("file_size_bytes", 0)
-
-                # Formater filstørrelse om tilgjengelig
-                size_str = ""
-                if file_size:
-                    if file_size > 1024 * 1024:
-                        size_str = f" · {file_size / (1024*1024):.1f} MB"
-                    elif file_size > 1024:
-                        size_str = f" · {file_size / 1024:.0f} KB"
-
-                # Layout med Streamlit-kolonner for ekte knapper
-                with st.container(border=True):
-                    info_col, btn_col = st.columns([4, 1])
-                    with info_col:
-                        render_html(f"""
-                            <div style="color:var(--bright,#f1f5f9);font-weight:600;">
-                                {html.escape(report_name)}
-                            </div>
-                            <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-top:0.2rem;">
-                                {html.escape(module_name)} · {dt['created']}: {html.escape(str(created_text))} · {dt['expires']}: {html.escape(str(exp_text))}{html.escape(size_str)}
-                            </div>
-                        """)
-
-                    with btn_col:
-                        # Unik key per rapport
-                        btn_key = f"dl_report_{proj_name}_{r_idx}_{report.get('id', report_name)}"
-
-                        if storage_path:
-                            # Moderne flyt: last ned bytes fra Supabase Storage
-                            if st.button(f"↓ {dt['download']}",
-                                         key=f"fetch_{btn_key}",
-                                         use_container_width=True,
-                                         type="primary"):
-                                try:
-                                    pdf_bytes = builtly_auth.get_report_bytes(storage_path)
-                                    if pdf_bytes:
-                                        # Lagre i session state så download_button kan brukes
-                                        st.session_state[f"_pdf_ready_{btn_key}"] = pdf_bytes
-                                        st.rerun()
-                                    else:
-                                        st.error("Kunne ikke hente fil fra Storage")
-                                except Exception as e:
-                                    st.error(f"Feil: {e}")
-
-                            # Hvis bytes er klare, vis download-knapp
-                            pdf_ready = st.session_state.get(f"_pdf_ready_{btn_key}")
-                            if pdf_ready:
-                                # Bestem filnavn
-                                ext = "pdf"
-                                if storage_path.lower().endswith(".docx"):
-                                    ext = "docx"
-                                elif storage_path.lower().endswith(".zip"):
-                                    ext = "zip"
-                                safe_name = "".join(
-                                    c if c.isalnum() or c in "_-" else "_"
-                                    for c in report_name
-                                )[:80]
-                                download_fname = f"{safe_name}.{ext}"
-
-                                mime = "application/pdf"
-                                if ext == "docx":
-                                    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                                elif ext == "zip":
-                                    mime = "application/zip"
-
-                                st.download_button(
-                                    label="✓ Lagre fil",
-                                    data=pdf_ready,
-                                    file_name=download_fname,
-                                    mime=mime,
-                                    key=f"save_{btn_key}",
-                                    use_container_width=True,
-                                )
-                        elif legacy_download_url:
-                            # Legacy: direkte lenke
-                            render_html(f"""
-                                <a href="{html.escape(legacy_download_url)}" target="_blank"
-                                   style="display:inline-block;width:100%;padding:0.4rem 0.8rem;
-                                          background:#38bdf8;color:#06111a;border-radius:6px;
-                                          text-align:center;text-decoration:none;font-weight:600;">
-                                    ↓ {dt['download']}
-                                </a>
-                            """)
-                        else:
-                            # Ingen fil tilgjengelig — vis disabled-knapp
-                            st.button(f"↓ {dt['download']}",
-                                      key=f"nofile_{btn_key}",
-                                      disabled=True,
-                                      use_container_width=True,
-                                      help="Fil ikke tilgjengelig (generert før Storage-integrasjon)")
-
-    # -- Actions --
-    st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
-    _at_menu = get_auth_text(lang_key)
-    act_col1, act_col2, act_col3 = st.columns(3)
-    with act_col1:
-        _back_labels = {"🇳🇴 Norsk": "← Tilbake til forsiden", "🇸🇪 Svenska": "← Tillbaka till startsidan", "🇩🇰 Dansk": "← Tilbage til forsiden", "🇫🇮 Suomi": "← Takaisin etusivulle", "🇩🇪 Deutsch": "← Zurück zur Startseite"}
-        if st.button(_back_labels.get(lang_key, "← Back to front page"), use_container_width=True):
-            try:
-                params = get_query_params_dict()
-                params.pop("auth", None)
-                set_query_params_dict(params)
-            except Exception:
-                pass
-            st.rerun()
-    with act_col2:
-        _plan_labels = {"🇳🇴 Norsk": "Endre abonnement", "🇸🇪 Svenska": "Ändra prenumeration", "🇩🇰 Dansk": "Ændr abonnement", "🇫🇮 Suomi": "Vaihda tilausta", "🇩🇪 Deutsch": "Plan ändern"}
-        if st.button(_plan_labels.get(lang_key, "Change plan"), use_container_width=True):
-            try:
-                st.query_params["auth"] = "plans"
-            except Exception:
-                pass
-            st.rerun()
-    with act_col3:
-        if st.button(_at_menu.get("acct_logout", "Log out"), use_container_width=True):
-            if _HAS_AUTH:
-                builtly_auth.logout()
-            else:
-                st.session_state.user_authenticated = False
-                st.session_state.user_email = ""
-                st.session_state.user_name = ""
-                st.session_state.user_plan = ""
-                st.session_state.user_reports = []
-            try:
-                params = get_query_params_dict()
-                params.pop("auth", None)
-                set_query_params_dict(params)
-            except Exception:
-                pass
-            st.rerun()
-
-
-def handle_auth_routing(lang_key: str) -> bool:
-    """Check if we need to show an auth page. Returns True if an auth page was rendered (caller should st.stop)."""
-    auth_page = _get_auth_page()
-    if not auth_page:
-        return False
-
-    if auth_page == "login":
-        render_login_page(lang_key)
-        return True
-    elif auth_page == "register":
-        render_register_page(lang_key)
-        return True
-    elif auth_page == "plans":
-        render_plans_page(lang_key)
-        return True
-    elif auth_page == "dashboard":
-        if _is_user_logged_in():
-            render_user_dashboard(lang_key)
-        else:
-            render_login_page(lang_key)
-        return True
-    elif auth_page == "payment_success":
-        # Stripe redirects here after successful checkout
-        if _HAS_AUTH:
-            session_id = ""
-            try:
-                session_id = st.query_params.get("session_id", "")
-            except Exception:
-                pass
-            if session_id:
-                ok, msg = builtly_auth.verify_checkout(session_id)
-                if ok:
-                    st.success(msg)
-                    _go_labels = {"🇳🇴 Norsk": "Gå til Builtly", "🇸🇪 Svenska": "Gå till Builtly", "🇩🇰 Dansk": "Gå til Builtly", "🇫🇮 Suomi": "Siirry Builtlyyn", "🇩🇪 Deutsch": "Weiter zu Builtly"}
-                    _go_text = _go_labels.get(lang_key, "Go to Builtly")
-                    _go_href = f"/?lang={language_slug(lang_key)}"
-                    render_html('<div style="text-align:center;margin-top:2rem;">')
-                    render_html(f'<a href="{_go_href}" target="_self" class="hero-action primary">{_go_text}</a>')
-                    render_html('</div>')
-                else:
-                    st.error(msg)
-            else:
-                st.error("Mangler session-ID fra Stripe.")
-        return True
-    return False
-
-
-def reference_base_dir() -> Path:
-    return Path(os.getenv("BUILTLY_REFERENCE_DIR") or "knowledge_base")
-
-
-def reference_file_candidates(lang_key: str, selected_codes: List[str]) -> List[Path]:
-    base_dir = reference_base_dir()
-    locale_slug = LANGUAGE_REFERENCE_SLUGS.get(lang_key, "global")
-    candidates = [
-        base_dir / "global" / "shared.md",
-        base_dir / locale_slug / "shared.md",
-    ]
-
-    for code in selected_codes or []:
-        candidates.append(base_dir / "global" / f"{code}.md")
-        candidates.append(base_dir / locale_slug / f"{code}.md")
-
-    unique_paths: List[Path] = []
-    seen = set()
-    for path in candidates:
-        path_key = path.as_posix()
-        if path_key not in seen:
-            seen.add(path_key)
-            unique_paths.append(path)
-    return unique_paths
-
-
-def load_reference_snippets(lang_key: str, selected_codes: List[str], char_limit: int = 2800) -> str:
-    snippets: List[str] = []
-    used = 0
-
-    for path in reference_file_candidates(lang_key, selected_codes):
-        if not path.exists() or not path.is_file():
-            continue
-
-        text = path.read_text(encoding="utf-8", errors="ignore").strip()
-        if not text:
-            continue
-
-        remaining = char_limit - used
-        if remaining <= 0:
-            break
-
-        excerpt = text[:remaining].strip()
-        if not excerpt:
-            continue
-
-        snippets.append(f"[{path.as_posix()}]\n{excerpt}")
-        used += len(excerpt)
-
-    return "\n\n".join(snippets).strip()
-
-
-def loaded_reference_pack_names(lang_key: str, selected_codes: List[str]) -> List[str]:
-    names: List[str] = []
-    for path in reference_file_candidates(lang_key, selected_codes):
-        if path.exists() and path.is_file():
-            names.append(path.as_posix())
-    return names
-
-
-def build_builtly_prompt(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
-    profile = get_locale_profile(lang_key)
-    selected_codes = selected_codes or list(DEFAULT_DISCIPLINES)
-    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key)) or get_text_bundle(lang_key)["assistant_scope_value"]
-
-    history_block = ""
-    if history:
-        snippets = []
-        for item in history[-4:]:
-            snippets.append(f"User: {item['question']}\nBuiltly: {item['answer']}")
-        history_block = "\n\nRecent conversation:\n" + "\n\n".join(snippets)
-
-    country_guidance = COUNTRY_GUIDANCE_PACKS.get(lang_key, COUNTRY_GUIDANCE_PACKS["🇬🇧 English (UK)"])
-    country_guidance_block = "\n".join([f"- {line}" for line in country_guidance])
-
-    discipline_lines: List[str] = []
-    for code in selected_codes:
-        guidance_lines = DISCIPLINE_GUIDANCE_PACKS.get(code, [])
-        label = discipline_label(code, lang_key)
-        for line in guidance_lines:
-            discipline_lines.append(f"- {label}: {line}")
-    discipline_guidance_block = "\n".join(discipline_lines) or "- Use the user's question to infer the most relevant technical focus."
-
-    reference_snippets = load_reference_snippets(lang_key, selected_codes)
-    reference_block = ""
-    if reference_snippets:
-        reference_block = (
-            "\n\nLocal reference pack excerpts (prioritise these when they are more specific than generic guidance):\n"
-            + reference_snippets
-        )
-
-    return f"""
-You are Builtly, the front-page engineering and property assistant for builtly.ai.
-
-Respond in {profile['language_name']}.
-Primary country context: {profile['country']}.
-Primary regulatory baseline: {profile['rule_set']}.
-Jurisdiction note: {profile['variation_note']}.
-Active disciplines: {selected_labels}.
-
-Country guidance pack:
-{country_guidance_block}
-
-Discipline guidance pack:
-{discipline_guidance_block}
-
-You can help with:
-- geotechnics and ground conditions
-- structural engineering
-- demolition, reuse and waste handling
-- acoustics and noise
-- fire safety
-- environment and sustainability
-- SHA / health and safety
-- BREEAM and certification strategy
-- traffic and mobility in early phase
-- property, feasibility and development
-
-How to answer:
-- Start with a direct practical answer.
-- Separate mandatory requirements, common practice, and assumptions when useful.
-- Be explicit about what depends on municipality, state, county, local authority or local permitting practice.
-- Prefer a practical structure when relevant: Direct answer, What governs, Main risks/open points, Next to clarify.
-- For early-phase questions, highlight the missing project facts that materially change the answer.
-- If several disciplines are involved, organise the answer by discipline or by decision topic.
-- For Sweden, explain when the 2025–2026 transition between older BBR rules and newer Boverket regulations matters.
-- For Germany, state clearly that the applicable Landesbauordnung and local authority practice must be confirmed.
-- For the United States, explain that state and local code adoption can differ from model codes.
-- For the United Kingdom, default to England and flag if Scotland, Wales or Northern Ireland may differ.
-- Do not pretend to certify, legally approve, or formally sign off.
-- If the question is outside scope, politely say that Builtly focuses on building technology, development and property.
-
-Formatting and length rules:
-- Write clean Markdown only.
-- Do not use tables.
-- Do not use horizontal rules.
-- Keep the answer compact and decision-oriented. In most cases stay under roughly 450-650 words.
-- Use at most four short headings or sections.
-- Finish the very last line with exactly {ASSISTANT_END_MARKER}
-
-{history_block}{reference_block}
-
-User question:
-{question.strip()}
-""".strip()
-
-
-def answer_has_end_marker(text: str) -> bool:
-    return ASSISTANT_END_MARKER in (text or "")
-
-
-def clean_ai_answer_text(text: str) -> str:
-    cleaned = (text or "").replace(ASSISTANT_END_MARKER, "")
-    cleaned = cleaned.replace("END_OF_BUILTLY_ANSWER", "")
-    cleaned = re.sub(r"(?m)^\s*---\s*$", "", cleaned)
-    cleaned = re.sub(r"(?m)^\s*\*\*\s*$", "", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
-
-
-def trim_incomplete_tail(text: str) -> str:
-    cleaned = clean_ai_answer_text(text)
-    if not cleaned:
-        return ""
-
-    lines = cleaned.splitlines()
-    if not lines:
-        return cleaned
-
-    last_line = lines[-1].strip()
-    if last_line and not last_line.endswith((".", "!", "?", ")", "]", "»", "”", ":")):
-        lines = lines[:-1]
-
-    trimmed = "\n".join(lines).strip()
-    if not trimmed:
-        trimmed = cleaned
-
-    sentence_end = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-    if sentence_end >= 0 and sentence_end >= int(len(trimmed) * 0.55):
-        return trimmed[: sentence_end + 1].strip()
-    return trimmed
-
-
-def build_builtly_continuation_prompt(question: str, partial_answer: str, selected_codes: List[str], lang_key: str) -> str:
-    profile = get_locale_profile(lang_key)
-    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key)) or get_text_bundle(lang_key)["assistant_scope_value"]
-    return f"""
-You are continuing the same Builtly answer.
-
-Respond in {profile['language_name']}.
-Country context: {profile['country']}.
-Primary regulatory baseline: {profile['rule_set']}.
-Active disciplines: {selected_labels}.
-
-Rules:
-- Continue exactly where the previous answer stopped.
-- Do not restart or repeat the introduction.
-- Finish any cut-off word, sentence, heading or bullet.
-- Keep the remaining part compact and practical.
-- Do not use tables or horizontal rules.
-- Finish the very last line with exactly {ASSISTANT_END_MARKER}
-
-Original user question:
-{question.strip()}
-
-Existing partial answer:
-{clean_ai_answer_text(partial_answer)}
-""".strip()
-
-
-def build_builtly_repair_prompt(question: str, partial_answer: str, selected_codes: List[str], lang_key: str) -> str:
-    profile = get_locale_profile(lang_key)
-    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key)) or get_text_bundle(lang_key)["assistant_scope_value"]
-    return f"""
-You are repairing a Builtly answer that stopped before it was completed.
-
-Respond in {profile['language_name']}.
-Country context: {profile['country']}.
-Primary regulatory baseline: {profile['rule_set']}.
-Active disciplines: {selected_labels}.
-
-Rules:
-- Rewrite the draft below into one complete, compact and practical answer.
-- Preserve the useful substance from the draft, but remove broken Markdown, repeated lines and unfinished fragments.
-- Do not use tables or horizontal rules.
-- Keep the answer decision-oriented and normally under roughly 450-650 words.
-- Finish the very last line with exactly {ASSISTANT_END_MARKER}
-
-Original user question:
-{question.strip()}
-
-Draft answer to repair:
-{clean_ai_answer_text(partial_answer)}
-""".strip()
-
-
-def parse_gemini_response(response_payload: Dict) -> tuple[str, bool]:
-    candidates = response_payload.get("candidates", [])
-    text_parts: List[str] = []
-    was_truncated = False
-    for candidate in candidates:
-        finish_reason = str(candidate.get("finishReason", "")).upper()
-        if finish_reason == "MAX_TOKENS":
-            was_truncated = True
-        content = candidate.get("content", {})
-        for part in content.get("parts", []):
-            if isinstance(part, dict) and part.get("text"):
-                text_parts.append(part["text"])
-    if text_parts:
-        return "\n".join(text_parts).strip(), was_truncated
-
-    block_reason = response_payload.get("promptFeedback", {}).get("blockReason")
-    if block_reason:
-        raise RuntimeError(f"Response blocked by AI engine: {block_reason}")
-
-    raise RuntimeError("No text returned from the AI engine.")
-
-
-def call_gemini_generate_content(
-    *,
-    api_key: str,
-    model_name: str,
-    prompt_text: str,
-    max_output_tokens: int = 2400,
-) -> tuple[str, bool]:
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt_text}],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "topP": 0.9,
-            "maxOutputTokens": max_output_tokens,
-        },
-    }
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{urlparse.quote(model_name, safe='')}:generateContent?key={urlparse.quote(api_key, safe='')}"
-    )
-
-    req = urlrequest.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urlrequest.urlopen(req, timeout=70) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return parse_gemini_response(data)
-    except urlerror.HTTPError as exc:
-        try:
-            details = exc.read().decode("utf-8")
-        except Exception:
-            details = str(exc)
-        raise RuntimeError(f"AI engine HTTP {exc.code}: {details}") from exc
-    except urlerror.URLError as exc:
-        raise RuntimeError(f"AI engine connection error: {exc}") from exc
-
-
-def merge_assistant_continuation(answer: str, continuation: str) -> str:
-    primary = (answer or "").rstrip()
-    extra = (continuation or "").lstrip()
-    if not extra:
-        return primary
-    if extra in primary:
-        return primary
-
-    max_overlap = min(len(primary), len(extra), 160)
-    overlap = 0
-    for size in range(max_overlap, 11, -1):
-        if primary[-size:].lower() == extra[:size].lower():
-            overlap = size
-            break
-    if overlap:
-        extra = extra[overlap:].lstrip()
-        if not extra:
-            return primary
-
-    if primary and extra and primary[-1].isalnum() and extra[0].isalnum():
-        if extra[0].islower():
-            return f"{primary}{extra}".strip()
-        return f"{primary} {extra}".strip()
-
-    if primary.endswith(("-", "–", "/", ":")):
-        separator = " "
-    elif primary.endswith("\n") or extra.startswith(("-", "*", "•", "1.", "2.", "3.", "4.", "5.")):
-        separator = "\n"
-    else:
-        separator = "\n\n"
-
-    return f"{primary}{separator}{extra}".strip()
-
-
-def request_builtly_answer(question: str, selected_codes: List[str], lang_key: str, history: List[Dict]) -> str:
-    api_key = gemini_api_key()
-    profile = get_locale_profile(lang_key)
-    selected_labels = ", ".join(discipline_labels(selected_codes, lang_key))
+    api_key = os.environ.get("GOOGLE_MAPS_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
     if not api_key:
-        return (
-            f"**{get_text_bundle(lang_key)['assistant_note_prefix']}:** "
-            f"Set the AI API key in Render to activate live answers. "
-            f"The front page is already wired to send the selected language ({profile['language_name']}), "
-            f"country ({profile['country']}), rule set ({profile['rule_set']}) and disciplines ({selected_labels}) to the AI engine."
+        st.warning("Utsiktsvisningen krever GOOGLE_MAPS_KEY (Maps JavaScript API).")
+        return
+
+    geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or []
+    massing_parts = geometry.get('massing_parts', []) or []
+    footprint_coords = geometry.get('footprint_polygon_coords') or []
+
+    flat_site = flatten_coord_groups(site_coords)
+    if not flat_site:
+        st.warning("Ingen tomtegeometri tilgjengelig for utsiktsvisning.")
+        return
+
+    # --- Finn kameraposisjon fra bygningsgeometri ---
+    parts_for_camera = massing_parts if massing_parts else (
+        [{"coords": footprint_coords, "height_m": option.building_height_m}]
+        if footprint_coords else []
+    )
+    if not parts_for_camera:
+        st.warning("Ingen bygningsgeometri å plassere kamera i.")
+        return
+
+    def _part_area(part):
+        c = flatten_coord_groups(part.get('coords', []))
+        if len(c) < 3:
+            return 0.0
+        try:
+            return Polygon([(p[0], p[1]) for p in c]).area
+        except Exception:
+            return 0.0
+
+    main_part = max(parts_for_camera, key=_part_area)
+    main_coords = flatten_coord_groups(main_part.get('coords', []))
+    if len(main_coords) < 3:
+        st.warning("Kunne ikke plassere kamera — ugyldig bygningspolygon.")
+        return
+
+    # Retningsvektor (UTM: +y=nord, +x=øst)
+    dir_map = {"N": (0.0, 1.0), "Ø": (1.0, 0.0), "S": (0.0, -1.0), "V": (-1.0, 0.0)}
+    heading_map = {"N": 0, "Ø": 90, "S": 180, "V": 270}
+    dx_dir, dy_dir = dir_map.get(direction, (0.0, -1.0))
+    heading_deg = heading_map.get(direction, 180)
+
+    # Finn ytterkant av fotavtrykket mot valgt retning
+    projections = [(p[0] * dx_dir + p[1] * dy_dir, p) for p in main_coords]
+    projections.sort(key=lambda x: -x[0])
+    if len(projections) >= 2:
+        edge_cx = (projections[0][1][0] + projections[1][1][0]) / 2.0
+        edge_cy = (projections[0][1][1] + projections[1][1][1]) / 2.0
+    else:
+        edge_cx, edge_cy = projections[0][1][0], projections[0][1][1]
+
+    # Balkong-avstand: 2m utover fasaden
+    cam_utm_x = edge_cx + dx_dir * 2.0
+    cam_utm_y = edge_cy + dy_dir * 2.0
+
+    # --- Konverter UTM → WGS84 ---
+    if not HAS_PYPROJ:
+        st.warning("pyproj kreves for å konvertere koordinater til lat/lng.")
+        return
+    try:
+        tx = Transformer.from_crs(25833, 4326, always_xy=True)
+        cam_lng, cam_lat = tx.transform(cam_utm_x, cam_utm_y)
+    except Exception as exc:
+        st.warning(f"Koordinatkonvertering feilet: {exc}")
+        return
+
+    # Kamera-høyde OVER BAKKEN (viewer bruker RELATIVE_TO_GROUND)
+    # Dette fjerner avhengighet av at terrain_ctx har korrekt min_elev_m.
+    # Google 3D Maps håndterer selv høyde over terreng når altitudeMode=RELATIVE_TO_GROUND.
+    floor_h = float(option.building_height_m) / max(int(option.floors), 1)
+    cam_height_above_ground = (floor - 1) * floor_h + 1.6
+
+    # base_elev beholdes for logging/debug
+    base_elev = float(terrain_ctx.get('min_elev_m', 0)) if terrain_ctx else 0.0
+    cam_alt = base_elev + cam_height_above_ground  # kun for debug-visning
+
+    # --- Bygg volumer som lat/lng for vieweren ---
+    typology_color = {
+        "Lamell": "rgba(34,197,94,0.55)", "Punkthus": "rgba(56,189,248,0.55)",
+        "Tun": "rgba(168,130,240,0.55)", "Rekke": "rgba(250,180,60,0.55)",
+        "Podium + Tårn": "rgba(220,80,120,0.55)", "Karré": "rgba(100,200,180,0.55)",
+        "Tårn": "rgba(56,140,248,0.55)",
+    }.get(option.typology, "rgba(34,197,94,0.55)")
+
+    volumes_data = []
+    all_parts = massing_parts if massing_parts else (
+        [{"coords": footprint_coords, "height_m": option.building_height_m}]
+        if footprint_coords else []
+    )
+    for part in all_parts:
+        pc = flatten_coord_groups(part.get('coords', []))
+        if len(pc) < 3:
+            continue
+        try:
+            ring = []
+            for p in pc:
+                plon, plat = tx.transform(float(p[0]), float(p[1]))
+                ring.append({"lat": round(plat, 7), "lng": round(plon, 7)})
+            if ring and (ring[0]["lat"] != ring[-1]["lat"] or ring[0]["lng"] != ring[-1]["lng"]):
+                ring.append(ring[0])
+            if len(ring) >= 4:
+                # top_altitude er nå HØYDE OVER BAKKEN — viewer bruker RELATIVE_TO_GROUND
+                volumes_data.append({
+                    "ring": ring,
+                    "top_altitude": float(part.get('height_m', option.building_height_m)),
+                })
+        except Exception:
+            continue
+
+    # --- Bygg URL ---
+    import urllib.parse
+    url_params = {
+        "key": api_key,
+        "lat": f"{cam_lat:.7f}",
+        "lng": f"{cam_lng:.7f}",
+        "alt": f"{cam_alt:.1f}",
+        "heading": str(heading_deg),
+        "tilt": "78",
+        "range": "5",
+        "color": typology_color,
+        "label": f"{option.name} · {floor}. etasje mot {direction}",
+    }
+    if volumes_data:
+        url_params["volumes"] = json.dumps(volumes_data, ensure_ascii=False)
+
+    viewer_url = f"{_VIEW_3D_BASE_URL}/?{urllib.parse.urlencode(url_params)}"
+
+    # --- Render via iframe ---
+    # NB: Streamlit har ikke st.components.iframe — riktig API er components.iframe
+    components.iframe(viewer_url, height=height_px, scrolling=False)
+
+def option_to_record(option: OptionResult) -> Dict[str, Any]:
+    record = asdict(option)
+    record["mix_counts"] = json.dumps(option.mix_counts, ensure_ascii=False)
+    record["notes"] = " | ".join(option.notes)
+    record.pop("geometry", None)
+    return record
+
+
+def _build_geo_narrative_for_context(
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+) -> str:
+    """Kort geo-avsnitt for pkt. 4 TOMT OG KONTEKST. Returnerer tom streng hvis
+    ingen geo-data er tilgjengelig."""
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return ""
+
+    contamination = geodata_bundle.get("grunnforurensning", []) or []
+    hist_year = geodata_bundle.get("historisk_year")
+    parts = []
+
+    # Åpningssetning — alltid hvis vi har data
+    if hist_year:
+        parts.append(
+            f"Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
+            f"NGU og NVE, samt en AI-vurdering av historisk flyfoto fra {hist_year}. "
+            f"Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter sol/skygge-analysen."
+        )
+    else:
+        parts.append(
+            "Det er gjennomført automatisk uttrekk av stedskontekst- og geodata fra Miljødirektoratet, "
+            "NGU og NVE. Detaljert gjennomgang er samlet i seksjonen \"Stedskontekst og geodata\" etter "
+            "sol/skygge-analysen."
         )
 
-    model_name = os.getenv("BUILTLY_GEMINI_MODEL") or os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
-    primary_prompt = build_builtly_prompt(question, selected_codes, lang_key, history)
-    answer, was_truncated = call_gemini_generate_content(
-        api_key=api_key,
-        model_name=model_name,
-        prompt_text=primary_prompt,
-        max_output_tokens=1800,
+    # Grunnforurensning — kort statuslinje
+    cnt = len(contamination)
+    if cnt == 0:
+        parts.append(
+            "Miljødirektoratets grunnforurensningsdatabase viser ingen kjente forurensingslokaliteter innen 500 m."
+        )
+    elif cnt <= 2:
+        parts.append(
+            f"Miljødirektoratets database viser {cnt} registrert forurensingslokalitet innen 500 m" if cnt == 1
+            else f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m."
+        )
+    else:
+        parts.append(
+            f"Miljødirektoratets database viser {cnt} registrerte forurensingslokaliteter innen 500 m. "
+            f"Forhøyet oppmerksomhet anbefales."
+        )
+
+    # Historisk bruk (hvis AI-analyse finnes)
+    if historical_analysis:
+        risiko = (historical_analysis.get("risiko_niva") or "").strip()
+        if risiko and risiko != "Ukjent":
+            parts.append(
+                f"AI-basert første screening av historisk flyfoto vurderer samlet forurensningsrisiko som {risiko.lower()}. "
+                f"Vurderingen erstatter ikke miljøteknisk grunnundersøkelse."
+            )
+
+    # v16: Aktsomhet (radon/flom/kvikkleire/skred) — kort sammendrag
+    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
+    if aktsomhet.get("available"):
+        kategorier = aktsomhet.get("categories", {}) or {}
+        hits = [k for k, v in kategorier.items() if v.get("hit")]
+        if hits:
+            label_map = {
+                "radon": "radon", "flom": "flom", "kvikkleire": "kvikkleire",
+                "skred_snø": "snøskred", "skred_stein": "steinskred", "skred_jord": "jord-/flomskred",
+            }
+            hit_labels = [label_map.get(h, h) for h in hits]
+            parts.append(
+                f"Tomten ligger i registrert aktsomhetssone for {', '.join(hit_labels)} "
+                f"(Geodata Online DOK). Fagteknisk RIG-/geoteknisk vurdering er nødvendig — se risiko-seksjonen."
+            )
+        else:
+            parts.append(
+                "Tomten ligger utenfor registrerte aktsomhetssoner for radon, flom, kvikkleire og skred "
+                "(DOK Samfunnssikkerhet / DOK Geologi)."
+            )
+
+    return " ".join(parts)
+
+
+def _build_geo_narrative_for_risk(
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+) -> List[str]:
+    """Kort risiko-avsnitt som bullets til pkt. 9 RISIKO OG AVKLARINGSPUNKTER.
+    Returnerer tom liste hvis ingen geo-data er tilgjengelig."""
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return []
+
+    bullets = []
+    contamination = geodata_bundle.get("grunnforurensning", []) or []
+    cnt = len(contamination)
+
+    # Grunnforurensning-linje
+    if cnt == 0:
+        bullets.append(
+            "- Grunnforurensning: Ingen kjente lokaliteter i Miljødirektoratets database innen 500 m. "
+            "Standard aktsomhetsprosedyre tilstrekkelig før bygging."
+        )
+    elif cnt <= 2:
+        bullets.append(
+            f"- Grunnforurensning: {cnt} registrert lokalitet i Miljødirektoratets database innen 500 m. "
+            f"Miljøteknisk undersøkelse bør vurderes som del av prosjekteringsfasen."
+        )
+    else:
+        bullets.append(
+            f"- Grunnforurensning: {cnt} registrerte lokaliteter innen 500 m (Miljødirektoratet). "
+            f"Miljøteknisk grunnundersøkelse er anbefalt før byggesaksinnsending."
+        )
+
+    # AI-historisk-analyse-linje
+    if historical_analysis:
+        risiko = (historical_analysis.get("risiko_niva") or "").strip()
+        tiltak = (historical_analysis.get("anbefalte_tiltak") or "").strip()
+        if risiko and risiko != "Ukjent":
+            line = f"- Forurensningsrisiko (AI-screening av historisk flyfoto): {risiko}."
+            if tiltak:
+                # Trunker tiltak til første setning for kort bullet
+                first_sentence = tiltak.split(".")[0].strip()
+                if first_sentence and len(first_sentence) < 180:
+                    line += f" {first_sentence}."
+            line += " Se dedikert seksjon \"Historisk flyfoto og tidligere arealbruk\" for full vurdering."
+            bullets.append(line)
+        elif risiko == "Ukjent":
+            bullets.append(
+                "- Forurensningsrisiko (AI-screening av historisk flyfoto): Vurderingen er usikker — "
+                "manuell fagkontroll av historisk bruk anbefales."
+            )
+
+    # v16: Aktsomhetskart-bullets (radon/flom/kvikkleire/skred fra DOK)
+    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
+    if aktsomhet.get("available"):
+        kategorier = aktsomhet.get("categories", {}) or {}
+        # Tiltaksmapping per kategori
+        tiltak_map = {
+            "radon": "Radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5.",
+            "flom": "Flomvurdering må inkluderes i ROS-analyse. Tiltakskategori vurderes iht. TEK17 § 7-2.",
+            "kvikkleire": "Geoteknisk vurdering og prosedyre iht. NVE veileder 1/2019 er obligatorisk før byggesøknad.",
+            "skred_snø": "Skredfarevurdering iht. TEK17 § 7-3 kan være påkrevd.",
+            "skred_stein": "Steinsprangvurdering iht. TEK17 § 7-3 kan være påkrevd.",
+            "skred_jord": "Jord-/flomskredvurdering iht. TEK17 § 7-3 kan være påkrevd.",
+        }
+        label_map = {
+            "radon": "Radon",
+            "flom": "Flom",
+            "kvikkleire": "Kvikkleire",
+            "skred_snø": "Snøskred",
+            "skred_stein": "Steinskred",
+            "skred_jord": "Jord-/flomskred",
+        }
+        for cat_key, cat_data in kategorier.items():
+            if not cat_data.get("hit"):
+                continue
+            severity = cat_data.get("severity", "registrert")
+            detail = cat_data.get("detail", "")
+            label = label_map.get(cat_key, cat_key)
+            tiltak = tiltak_map.get(cat_key, "Fagteknisk vurdering anbefales.")
+            sev_text = {"høy": "høy aktsomhet", "moderat": "moderat aktsomhet",
+                        "lav": "lav aktsomhet", "registrert": "registrert sone"}.get(severity, severity)
+            line = f"- {label}: {sev_text}"
+            if detail and detail.lower() not in ("aktsomhetsområde", "aktsomhetssone"):
+                line += f" ({detail})"
+            line += f". {tiltak}"
+            bullets.append(line)
+
+    return bullets
+
+
+def build_deterministic_report(
+    site: SiteInputs,
+    options: List[OptionResult],
+    parsed_hints: Dict[str, float],
+    has_visual_input: bool,
+    manual_override: Optional[Dict[str, Any]] = None,
+    environment_data: Optional[Dict[str, Any]] = None,
+    geodata_bundle: Optional[Dict[str, Any]] = None,
+    historical_analysis: Optional[Dict[str, str]] = None,
+) -> str:
+    if not options:
+        return (
+            "# 1. OPPSUMMERING\n"
+            "Ingen alternativ kunne genereres fordi tomtegeometri eller reguleringsgrenser er for svake.\n\n"
+            "# 2. GRUNNLAG\n"
+            "- Kontroller tomtepolygon, byggegrenser, BYA/BRA og evt. terreng- eller nabodata.\n"
+        )
+
+    best = options[0]
+    using_polygon = site.site_geometry_source not in {"Rektangulert fallback", "Rektangel", "Manuell rektangeltomt"}
+    terrain_active = best.terrain_relief_m > 0.0 or best.terrain_slope_pct > 0.0
+    has_manual = manual_override is not None
+    lines = []
+    lines.append("# 1. OPPSUMMERING")
+
+    if has_manual:
+        mo = manual_override
+        pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+        manual_bra = mo.get('saleable_area_m2', 0)
+        manual_pct_bra = round(manual_bra / max(site.site_area_m2, 1) * 100, 0) if pct_bra_active else 0
+        if pct_bra_active:
+            lines.append(
+                f"Brukeren har manuelt overstyrt volumforslaget. "
+                f"Den manuelle løsningen gir {manual_bra:.0f} m² BRA ({manual_pct_bra:.0f}% utnyttelse), "
+                f"{mo.get('gross_bta_m2', 0):.0f} m² BTA og ca. {mo.get('unit_count', 0)} boliger."
+            )
+        else:
+            lines.append(
+                f"Brukeren har manuelt overstyrt volumforslaget. "
+                f"Den manuelle løsningen gir {mo.get('gross_bta_m2', 0):.0f} m² BTA, "
+                f"{manual_bra:.0f} m² BRA og ca. {mo.get('unit_count', 0)} boliger."
+            )
+    else:
+        best_bra = best.gross_bta_m2 * best.efficiency_ratio
+        if site.utnyttelsesgrad_bra_pct > 0:
+            best_pct_bra = round(best_bra / max(site.site_area_m2, 1) * 100, 0)
+            lines.append(
+                f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
+                f"Det gir omtrent {best_bra:.0f} m² BRA ({best_pct_bra:.0f}% utnyttelse), "
+                f"{best.gross_bta_m2:.0f} m² BTA og ca. {best.unit_count} boliger."
+            )
+        else:
+            lines.append(
+                f"Beste indikative alternativ er {best.name} ({best.typology}) med score {best.score}/100. "
+                f"Det gir omtrent {best.gross_bta_m2:.0f} m² BTA, {best_bra:.0f} m² BRA "
+                f"og ca. {best.unit_count} boliger."
+            )
+    if using_polygon:
+        lines.append(
+            f"Analysen bruker faktisk tomtepolygon, reelt byggefelt på ca. {best.buildable_area_m2:.0f} m² "
+            f"og {best.neighbor_count} nabobygg i sol/skygge-vurderingen."
+        )
+    if terrain_active:
+        lines.append(
+            f"Terrenggrunnlag er brukt som en forenklet flate med ca. {best.terrain_slope_pct:.1f}% gjennomsnittlig fall og "
+            f"{best.terrain_relief_m:.1f} m lokalt relieff."
+        )
+    lines.append("")
+    lines.append("# 2. GRUNNLAG")
+    lines.append(f"- Tomteareal brukt i motor: {site.site_area_m2:.0f} m²")
+    lines.append(f"- Tomtedimensjon (omsluttende orientert rektangel): ca. {site.site_width_m:.1f} x {site.site_depth_m:.1f} m")
+    lines.append(
+        f"- Byggegrenser / inntrekk: front {site.front_setback_m:.1f} m, bak {site.rear_setback_m:.1f} m, side {site.side_setback_m:.1f} m, "
+        f"polygonbuffer {site.polygon_setback_m:.1f} m"
+    )
+    lines.append(f"- Maks BYA: {site.max_bya_pct:.1f}%")
+    lines.append(f"- Maks BRA: {'ikke satt' if site.max_bra_m2 <= 0 else f'{site.max_bra_m2:.0f} m²'}")
+    lines.append(f"- Maks etasjer: {site.max_floors}")
+    lines.append(f"- Maks høyde: {site.max_height_m:.1f} m")
+    if site.utnyttelsesgrad_bra_pct > 0:
+        target_bra = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        lines.append(f"- %-BRA mål: {site.utnyttelsesgrad_bra_pct:.0f}% → {target_bra:.0f} m² BRA")
+    else:
+        lines.append(f"- Ønsket BTA: {site.desired_bta_m2:.0f} m²")
+    lines.append(f"- Solanalyse basert på breddegrad: {site.latitude_deg:.3f}")
+    lines.append(f"- Geometrikilde: {site.site_geometry_source}")
+    lines.append(f"- Nabobygg brukt i analysen: {site.neighbor_count}")
+    lines.append(f"- Visuelt grunnlag lastet opp: {'ja' if has_visual_input else 'nei'}")
+    if site.polygon_crs:
+        lines.append(f"- CRS / projeksjon for polygon: {site.polygon_crs}")
+    if parsed_hints:
+        lines.append(f"- Tolket fra fritekst: {json.dumps(parsed_hints, ensure_ascii=False)}")
+    lines.append("")
+    lines.append("# 3. VIKTIGSTE FORUTSETNINGER")
+    lines.append("- Analysen er deterministisk og skjematisk; den erstatter ikke detaljert reguleringstolkning.")
+    lines.append("- Sol/skygge er oppgradert til en 2.5D-vurdering med faktisk tomtepolygon, nabohøyder og enkel terrengflate når dette er lagt inn.")
+    lines.append("- Leilighetsmiks beregnes ut fra salgbart areal og gjennomsnittsstørrelser, ikke full planløsning.")
+    lines.append("- Terreng brukes som et regressjonsplan / forenklet flate, ikke full detaljmodell av murer, skjæringer eller støttemurer.")
+    lines.append("")
+    lines.append("# 4. TOMT OG KONTEKST")
+    if using_polygon:
+        lines.append(
+            f"Tomten er analysert som faktisk polygon i stedet for rektangulær boks. Dette gir mer realistisk byggefelt, "
+            f"bedre kontroll på fotavtrykk og en mer troverdig sol-/skyggevurdering mot omkringliggende volum."
+        )
+    else:
+        lines.append(
+            "Tomten er analysert som rektangulær fallback fordi faktisk polygon ikke er lastet inn. Resultatene er fortsatt nyttige, "
+            "men geometrisk presisjon blir svakere enn med ekte tomtegrense."
+        )
+    if best.neighbor_count > 0:
+        lines.append(
+            f"Det er brukt {best.neighbor_count} nabobygg i analysen. Disse påvirker særlig solbelyst uteareal og vinter-/skuldersesongskygger."
+        )
+    else:
+        lines.append("Det er ikke lagt inn nabovolumer, så skyggevurderingen gjelder primært eget volum på tomten.")
+    if terrain_active:
+        lines.append(
+            f"Terrengflaten viser omtrent {best.terrain_slope_pct:.1f}% gjennomsnittlig fall. Dette påvirker adkomst, underetasje, parkering og skyggeutbredelse."
+        )
+
+    # Miljødata: støy, dagslys, vind
+    env = environment_data or {}
+    noise = env.get("noise", {})
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        db = worst.get("db", 0)
+        src = worst.get("source_type", "vei")
+        zone = worst.get("zone", "")
+        lines.append("")
+        lines.append(f"Støydata fra {noise.get('source', 'kartlegging')}: Tomten er berørt av støysone {zone} ({db:.0f} dB Lden fra {src}).")
+        if db >= 65:
+            lines.append(
+                "Støynivået er over 65 dB og krever spesiell oppmerksomhet ved boligprosjektering. "
+                "TEK17 stiller krav til innendørs lydnivå og det vil sannsynligvis kreves gjennomgående leiligheter med stille side, "
+                "lydskjermende fasadeløsninger og/eller støyskjerm."
+            )
+        elif db >= 55:
+            lines.append(
+                "Støynivået er moderat (55-65 dB). Gjennomgående leiligheter med stille side anbefales. "
+                "Balkong og uteoppholdsareal bør orienteres bort fra støykilden."
+            )
+        else:
+            lines.append("Støynivået er under 55 dB, noe som gir gode rammer for boligutvikling uten spesielle støytiltak.")
+        if len(noise["zones"]) > 1:
+            other_sources = set(z.get("source_type", "") for z in noise["zones"] if z.get("source_type") != src)
+            if other_sources:
+                lines.append(f"Det er også registrert støy fra: {', '.join(other_sources)}.")
+    elif noise.get("source", "").startswith("Geodata"):
+        lines.append("")
+        lines.append("Støydata er sjekket mot DOK Forurensning. Ingen registrerte støysoner berører tomten direkte.")
+
+    daylight = env.get("daylight", {})
+    if daylight.get("available") and daylight.get("overall_score", 0) > 0:
+        dl = daylight["overall_score"]
+        lines.append(f"Dagslysindikator (forenklet TEK17 §13-7): {dl:.0f}/100.")
+
+    wind_c = env.get("wind_comfort", {})
+    if wind_c.get("available"):
+        lines.append(f"Vindkomfort: Klasse {wind_c.get('lawson_class', '?')} ({wind_c.get('overall', 'ikke vurdert')}).")
+
+    # Geo-avsnitt (stedskontekst + grunnforurensning + historisk bruk)
+    _geo_narr = _build_geo_narrative_for_context(geodata_bundle, historical_analysis)
+    if _geo_narr:
+        lines.append("")
+        lines.append(_geo_narr)
+
+    lines.append("")
+    lines.append("# 5. REGULERINGSMESSIGE FORHOLD")
+    lines.append(
+        f"Maks fotavtrykk styres av kombinasjonen av BYA og faktisk byggefelt. I denne runden er beregnet bebbyggbar flate ca. {best.buildable_area_m2:.0f} m². "
+        f"Høydebegrensning og etasjeantall gir et indikativt tak på {min(site.max_floors, max(1, int(site.max_height_m // max(site.floor_to_floor_m, 2.8))))} etasjer."
+    )
+    lines.append("")
+
+    # --- Når manuell overstyring er aktiv: kompakt rapport uten gammel alternativliste ---
+    if has_manual:
+        mo = manual_override
+        pct_bra_active = site.utnyttelsesgrad_bra_pct > 0
+        site_area = max(site.site_area_m2, 1.0)
+        manual_bra = mo.get('saleable_area_m2', 0)
+        manual_bta = mo.get('gross_bta_m2', 0)
+        manual_pct_bra = round(manual_bra / site_area * 100, 0) if pct_bra_active else 0
+
+        lines.append("# 6. VALGT VOLUMLØSNING (MANUELL OVERSTYRING)")
+        lines.append(
+            f"Brukeren har overstyrt motorens forslag med en manuell volumplassering. "
+            f"Den manuelle skissen består av {mo.get('n_buildings', '?')} bygg."
+        )
+        lines.append("")
+
+        if pct_bra_active:
+            lines.append(f"- BRA (salgbart areal): {manual_bra:.0f} m²")
+            lines.append(f"- %-BRA: {manual_pct_bra:.0f}% (mål: {site.utnyttelsesgrad_bra_pct:.0f}%)")
+            lines.append(f"- BTA (bruttoareal): {manual_bta:.0f} m²")
+        else:
+            lines.append(f"- BTA (bruttoareal): {manual_bta:.0f} m²")
+            lines.append(f"- BRA (salgbart areal): {manual_bra:.0f} m²")
+
+        lines.append(f"- Fotavtrykk: {mo.get('footprint_area_m2', 0):.0f} m²")
+        lines.append(f"- Leiligheter: {mo.get('unit_count', 0)}")
+        mix_c = mo.get("mix_counts")
+        if mix_c:
+            lines.append(f"- Fordeling: {json.dumps(mix_c, ensure_ascii=False)}")
+        lines.append(f"- Etasjer (maks): {mo.get('floors', '?')}")
+        lines.append(f"- Byggehøyde: {mo.get('building_height_m', 0):.1f} m")
+        lines.append(f"- Solscore: {mo.get('solar_score', 0):.0f}/100")
+        lines.append(f"- Solbelyst uteareal: {mo.get('sunlit_open_space_pct', 0):.0f}%")
+        lines.append("")
+
+        lines.append("# 7. SAMMENLIGNING MED MOTORENS FORSLAG")
+        lines.append("Motorens automatiske alternativ ble beregnet som referanse. Kun sammendrag vises:")
+        for option in options[:5]:  # maks 5 alternativer i kort form
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            lines.append(
+                f"- {option.name}: {option.gross_bta_m2:.0f} m² BTA, "
+                f"~{bra_est:.0f} m² BRA, {option.unit_count} boliger, sol {option.solar_score:.0f}/100"
+            )
+        lines.append("")
+
+        lines.append("# 8. RISIKO OG AVKLARINGSPUNKTER")
+        lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
+        if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
+            lines.append("- Nabohøyder er hentet automatisk fra matrikkelen. Verifiser mot faktisk situasjon.")
+        elif best.neighbor_count > 0:
+            lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
+        lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
+
+        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
+        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
+            lines.append(_geo_b)
+
+        if pct_bra_active and manual_pct_bra < site.utnyttelsesgrad_bra_pct * 0.9:
+            lines.append(
+                f"- OBS: Oppnådd %-BRA ({manual_pct_bra:.0f}%) er lavere enn mål ({site.utnyttelsesgrad_bra_pct:.0f}%). "
+                f"Vurder høyere etasjetall eller større fotavtrykk."
+            )
+        lines.append("")
+
+        lines.append("# 9. ANBEFALING / NESTE STEG")
+        lines.append(
+            f"Den manuelle skissen er valgt som utgangspunkt for videre bearbeiding. "
+            f"Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
+            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell."
+        )
+    else:
+        # --- STANDARD RAPPORT (uten manuell overstyring) ---
+        lines.append("# 6. ARKITEKTONISK VURDERING")
+        lines.append(
+            f"{best.typology} fremstår som sterkest i denne runden fordi kombinasjonen av volumtreff, solscore ({best.solar_score:.0f}/100), "
+            f"solbelyst uteareal ({best.sunlit_open_space_pct:.0f}%) og utnyttelse av faktisk byggefelt er best balansert."
+        )
+        lines.append("")
+        lines.append("# 7. MULIGE UTVIKLINGSGREP")
+        for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            if site.utnyttelsesgrad_bra_pct > 0:
+                lines.append(
+                    f"- {option.name}: {option.typology}, {option.floors} etasjer, ~{bra_est:.0f} m² BRA, "
+                    f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
+                )
+            else:
+                lines.append(
+                    f"- {option.name}: {option.typology}, {option.floors} etasjer, {option.gross_bta_m2:.0f} m² BTA, "
+                    f"{option.unit_count} boliger, solscore {option.solar_score:.0f}/100."
+                )
+        lines.append("")
+        lines.append("# 8. ALTERNATIVER")
+        for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            lines.append(f"## {option.name}")
+            lines.append(
+                f"- Typologi: {option.typology}\n"
+                f"- Fotavtrykk: {option.footprint_area_m2:.0f} m²\n"
+                f"- BTA: {option.gross_bta_m2:.0f} m²\n"
+                f"- BRA (salgbart): ~{bra_est:.0f} m²\n"
+                f"- Leiligheter: {option.unit_count} ({json.dumps(option.mix_counts, ensure_ascii=False)})\n"
+                f"- Parkering: {option.parking_spaces} plasser\n"
+                f"- Solbelyst uteareal: ca. {option.sunlit_open_space_pct:.0f}%\n"
+                f"- Vinterskygge kl 12: ca. {option.winter_noon_shadow_m:.0f} m"
+            )
+            for note in option.notes:
+                lines.append(f"- {note}")
+        lines.append("")
+        lines.append("# 9. RISIKO OG AVKLARINGSPUNKTER")
+        lines.append("- Verifiser reguleringsbestemmelser, kote, gesims, parkeringskrav og uteoppholdsareal mot faktisk plan.")
+        if best.neighbor_count > 0 and "Eksakt" in site.site_geometry_source:
+            lines.append("- Nabohøyder er hentet automatisk fra matrikkelen. Verifiser mot faktisk situasjon.")
+        elif best.neighbor_count > 0:
+            lines.append("- Nabohøyder fra GeoJSON/OSM må kvalitetssikres.")
+        lines.append("- Terrengmodellen er forenklet og bør erstattes med detaljert kotegrunnlag ved videre prosjektering.")
+
+        # Geo-risikobullets (grunnforurensning + AI-historisk-screening)
+        for _geo_b in _build_geo_narrative_for_risk(geodata_bundle, historical_analysis):
+            lines.append(_geo_b)
+
+        lines.append("")
+        lines.append("# 10. ANBEFALING / NESTE STEG")
+        lines.append(
+            f"Start videre bearbeiding med {best.name}. Neste steg er å finjustere kjerner og trapper, teste uteopphold og adkomst mot terreng, "
+            f"og kontrollere kritiske skyggeforhold i en mer detaljert 3D-modell."
+        )
+
+    return "\n".join(lines)
+
+
+# --- 5. PDF ---
+PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
+
+
+def _register_fonts(pdf: FPDF) -> str:
+    """Registrer DejaVuSans for UTF-8-støtte (æøå, ², ³) når tilgjengelig.
+    Returnerer faktisk brukt font ("DejaVu" eller "Helvetica").
+    Idempotent: sjekker pdf.fonts før add_font (unngår kjent pyfpdf-bug
+    ved 2. gangs kall på samme font-navn i samme prosess).
+    """
+    if not HAS_DEJAVU:
+        return "Helvetica"
+    existing = getattr(pdf, "fonts", {}) or {}
+    ok = 0
+    for style in ["", "B", "I"]:
+        key = "dejavu" + style  # FPDF lagrer lowercase family + style
+        if key in existing:
+            ok += 1
+            continue
+        path = _find_dejavu_font(style)
+        if not path:
+            return "Helvetica"
+        try:
+            pdf.add_font("DejaVu", style, path, uni=True)
+            ok += 1
+        except Exception:
+            # Hvis add_font feilet men fonten likevel ble lagt til (pyfpdf-cache-bug)
+            if key in getattr(pdf, "fonts", {}):
+                ok += 1
+            else:
+                return "Helvetica"
+    return "DejaVu" if ok == 3 else "Helvetica"
+
+
+# --- PDF v11 Color constants ---
+_NAVY = (15, 27, 51)           # Mørkere, mer alvorlig navy
+_BUILTLY_BLUE = (31, 55, 95)   # Dempet corporate blå (tidligere lyseblå var for lys)
+_ACCENT_BLUE = (66, 103, 155)  # Brukes kun som subtil aksent
+_BODY_BLACK = (30, 30, 30)
+_MUTED = (120, 130, 145)
+_DIVIDER = (200, 208, 220)     # Lys grå for skillelinjer
+_TABLE_HEADER_BG = (15, 27, 51)
+_TABLE_HEADER_FG = (255, 255, 255)
+_TABLE_ROW_ALT = (247, 249, 252)
+_TABLE_ROW_WHITE = (255, 255, 255)
+_SCORE_GREEN = (16, 185, 129)
+_SCORE_AMBER = (245, 158, 11)
+_SCORE_RED = (239, 68, 68)
+
+
+class BuiltlyProPDF(FPDF):
+    """McKinsey-quality PDF with professional header/footer (v11)."""
+
+    def header(self) -> None:
+        if self.page_no() == 1:
+            return
+        self.set_y(10)
+        # Tekst først, ved y=10, høyde 6mm → slutter ved y=16
+        self.set_font(PDF_FONT, "", 8)
+        self.set_text_color(*_MUTED)
+        self.cell(0, 6, clean_pdf_text(f"PROSJEKT: {self.p_name}"), 0, 0, "L")
+        self.cell(0, 6, clean_pdf_text("Dokumentnr: ARK-002"), 0, 1, "R")
+        # Tynn divider-linje UNDER teksten, ikke gjennom den
+        self.set_draw_color(*_DIVIDER)
+        self.set_line_width(0.3)
+        self.line(25, 17, 185, 17)
+        self.set_line_width(0.2)
+        self.set_y(22)
+
+    def footer(self) -> None:
+        self.set_y(-18)
+        self.set_draw_color(*_DIVIDER)
+        self.set_line_width(0.3)
+        self.line(25, self.get_y(), 185, self.get_y())
+        self.set_line_width(0.2)
+        self.set_y(-14)
+        self.set_font(PDF_FONT, "", 7)
+        self.set_text_color(*_MUTED)
+        self.cell(85, 8, clean_pdf_text("UTKAST · KREVER FAGLIG KONTROLL"), 0, 0, "L")
+        self.set_font(PDF_FONT, "", 7)
+        self.cell(0, 8, clean_pdf_text(f"Side {self.page_no()}"), 0, 0, "R")
+
+    def check_space(self, height: float) -> None:
+        if self.get_y() + height > 268:
+            self.add_page()
+            self.set_margins(25, 25, 20)
+            self.set_x(25)
+
+    def section_title(self, text: str, size: int = 16) -> None:
+        """Navy section header with accent underline matching text width."""
+        self.check_space(20)
+        self.ln(4)
+        self.set_x(25)
+        self.set_font(PDF_FONT, "B", size)
+        self.set_text_color(*_NAVY)
+        text_w = min(self.get_string_width(clean_pdf_text(text)) + 2, 155)
+        self.multi_cell(155, 8, clean_pdf_text(text), 0, "L")
+        y = self.get_y()
+        self.set_draw_color(*_BUILTLY_BLUE)
+        self.set_line_width(0.6)
+        self.line(25, y + 1, 25 + text_w, y + 1)
+        self.set_line_width(0.2)
+        self.ln(5)
+
+    def body_text(self, text: str) -> None:
+        """Standard body text."""
+        self.set_x(25)
+        self.set_font(PDF_FONT, "", 10)
+        self.set_text_color(*_BODY_BLACK)
+        self.multi_cell(155, 5.5, ironclad_text_formatter(text))
+
+    def subtitle(self, text: str) -> None:
+        """Builtly-blue subtitle."""
+        self.check_space(14)
+        self.ln(3)
+        self.set_x(25)
+        self.set_font(PDF_FONT, "B", 12)
+        self.set_text_color(*_BUILTLY_BLUE)
+        self.multi_cell(155, 7, clean_pdf_text(text), 0, "L")
+        self.set_font(PDF_FONT, "", 10)
+        self.set_text_color(*_BODY_BLACK)
+        self.ln(2)
+
+
+def add_pdf_table(pdf: BuiltlyProPDF, headers: List[str], rows: List[List[str]], widths: List[float], score_col: int = -1) -> None:
+    """Professional table with navy header, alternating rows, color-coded score column."""
+    pdf.set_font(PDF_FONT, "B", 8)
+    pdf.set_fill_color(*_TABLE_HEADER_BG)
+    pdf.set_text_color(*_TABLE_HEADER_FG)
+    pdf.set_draw_color(200, 205, 215)
+    for idx, header in enumerate(headers):
+        pdf.cell(widths[idx], 9, clean_pdf_text(header), 1, 0, "C", fill=True)
+    pdf.ln()
+
+    pdf.set_font(PDF_FONT, "", 8)
+    for row_idx, row in enumerate(rows):
+        pdf.check_space(9)
+        is_alt = row_idx % 2 == 0
+        bg = _TABLE_ROW_ALT if is_alt else _TABLE_ROW_WHITE
+        pdf.set_fill_color(*bg)
+        for col_idx, value in enumerate(row):
+            if col_idx == score_col:
+                try:
+                    score_val = float(value)
+                    if score_val >= 60:
+                        pdf.set_text_color(*_SCORE_GREEN)
+                    elif score_val >= 40:
+                        pdf.set_text_color(180, 130, 0)
+                    else:
+                        pdf.set_text_color(*_SCORE_RED)
+                except ValueError:
+                    pdf.set_text_color(*_BODY_BLACK)
+            else:
+                pdf.set_text_color(*_BODY_BLACK)
+            pdf.cell(widths[col_idx], 9, clean_pdf_text(value), 1, 0, "C", fill=True)
+        pdf.ln()
+    pdf.set_text_color(*_BODY_BLACK)
+    pdf.ln(4)
+
+
+def _render_solar_chart(options: List[OptionResult]) -> Image.Image:
+    """Rendrer et horisontalt bar-chart som sammenligner solscore, BRA og boliger per alternativ. Lys bakgrunn for PDF.
+
+    Font-størrelser økt for PDF-lesbarhet (1600 → ~600px skalering).
+    """
+    w, h = 1600, max(560, 120 + len(options) * 120)
+    img = Image.new('RGB', (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Fonter betydelig økt: var 26/20/17/16, nå 36/26/24/22
+    font_title = _pil_font(36, bold=True)
+    font_label = _pil_font(26, bold=True)
+    font_value = _pil_font(24, bold=True)
+    font_small = _pil_font(22, bold=True)
+
+    # Header med accent-linje (følger faktisk tekstbredde)
+    draw.text((40, 14), "SOLANALYSE OG VOLUMSAMMENLIGNING", fill=(26, 43, 72), font=font_title)
+    try:
+        _sol_bbox = draw.textbbox((40, 14), "SOLANALYSE OG VOLUMSAMMENLIGNING", font=font_title)
+        _sol_right = _sol_bbox[2]
+    except Exception:
+        _sol_right = 40 + 500
+    draw.rectangle([(40, 60), (_sol_right, 64)], fill=(0, 96, 155))
+
+    bar_h = 46
+    y_start = 100
+    max_bra = max((o.gross_bta_m2 * o.efficiency_ratio for o in options), default=1)
+
+    for i, opt in enumerate(options):
+        y = y_start + i * 120
+        bra = opt.gross_bta_m2 * opt.efficiency_ratio
+        sol = opt.solar_score
+
+        # Bakgrunnsrad
+        if i % 2 == 0:
+            draw.rectangle([(30, y - 12), (w - 30, y + bar_h + 38)], fill=(240, 244, 250))
+
+        draw.text((44, y + 8), f"{opt.typology}", fill=(26, 43, 72), font=font_label)
+
+        # Sol-bar (blå, skalert til 100)
+        sol_w = max(12, int(sol / 100 * 520))
+        draw.rectangle([(340, y), (340 + sol_w, y + bar_h // 2 - 2)], fill=(0, 96, 155))
+        draw.text((350 + sol_w, y - 2), f"Sol {sol:.0f}", fill=(0, 96, 155), font=font_value)
+
+        # BRA-bar (grønn, skalert til maks)
+        bra_w = max(12, int(bra / max(max_bra, 1) * 520))
+        draw.rectangle([(340, y + bar_h // 2 + 2), (340 + bra_w, y + bar_h)], fill=(16, 150, 100))
+        draw.text((350 + bra_w, y + bar_h // 2 + 2), f"BRA {bra:.0f} m\u00b2", fill=(16, 150, 100), font=font_value)
+
+        draw.text((1250, y + 12), f"{opt.unit_count} bol.", fill=(60, 80, 110), font=font_label)
+        draw.text((1430, y + 12), f"{opt.floors} et.", fill=(70, 90, 120), font=font_label)
+
+    ly = h - 60
+    draw.rectangle([(40, ly), (68, ly + 22)], fill=(0, 96, 155))
+    draw.text((80, ly - 2), "Solscore", fill=(60, 80, 110), font=font_small)
+    draw.rectangle([(280, ly), (308, ly + 22)], fill=(16, 150, 100))
+    draw.text((320, ly - 2), "BRA (salgbart areal)", fill=(60, 80, 110), font=font_small)
+
+    return img
+
+
+def _render_context_summary(options: List[OptionResult], site: "SiteInputs", environment_data: Optional[Dict[str, Any]] = None) -> Image.Image:
+    """Rendrer en kompakt stedskontekst-oppsummering. Lys bakgrunn for PDF.
+
+    Font-størrelser og kontrast er designet for at tekst skal være lesbar
+    etter PDF-komprimering (1600 → ~600px). Tidligere var 16pt labels
+    ulesbar (~6pt i PDF); nå er de 28pt (~10pt i PDF) med sterk kontrast.
+    """
+    env = environment_data or {}
+    has_env = bool(env.get("available"))
+
+    # Beregn høyden dynamisk basert på faktisk innhold.
+    # TOMTE-seksjon: start y=90, hver rad = 110h + 20gap = 130
+    # Antall rader avhenger av antall items (max 4 per rad, 6-7 items totalt)
+    # MILJØFORHOLD-seksjon: start 40px etter TOMTE-bunn, tittel +56 til kortstart, +110 til bunn
+    # Plus litt bunnmargin (30px)
+    # Antall items settes senere — anta verste fall her: 7 items = 2 rader, + env = 560 total
+    h_no_env = 90 + 2 * 130 + 30  # 380 — plass til 2 rader TOMTE-kort
+    h_with_env = h_no_env + 40 + 56 + 110 + 30  # 616 — + env-seksjon
+    h = h_with_env if has_env else h_no_env
+    w = 1600
+    img = Image.new('RGB', (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Font-størrelser betydelig økt for PDF-lesbarhet
+    font_title = _pil_font(36, bold=True)
+    font_label = _pil_font(22, bold=True)
+    font_value = _pil_font(34, bold=True)
+
+    draw.text((40, 14), "TOMTE- OG STEDSKONTEKST", fill=(26, 43, 72), font=font_title)
+    # Accent-linje følger faktisk tekstbredde
+    try:
+        _bbox = draw.textbbox((40, 14), "TOMTE- OG STEDSKONTEKST", font=font_title)
+        _title_right = _bbox[2]
+    except Exception:
+        _title_right = 40 + 460  # fallback
+    draw.rectangle([(40, 60), (_title_right, 64)], fill=(0, 96, 155))
+
+    best = options[0] if options else None
+    if best is None:
+        return img
+
+    items = [
+        ("TOMTEAREAL", f"{site.site_area_m2:.0f} m\u00b2"),
+        ("BYGGEFELT", f"{best.buildable_area_m2:.0f} m\u00b2"),
+        ("NABOBYGG", f"{site.neighbor_count} stk"),
+        ("MAKS ETASJER", f"{site.max_floors}"),
+        ("MAKS HØYDE", f"{site.max_height_m:.0f} m"),
+        ("MAKS BYA", f"{site.max_bya_pct:.0f}%"),
+    ]
+    if site.utnyttelsesgrad_bra_pct > 0:
+        items.append(("%-BRA MÅL", f"{site.utnyttelsesgrad_bra_pct:.0f}%"))
+
+    col_w = 370
+    card_h = 110
+    for i, (label, value) in enumerate(items):
+        col = i % 4
+        row = i // 4
+        x = 40 + col * col_w
+        y = 90 + row * (card_h + 20)
+        # Tydeligere kort — solid lys bakgrunn med mørkere ramme
+        draw.rectangle([(x, y), (x + col_w - 24, y + card_h)], fill=(240, 244, 250), outline=(150, 170, 195), width=2)
+        # Label: mørkere (var 120,130,145 = for lys), nå blå-navy for kontrast
+        draw.text((x + 18, y + 14), label, fill=(70, 90, 120), font=font_label)
+        # Verdi: full navy
+        draw.text((x + 18, y + 54), value, fill=(26, 43, 72), font=font_value)
+
+    # Beregn hvor bunnen av siste rad med TOMTE-kort er,
+    # så MILJØFORHOLD-tittel kan plasseres UNDER — ikke hardkodet 330.
+    _n_rows = (len(items) + 3) // 4  # antall rader i 4-kolonne-grid
+    _tomte_bottom = 90 + _n_rows * (card_h + 20)
+
+    if has_env:
+        env_y = _tomte_bottom + 40  # 40px margin mellom seksjoner
+        draw.text((40, env_y - 14), "MILJØFORHOLD", fill=(26, 43, 72), font=font_title)
+        # Accent-linje følger faktisk tekstbredde
+        try:
+            _env_bbox = draw.textbbox((40, env_y - 14), "MILJØFORHOLD", font=font_title)
+            _env_title_right = _env_bbox[2]
+        except Exception:
+            _env_title_right = 40 + 260  # fallback
+        draw.rectangle([(40, env_y + 32), (_env_title_right, env_y + 36)], fill=(0, 96, 155))
+
+        noise = env.get("noise", {})
+        daylight = env.get("daylight", {})
+        wind_c = env.get("wind_comfort", {})
+
+        env_items = []
+        if noise.get("available") and noise.get("zones"):
+            worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+            db = worst.get("db", 0)
+            color = (200, 40, 40) if db > 65 else (180, 120, 0) if db > 55 else (16, 150, 100)
+            env_items.append(("STØY", f"{db:.0f} dB ({worst.get('source_type', 'vei')})", color))
+        else:
+            env_items.append(("STØY", "Ingen data", (150, 160, 175)))
+
+        if daylight.get("available"):
+            dl = daylight.get("overall_score", 0)
+            color = (16, 150, 100) if dl >= 70 else (180, 120, 0) if dl >= 50 else (200, 40, 40)
+            env_items.append(("DAGSLYS", f"{dl:.0f}/100", color))
+
+        if wind_c.get("available"):
+            wclass = wind_c.get("lawson_class", "?")
+            color = (16, 150, 100) if wclass in ["A", "B"] else (180, 120, 0) if wclass == "C" else (200, 40, 40)
+            env_items.append(("VIND", f"Klasse {wclass}", color))
+
+        for i, (label, value, color) in enumerate(env_items):
+            x = 40 + i * col_w
+            draw.rectangle([(x, env_y + 56), (x + col_w - 24, env_y + 56 + card_h)], fill=(240, 244, 250), outline=(150, 170, 195), width=2)
+            draw.text((x + 18, env_y + 70), label, fill=(70, 90, 120), font=font_label)
+            draw.text((x + 18, env_y + 110), value, fill=color, font=font_value)
+
+    return img
+
+
+# --- SOL/SKYGGE SNAPSHOT RENDERING (v11) ---
+
+def render_solar_snapshot(
+    site: SiteInputs,
+    option: OptionResult,
+    day_of_year: int,
+    solar_hour: float,
+    label: str = "",
+) -> Image.Image:
+    """
+    Isometrisk 3D sol/skygge-snapshot — matcher Three.js-dashboardets estetikk.
+
+    Viser bygningsvolumer, skygger og nabobygg i isometrisk projeksjon med
+    mørk navy bakgrunn, grønne volumer med glow, hvite label-bokser.
+    Erstattet tidligere top-down 2D-plot med 3D-stil for å matche skjermen.
+    """
+    import math as _m
+    canvas_w, canvas_h = 1120, 840
+    bg = (11, 20, 38, 255)
+    img = Image.new('RGBA', (canvas_w, canvas_h), bg)
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font_title = _pil_font(32, bold=True)
+    font_small = _pil_font(28, bold=True)
+    font_north = _pil_font(28, bold=True)
+    font_info = _pil_font(22, bold=True)
+
+    site_coords = option.geometry.get('site_polygon_coords') or []
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+
+    site_pts_raw = flatten_coord_groups(site_coords)
+    if not site_pts_raw:
+        site_pts_raw = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts_raw]
+    sys_ = [p[1] for p in site_pts_raw]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    # Isometrisk projeksjon-parametere
+    ISO_ANGLE = _m.radians(30.0)
+    COS_A = _m.cos(ISO_ANGLE)
+    SIN_A = _m.sin(ISO_ANGLE)
+    Z_SCALE = 1.4
+
+    # View-radius: inkluder naboer litt utenfor tomtegrensen for kontekst
+    view_radius = max(site_span * 1.3, 120.0)
+    display_span = site_span + view_radius * 0.8
+
+    target_screen_span = min(canvas_w, canvas_h) * 0.62
+    pixel_scale = target_screen_span / display_span
+
+    screen_cx = canvas_w * 0.5
+    screen_cy = canvas_h * 0.58  # Litt ned for å gi høyde-rom
+
+    def iso_project(x, y, z=0.0):
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
+        return sx, sy
+
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
+
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), c[3] if len(c) > 3 else 255)
+
+    def lighten(c, a):
+        return (min(255, c[0]+a), min(255, c[1]+a), min(255, c[2]+a), c[3] if len(c) > 3 else 255)
+
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
+
+    # Solar beregninger
+    lat = site.latitude_deg
+    alt_deg = solar_altitude_deg(lat, day_of_year, solar_hour)
+    az_deg = solar_azimuth_deg(lat, day_of_year, solar_hour)
+    az_local = (az_deg - site.north_rotation_deg) % 360.0
+    sun_above = alt_deg > 0.5
+
+    # --- Bakkeplan: tomtegrense som subtilt lysere område ---
+    site_iso = iso_pts(flatten_coord_groups(site_coords), 0.0)
+    if len(site_iso) >= 3:
+        draw.polygon(site_iso, fill=(22, 36, 58, 220), outline=(90, 130, 180, 180))
+
+    # --- Samle volumer for depth-sorting (bak-til-frem basert på y-koord) ---
+    volumes = []
+
+    # Nabobygg
+    for neighbor in neighbor_polys:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
+            continue
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if _m.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        h_n = float(neighbor.get('height_m', 9.0))
+        volumes.append({
+            'type': 'neighbor',
+            'coords': ncoords,
+            'height_m': max(h_n, 3.0),
+            'depth_key': avg_x + avg_y,
+            'avg_x': avg_x,
+            'avg_y': avg_y,
+        })
+
+    # Nye bygg (massing_parts)
+    TYPOLOGY_COLOR_MAP = {
+        "Lamell":        (34, 197, 94),
+        "Punkthus":      (56, 189, 248),
+        "Tun":           (168, 130, 240),
+        "Rekke":         (250, 180, 60),
+        "Podium + Tårn": (220, 80, 120),
+        "Karré":         (100, 200, 180),
+        "Tårn":          (56, 140, 248),
+    }
+    default_rgb = TYPOLOGY_COLOR_MAP.get(option.typology, (34, 197, 94))
+
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords or len(pcoords) < 3:
+            continue
+        avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+        avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+        h_p = float(part.get('height_m', option.building_height_m))
+        raw_c = part.get('color')
+        if raw_c and len(raw_c) >= 3:
+            base_c = tuple(int(v) if v > 1 else int(v * 255) for v in raw_c[:3])
+        else:
+            base_c = default_rgb
+        volumes.append({
+            'type': 'main',
+            'coords': pcoords,
+            'height_m': h_p,
+            'color': base_c,
+            'floors': int(part.get('floors', option.floors)),
+            'typology': part.get('typology', option.typology),
+            'depth_key': avg_x + avg_y,
+            'avg_x': avg_x,
+            'avg_y': avg_y,
+        })
+
+    # Sorter: bakerst først
+    volumes.sort(key=lambda v: v['depth_key'])
+
+    # --- Tegn skygger på bakkeplan (før volumer) ---
+    if sun_above:
+        for vol in volumes:
+            try:
+                fp = Polygon([(p[0], p[1]) for p in vol['coords']])
+                if fp.is_valid and not fp.is_empty:
+                    shadow = build_shadow_polygon(fp, vol['height_m'], az_local, alt_deg, None)
+                    if shadow and not shadow.is_empty:
+                        s_coords = geometry_to_coord_groups(shadow)
+                        s_flat = flatten_coord_groups(s_coords)
+                        s_pts = iso_pts(s_flat, 0.0)
+                        if len(s_pts) >= 3:
+                            # Skygge: mørkere enn bakkeplan
+                            shadow_c = (2, 6, 14, 210) if vol['type'] == 'main' else (4, 10, 20, 160)
+                            draw.polygon(s_pts, fill=shadow_c)
+            except Exception:
+                pass
+
+    # --- Tegn volumer (bak-til-frem) ---
+    # Tell typologier for label-indeks
+    typo_counter = {}
+    for v in volumes:
+        if v['type'] == 'main':
+            typo_counter[v['typology']] = typo_counter.get(v['typology'], 0) + 1
+    typo_total = dict(typo_counter)
+    typo_idx = {k: 0 for k in typo_counter}
+
+    for vol in volumes:
+        h = vol['height_m']
+        coords = vol['coords']
+        if vol['type'] == 'neighbor':
+            # Lyse wireframe-nabobygg (matcher Three.js-stil)
+            alpha = min(130, int(70 + h * 3))
+            top_c = (155, 170, 195, alpha)
+            side_c = (130, 145, 170, alpha)
+            out_c = (200, 215, 235, min(200, alpha + 50))
+            draw_extruded(coords, h, top_c, side_c, out_c, 1)
+            # Høyde-label
+            if h > 5:
+                lx, ly = iso_project(vol['avg_x'], vol['avg_y'], h * 1.08)
+                draw.text((lx - 12, ly - 8), f"{h:.0f}m", fill=(180, 195, 220, 200), font=font_info)
+        else:
+            # Hovedbygg: fullmettet farge, lys kontur
+            base = vol['color']
+            top_c = (base[0], base[1], base[2], 245)
+            side_c = darken((base[0], base[1], base[2], 230), 0.78)
+            out_c = (250, 255, 250, 255)
+            draw_extruded(coords, h, top_c, side_c, out_c, 2)
+            # Label-boks med etasje + høyde
+            typo = vol['typology']
+            typo_idx[typo] = typo_idx.get(typo, 0) + 1
+            if typo_total.get(typo, 1) > 1:
+                lbl = f"{typo} {typo_idx[typo]}  {vol['floors']}et / {h:.0f}m"
+            else:
+                lbl = f"{typo}  {vol['floors']}et / {h:.0f}m"
+            lx, ly = iso_project(vol['avg_x'], vol['avg_y'], h * 1.05)
+            tw = font_small.getlength(lbl) if hasattr(font_small, 'getlength') else len(lbl) * 11
+            th = 34
+            box = [(lx - tw/2 - 10, ly - th/2 - 2), (lx + tw/2 + 10, ly + th/2 + 2)]
+            draw.rectangle(box, fill=(20, 30, 50, 235), outline=(255, 255, 255, 220), width=1)
+            draw.text((lx - tw/2, ly - th/2 + 3), lbl, fill=(245, 247, 251, 255), font=font_small)
+
+    # --- Solretning-pil (hjørnet øverst til høyre) ---
+    if sun_above:
+        sun_rad = _m.radians(az_local)
+        arrow_len = 85
+        arr_cx, arr_cy = canvas_w - 130, 90
+        dx = _m.sin(sun_rad) * arrow_len
+        dy = -_m.cos(sun_rad) * arrow_len
+        ax1, ay1 = arr_cx - dx * 0.5, arr_cy - dy * 0.5
+        ax2, ay2 = arr_cx + dx * 0.5, arr_cy + dy * 0.5
+        draw.line([(ax1, ay1), (ax2, ay2)], fill=(255, 200, 40, 255), width=5)
+        draw.ellipse([(ax1 - 22, ay1 - 22), (ax1 + 22, ay1 + 22)], fill=(255, 200, 40, 70))
+        draw.ellipse([(ax1 - 14, ay1 - 14), (ax1 + 14, ay1 + 14)], fill=(255, 220, 70, 255))
+        draw.text((ax1 - 7, ay1 - 10), "S", fill=(60, 40, 0, 255), font=font_north)
+
+    # --- Nordpil (hjørnet øverst til venstre) ---
+    nx, ny = 60, 60
+    nav_color = (200, 215, 235, 230)
+    draw.line((nx, ny + 32, nx, ny - 22), fill=nav_color, width=3)
+    draw.polygon([(nx, ny - 32), (nx - 10, ny - 10), (nx + 10, ny - 10)], fill=nav_color)
+    draw.text((nx - 8, ny + 36), 'N', fill=nav_color, font=font_north)
+
+    # --- Label-stripe nederst ---
+    month_names = {80: "21. mars", 172: "21. juni", 355: "21. des"}
+    date_str = month_names.get(day_of_year, f"dag {day_of_year}")
+    hour_str = f"{int(solar_hour):02d}:{int((solar_hour % 1) * 60):02d}"
+    alt_str = f"h={alt_deg:.1f}\u00b0" if sun_above else "sol under horisont"
+    lbl_y = canvas_h - 80
+    draw.rectangle([(0, lbl_y), (canvas_w, canvas_h)], fill=(6, 12, 24, 255))
+    draw.line([(0, lbl_y), (canvas_w, lbl_y)], fill=(100, 130, 170, 200), width=2)
+    display_label = label or f"{date_str} kl. {hour_str}"
+    draw.text((28, lbl_y + 14), display_label, fill=(245, 247, 251, 255), font=font_title)
+    draw.text((28, lbl_y + 48), f"Solhøyde: {alt_str} | Asimut: {az_local:.0f}\u00b0", fill=(180, 195, 215, 230), font=font_small)
+
+    return img.convert('RGB')
+
+
+def render_solar_snapshot_grid(
+    site: SiteInputs,
+    option: OptionResult,
+) -> Image.Image:
+    """
+    Rendrer en 3x2 rutenett med 5 sol/skygge-snapshots:
+      Rad 1: Vårjevndøgn 12:00, 15:00, Sommersolverv 12:00
+      Rad 2: Sommersolverv 15:00, 18:00, (infopanel)
+    """
+    snapshots = [
+        (80, 12.0, "Vårjevndøgn - 21. mars kl. 12:00"),
+        (80, 15.0, "Vårjevndøgn - 21. mars kl. 15:00"),
+        (172, 12.0, "Sommersolverv - 21. juni kl. 12:00"),
+        (172, 15.0, "Sommersolverv - 21. juni kl. 15:00"),
+        (172, 18.0, "Sommersolverv - 21. juni kl. 18:00"),
+    ]
+    cell_w, cell_h = 1120, 840
+    cols, rows = 3, 2
+    grid_w = cols * cell_w
+    grid_h = rows * cell_h
+
+    grid = Image.new('RGB', (grid_w, grid_h), (248, 250, 252))
+    draw = ImageDraw.Draw(grid)
+    font_title = _pil_font(32, bold=True)
+    font_body = _pil_font(24)
+    font_small = _pil_font(20)
+    font_legend = _pil_font(22)
+
+    for idx, (doy, hour, lbl) in enumerate(snapshots):
+        col = idx % cols
+        row = idx // cols
+        try:
+            snap = render_solar_snapshot(site, option, doy, hour, lbl)
+            grid.paste(snap, (col * cell_w, row * cell_h))
+        except Exception as e:
+            x0, y0 = col * cell_w, row * cell_h
+            draw.rectangle([(x0, y0), (x0 + cell_w, y0 + cell_h)], fill=(240, 243, 248))
+            draw.text((x0 + 40, y0 + 400), f"Feil: {str(e)[:60]}", fill=(200, 50, 50), font=font_body)
+
+    # Siste celle: infopanel
+    ix, iy = 2 * cell_w, 1 * cell_h
+    draw.rectangle([(ix, iy), (ix + cell_w, iy + cell_h)], fill=(26, 43, 72))
+    draw.text((ix + 60, iy + 80), "SOL/SKYGGE-ANALYSE", fill=(56, 189, 248), font=font_title)
+    draw.text((ix + 60, iy + 150), f"Breddegrad: {site.latitude_deg:.2f} N", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 190), f"Typologi: {option.typology}", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 230), f"Høyde: {option.building_height_m:.1f} m", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 270), f"Etasjer: {option.floors}", fill=(200, 211, 223), font=font_body)
+    draw.text((ix + 60, iy + 340), "Skygger er vist som", fill=(160, 175, 195), font=font_small)
+    draw.text((ix + 60, iy + 370), "semitransparente felt.", fill=(160, 175, 195), font=font_small)
+    draw.text((ix + 60, iy + 430), "Gul sirkel = solretning", fill=(255, 210, 60), font=font_legend)
+    draw.text((ix + 60, iy + 470), "Mørkeblå = bygningsskygge", fill=(100, 130, 170), font=font_legend)
+    draw.text((ix + 60, iy + 510), "Lysegrå = naboskygge", fill=(160, 170, 185), font=font_legend)
+    draw.text((ix + 60, iy + cell_h - 100), "Generert av Builtly ARK Motor", fill=(80, 100, 130), font=font_small)
+
+    return grid
+
+
+# --- EXECUTIVE SUMMARY KPI IMAGE (v11) ---
+
+def _render_executive_summary(
+    options: List[OptionResult],
+    site: SiteInputs,
+    environment_data: Optional[Dict[str, Any]] = None,
+) -> Image.Image:
+    """McKinsey-style executive summary med fargede KPI-bokser."""
+    w, h = 1800, 1200
+    img = Image.new('RGB', (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    font_heading = _pil_font(32, bold=True)
+    font_subtitle = _pil_font(24)
+    font_kpi_label = _pil_font(20)
+    font_kpi_value = _pil_font(36, bold=True)
+    font_kpi_sub = _pil_font(18)
+    font_bar_label = _pil_font(22)
+    font_bar_value = _pil_font(20, bold=True)
+
+    navy = (26, 43, 72)
+    builtly_blue = (0, 96, 155)
+    accent_green = (16, 185, 129)
+    accent_amber = (245, 158, 11)
+    accent_red = (239, 68, 68)
+    light_bg = (248, 250, 252)
+    card_border = (226, 232, 240)
+
+    best = options[0] if options else None
+    if not best:
+        return img
+    bra_best = best.gross_bta_m2 * best.efficiency_ratio
+
+    # Header stripe
+    draw.rectangle([(0, 0), (w, 10)], fill=builtly_blue)
+    draw.text((60, 36), "SAMMENDRAG", fill=navy, font=font_heading)
+    draw.text((60, 76), f"Anbefalt: {best.name} ({best.typology})", fill=builtly_blue, font=font_subtitle)
+
+    # KPI Cards row 1
+    kpi_cards = [
+        ("BRA", f"{bra_best:,.0f} m2".replace(",", " "), "Salgbart areal", builtly_blue),
+        ("ENHETER", f"{best.unit_count}", "Boliger", builtly_blue),
+        ("SOL", f"{best.solar_score:.0f}/100", "Solscore", accent_green if best.solar_score >= 50 else accent_amber),
+        ("SCORE", f"{best.score:.0f}/100", "Totalscore", accent_green if best.score >= 60 else accent_amber),
+    ]
+    card_w, card_h = 390, 170
+    card_y = 130
+    for i, (title, value, subtitle, color) in enumerate(kpi_cards):
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + card_h)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, card_y), (x + card_w, card_y + 7)], fill=color)
+        draw.text((x + 24, card_y + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, card_y + 60), value, fill=navy, font=font_kpi_value)
+        draw.text((x + 24, card_y + 115), subtitle, fill=(150, 160, 175), font=font_kpi_sub)
+
+    # KPI Cards row 2 — Tomt
+    site_cards = [
+        ("TOMTEAREAL", f"{site.site_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
+        ("BYGGEFELT", f"{best.buildable_area_m2:,.0f} m2".replace(",", " "), builtly_blue),
+        ("MAKS HØYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", builtly_blue),
+        ("NABOBYGG", f"{site.neighbor_count} stk", builtly_blue),
+    ]
+    card_y2 = card_y + card_h + 30
+    for i, (title, value, color) in enumerate(site_cards):
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 130)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, card_y2), (x + card_w, card_y2 + 6)], fill=color)
+        draw.text((x + 24, card_y2 + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, card_y2 + 60), value, fill=navy, font=font_kpi_value)
+
+    # Miljo-rad
+    env = environment_data or {}
+    env_y = card_y2 + 150
+    draw.text((60, env_y), "MILJØFORHOLD", fill=navy, font=font_heading)
+    env_y += 44
+
+    env_items = []
+    noise = env.get("noise", {}) if env.get("available") else {}
+    daylight = env.get("daylight", {}) if env.get("available") else {}
+
+    if noise.get("available") and noise.get("zones"):
+        worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+        db = worst.get("db", 0)
+        color = accent_red if db > 65 else accent_amber if db > 55 else accent_green
+        env_items.append(("STØY", f"{db:.0f} dB", color))
+    else:
+        env_items.append(("STØY", "Ingen data", (150, 160, 175)))
+
+    if daylight.get("available"):
+        dl = daylight.get("overall_score", 0)
+        color = accent_green if dl >= 70 else accent_amber if dl >= 50 else accent_red
+        env_items.append(("DAGSLYS", f"{dl:.0f}/100", color))
+    else:
+        env_items.append(("DAGSLYS", "Ikke vurdert", (150, 160, 175)))
+
+    env_items.append(("%-BRA MAL", f"{site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else "Ikke satt", builtly_blue))
+
+    for i, (title, value, color) in enumerate(env_items):
+        x = 60 + i * (card_w + 24)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 130)], fill=light_bg, outline=card_border, width=2)
+        draw.rectangle([(x, env_y), (x + card_w, env_y + 6)], fill=color)
+        draw.text((x + 24, env_y + 24), title, fill=(120, 130, 145), font=font_kpi_label)
+        draw.text((x + 24, env_y + 60), value, fill=navy, font=font_kpi_value)
+
+    # Ranking bar
+    rank_y = env_y + 170
+    draw.text((60, rank_y), "ALTERNATIV-RANKING (SCORE)", fill=navy, font=font_heading)
+    rank_y += 44
+    max_score = max((o.score for o in options), default=100)
+    bar_max_w = 1300
+    for i, opt in enumerate(sorted(options, key=lambda o: o.score, reverse=True)):
+        y = rank_y + i * 56
+        bar_w = max(16, int(opt.score / max(max_score, 1) * bar_max_w))
+        bar_color = accent_green if opt.score >= 60 else accent_amber if opt.score >= 40 else accent_red
+        draw.rectangle([(300, y), (300 + bar_w, y + 36)], fill=bar_color)
+        draw.text((60, y + 4), f"{opt.typology}", fill=navy, font=font_bar_label)
+        draw.text((310 + bar_w, y + 6), f"{opt.score:.0f}", fill=navy, font=font_bar_value)
+
+    return img
+
+
+# ================================================================
+# GEO CONTEXT BUNDLE — automatisk henting fra åpne geo-APIer
+# ----------------------------------------------------------------
+# Porterer logikken fra pages/Geo.py (fetch_all_geodata) som lokale
+# funksjoner for å unngå cross-page-import (Geo.py kaller
+# st.set_page_config ved import — ikke trygt her).
+#
+# Scope: Historisk flyfoto (m/år), Miljødirektoratet grunnforurensning,
+# NGU Radon, NVE Flom/Kvikkleire/Skred som kartbilder. Bruker allerede
+# etablert Geodata Online-klient (gdo) der den er tilgjengelig.
+# ================================================================
+
+def _bbox_from_center_local(x: float, y: float, radius_m: float = 250.0) -> tuple:
+    """Bygg bbox (EPSG:25833) rundt et senterpunkt."""
+    return (x - radius_m, y - radius_m, x + radius_m, y + radius_m)
+
+
+def _wms_fetch(base_url: str, layers: str, bbox_25833: tuple,
+               width: int = 800, height: int = 800,
+               styles: str = "", fmt: str = "image/png",
+               version: str = "1.3.0") -> Optional[Image.Image]:
+    """Generell WMS-GetMap-fetcher. Returnerer PIL.Image eller None."""
+    try:
+        params = {
+            "SERVICE": "WMS", "REQUEST": "GetMap", "VERSION": version,
+            "LAYERS": layers, "STYLES": styles,
+            "CRS": "EPSG:25833" if version == "1.3.0" else None,
+            "SRS": None if version == "1.3.0" else "EPSG:25833",
+            "BBOX": f"{bbox_25833[0]},{bbox_25833[1]},{bbox_25833[2]},{bbox_25833[3]}",
+            "WIDTH": width, "HEIGHT": height, "FORMAT": fmt, "TRANSPARENT": "TRUE",
+        }
+        params = {k: v for k, v in params.items() if v is not None}
+        resp = requests.get(base_url, params=params, timeout=15)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        return None
+    return None
+
+
+def _fetch_ngu_radon(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://geo.ngu.no/mapserver/RadonAktsomhetWMS?",
+        layers="Radon", bbox_25833=bbox,
     )
 
-    combined_answer = answer
-    continuation_rounds = 0
-    while continuation_rounds < 3 and (was_truncated or not answer_has_end_marker(combined_answer)):
-        continuation_rounds += 1
-        continuation_prompt = build_builtly_continuation_prompt(
-            question=question,
-            partial_answer=combined_answer,
-            selected_codes=selected_codes,
-            lang_key=lang_key,
+
+def _fetch_nve_flom(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/Flom1/MapServer/WMSServer?",
+        layers="Flom_aktsomhetsomrade", bbox_25833=bbox,
+    )
+
+
+def _fetch_nve_kvikkleire(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/Mapservices/SkredKvikkleire2/MapServer/WMSServer?",
+        layers="KvikkleireFaregrad", bbox_25833=bbox,
+    )
+
+
+def _fetch_nve_skred(bbox: tuple) -> Optional[Image.Image]:
+    return _wms_fetch(
+        "https://nve.geodataonline.no/arcgis/services/SkredSnoJord1/MapServer/WMSServer?",
+        layers="SkredSnoJordAktsomhet", bbox_25833=bbox,
+    )
+
+
+def _fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.0) -> list:
+    """Miljødirektoratet — kjente forurensingslokaliteter i nærheten (liste av dicts)."""
+    try:
+        from pyproj import Transformer
+        tr = Transformer.from_crs(25833, 4326, always_xy=True)
+        lon, lat = tr.transform(x, y)
+    except Exception:
+        return []
+    try:
+        resp = requests.get(
+            "https://grfreg-api.miljodirektoratet.no/api/Lokalitet/hentNaereLokaliteter",
+            params={"latitude": lat, "longitude": lon, "radius": int(radius_m)},
+            timeout=8,
         )
-        try:
-            continuation, continuation_truncated = call_gemini_generate_content(
-                api_key=api_key,
-                model_name=model_name,
-                prompt_text=continuation_prompt,
-                max_output_tokens=900,
-            )
-        except Exception:
-            break
-
-        merged_answer = merge_assistant_continuation(combined_answer, continuation)
-        if merged_answer == combined_answer:
-            break
-
-        combined_answer = merged_answer
-        was_truncated = continuation_truncated
-
-    if not answer_has_end_marker(combined_answer):
-        repair_prompt = build_builtly_repair_prompt(
-            question=question,
-            partial_answer=combined_answer,
-            selected_codes=selected_codes,
-            lang_key=lang_key,
-        )
-        try:
-            repaired_answer, repaired_truncated = call_gemini_generate_content(
-                api_key=api_key,
-                model_name=model_name,
-                prompt_text=repair_prompt,
-                max_output_tokens=1400,
-            )
-            combined_answer = repaired_answer
-            if repaired_truncated or not answer_has_end_marker(combined_answer):
-                final_continuation_prompt = build_builtly_continuation_prompt(
-                    question=question,
-                    partial_answer=combined_answer,
-                    selected_codes=selected_codes,
-                    lang_key=lang_key,
-                )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        sites = data if isinstance(data, list) else data.get("lokaliteter", data.get("features", []))
+        result = []
+        for site in sites[:20]:
+            props = site.get("properties", site) if isinstance(site, dict) else {}
+            # Forsøk å beregne avstand hvis koordinater finnes
+            dist_m = None
+            geom = site.get("geometry") if isinstance(site, dict) else None
+            if geom and geom.get("coordinates"):
                 try:
-                    continuation, _ = call_gemini_generate_content(
-                        api_key=api_key,
-                        model_name=model_name,
-                        prompt_text=final_continuation_prompt,
-                        max_output_tokens=700,
-                    )
-                    combined_answer = merge_assistant_continuation(combined_answer, continuation)
+                    scoord = geom["coordinates"]
+                    if isinstance(scoord, list) and len(scoord) >= 2:
+                        slon, slat = float(scoord[0]), float(scoord[1])
+                        # Enkel haversine i meter
+                        import math as _m
+                        R = 6371000.0
+                        dlat = _m.radians(slat - lat); dlon = _m.radians(slon - lon)
+                        a = (_m.sin(dlat/2)**2 +
+                             _m.cos(_m.radians(lat)) * _m.cos(_m.radians(slat)) * _m.sin(dlon/2)**2)
+                        dist_m = 2 * R * _m.asin(_m.sqrt(a))
                 except Exception:
                     pass
+            result.append({
+                "navn": props.get("navn") or props.get("lokalitetsnavn") or "Ukjent",
+                "status": props.get("status") or props.get("aktivitetsstatus") or "",
+                "type": props.get("type") or props.get("forurensningstype") or "",
+                "paavirkningsgrad": props.get("paavirkningsgrad") or props.get("pavirkningsgrad") or "",
+                "id": props.get("id") or props.get("lokalitetsId") or "",
+                "distance_m": dist_m,
+            })
+        # Sorter etter avstand hvis tilgjengelig
+        result.sort(key=lambda s: s.get("distance_m") if s.get("distance_m") is not None else 9999)
+        return result
+    except Exception:
+        return []
+
+
+def _classify_aktsomhet_feature(layer_name: str, attrs: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Klassifiser en DOK-feature i (kategori, alvorlighetsbeskrivelse) basert på
+    layer_name og attributter.
+
+    Returnerer (kategori, detalj) eller None hvis ikke relevant.
+
+    Kategorier: 'radon', 'flom', 'kvikkleire', 'skred_snø', 'skred_stein',
+                'skred_jord', 'skred_annet', 'samfunnssikkerhet_annet'.
+    """
+    ln = (layer_name or "").lower()
+
+    # Hjelpe: finn fare-/klasse-attributt fra ulike mulige feltnavn
+    def _fareverdi() -> str:
+        for key in ("faregrad", "fare", "klasse", "risikoklasse", "risikogruppe",
+                    "aktsomhetsnivaa", "aktsomhetsniva", "nivaa", "niva",
+                    "verdi", "type", "kategori", "beskrivelse", "navn"):
+            for k, v in (attrs or {}).items():
+                if k.lower() == key and v not in (None, "", 0):
+                    return str(v)
+        return ""
+
+    detalj = _fareverdi()
+
+    # Radon (NGU aktsomhetskart)
+    if "radon" in ln:
+        return ("radon", detalj or "Aktsomhetsområde")
+
+    # Flom
+    if "flom" in ln:
+        return ("flom", detalj or "Flomutsatt aktsomhetsområde")
+
+    # Kvikkleire
+    if "kvikkleire" in ln or "kvikk" in ln:
+        return ("kvikkleire", detalj or "Faregradssone kvikkleire")
+
+    # Skred (snø/jord/stein/flomskred)
+    if "snoskred" in ln or "snøskred" in ln or ("snø" in ln and "skred" in ln):
+        return ("skred_snø", detalj or "Aktsomhetsområde")
+    if "steinskred" in ln or "steinsprang" in ln or ("stein" in ln and "skred" in ln):
+        return ("skred_stein", detalj or "Aktsomhetsområde")
+    if "jordskred" in ln or "lossmasseskred" in ln or ("jord" in ln and "skred" in ln):
+        return ("skred_jord", detalj or "Aktsomhetsområde")
+    if "flomskred" in ln:
+        return ("skred_jord", detalj or "Flomskred aktsomhet")
+    if "skred" in ln:
+        return ("skred_annet", detalj or "Skredaktsomhet")
+
+    # Andre samfunnssikkerhetslag vi ikke gjenkjenner — ikke returner
+    return None
+
+
+def _fetch_aktsomhet_via_gdo(site_polygon, gdo_client) -> Dict[str, Any]:
+    """Hent strukturerte aktsomhetsdata (radon/flom/kvikkleire/skred) via
+    Geodata Online DOK Samfunnssikkerhet + DOK Geologi (radon).
+
+    Returnerer dict med per-kategori-status:
+        {
+            "available": True/False,
+            "categories": {
+                "radon": {"hit": True/False, "detail": "...", "features": N},
+                "flom": {...},
+                "kvikkleire": {...},
+                "skred_snø": {...},
+                "skred_stein": {...},
+                "skred_jord": {...},
+            },
+            "total_features": N,
+            "source": "Geodata Online DOK Samfunnssikkerhet",
+            "errors": [...],
+        }
+    """
+    result = {
+        "available": False,
+        "categories": {},
+        "total_features": 0,
+        "source": "Geodata Online DOK",
+        "errors": [],
+    }
+    if gdo_client is None or site_polygon is None:
+        result["errors"].append("Geodata Online client eller tomtepolygon mangler")
+        return result
+
+    # Initialiser alle kategoriene til "ikke treff" — vi fyller inn ved funn
+    categories = {
+        "radon": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "flom": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "kvikkleire": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_snø": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_stein": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_jord": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+    }
+
+    # Kall DOK Samfunnssikkerhet (flom, kvikkleire, skred)
+    try:
+        from geodata_client import GEOMAP_DOKSAMFUNNSSIKKERHET_MS
+        sikkerhet = gdo_client.fetch_context_from_service(
+            GEOMAP_DOKSAMFUNNSSIKKERHET_MS,
+            site_polygon,
+            buffer_m=50.0,  # liten buffer — vi vil vite om tomten ligger i sone
+            source_label="Geodata Online DOK Samfunnssikkerhet",
+        )
+        for feat in sikkerhet.get("features") or []:
+            layer_name = feat.get("layer_name", "")
+            attrs = feat.get("attributes") or {}
+            cls = _classify_aktsomhet_feature(layer_name, attrs)
+            if cls is None:
+                continue
+            cat, detail = cls
+            if cat in categories:
+                categories[cat]["hit"] = True
+                categories[cat]["features"] += 1
+                # Behold mest informative detalj (ikke bare "Aktsomhetsområde")
+                if detail and detail != "Aktsomhetsområde" and not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                elif not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                result["total_features"] += 1
+        for err in (sikkerhet.get("errors") or [])[:3]:
+            result["errors"].append(f"Samfunnssikkerhet: {err[:100]}")
+    except Exception as exc:
+        result["errors"].append(f"DOK Samfunnssikkerhet: {str(exc)[:120]}")
+
+    # Kall DOK Geologi (radon og kvikkleire-faresoner)
+    try:
+        from geodata_client import GEOMAP_DOKGEOLOGI_MS
+        geologi = gdo_client.fetch_context_from_service(
+            GEOMAP_DOKGEOLOGI_MS,
+            site_polygon,
+            buffer_m=50.0,
+            source_label="Geodata Online DOK Geologi",
+        )
+        for feat in geologi.get("features") or []:
+            layer_name = feat.get("layer_name", "")
+            attrs = feat.get("attributes") or {}
+            cls = _classify_aktsomhet_feature(layer_name, attrs)
+            if cls is None:
+                continue
+            cat, detail = cls
+            if cat in categories:
+                categories[cat]["hit"] = True
+                categories[cat]["features"] += 1
+                if detail and not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                result["total_features"] += 1
+        for err in (geologi.get("errors") or [])[:3]:
+            result["errors"].append(f"Geologi: {err[:100]}")
+    except Exception as exc:
+        result["errors"].append(f"DOK Geologi: {str(exc)[:120]}")
+
+    # Klassifiser severity basert på detail-strengen (NGU-konvensjon: klasse 1-3)
+    for cat, data in categories.items():
+        if not data["hit"]:
+            data["severity"] = "ingen"
+            continue
+        detail_lower = (data["detail"] or "").lower()
+        if any(word in detail_lower for word in ("høy", "hoy", "stor", "3", "høg")):
+            data["severity"] = "høy"
+        elif any(word in detail_lower for word in ("moderat", "middels", "2")):
+            data["severity"] = "moderat"
+        elif any(word in detail_lower for word in ("lav", "låg", "lite", "1", "liten")):
+            data["severity"] = "lav"
+        else:
+            # Treff uten klassifisert alvorlighet — markér som "registrert"
+            data["severity"] = "registrert"
+
+    result["categories"] = categories
+    result["available"] = True  # Vi har kalt API-et, selv om ingen treff
+    return result
+
+
+def build_geo_context_bundle(
+    site_polygon,
+    coords: Optional[Tuple[float, float]],
+    gdo_client,
+    radius_m: float = 300.0,
+) -> Dict[str, Any]:
+    """Samle geo-kontekst-data (historisk foto, grunnforurensning, radon, flom osv.)
+    for bruk i PDF-rapporten.
+
+    Args:
+        site_polygon: Shapely Polygon i EPSG:25833 (fra geodata_context)
+        coords: (x, y) i EPSG:25833. Hvis None, tas centroiden fra site_polygon.
+        gdo_client: GeodataOnlineClient-instans eller None
+        radius_m: Søkeradius for grunnforurensning
+
+    Returns:
+        Dict med nøklene:
+            available (bool), coords, bbox,
+            historisk (PIL.Image), historisk_year, historisk_source,
+            grunnforurensning (list), radon (PIL.Image),
+            flom (PIL.Image), kvikkleire (PIL.Image), skred (PIL.Image),
+            log (list[str]), errors (list[str])
+    """
+    result = {
+        "available": False,
+        "coords": None, "bbox": None,
+        "historisk": None, "historisk_year": None, "historisk_source": "",
+        "grunnforurensning": [],
+        "radon": None, "flom": None, "kvikkleire": None, "skred": None,
+        "aktsomhet": {"available": False, "categories": {}},  # NY v16: strukturerte DOK-data
+        "log": [], "errors": [],
+    }
+
+    # Finn koordinater og bbox
+    try:
+        if coords is None and site_polygon is not None:
+            c = site_polygon.centroid
+            coords = (float(c.x), float(c.y))
+        if coords is None:
+            result["errors"].append("Ingen koordinater tilgjengelig for geo-oppslag.")
+            return result
+        x, y = coords
+        result["coords"] = (x, y)
+        if site_polygon is not None:
+            bbox = tuple(site_polygon.bounds)
+        else:
+            bbox = _bbox_from_center_local(x, y, radius_m)
+        result["bbox"] = bbox
+    except Exception as exc:
+        result["errors"].append(f"Koordinat/bbox feilet: {str(exc)[:80]}")
+        return result
+
+    # Utvid bbox litt for historisk foto (parcel-bbox er ofte for trang)
+    minx, miny, maxx, maxy = bbox
+    buf = 100.0
+    expanded_bbox = (minx - buf, miny - buf, maxx + buf, maxy + buf)
+
+    # Historisk ortofoto via Geodata Online (GeomapBilder3 mosaic)
+    if gdo_client is not None:
+        try:
+            img, src, year = gdo_client.fetch_historical_ortofoto(
+                bbox=expanded_bbox, buffer_m=0, width=1200, height=1200)
+            if img is not None:
+                result["historisk"] = img
+                result["historisk_year"] = year
+                result["historisk_source"] = src
+                result["log"].append(f"Historisk ortofoto: {src} ({year})")
+            else:
+                result["log"].append(f"Historisk ortofoto: {src}")
+        except Exception as exc:
+            result["log"].append(f"Historisk ortofoto feilet: {str(exc)[:80]}")
+
+    # Miljødirektoratet — grunnforurensning (liste)
+    try:
+        sites = _fetch_miljodir_grunnforurensning(x, y, radius_m=500.0)
+        result["grunnforurensning"] = sites
+        result["log"].append(f"Miljødirektoratet: {len(sites)} kjente lokaliteter innen 500 m")
+    except Exception as exc:
+        result["log"].append(f"Miljødirektoratet feilet: {str(exc)[:80]}")
+
+    # --- AKTSOMHETSDATA via Geodata Online DOK (v16: strukturerte data, ikke bare bilder) ---
+    # Dette gir oss faktisk klassifisering ("moderat radon", "flomsone", osv.)
+    # i stedet for bare "ingen data / utenfor kartlagt område".
+    try:
+        aktsomhet = _fetch_aktsomhet_via_gdo(site_polygon, gdo_client)
+        result["aktsomhet"] = aktsomhet
+        if aktsomhet.get("available"):
+            hits = [c for c, d in aktsomhet.get("categories", {}).items() if d.get("hit")]
+            if hits:
+                result["log"].append(f"DOK aktsomhet: treff i {len(hits)} kategorier: {', '.join(hits)}")
+            else:
+                result["log"].append("DOK aktsomhet: tomten ligger ikke i noen registrert aktsomhetssone")
+    except Exception as exc:
+        result["aktsomhet"] = {"available": False, "errors": [str(exc)[:120]]}
+        result["log"].append(f"DOK aktsomhet feilet: {str(exc)[:80]}")
+
+    # --- Gamle WMS-kall beholdes som fallback for kartbilder i PDF ---
+    # Kun brukt hvis noen vil vise kartbilder i tillegg til strukturerte data.
+    # (Dagens Saga Park-test viste at disse WMS-ene ofte returnerer tomme bilder,
+    # så de er nedprioritert men ikke fjernet.)
+    try:
+        img = _fetch_ngu_radon(bbox)
+        if img is not None:
+            result["radon"] = img
+            result["log"].append("NGU Radon aktsomhetskart (WMS-bilde) hentet")
+    except Exception:
+        pass
+
+    for key, func, label in [
+        ("flom", _fetch_nve_flom, "NVE Flom"),
+        ("kvikkleire", _fetch_nve_kvikkleire, "NVE Kvikkleire"),
+        ("skred", _fetch_nve_skred, "NVE Skred"),
+    ]:
+        try:
+            img = func(bbox)
+            if img is not None:
+                result[key] = img
+                result["log"].append(f"{label} aktsomhetskart (WMS-bilde) hentet")
         except Exception:
-            combined_answer = trim_incomplete_tail(combined_answer)
+            pass
 
-    final_answer = clean_ai_answer_text(combined_answer)
-    if not final_answer:
-        raise RuntimeError("No text returned from the AI engine.")
+    # Marker som tilgjengelig hvis vi har minst én datakilde
+    has_any = any([
+        result["historisk"] is not None,
+        bool(result["grunnforurensning"]),
+        result["radon"] is not None,
+        result["flom"] is not None,
+        result["kvikkleire"] is not None,
+        result["skred"] is not None,
+        bool(result.get("aktsomhet", {}).get("available")),
+    ])
+    result["available"] = has_any
+    return result
 
-    if not answer_has_end_marker(combined_answer):
-        final_answer = trim_incomplete_tail(final_answer)
 
-    return final_answer
+def analyze_historical_aerial_with_claude(
+    historical_image: Optional[Image.Image],
+    year: Optional[int],
+    contamination_sites: list,
+    address_hint: str = "",
+    nearby_plans_count: Optional[int] = None,
+) -> Optional[Dict[str, str]]:
+    """Full AI-analyse av historisk flyfoto med fokus på:
+    - Tidligere arealbruk (industri, landbruk, skog, tettsted, osv.)
+    - Potensielle forurensningskilder fra historisk bruk
+    - Anbefalte tiltak (miljøteknisk undersøkelse, MUA-kartlegging, osv.)
 
+    Returnerer dict med 'tidligere_bruk', 'forurensningsrisiko', 'anbefalte_tiltak',
+    'risiko_niva' ('Lav'/'Moderat'/'Høy'/'Ukjent'). Null ved feil eller manglende input.
+    """
+    if historical_image is None or not ANTHROPIC_API_KEY:
+        return None
 
-def handle_assistant_submission(question: str, selected_codes: List[str], lang_key: str) -> None:
-    lang = get_text_bundle(lang_key)
+    contamination_summary = ""
+    if contamination_sites:
+        contamination_summary = f"\n\nFra Miljødirektoratets grunnforurensningsdatabase er det registrert {len(contamination_sites)} lokalitet(er) innen 500 m. De nærmeste:\n"
+        for s in contamination_sites[:5]:
+            line = f"  - {s.get('navn', 'Ukjent')}"
+            extras = []
+            if s.get("type"): extras.append(s["type"])
+            if s.get("status"): extras.append(s["status"])
+            if s.get("paavirkningsgrad"): extras.append(f"påvirkningsgrad: {s['paavirkningsgrad']}")
+            if s.get("distance_m") is not None: extras.append(f"ca. {int(s['distance_m'])} m unna")
+            if extras:
+                line += " — " + ", ".join(extras)
+            contamination_summary += line + "\n"
+    else:
+        contamination_summary = "\n\nMiljødirektoratets grunnforurensningsdatabase: Ingen kjente registrerte lokaliteter innen 500 m."
+
+    year_str = f"fra {year}" if year else "av ukjent år"
+    addr_str = f" for tomten ved {address_hint}" if address_hint else ""
+
+    system_prompt = (
+        "Du er en erfaren norsk miljøgeolog (RIG-M) og arealutviklingskonsulent. "
+        "Du analyserer historiske flyfoto for å vurdere tidligere arealbruk og forurensningsrisiko "
+        "i tråd med forurensningsforskriften kapittel 2 (tiltak ved utbygging) og TEK17 §§ 5-2 og 13-6. "
+        "Du svarer på norsk, fagteknisk og konkret. Du unngår spekulasjon og merker usikkerhet tydelig. "
+        "Du vet at historiske flyfoto alene ikke kan erstatte miljøteknisk grunnundersøkelse — men de "
+        "er ofte første trinn i en aktsom historisk kartlegging som kreves før byggesaksbehandling "
+        "på tomter med potensielt forurenset grunn."
+    )
+
+    user_text = (
+        f"Vedlagt er et historisk flyfoto {year_str}{addr_str}. "
+        f"{contamination_summary}\n\n"
+        "Analyser flyfotoet og gi en konkret vurdering i disse fire kategoriene. "
+        "Svar KUN som ren JSON (ingen markdown-backticks, ingen ekstra tekst) "
+        "med nøyaktig disse nøklene:\n\n"
+        "{\n"
+        '  "tidligere_bruk": "2-4 setninger som beskriver hva flyfotoet viser av arealbruk på tomten og i nærområdet. '
+        'Nevn konkret: bebyggelse, vegetasjon, infrastruktur, synlige anlegg/industri/gårdsbruk/grustak/deponi osv. '
+        'Vær konkret — unngå generelle formuleringer.",\n'
+        '  "forurensningsrisiko": "3-5 setninger som kobler observasjoner til potensielle forurensningskilder '
+        '(oljetank, smørebu, kjemisk rensing, fyllmasser, sprøytemiddelbruk, diffus byforurensning, osv.). '
+        'Vurder sannsynlighet for PAH, tungmetaller, oljehydrokarboner, asbestrester. Nevn også hvis fotoet '
+        'IKKE indikerer forhøyet risiko (f.eks. uberørt skog/landbruk uten synlige inngrep).",\n'
+        '  "anbefalte_tiltak": "Konkret anbefaling: behov for miljøteknisk grunnundersøkelse (prøvetaking + lab), '
+        'historisk kartlegging mot bransjearkiv, sjekk av arkivmateriale fra tidligere eiere, eller kun '
+        'standard påvisningsprosedyre. Vis til forurensningsforskriftens kap. 2 hvis relevant.",\n'
+        '  "risiko_niva": "ETT av: Lav, Moderat, Høy, Ukjent — din samlede vurdering"\n'
+        "}\n\n"
+        "Viktig: Hvis flyfotoet er uklart, dårlig oppløst eller du ikke kan konkludere, skriv det eksplisitt "
+        'og sett risiko_niva="Ukjent". Ikke dikt opp detaljer.'
+    )
 
     try:
-        with st.spinner(lang["assistant_loading"]):
-            answer = request_builtly_answer(
-                question=question,
-                selected_codes=selected_codes,
-                lang_key=lang_key,
-                history=st.session_state.assistant_history,
-            )
-
-        st.session_state.assistant_history.append(
-            {
-                "question": question.strip(),
-                "answer": answer,
-                "disciplines": discipline_labels(selected_codes, lang_key),
-                "lang": lang_key,
-            }
-        )
-        st.session_state.assistant_history = st.session_state.assistant_history[-8:]
-    except Exception as exc:
-        st.session_state.assistant_history.append(
-            {
-                "question": question.strip(),
-                "answer": f"**{lang['assistant_error_prefix']}:** {exc}",
-                "disciplines": discipline_labels(selected_codes, lang_key),
-                "lang": lang_key,
-            }
-        )
-        st.session_state.assistant_history = st.session_state.assistant_history[-8:]
+        raw = _call_claude_vision(system_prompt, user_text, [historical_image], max_tokens=2000)
+        if not raw:
+            return None
+        # Strip markdown-fences hvis til stede
+        text = raw.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        data = json.loads(text)
+        # Valider forventede nøkler
+        for key in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak", "risiko_niva"):
+            data.setdefault(key, "")
+        # Normaliser risiko_niva
+        rn = str(data.get("risiko_niva", "")).strip().lower()
+        if "høy" in rn or "hoy" in rn or rn == "høy":
+            data["risiko_niva"] = "Høy"
+        elif "moderat" in rn or "middels" in rn:
+            data["risiko_niva"] = "Moderat"
+        elif "lav" in rn:
+            data["risiko_niva"] = "Lav"
+        else:
+            data["risiko_niva"] = "Ukjent"
+        return data
+    except Exception:
+        return None
 
 
-ASSISTANT_TEASER_TITLE_COPY = {
-    "🇬🇧 English (UK)": "Ask about building technology and property.",
-    "🇺🇸 English (US)": "Ask about building technology and property.",
-    "🇳🇴 Norsk": "Still spørsmål om bygg, eiendom og regelverk.",
-    "🇸🇪 Svenska": "Ställ frågor om bygg, fastighet och regelverk.",
-    "🇩🇰 Dansk": "Stil spørgsmål om byggeri, ejendom og regelværk.",
-    "🇫🇮 Suomi": "Kysy rakentamisesta, kiinteistöistä ja määräyksistä.",
-    "🇩🇪 Deutsch": "Fragen zu Bau, Immobilie und Regelwerk stellen.",
-}
-
-ASSISTANT_TEASER_SUBTITLE_COPY = {
-    "🇬🇧 English (UK)": "A practical Q&A surface adapted to the selected language and national baseline.",
-    "🇺🇸 English (US)": "A practical Q&A surface adapted to the selected language and national baseline.",
-    "🇳🇴 Norsk": "En spørreflate som følger valgt språk og nasjonalt rammeverk.",
-    "🇸🇪 Svenska": "En frågeyta som följer valt språk och nationellt ramverk.",
-    "🇩🇰 Dansk": "En spørgeflade som følger valgt sprog og nationalt regelsæt.",
-    "🇫🇮 Suomi": "Kysymysikkuna, joka seuraa valittua kieltä ja kansallista viitekehystä.",
-    "🇩🇪 Deutsch": "Ein Fragenfenster passend zu Sprache und nationalem Regelwerk.",
-}
-
-ASSISTANT_TEASER_FOOT_COPY = {
-    "🇬🇧 English (UK)": "Covers GEO, structural, demolition, acoustics, fire, environment, SHA, BREEAM and property.",
-    "🇺🇸 English (US)": "Covers GEO, structural, demolition, acoustics, fire, environment, SHA, BREEAM and property.",
-    "🇳🇴 Norsk": "Dekker GEO, RIB, rive, RIAku, RIBr, miljø, SHA, BREEAM og eiendom.",
-    "🇸🇪 Svenska": "Täcker GEO, konstruktion, rivning, akustik, brand, miljö, SHA, BREEAM och fastighet.",
-    "🇩🇰 Dansk": "Dækker GEO, konstruktion, nedrivning, akustik, brand, miljø, SHA, BREEAM og ejendom.",
-    "🇫🇮 Suomi": "Kattaa GEO, rakenteet, purun, akustiikan, palon, ympäristön, SHA:n, BREEAMin ja kiinteistöt.",
-    "🇩🇪 Deutsch": "Deckt GEO, Tragwerk, Rückbau, Akustik, Brandschutz, Umwelt, SHA, BREEAM und Immobilie ab.",
-}
+def _pil_to_temp_jpg(img: Image.Image, max_w: int = 1600) -> str:
+    """Konverter PIL-bilde til midlertidig JPG og returner filsti.
+    FPDF trenger fil på disk. Rezise om for bredt."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+    try:
+        rgb = img.convert("RGB")
+        if rgb.width > max_w:
+            ratio = max_w / rgb.width
+            new_h = int(rgb.height * ratio)
+            rgb = rgb.resize((max_w, new_h), Image.LANCZOS)
+        rgb.save(tmp.name, format="JPEG", quality=88)
+    finally:
+        tmp.close()
+    return tmp.name
 
 
-def assistant_teaser_title(lang_key: str) -> str:
-    return ASSISTANT_TEASER_TITLE_COPY.get(lang_key, ASSISTANT_TEASER_TITLE_COPY["🇬🇧 English (UK)"])
+def build_geo_context_pages(
+    pdf: "BuiltlyProPDF",
+    geodata_bundle: Optional[Dict[str, Any]],
+    historical_analysis: Optional[Dict[str, str]],
+    site_intelligence: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Bygg de to geo-sidene i PDF-rapporten.
 
+    Side A: STEDSKONTEKST OG GEODATA — KPI-kort (plan/projects/transport
+    hvis tilgjengelig) + grunnforurensnings-tabell + risikomerking.
+    Side B: HISTORISK FLYFOTO OG TIDLIGERE BRUK — historisk bilde +
+    AI-analyse i tre seksjoner (tidligere bruk, forurensningsrisiko,
+    anbefalte tiltak) + risiko-badge.
+    """
+    if not geodata_bundle or not geodata_bundle.get("available"):
+        return  # Skipp stille hvis ingen data
 
-def assistant_teaser_subtitle(lang_key: str) -> str:
-    return ASSISTANT_TEASER_SUBTITLE_COPY.get(lang_key, ASSISTANT_TEASER_SUBTITLE_COPY["🇬🇧 English (UK)"])
-
-
-def assistant_teaser_foot(lang_key: str) -> str:
-    return ASSISTANT_TEASER_FOOT_COPY.get(lang_key, ASSISTANT_TEASER_FOOT_COPY["🇬🇧 English (UK)"])
-
-
-def render_assistant_surface(lang_key: str, surface_key: str = "dialog") -> None:
-    lang = get_text_bundle(lang_key)
-    locale_profile = get_locale_profile(lang_key)
-    selected_codes = st.session_state.get("assistant_discipline_codes", list(DEFAULT_DISCIPLINES))
-
-    render_html(
-        f"""
-        <div class="assistant-dialog-hero">
-            <div class="assistant-kicker">{lang['assistant_kicker']}</div>
-            <div class="assistant-title">{assistant_teaser_title(lang_key)}</div>
-            <div class="assistant-subtitle">{assistant_teaser_subtitle(lang_key)}</div>
-            <div class="context-chips compact">
-                <div class="context-chip"><span>{lang['assistant_label_country']}:</span> {locale_profile['country']}</div>
-                <div class="context-chip"><span>{lang['assistant_label_rules']}:</span> {locale_profile['jurisdiction_short']}</div>
-            </div>
-            <div class="assistant-dialog-note">{locale_profile['variation_note']}</div>
-        </div>
-        """
+    # ============================================================
+    # SIDE A: STEDSKONTEKST OG GEODATA
+    # ============================================================
+    pdf.add_page()
+    pdf.section_title("STEDSKONTEKST OG GEODATA", 16)
+    pdf.body_text(
+        "Automatisert uttrekk fra åpne norske geodata-kilder: plan- og reguleringsdata, "
+        "utbyggingsaktivitet, mobilitet/transport, samt Miljødirektoratets "
+        "grunnforurensningsdatabase. Dette er et første screeningbilde — "
+        "fagteknisk RIG-M-vurdering kreves før byggesaksinnsending."
     )
+    pdf.ln(3)
 
-    render_html(
-        f"""
-        <div class="example-label">{lang['assistant_examples_label']}</div>
-        <div class="example-chip-wrap">
-            {''.join([f'<div class="example-chip">{html.escape(example)}</div>' for example in lang['assistant_examples']])}
-        </div>
-        """
-    )
+    # --- KPI-rad 1: Plan / Utbygging / Mobilitet (fra site_intelligence) ---
+    def _draw_kpi(px, py, pw, ph, title_str, value_str, sub_str, accent_color):
+        """Lokal variant av _draw_kpi_card — identisk stil til resten av PDF-en."""
+        pdf.set_fill_color(*accent_color)
+        pdf.rect(px, py, pw, 2, 'F')
+        pdf.set_draw_color(150, 170, 195)
+        pdf.set_line_width(0.3)
+        pdf.rect(px, py, pw, ph, 'D')
+        pdf.set_line_width(0.2)
+        pdf.set_fill_color(240, 244, 250)
+        pdf.rect(px + 0.3, py + 2.3, pw - 0.6, ph - 2.6, 'F')
+        pdf.set_xy(px + 3, py + 5)
+        pdf.set_font(PDF_FONT, "B", 10)
+        pdf.set_text_color(70, 90, 120)
+        pdf.cell(pw - 6, 5, clean_pdf_text(title_str), 0, 0)
+        pdf.set_xy(px + 3, py + 12)
+        pdf.set_font(PDF_FONT, "B", 16)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(pw - 6, 9, clean_pdf_text(value_str), 0, 0)
+        if sub_str:
+            pdf.set_xy(px + 3, py + 22)
+            pdf.set_font(PDF_FONT, "", 8)
+            pdf.set_text_color(100, 115, 135)
+            pdf.cell(pw - 6, 4, clean_pdf_text(sub_str), 0, 0)
 
-    input_key = f"assistant_input_{surface_key}_{st.session_state.get('assistant_input_nonce', 0)}"
+    # Overskrift
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("PLAN, UTBYGGING OG MOBILITET"), 0, 1)
+    pdf.ln(1)
 
-    with st.form(f"builtly_frontpage_assistant_{surface_key}"):
-        selected_codes = st.multiselect(
-            lang["assistant_disciplines_label"],
-            options=[item["code"] for item in DISCIPLINE_CATALOG],
-            format_func=lambda code: discipline_label(code, lang_key),
-            key="assistant_discipline_codes",
-        )
-        question = st.text_area(
-            lang["assistant_question_label"],
-            key=input_key,
-            placeholder=lang["assistant_placeholder"],
-            height=170,
-        )
-        submitted = st.form_submit_button(lang["assistant_btn"], use_container_width=True)
+    cw, ch, gap = 51, 28, 3  # 3 kort a 51mm + 2 gaps a 3mm = 159mm (passer i 155mm textwidth + litt margin)
+    cx, cy = 25, pdf.get_y()
 
-    if submitted and question.strip():
-        handle_assistant_submission(question, selected_codes, lang_key)
-        bump_assistant_input_nonce()
-        st.rerun()
+    si = site_intelligence or {}
+    si_available = bool(si.get("available"))
 
-    action_left, action_right = st.columns([0.35, 0.65], gap="small")
-    with action_left:
-        clear_clicked = st.button(lang["assistant_clear"], key=f"assistant_clear_{surface_key}", use_container_width=True)
-    with action_right:
-        st.caption(lang["assistant_disclaimer"])
-
-    if clear_clicked:
-        reset_assistant_conversation()
-        st.rerun()
-
-    if st.session_state.assistant_history:
-        latest = st.session_state.assistant_history[-1]
-        with st.container(border=True):
-            st.markdown(f"**{lang['assistant_latest_answer']}**")
-            if latest.get("disciplines"):
-                st.caption(" · ".join(latest["disciplines"]))
-            st.markdown(latest["answer"])
-
-        if len(st.session_state.assistant_history) > 1:
-            with st.expander(lang["assistant_history_label"], expanded=False):
-                for item in reversed(st.session_state.assistant_history[-8:]):
-                    st.markdown(f"**Q:** {item['question']}")
-                    if item.get("disciplines"):
-                        st.caption(" · ".join(item["disciplines"]))
-                    st.markdown(item["answer"])
-                    st.markdown("---")
+    # Plan-kort
+    plan = si.get("plan", {}) if si_available else {}
+    nearby_plan_n = plan.get("nearby_plan_count")
+    risk_score = plan.get("regulatory_risk_score")
+    if nearby_plan_n is not None:
+        plan_val = f"{nearby_plan_n}"
+        if risk_score is not None:
+            risk_color = _SCORE_GREEN if risk_score < 33 else _SCORE_AMBER if risk_score < 66 else _SCORE_RED
+            risk_label = "Lav risiko" if risk_score < 33 else "Moderat" if risk_score < 66 else "Høy risiko"
+            plan_sub = f"Planrisiko: {risk_label} ({risk_score:.0f}/100)"
+        else:
+            risk_color = _BUILTLY_BLUE
+            plan_sub = "planer i nærheten"
+        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", plan_val, plan_sub, risk_color)
     else:
-        render_html(
-            f"""
-            <div class="assistant-note">
-                <strong>{lang['assistant_empty_title']}</strong>
-                {lang['assistant_empty_body']}
-            </div>
-            """
+        _draw_kpi(cx, cy, cw, ch, "PLANKONTEKST", "Ingen data", "", _MUTED)
+
+    # Utbyggingsaktivitet
+    projects = si.get("projects", {}) if si_available else {}
+    proj_n = projects.get("nearby_count") or projects.get("feature_count")
+    if proj_n is not None:
+        proj_color = _BUILTLY_BLUE if proj_n == 0 else _SCORE_AMBER if proj_n < 5 else _SCORE_GREEN
+        proj_sub = "prosjekter i nærområdet"
+        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", f"{proj_n}", proj_sub, proj_color)
+    else:
+        _draw_kpi(cx + cw + gap, cy, cw, ch, "UTBYGGINGSAKTIVITET", "Ingen data", "", _MUTED)
+
+    # Mobilitet
+    transport = si.get("transport", {}) if si_available else {}
+    mob_score = transport.get("mobility_score")
+    if mob_score is not None:
+        transit_m = transport.get("nearest_transit_m")
+        mob_color = _SCORE_GREEN if mob_score >= 60 else _SCORE_AMBER if mob_score >= 40 else _SCORE_RED
+        mob_val = f"{mob_score:.0f}/100"
+        if transit_m is not None:
+            mob_sub = f"Kollektiv: {int(transit_m)} m"
+        else:
+            mob_sub = "Mobilitetsscore"
+        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", mob_val, mob_sub, mob_color)
+    else:
+        _draw_kpi(cx + 2 * (cw + gap), cy, cw, ch, "MOBILITET", "Ingen data", "", _MUTED)
+
+    pdf.set_y(cy + ch + 5)
+
+    # --- Grunnforurensning-seksjon ---
+    contamination = geodata_bundle.get("grunnforurensning", [])
+
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("GRUNNFORURENSNING (MILJØDIREKTORATET)"), 0, 1)
+    pdf.ln(1)
+
+    # Status-boks
+    cnt = len(contamination)
+    if cnt == 0:
+        status_color = _SCORE_GREEN
+        status_text = "Ingen kjente lokaliteter innen 500 m radius"
+        status_sub = "Basert på Miljødirektoratets database — kilde: grfreg-api.miljodirektoratet.no"
+    elif cnt <= 2:
+        status_color = _SCORE_AMBER
+        status_text = f"{cnt} registrert lokalitet innen 500 m" if cnt == 1 else f"{cnt} registrerte lokaliteter innen 500 m"
+        status_sub = "Moderat oppmerksomhet anbefales — vurder miljøteknisk undersøkelse"
+    else:
+        status_color = _SCORE_RED
+        status_text = f"{cnt} registrerte lokaliteter innen 500 m"
+        status_sub = "Forhøyet oppmerksomhet — miljøteknisk grunnundersøkelse bør vurderes"
+
+    y_box = pdf.get_y()
+    pdf.set_fill_color(*status_color)
+    pdf.rect(25, y_box, 3, 14, 'F')  # Tykk fargestripe venstre
+    pdf.set_fill_color(247, 249, 252)
+    pdf.set_draw_color(*_DIVIDER)
+    pdf.set_line_width(0.3)
+    pdf.rect(28, y_box, 157, 14, 'DF')
+    pdf.set_line_width(0.2)
+    pdf.set_xy(31, y_box + 2)
+    pdf.set_font(PDF_FONT, "B", 10)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(152, 5, clean_pdf_text(status_text), 0, 1)
+    pdf.set_xy(31, y_box + 8)
+    pdf.set_font(PDF_FONT, "", 9)
+    pdf.set_text_color(100, 115, 135)
+    pdf.cell(152, 4, clean_pdf_text(status_sub), 0, 1)
+    pdf.set_y(y_box + 16)
+
+    # Tabell med de nærmeste lokalitetene hvis finnes
+    if contamination:
+        pdf.ln(2)
+        headers = ["Lokalitet", "Type / kategori", "Status", "Avstand"]
+        widths = [62, 43, 30, 20]
+        rows = []
+        for s in contamination[:6]:
+            navn = (s.get("navn") or "Ukjent")[:38]
+            typ = (s.get("type") or "—")[:28]
+            status = (s.get("status") or "—")[:18]
+            dist = f"{int(s['distance_m'])} m" if s.get("distance_m") is not None else "—"
+            rows.append([navn, typ, status, dist])
+        add_pdf_table(pdf, headers, rows, widths)
+        if len(contamination) > 6:
+            pdf.ln(1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "I", 8)
+            pdf.set_text_color(*_MUTED)
+            pdf.cell(0, 4, clean_pdf_text(f"... og {len(contamination) - 6} ytterligere lokalitet(er) i omrdet."), 0, 1)
+
+    # --- Aktsomhetskart — strukturerte DOK-data fra Geodata Online (v16) ---
+    pdf.ln(3)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 11)
+    pdf.set_text_color(*_NAVY)
+    pdf.cell(0, 7, clean_pdf_text("AKTSOMHET — RADON, FLOM OG SKRED"), 0, 1)
+    pdf.ln(1)
+
+    aktsomhet_data = geodata_bundle.get("aktsomhet", {}) or {}
+    categories = aktsomhet_data.get("categories", {}) or {}
+    gdo_ok = aktsomhet_data.get("available", False)
+
+    # Kategorier i fast rekkefølge for konsekvent layout
+    akt_rows = [
+        ("radon", "Radon (NGU aktsomhetskart)"),
+        ("flom", "Flom (NVE aktsomhetsområde)"),
+        ("kvikkleire", "Kvikkleire (NVE faresoner)"),
+        ("skred_snø", "Snøskred (NVE aktsomhet)"),
+        ("skred_stein", "Steinskred / steinsprang"),
+        ("skred_jord", "Jord-/flomskred"),
+    ]
+
+    pdf.set_font(PDF_FONT, "", 9)
+    for key, label in akt_rows:
+        cat = categories.get(key, {}) or {}
+        hit = bool(cat.get("hit"))
+        severity = cat.get("severity", "ukjent")
+        detail = cat.get("detail", "")
+
+        # Fargekode indikator
+        if not gdo_ok:
+            color = _MUTED
+            status = "data ikke hentet"
+        elif not hit:
+            color = _SCORE_GREEN
+            status = "ingen registrert aktsomhetssone"
+        elif severity == "høy":
+            color = _SCORE_RED
+            status = f"høy aktsomhet — {detail}" if detail else "høy aktsomhet"
+        elif severity == "moderat":
+            color = _SCORE_AMBER
+            status = f"moderat aktsomhet — {detail}" if detail else "moderat aktsomhet"
+        elif severity == "lav":
+            color = _SCORE_AMBER  # gul for forsiktighet
+            status = f"lav aktsomhet — {detail}" if detail else "lav aktsomhet"
+        else:  # registrert, men ukjent grad
+            color = _SCORE_AMBER
+            status = f"registrert aktsomhet — {detail}" if detail else "registrert aktsomhetssone"
+
+        pdf.set_x(25)
+        pdf.set_fill_color(*color)
+        pdf.rect(25, pdf.get_y() + 1.5, 2.5, 2.5, 'F')
+        pdf.set_x(30)
+        pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(60, 5, clean_pdf_text(label), 0, 0)
+        pdf.set_text_color(*_MUTED) if not hit or not gdo_ok else pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 5, clean_pdf_text(status), 0, 1)
+
+    # Hvis vi fikk noen treff totalt, legg til en sammendragsboks
+    total_hits = sum(1 for c in categories.values() if c.get("hit"))
+    if gdo_ok and total_hits > 0:
+        pdf.ln(2)
+        y_box = pdf.get_y()
+        pdf.set_fill_color(*_SCORE_AMBER)
+        pdf.rect(25, y_box, 3, 10, 'F')
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.set_line_width(0.3)
+        pdf.rect(28, y_box, 157, 10, 'DF')
+        pdf.set_line_width(0.2)
+        pdf.set_xy(31, y_box + 1.5)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(152, 4, clean_pdf_text(
+            f"Tomten er registrert i {total_hits} aktsomhetskategori" +
+            ("er" if total_hits != 1 else "")
+        ), 0, 1)
+        pdf.set_xy(31, y_box + 5.5)
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.set_text_color(100, 115, 135)
+        pdf.cell(152, 4, clean_pdf_text(
+            "Faglig RIG-/geotekniker-vurdering er nødvendig før byggesaksbehandling."
+        ), 0, 1)
+        pdf.set_y(y_box + 12)
+
+    pdf.ln(1)
+    pdf.set_font(PDF_FONT, "I", 8)
+    pdf.set_text_color(*_MUTED)
+    pdf.set_x(25)
+    pdf.multi_cell(
+        155, 4,
+        clean_pdf_text(
+            f"Kilde: {aktsomhet_data.get('source', 'Geodata Online DOK')}. "
+            "Aktsomhetskart er veiledende. Ved utbygging må fagfolk (RIG, geotekniker, miljøgeolog) "
+            "verifisere forholdene i felt og i relevante tilleggsregistre (f.eks. NGU GRANADA for grunnvann, "
+            "NVE Temakart for detaljerte skredfaresoner)."
+        )
+    )
+
+    # ============================================================
+    # SIDE B: HISTORISK FLYFOTO OG TIDLIGERE BRUK
+    # ============================================================
+    hist_img = geodata_bundle.get("historisk")
+    hist_year = geodata_bundle.get("historisk_year")
+    hist_src = geodata_bundle.get("historisk_source", "")
+
+    if hist_img is None:
+        # Ingen historisk foto — skipp side B, men skriv en liten note på side A
+        pdf.ln(3)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.multi_cell(
+            155, 4.5,
+            clean_pdf_text(
+                "Merk: Historisk flyfoto var ikke automatisk tilgjengelig for denne tomten. "
+                "Manuell oppslag i Norge i Bilder eller kommunearkiv anbefales som del av "
+                "aktsom historisk kartlegging (forurensningsforskriften kap. 2)."
+            )
+        )
+        return
+
+    pdf.add_page()
+    title_year = f"HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK ({hist_year})" if hist_year else "HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK"
+    pdf.section_title(title_year, 16)
+
+    intro = (
+        "Historisk flyfoto er sentralt i aktsom historisk kartlegging av tomten. "
+        "Det gir førstehånds indikasjon på tidligere arealbruk — industri, landbruk, "
+        "deponi, fylling eller andre potensielt forurensende aktiviteter — som igjen "
+        "avgjør behovet for miljøteknisk grunnundersøkelse i henhold til "
+        "forurensningsforskriften kapittel 2."
+    )
+    pdf.body_text(intro)
+    pdf.ln(2)
+
+    # Kildemerking
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "I", 8)
+    pdf.set_text_color(*_MUTED)
+    src_label = f"Kilde: {hist_src}" + (f" · År: {hist_year}" if hist_year else "")
+    pdf.cell(0, 4, clean_pdf_text(src_label), 0, 1)
+    pdf.ln(1)
+
+    # Historisk bilde sentrert (150mm bred for å gi plass til analyse under)
+    img_w = 150
+    img_h = 90  # Fast aspekt — ortofoto er ofte ~kvadratisk, men vi padder
+    x_img = (210 - img_w) / 2
+    try:
+        tmp_path = _pil_to_temp_jpg(hist_img, max_w=1600)
+        y_before = pdf.get_y()
+        # Beregn faktisk høyde basert på originalbildets aspekt
+        orig_w, orig_h = hist_img.size
+        actual_h = img_w * (orig_h / orig_w)
+        if actual_h > 110:  # Maks 110mm
+            actual_h = 110
+            img_w = actual_h * (orig_w / orig_h)
+            x_img = (210 - img_w) / 2
+        # Lys ramme rundt bildet
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.set_line_width(0.4)
+        pdf.rect(x_img - 1, y_before - 1, img_w + 2, actual_h + 2, 'D')
+        pdf.set_line_width(0.2)
+        pdf.image(tmp_path, x=x_img, y=y_before, w=img_w, h=actual_h)
+        pdf.set_y(y_before + actual_h + 4)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+    except Exception as exc:
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_SCORE_RED)
+        pdf.cell(0, 5, clean_pdf_text(f"Bilde kunne ikke renderes: {str(exc)[:60]}"), 0, 1)
+
+    # --- AI-analyse-seksjon ---
+    if historical_analysis and any(historical_analysis.get(k) for k in ("tidligere_bruk", "forurensningsrisiko", "anbefalte_tiltak")):
+        # Risiko-badge øverst
+        risk = historical_analysis.get("risiko_niva", "Ukjent")
+        risk_colors = {
+            "Lav": _SCORE_GREEN,
+            "Moderat": _SCORE_AMBER,
+            "Høy": _SCORE_RED,
+            "Ukjent": _MUTED,
+        }
+        rc = risk_colors.get(risk, _MUTED)
+
+        pdf.ln(2)
+        y_badge = pdf.get_y()
+        pdf.set_fill_color(*rc)
+        pdf.rect(25, y_badge, 4, 10, 'F')
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.rect(29, y_badge, 156, 10, 'DF')
+        pdf.set_xy(32, y_badge + 1)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(100, 115, 135)
+        pdf.cell(40, 4, clean_pdf_text("FORURENSNINGSRISIKO:"), 0, 0)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*rc)
+        pdf.cell(30, 4, clean_pdf_text(risk.upper()), 0, 0)
+        pdf.set_font(PDF_FONT, "I", 8)
+        pdf.set_text_color(*_MUTED)
+        pdf.set_xy(32, y_badge + 5.5)
+        pdf.cell(150, 4, clean_pdf_text("AI-basert første screening — fagteknisk vurdering kreves"), 0, 0)
+        pdf.set_y(y_badge + 13)
+
+        def _analysis_block(title: str, body: str) -> None:
+            if not body:
+                return
+            pdf.check_space(20)
+            pdf.ln(1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "B", 10)
+            pdf.set_text_color(*_BUILTLY_BLUE)
+            pdf.cell(0, 5, clean_pdf_text(title), 0, 1)
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "", 9)
+            pdf.set_text_color(*_BODY_BLACK)
+            pdf.multi_cell(155, 4.8, ironclad_text_formatter(body))
+            pdf.ln(1)
+
+        _analysis_block("TIDLIGERE AREALBRUK", historical_analysis.get("tidligere_bruk", ""))
+        _analysis_block("VURDERT FORURENSNINGSRISIKO", historical_analysis.get("forurensningsrisiko", ""))
+        _analysis_block("ANBEFALTE TILTAK", historical_analysis.get("anbefalte_tiltak", ""))
+    else:
+        # Ingen AI-analyse tilgjengelig — vis bare bildet med en note
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "I", 9)
+        pdf.set_text_color(*_MUTED)
+        pdf.multi_cell(
+            155, 4.5,
+            clean_pdf_text(
+                "AI-basert analyse av historisk flyfoto er ikke tilgjengelig i denne rapporten "
+                "(krever ANTHROPIC_API_KEY). Manuell fagvurdering av tidligere arealbruk anbefales "
+                "som del av aktsom historisk kartlegging."
+            )
         )
 
 
-def maybe_render_assistant_dialog(lang_key: str) -> None:
-    if not st.session_state.get("assistant_dialog_open"):
-        return
+# ================================================================
+# POST-FILTER HELPERS FOR AI-GENERERT RAPPORTTEKST
+# Claude ignorerer av og til FORBUDT-klausulene i prompten — disse
+# filtrene rydder ut hallusinasjonene før teksten sendes til PDF.
+# ================================================================
 
-    if hasattr(st, "dialog"):
-        title = get_text_bundle(lang_key)["assistant_kicker"]
+def _strip_hallucinated_preamble(text: str) -> str:
+    """Fjern hallusinerte forside-blokker som Claude av og til legger FØR pkt. 1.
+    Eksempel: "MULIGHETSSTUDIE\n\nDato: [Dagens dato]\nProsjekt: ..."
+    Alt før første "# 1." (eller "1." som seksjonsstart) er preamble — kutt det.
+    """
+    if not text:
+        return text
+    # Finn starten av pkt. 1 — aksepterer både "# 1." og "1. OPPSUMMERING"
+    m = re.search(r"^#?\s*1\.\s+[A-ZÆØÅ]", text, re.MULTILINE)
+    if m and m.start() > 0:
+        # Det finnes tekst før pkt. 1 — sjekk om det ligner preamble
+        preamble = text[:m.start()].strip()
+        # Preamble er "suspekt" hvis den inneholder placeholder eller metadata-nøkler
+        suspect_patterns = [
+            r"\[[Dd]agens\s+dato\]", r"\[[Ss]ett\s+inn", r"\[[Pp]laceholder",
+            r"^MULIGHETSSTUDIE\s*$", r"^Dato\s*:", r"^Prosjekt\s*:",
+            r"^Tomteareal\s*:", r"^Oppdragsgiver\s*:", r"^Utarbeidet\s+av\s*:",
+        ]
+        is_suspect = any(re.search(p, preamble, re.MULTILINE) for p in suspect_patterns)
+        # Kort preamble (< 400 tegn) som ikke inneholder # headings er også mistenkelig
+        has_headings = bool(re.search(r"^#\s", preamble, re.MULTILINE))
+        if is_suspect or (len(preamble) < 400 and not has_headings):
+            return text[m.start():]
+    return text
 
-        @st.dialog(
-            title,
-            width="large",
-            dismissible=True,
-            icon=":material/auto_awesome:",
-            on_dismiss=close_assistant,
+
+def _strip_hallucinated_appendix(text: str) -> str:
+    """Fjern hallusinert VEDLEGG/APPENDIKS-seksjon etter pkt. 10.
+    Geo-data og støy er allerede presentert i dedikerte PDF-seksjoner
+    og skal ikke dupliseres i vedlegg i rapportteksten.
+    """
+    if not text:
+        return text
+    # Finn starten av en vedleggs-seksjon etter pkt. 10
+    # Mønster: "VEDLEGG", "APPENDIKS", "APPENDIX", "TILLEGG" som overskrift
+    m = re.search(
+        r"^(?:#+\s*|\*\*)?(?:VEDLEGG|APPENDIKS|APPENDIX|TILLEGG)\b",
+        text, re.MULTILINE | re.IGNORECASE
+    )
+    if m:
+        # Kun fjern hvis vedlegget kommer ETTER pkt. 10
+        pkt10 = re.search(r"^#?\s*10\.\s+", text, re.MULTILINE)
+        if pkt10 and m.start() > pkt10.start():
+            return text[:m.start()].rstrip() + "\n"
+    return text
+
+
+def _normalize_bullets(text: str) -> str:
+    """Konverter '*' og '•' bullet-markere til '-' for konsistent rendering."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        # Match "* " eller "• " i starten (etter whitespace)
+        m = re.match(r"^(\s*)[\*•]\s+(.*)$", line)
+        if m:
+            lines[i] = f"{m.group(1)}- {m.group(2)}"
+    return "\n".join(lines)
+
+
+def create_full_report_pdf(
+    name: str,
+    client: str,
+    land: str,
+    report_text: str,
+    options: List[OptionResult],
+    option_images: List[Image.Image],
+    visual_attachments: List[Image.Image],
+    manual_sketch_images: Optional[List[Image.Image]] = None,
+    site: Optional["SiteInputs"] = None,
+    environment_data: Optional[Dict[str, Any]] = None,
+    solar_grid_image: Optional[Image.Image] = None,
+    scene_images: Optional[List[Image.Image]] = None,
+    plan_view_analyses: Optional[List[str]] = None,
+    cover_image: Optional[Image.Image] = None,
+    solar_3d_snapshots: Optional[List[Image.Image]] = None,
+    geodata_bundle: Optional[Dict[str, Any]] = None,
+    historical_analysis: Optional[Dict[str, str]] = None,
+    site_intelligence: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """
+    McKinsey-quality PDF v15:
+      Page 1:  Cover (med eventuelt AI-render)
+      Page 2:  Table of Contents
+      Page 3:  Sammendrag (KPI-kort vektor)
+      Page 4:  Tomt og kontekst — flyfoto, støykart (flyttet fra vedlegg)
+      Page 5:  Nøkkeltall + sol/BRA-chart + kontekst
+      Page 6+: Volumskisser (top 3)
+      Page N:  Planvisning og volumkontroll (med AI-analyse)
+      Page N:  Sol/skygge individuelle snapshots
+      Page N+1: STEDSKONTEKST OG GEODATA (NY v15) — plan/projects/transport
+                + grunnforurensning + aktsomhetskart-status
+      Page N+2: HISTORISK FLYFOTO OG TIDLIGERE AREALBRUK (NY v15) — med
+                AI-analyse (tidligere bruk, forurensningsrisiko, tiltak)
+      Page N+3: Rapport tekst (pkt. 1–10 narrativ)
+    """
+    pdf = BuiltlyProPDF()
+    # _register_fonts returnerer faktisk brukbar font. Ved 2. gangs kall
+    # (ny PDF-instans i samme prosess) kan DejaVu-registrering feile stille —
+    # vi faller da trygt tilbake til Helvetica for HELE PDF-en for å unngå
+    # "Undefined font: dejavu"-crash i header/footer.
+    global PDF_FONT
+    _active_font = _register_fonts(pdf)
+    if _active_font != PDF_FONT:
+        PDF_FONT = _active_font
+    pdf.p_name = name.upper()
+    pdf.set_margins(25, 25, 20)
+    pdf.set_auto_page_break(True, 22)
+
+    # ================================================================
+    # PAGE 1: COVER
+    # ================================================================
+    pdf.add_page()
+
+    # Tynn topplinje i navy
+    pdf.set_fill_color(*_NAVY)
+    pdf.rect(0, 0, 210, 3, 'F')
+
+    _cover_tmp_path: Optional[str] = None  # Defer cleanup until after pdf.output()
+
+    # --- TOPP: Logo + tittel ---
+    if os.path.exists("logo.png"):
+        pdf.image("logo.png", x=25, y=18, w=38)
+
+    # Tittelblokk
+    pdf.set_y(48)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 28)
+    pdf.set_text_color(*_NAVY)
+    pdf.multi_cell(0, 11, clean_pdf_text("Mulighetsstudie"), 0, "L")
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "B", 28)
+    pdf.multi_cell(0, 11, clean_pdf_text("og tomteanalyse"), 0, "L")
+
+    # Undertittel — dempet grå
+    pdf.ln(2)
+    pdf.set_x(25)
+    pdf.set_font(PDF_FONT, "", 13)
+    pdf.set_text_color(*_MUTED)
+    pdf.cell(0, 7, clean_pdf_text(f"Konseptvurdering · {name}"), 0, 1, "L")
+
+    # --- MIDT: Hero-bilde ---
+    image_top_y = 100  # Start av bildet
+    if cover_image is not None:
+        _cover_fd = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        _cover_tmp_path = _cover_fd.name
+        _cover_fd.close()
+        try:
+            _cover_rgb = cover_image.convert("RGB")
+            _cover_rgb.save(_cover_tmp_path, format="JPEG", quality=92)
+            # Sentrert, fyller hele bredden mellom marginer
+            target_w = 160
+            img_h = target_w * _cover_rgb.height / _cover_rgb.width
+            if img_h > 110:
+                img_h = 110
+                target_w = img_h * _cover_rgb.width / _cover_rgb.height
+            x_img = (210 - target_w) / 2
+            pdf.image(_cover_tmp_path, x=x_img, y=image_top_y, w=target_w, h=img_h)
+        except Exception:
+            pass
+
+    # --- BUNN: Metadata-tabell (liten skrift, rolig uttrykk) ---
+    pdf.set_y(235)
+    pdf.set_draw_color(*_DIVIDER)
+    pdf.set_line_width(0.3)
+    pdf.line(25, 235, 185, 235)
+    pdf.set_line_width(0.2)
+    pdf.ln(6)
+
+    for label, value in [
+        ("Oppdragsgiver", client or "Ukjent"),
+        ("Dato", datetime.now().strftime("%d. %B %Y").replace("January", "januar").replace("February", "februar").replace("March", "mars").replace("April", "april").replace("May", "mai").replace("June", "juni").replace("July", "juli").replace("August", "august").replace("September", "september").replace("October", "oktober").replace("November", "november").replace("December", "desember")),
+        ("Utarbeidet av", "Builtly ARK Motor + AI"),
+        ("Regelverk", land),
+    ]:
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(45, 6, clean_pdf_text(label.upper()), 0, 0)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 6, clean_pdf_text(value), 0, 1)
+
+    # Tynn bunnlinje i navy
+    pdf.set_fill_color(*_NAVY)
+    pdf.rect(0, 294, 210, 3, 'F')
+
+    # ================================================================
+    # PAGE 2: TABLE OF CONTENTS
+    # ================================================================
+    pdf.add_page()
+    pdf.section_title("INNHOLDSFORTEGNELSE", 18)
+    pdf.ln(4)
+
+    toc_items = [
+        ("1.", "Sammendrag"),
+    ]
+    toc_idx = 2
+    if visual_attachments:
+        toc_items.append((f"{toc_idx}.", "Tomt og kontekst — flyfoto og støykart"))
+        toc_idx += 1
+    toc_items.append((f"{toc_idx}.", "Nøkkeltall fra motor"))
+    toc_idx += 1
+    toc_items.append((f"{toc_idx}.", "Volumskisser — topp 3 alternativer"))
+    toc_idx += 1
+    if scene_images:
+        toc_items.append((f"{toc_idx}.", "Planvisning og volumkontroll"))
+        toc_idx += 1
+    if solar_grid_image is not None:
+        toc_items.append((f"{toc_idx}.", "Sol/skygge-analyse"))
+        toc_idx += 1
+    if geodata_bundle and geodata_bundle.get("available"):
+        toc_items.append((f"{toc_idx}.", "Stedskontekst og geodata"))
+        toc_idx += 1
+        if geodata_bundle.get("historisk") is not None:
+            toc_items.append((f"{toc_idx}.", "Historisk flyfoto og tidligere arealbruk"))
+            toc_idx += 1
+
+    # TOC: kun fange OFFISIELLE # -headings (ikke underpunkter i narrativ tekst).
+    # Tidligere regex fanget også "1. Detaljert støyutredning..." fra pkt. 10-underpunkter.
+    # Nå aksepteres kun linjer som EKSPLISITT starter med "# " (hash + mellomrom).
+    narrativ_toc_count = 0
+    MAX_NARRATIV_TOC_ITEMS = 12  # safety cap — unngå TOC-spam ved hallusinasjoner
+    for raw_line in report_text.split("\n"):
+        line = raw_line.strip()
+        if line.startswith("# ") and narrativ_toc_count < MAX_NARRATIV_TOC_ITEMS:
+            # Strip "# " og eventuell "#" og mellomrom
+            title = line.lstrip("#").strip()
+            # Strip nummerprefiks: "1. OPPSUMMERING" → "OPPSUMMERING"
+            # (TOC-indeks er allerede toc_idx — vi vil ikke ha dobbel nummerering)
+            title = re.sub(r"^\d+\.\s*", "", title).strip()
+            # Title case: OPPSUMMERING → Oppsummering (mindre ropende i TOC)
+            if title.isupper() and len(title) > 3:
+                # Spesialbehandling: behold akronymer og rom-etter-slash
+                # Enkleste: bare første bokstav stor, resten små
+                title = title.capitalize()
+                # Men behold store bokstaver etter "/" og "-" (f.eks. "Risiko og avklaringspunkter")
+                # capitalize() gjør dette naturlig nok
+            # Filtrer bort støy-headings: for korte (<3 tegn) eller rene tall
+            if len(title) < 3 or title.isdigit():
+                continue
+            # Filtrer bort hallusinerte FORBUDT-headings som kan ha sneket seg gjennom
+            title_upper = title.upper()
+            if any(bad in title_upper for bad in ("VEDLEGG", "APPENDIKS", "APPENDIX", "MULIGHETSSTUDIE\n")):
+                continue
+            toc_items.append((f"{toc_idx}.", title))
+            toc_idx += 1
+            narrativ_toc_count += 1
+
+    for num, title in toc_items:
+        pdf.set_x(30)
+        pdf.set_font(PDF_FONT, "B", 10)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(10, 8, clean_pdf_text(num), 0, 0)
+        pdf.set_font(PDF_FONT, "", 10)
+        pdf.set_text_color(*_BODY_BLACK)
+        title_w = pdf.get_string_width(clean_pdf_text(title))
+        max_title_w = 120
+        if title_w > max_title_w:
+            title_w = max_title_w
+        pdf.cell(title_w + 2, 8, clean_pdf_text(title[:80]), 0, 0)
+        remaining = max(5, 155 - 10 - title_w - 2)
+        dots = "." * max(2, int(remaining / 1.8))
+        pdf.set_text_color(*_MUTED)
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.cell(0, 8, dots, 0, 1)
+
+    # ================================================================
+    # PAGE 3: EXECUTIVE SUMMARY
+    # ================================================================
+    if options and site is not None:
+        pdf.add_page()
+        pdf.section_title("SAMMENDRAG", 18)
+
+        best = options[0]
+        bra_best = best.gross_bta_m2 * best.efficiency_ratio
+
+        # Anbefalt alternativ
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "", 11)
+        pdf.set_text_color(*_BUILTLY_BLUE)
+        pdf.cell(0, 7, clean_pdf_text(f"Anbefalt: {best.name} ({best.typology})"), 0, 1)
+        pdf.ln(4)
+
+        # --- KPI-kort rad 1 (native PDF rects) ---
+        def _draw_kpi_card(px, py, pw, ph, title_str, value_str, sub_str, accent_color):
+            pdf.set_fill_color(*accent_color)
+            pdf.rect(px, py, pw, 2, 'F')
+            pdf.set_draw_color(150, 170, 195)
+            pdf.set_line_width(0.3)
+            pdf.rect(px, py, pw, ph, 'D')
+            pdf.set_line_width(0.2)
+            pdf.set_fill_color(240, 244, 250)
+            pdf.rect(px + 0.3, py + 2.3, pw - 0.6, ph - 2.6, 'F')
+            # Title: større font (7→10), mørkere farge (muted→navy-blå for kontrast)
+            pdf.set_xy(px + 3, py + 5)
+            pdf.set_font(PDF_FONT, "B", 10)
+            pdf.set_text_color(70, 90, 120)
+            pdf.cell(pw - 6, 5, clean_pdf_text(title_str), 0, 0)
+            # Value: større font (14→17) for dominant lesbarhet
+            pdf.set_xy(px + 3, py + 12)
+            pdf.set_font(PDF_FONT, "B", 17)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(pw - 6, 9, clean_pdf_text(value_str), 0, 0)
+            if sub_str:
+                pdf.set_xy(px + 3, py + 22)
+                pdf.set_font(PDF_FONT, "", 8)
+                pdf.set_text_color(100, 115, 135)
+                pdf.cell(pw - 6, 4, clean_pdf_text(sub_str), 0, 0)
+
+        cw = 38  # card width
+        ch = 32  # card height (økt fra 28 for å romme større fonter)
+        cx = 25  # start x
+        cy = pdf.get_y()
+        gap = 2.5
+
+        sol_color = (16, 185, 129) if best.solar_score >= 50 else (245, 158, 11)
+        score_color = (16, 185, 129) if best.score >= 60 else (245, 158, 11)
+
+        _draw_kpi_card(cx, cy, cw, ch, "BRA", f"{bra_best:,.0f} m2".replace(",", " "), "Salgbart areal", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + cw + gap, cy, cw, ch, "ENHETER", f"{best.unit_count}", "Boliger", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 2 * (cw + gap), cy, cw, ch, "SOL", f"{best.solar_score:.0f}/100", "Solscore", sol_color)
+        _draw_kpi_card(cx + 3 * (cw + gap), cy, cw, ch, "SCORE", f"{best.score:.0f}/100", "Totalscore", score_color)
+        pdf.set_y(cy + ch + 4)
+
+        # --- KPI-kort rad 2: Tomt ---
+        cy2 = pdf.get_y()
+        _draw_kpi_card(cx, cy2, cw, 26, "TOMTEAREAL", f"{site.site_area_m2:,.0f} m2".replace(",", " "), "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + cw + gap, cy2, cw, 26, "BYGGEFELT", f"{best.buildable_area_m2:,.0f} m2".replace(",", " "), "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 2 * (cw + gap), cy2, cw, 26, "MAKS HØYDE", f"{site.max_height_m:.0f} m / {site.max_floors} et.", "", _BUILTLY_BLUE)
+        _draw_kpi_card(cx + 3 * (cw + gap), cy2, cw, 26, "NABOBYGG", f"{site.neighbor_count} stk", "", _BUILTLY_BLUE)
+        pdf.set_y(cy2 + 30)
+
+        # --- Miljo-rad ---
+        env = environment_data or {}
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(0, 7, clean_pdf_text("MILJØFORHOLD"), 0, 1)
+        pdf.ln(1)
+
+        cy3 = pdf.get_y()
+        noise = env.get("noise", {}) if env.get("available") else {}
+        daylight = env.get("daylight", {}) if env.get("available") else {}
+
+        if noise.get("available") and noise.get("zones"):
+            worst = max(noise["zones"], key=lambda z: z.get("db", 0))
+            db = worst.get("db", 0)
+            nc = (239, 68, 68) if db > 65 else (245, 158, 11) if db > 55 else (16, 185, 129)
+            _draw_kpi_card(cx, cy3, cw, 26, "STØY", f"{db:.0f} dB", "", nc)
+        else:
+            _draw_kpi_card(cx, cy3, cw, 26, "STØY", "Ingen data", "", _MUTED)
+
+        if daylight.get("available"):
+            dl = daylight.get("overall_score", 0)
+            dc = (16, 185, 129) if dl >= 70 else (245, 158, 11) if dl >= 50 else (239, 68, 68)
+            _draw_kpi_card(cx + cw + gap, cy3, cw, 26, "DAGSLYS", f"{dl:.0f}/100", "", dc)
+        else:
+            _draw_kpi_card(cx + cw + gap, cy3, cw, 26, "DAGSLYS", "Ikke vurdert", "", _MUTED)
+
+        bra_pct = f"{site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else "Ikke satt"
+        _draw_kpi_card(cx + 2 * (cw + gap), cy3, cw, 26, "%-BRA MAL", bra_pct, "", _BUILTLY_BLUE)
+        pdf.set_y(cy3 + 30)
+
+        # --- Ranking-barer ---
+        pdf.ln(2)
+        pdf.set_x(25)
+        pdf.set_font(PDF_FONT, "B", 11)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(0, 7, clean_pdf_text("ALTERNATIV-RANKING (SCORE)"), 0, 1)
+        pdf.ln(2)
+
+        max_score = max((o.score for o in options), default=100)
+        bar_max_w = 110  # mm
+        sorted_opts = sorted(options, key=lambda o: o.score, reverse=True)
+        for opt in sorted_opts:
+            bar_w = max(2, opt.score / max(max_score, 1) * bar_max_w)
+            bar_color = (16, 185, 129) if opt.score >= 60 else (245, 158, 11) if opt.score >= 40 else (239, 68, 68)
+            y_bar = pdf.get_y()
+            pdf.set_x(25)
+            pdf.set_font(PDF_FONT, "", 9)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(30, 6, clean_pdf_text(opt.typology), 0, 0)
+            pdf.set_fill_color(*bar_color)
+            pdf.rect(56, y_bar + 0.5, bar_w, 5, 'F')
+            pdf.set_xy(57 + bar_w, y_bar)
+            pdf.set_font(PDF_FONT, "B", 9)
+            pdf.cell(10, 6, clean_pdf_text(f"{opt.score:.0f}"), 0, 1)
+            pdf.ln(1)
+
+    # ================================================================
+    # TOMT OG KONTEKST (flyfoto, støykart — flyttet fra vedlegg)
+    # ================================================================
+    if visual_attachments:
+        pdf.add_page()
+        pdf.section_title("TOMT OG KONTEKST", 16)
+        pdf.body_text(
+            "Flyfoto og støykart gir det visuelle grunnlaget for analysen "
+            "og dokumenterer tomtens plassering, bebyggelsestetthet og "
+            "miljøforhold."
         )
-        def _assistant_dialog() -> None:
-            render_assistant_surface(lang_key, surface_key="dialog")
+        pdf.ln(4)
 
-        _assistant_dialog()
-        return
+        attachment_labels = ["Flyfoto — tomt og omkringliggende bebyggelse", "Støykart — Dovrebanen"]
+        for idx, image in enumerate(visual_attachments):
+            if idx > 0:
+                pdf.add_page()
+            label = attachment_labels[idx] if idx < len(attachment_labels) else f"Figur {idx + 1}"
+            pdf.subtitle(label)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=88)
+                ratio_h = 160 * (image.height / max(image.width, 1))
+                if ratio_h > 200:
+                    ratio_h = 200
+                    ratio_w = ratio_h * (image.width / max(image.height, 1))
+                    pdf.image(tmp.name, x=105 - (ratio_w / 2), y=pdf.get_y(), w=ratio_w)
+                else:
+                    pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.set_y(pdf.get_y() + ratio_h + 4)
 
-    st.markdown("<div style='margin-top: 1.25rem;'></div>", unsafe_allow_html=True)
-    with st.container(border=True):
-        render_assistant_surface(lang_key, surface_key="inline")
-        if st.button(assistant_close_label(lang_key), key="assistant_inline_close", use_container_width=True):
-            close_assistant()
-            st.rerun()
+    # ================================================================
+    # PAGE 4: NØKKELTALL + CHARTS
+    # ================================================================
+    if options:
+        pdf.add_page()
+        pdf.section_title("NØKKELTALL FRA MOTOR", 16)
+
+        rows = []
+        for option in options:
+            bra_est = option.gross_bta_m2 * option.efficiency_ratio
+            rows.append([
+                option.name.replace("Alt ", ""),
+                option.typology,
+                f"{option.gross_bta_m2:.0f}",
+                f"{bra_est:.0f}",
+                str(option.unit_count),
+                f"{option.solar_score:.0f}",
+                f"{option.score:.0f}",
+            ])
+        add_pdf_table(
+            pdf,
+            headers=["Alt", "Typologi", "BTA", "BRA", "Enheter", "Sol", "Score"],
+            rows=rows,
+            widths=[30, 30, 22, 22, 20, 18, 18],
+            score_col=6,
+        )
+
+        try:
+            solar_chart = _render_solar_chart(options)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                solar_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                # Beregn høyde fra faktisk bildeforhold for å unngå at tekst blir klemt
+                _img_w_mm = 180
+                _img_h_mm = _img_w_mm * solar_chart.height / max(solar_chart.width, 1)
+                pdf.check_space(int(_img_h_mm) + 10)
+                pdf.image(tmp.name, x=15, y=pdf.get_y(), w=_img_w_mm)
+                pdf.ln(_img_h_mm + 5)
+        except Exception:
+            pass
+
+    if options and site is not None:
+        try:
+            ctx_chart = _render_context_summary(options, site, environment_data=environment_data)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                ctx_chart.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                _img_w_mm = 180
+                _img_h_mm = _img_w_mm * ctx_chart.height / max(ctx_chart.width, 1)
+                pdf.check_space(int(_img_h_mm) + 10)
+                pdf.image(tmp.name, x=15, y=pdf.get_y(), w=_img_w_mm)
+                pdf.ln(_img_h_mm + 5)
+        except Exception:
+            pass
+
+    # ================================================================
+    # PAGE 5+: VOLUMSKISSER - TOPP 3 (v13: ett alternativ per side)
+    # ================================================================
+    if option_images and not manual_sketch_images:
+        for i, image in enumerate(option_images[:3]):
+            pdf.add_page()
+            if i == 0:
+                pdf.section_title("VOLUMSKISSER - TOPP 3 ALTERNATIVER", 16)
+                pdf.ln(2)
+            if i < len(options):
+                opt = options[i]
+                bra = opt.gross_bta_m2 * opt.efficiency_ratio
+                pdf.subtitle(
+                    f"{opt.name} - {opt.typology} | ~{bra:.0f} m2 BRA | {opt.unit_count} bol. | Sol {opt.solar_score:.0f}/100"
+                )
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                img_w = 160
+                img_h = img_w * (image.height / max(image.width, 1))
+                if img_h > 180:
+                    img_h = 180
+                    img_w = img_h * (image.width / max(image.height, 1))
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
+            # Nøkkeltall caption under bildet
+            if i < len(options):
+                opt = options[i]
+                parts_count = len((opt.geometry or {}).get('massing_parts', []))
+                caption = (
+                    f"{opt.name} | {opt.typology} | {parts_count or '?'} deler\n"
+                    f"BTA {opt.gross_bta_m2:.0f} m\u00b2 | {opt.unit_count} boliger | {opt.floors} et. | "
+                    f"H\u00f8yde {opt.building_height_m:.1f} m | Sol {opt.solar_score:.0f}/100\n"
+                    f"Fotavtrykk {opt.footprint_area_m2:.0f} m\u00b2 | "
+                    f"Uteareal sol {opt.sunlit_open_space_pct:.0f}% | Naboer {opt.neighbor_count} | "
+                    f"Byggefelt {opt.buildable_area_m2:.0f} m\u00b2\n"
+                    f"Vinterskygge {opt.winter_noon_shadow_m:.0f} m | Score {opt.score}/100 | "
+                    f"{'Eksakt polygon' if 'Eksakt' in (opt.geometry or {}).get('placement', {}).get('source', '') else 'Beregnet'}"
+                )
+                pdf.set_font(PDF_FONT, "", 7)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                pdf.multi_cell(160, 3.5, clean_pdf_text(caption))
+                pdf.set_text_color(*_BODY_BLACK)
+
+    if manual_sketch_images:
+        pdf.add_page()
+        pdf.section_title("VALGT VOLUMLOSNING", 16)
+        pdf.body_text(
+            "Bildene nedenfor viser den manuelt redigerte volumplasseringen "
+            "som er valgt for videre bearbeiding."
+        )
+        pdf.ln(4)
+        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
+        for i, image in enumerate(manual_sketch_images):
+            pdf.check_space(100)
+            lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
+            pdf.subtitle(lbl)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=90)
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=160)
+                pdf.ln(92)
+
+    # ================================================================
+    # PLANVISNING OG VOLUMKONTROLL (v13: én per side med AI-analyse)
+    # ================================================================
+    if scene_images:
+        pv_analyses = plan_view_analyses or []
+        for i, image in enumerate(scene_images):
+            pdf.add_page()
+            if i == 0:
+                pdf.section_title("PLANVISNING OG VOLUMKONTROLL", 16)
+                pdf.body_text(
+                    "Planvisninger viser foreslåtte volumer sett ovenfra med "
+                    "tomtegrense, byggefelt og nabobebyggelse. "
+                    "Høyder på foreslåtte bygg og nabobygg er angitt."
+                )
+                pdf.ln(4)
+            if i < len(options):
+                opt = options[i]
+                bra = opt.gross_bta_m2 * opt.efficiency_ratio
+                lbl = f"{opt.name} — {opt.typology} | Planvisning"
+                caption = (
+                    f"BTA {opt.gross_bta_m2:.0f} m\u00b2 | BRA ~{bra:.0f} m\u00b2 | "
+                    f"{opt.unit_count} boliger | {opt.floors} etg | "
+                    f"Fotavtrykk {opt.footprint_area_m2:.0f} m\u00b2"
+                )
+            else:
+                lbl = f"Planvisning {i + 1}"
+                caption = ""
+            pdf.subtitle(lbl)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                image.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                img_w = 160
+                img_h = img_w * (image.height / max(image.width, 1))
+                if img_h > 160:
+                    img_h = 160
+                    img_w = img_h * (image.width / max(image.height, 1))
+                pdf.image(tmp.name, x=25, y=pdf.get_y(), w=img_w)
+                pdf.ln(img_h + 4)
+            # Caption under bildet
+            if caption:
+                pdf.set_font(PDF_FONT, "I", 8)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                pdf.cell(160, 4, clean_pdf_text(caption), 0, 1)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.ln(2)
+            # AI-analyse under bildet
+            if i < len(pv_analyses) and pv_analyses[i]:
+                pdf.check_space(25)
+                pdf.set_font(PDF_FONT, "B", 9)
+                pdf.set_text_color(*_BUILTLY_BLUE)
+                pdf.set_x(25)
+                pdf.cell(0, 5, clean_pdf_text("Arkitektonisk vurdering"), 0, 1)
+                pdf.set_font(PDF_FONT, "", 9)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.set_x(25)
+                pdf.multi_cell(160, 4.5, ironclad_text_formatter(pv_analyses[i]))
+                pdf.ln(4)
+
+    # ================================================================
+    # SOL/SKYGGE — ELEGANT ÉN-SIDE-PER-BILDE MED METADATA-PANEL
+    # ================================================================
+    if solar_grid_image is not None and site is not None and options:
+        solar_snapshots = [
+            (80, 12.0, "Vårjevndøgn — 21. mars kl. 12:00"),
+            (80, 15.0, "Vårjevndøgn — 21. mars kl. 15:00"),
+            (172, 12.0, "Sommersolverv — 21. juni kl. 12:00"),
+            (172, 15.0, "Sommersolverv — 21. juni kl. 15:00"),
+            (172, 18.0, "Sommersolverv — 21. juni kl. 18:00"),
+        ]
+        # use_3d indikerer om 3D-snapshots er tilgjengelige i det hele tatt.
+        # Hver individuelle snapshot sjekker sin egen indeks (fleksibelt — hvis
+        # brukeren har lastet opp 3 av 5, bruker vi 3D for de 3 og fallback for 2).
+        has_any_3d = bool(solar_3d_snapshots) and len(solar_3d_snapshots) > 0
+        use_3d = has_any_3d  # flag brukt i metodikk-tekst og kilde-referanse
+
+        # Introside — oppsummering av sol/skygge-metodikk
+        pdf.add_page()
+        pdf.section_title("SOL/SKYGGE-ANALYSE", 16)
+
+        _best = options[0] if options else None
+        _best_h = float(getattr(_best, "building_height_m", 0.0) or 0.0) if _best else 0.0
+
+        pdf.body_text(
+            "Analysen viser beregnede skyggeforhold for vårjevndøgn (21. mars) og "
+            "sommersolverv (21. juni) ved utvalgte klokkeslett. 3D-modellen inkluderer "
+            "både foreslått volum og 158 nabobygg, slik at kastede skygger reflekterer "
+            "den reelle situasjonen på tomten. Beregningene er stedsspesifikke for "
+            f"breddegrad {site.latitude_deg:.2f}° N."
+            if use_3d else
+            "Diagrammene viser beregnede skyggeforhold for vårjevndøgn (21. mars) og "
+            "sommersolverv (21. juni) ved utvalgte klokkeslett. Skygger fra foreslåtte "
+            "volumer og nabobygg er inkludert. Beregningene er stedsspesifikke for "
+            f"breddegrad {site.latitude_deg:.2f}° N."
+        )
+        pdf.ln(3)
+
+        # Liten info-boks med metodikk-kontekst
+        try:
+            pdf.set_fill_color(247, 249, 252)  # svært lys blågrå
+            pdf.set_draw_color(220, 228, 238)
+            pdf.set_line_width(0.2)
+            _box_y = pdf.get_y()
+            pdf.rect(25, _box_y, 160, 26, style="DF")
+            pdf.set_xy(29, _box_y + 3)
+            pdf.set_font(PDF_FONT, "B", 9)
+            pdf.set_text_color(*_NAVY)
+            pdf.cell(156, 5, clean_pdf_text("Metodikk"), 0, 2, "L")
+            pdf.set_x(29)
+            pdf.set_font(PDF_FONT, "", 8.5)
+            pdf.set_text_color(*_BODY_BLACK)
+            _method_text = (
+                "Bildene er renderet fra den interaktive 3D-modellen i dashbordet. "
+                "Solens posisjon (høyde og azimut) er beregnet astronomisk fra dato "
+                "og klokkeslett, og skyggene kastes deterministisk fra faktiske "
+                "volumhøyder."
+                if use_3d else
+                "Sol/skygge-diagrammene er generert fra en Python/Shapely-basert "
+                "skyggemotor. For fotorealistisk fremstilling med terreng og "
+                "nabobygg, bruk «Fang sol/skygge» i 3D-scenen og regenerer rapporten."
+            )
+            pdf.multi_cell(152, 4.2, ironclad_text_formatter(_method_text))
+            pdf.set_line_width(0.2)
+            pdf.set_xy(25, _box_y + 28)
+        except Exception:
+            pass
+        pdf.ln(2)
+
+        # Oversiktstabell med solhøyder for alle snapshots
+        try:
+            pdf.subtitle("Soldata for analyserte tidspunkter")
+            hdrs = ["Dato", "Tid", "Solhøyde", "Azimut", "Skygge (ved 16m)"]
+            widths = [35, 18, 25, 25, 52]
+            rows = []
+            for (doy, hour, lbl) in solar_snapshots:
+                alt_v = solar_altitude_deg(site.latitude_deg, doy, hour)
+                az_v = (solar_azimuth_deg(site.latitude_deg, doy, hour) - site.north_rotation_deg) % 360.0
+                sh_v = shadow_length_m(16.0, alt_v) if alt_v > 0.5 else 0.0
+                # Formater dato
+                _date = "21. mars" if doy == 80 else ("21. juni" if doy == 172 else f"dag {doy}")
+                _time = f"{int(hour):02d}:{int((hour%1)*60):02d}"
+                rows.append([
+                    _date,
+                    _time,
+                    f"{alt_v:.1f}°",
+                    f"{az_v:.0f}°",
+                    f"{sh_v:.1f} m" if alt_v > 0.5 else "—",
+                ])
+            add_pdf_table(pdf, hdrs, rows, widths)
+            pdf.ln(2)
+        except Exception:
+            pass
+
+        # --- Én side per bilde ---
+        for s_idx, (doy, hour, lbl) in enumerate(solar_snapshots):
+            try:
+                # Bruk 3D-snapshot hvis tilgjengelig på denne indeksen, ellers fallback
+                this_uses_3d = has_any_3d and s_idx < len(solar_3d_snapshots)
+                if this_uses_3d:
+                    snap = solar_3d_snapshots[s_idx]
+                else:
+                    snap = render_solar_snapshot(site, options[0], doy, hour, lbl)
+
+                # Beregn soldata for denne tidspunktet
+                try:
+                    alt_deg = solar_altitude_deg(site.latitude_deg, doy, hour)
+                    az_deg = (solar_azimuth_deg(site.latitude_deg, doy, hour) - site.north_rotation_deg) % 360.0
+                    if _best_h > 0 and alt_deg > 0.5:
+                        sh_len = shadow_length_m(_best_h, alt_deg)
+                    else:
+                        sh_len = 0.0
+                except Exception:
+                    alt_deg = 0.0
+                    az_deg = 0.0
+                    sh_len = 0.0
+
+                # Ny side per snapshot — maksimal lesbarhet
+                pdf.add_page()
+
+                # Heading (navy, med accent-linje)
+                pdf.set_x(25)
+                pdf.set_font(PDF_FONT, "B", 15)
+                pdf.set_text_color(*_NAVY)
+                pdf.multi_cell(160, 8, clean_pdf_text(lbl), 0, "L")
+                _y_after_title = pdf.get_y()
+                pdf.set_draw_color(*_BUILTLY_BLUE)
+                pdf.set_line_width(0.6)
+                _title_w = min(pdf.get_string_width(clean_pdf_text(lbl)) + 2, 155)
+                pdf.line(25, _y_after_title + 0.5, 25 + _title_w, _y_after_title + 0.5)
+                pdf.set_line_width(0.2)
+                pdf.ln(4)
+
+                # Kort underforklaring — kontekstuell, ikke generisk
+                _season = "Vårjevndøgn" if doy == 80 else "Sommersolverv"
+                _hour_str = f"{int(hour):02d}:{int((hour%1)*60):02d}"
+                _ctx_text = {
+                    (80, 12.0): (
+                        "Midt på dagen ved vårjevndøgn står solen i sør. Dette er en referansesituasjon "
+                        "med moderat solhøyde som viser typiske skyggeforhold gjennom vår og høst."
+                    ),
+                    (80, 15.0): (
+                        "Ettermiddag ved vårjevndøgn — solen beveger seg mot vest og skyggene forlenges "
+                        "østover. Kritisk for uteareal som skal fungere utover dagen."
+                    ),
+                    (172, 12.0): (
+                        "Høyeste solstand i året. Skyggene er korteste og uteareal får maksimal solinnstråling. "
+                        "Brukes som kontrollpunkt for sommersituasjonen."
+                    ),
+                    (172, 15.0): (
+                        "Sommerettermiddag med høy sol fra sørvest. Viktigste tidspunkt for vurdering av "
+                        "solforhold på vestvendte fasader og uteareal."
+                    ),
+                    (172, 18.0): (
+                        "Kveldssol fra vest — avgjørende for solinnstråling på uteareal etter arbeidstid. "
+                        "Her vises hvilke arealer som beholder sol lengst på sommerdager."
+                    ),
+                }.get((doy, hour), f"{_season} kl. {_hour_str} — solhøyde og skyggekast for dette tidspunktet.")
+
+                pdf.set_x(25)
+                pdf.set_font(PDF_FONT, "", 9.5)
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.multi_cell(160, 4.8, ironclad_text_formatter(_ctx_text))
+                pdf.ln(3)
+
+                # Stort bilde — nesten full sidebredde
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                    snap.convert("RGB").save(tmp.name, format="JPEG", quality=92)
+                    # 170mm bred, høyde følger bildeforhold, men cap ved 150mm
+                    img_w = 170.0
+                    img_h = img_w * (snap.height / max(snap.width, 1))
+                    if img_h > 155:
+                        img_h = 155.0
+                        img_w = img_h * (snap.width / max(snap.height, 1))
+                    # Sentrer horisontalt
+                    _x_img = (210 - img_w) / 2.0
+                    _y_img = pdf.get_y()
+                    pdf.image(tmp.name, x=_x_img, y=_y_img, w=img_w)
+
+                    # Subtil ramme rundt bildet for profesjonell polish
+                    pdf.set_draw_color(210, 220, 232)
+                    pdf.set_line_width(0.3)
+                    pdf.rect(_x_img, _y_img, img_w, img_h)
+                    pdf.set_line_width(0.2)
+
+                    pdf.set_y(_y_img + img_h + 5)
+
+                # Metadata-panel — tre kort i rekke: Solhøyde | Azimut | Skygge
+                try:
+                    _mx = 25.0
+                    _my = pdf.get_y()
+                    _total_w = 160.0
+                    _gap = 4.0
+                    _card_w = (_total_w - 2 * _gap) / 3.0
+                    _card_h = 18.0
+
+                    def _draw_meta_card(cx: float, cy: float, cw: float, ch: float,
+                                         label: str, value: str, hint: str) -> None:
+                        pdf.set_fill_color(250, 251, 253)
+                        pdf.set_draw_color(220, 228, 238)
+                        pdf.set_line_width(0.3)
+                        pdf.rect(cx, cy, cw, ch, style="DF")
+                        # Vertikal accent-strek til venstre
+                        pdf.set_draw_color(*_BUILTLY_BLUE)
+                        pdf.set_line_width(0.8)
+                        pdf.line(cx + 0.4, cy + 2, cx + 0.4, cy + ch - 2)
+                        pdf.set_line_width(0.2)
+                        # Label
+                        pdf.set_xy(cx + 3, cy + 2)
+                        pdf.set_font(PDF_FONT, "B", 7.5)
+                        pdf.set_text_color(*_MUTED)
+                        pdf.cell(cw - 6, 3.5, clean_pdf_text(label.upper()), 0, 0, "L")
+                        # Value
+                        pdf.set_xy(cx + 3, cy + 6)
+                        pdf.set_font(PDF_FONT, "B", 14)
+                        pdf.set_text_color(*_NAVY)
+                        pdf.cell(cw - 6, 6, clean_pdf_text(value), 0, 0, "L")
+                        # Hint
+                        pdf.set_xy(cx + 3, cy + ch - 5)
+                        pdf.set_font(PDF_FONT, "", 7)
+                        pdf.set_text_color(*_MUTED)
+                        pdf.cell(cw - 6, 3, clean_pdf_text(hint), 0, 0, "L")
+
+                    # Solhøyde
+                    _draw_meta_card(
+                        _mx, _my, _card_w, _card_h,
+                        "Solhøyde", f"{alt_deg:.1f}°",
+                        "Vinkel over horisont"
+                    )
+                    # Azimut
+                    _az_compass = {
+                        (0, 22.5): "N", (22.5, 67.5): "NØ", (67.5, 112.5): "Ø",
+                        (112.5, 157.5): "SØ", (157.5, 202.5): "S", (202.5, 247.5): "SV",
+                        (247.5, 292.5): "V", (292.5, 337.5): "NV", (337.5, 360.1): "N",
+                    }
+                    _compass = next((v for (lo, hi), v in _az_compass.items() if lo <= az_deg < hi), "—")
+                    _draw_meta_card(
+                        _mx + _card_w + _gap, _my, _card_w, _card_h,
+                        "Azimut", f"{az_deg:.0f}° ({_compass})",
+                        "Himmelretning mot sol"
+                    )
+                    # Skyggelengde
+                    if _best_h > 0 and sh_len > 0:
+                        _sh_val = f"{sh_len:.1f} m"
+                        _sh_hint = f"Fra {_best_h:.1f}m bygg"
+                    elif alt_deg <= 0.5:
+                        _sh_val = "Under horisont"
+                        _sh_hint = "Solen er gått ned"
+                    else:
+                        _sh_val = "—"
+                        _sh_hint = ""
+                    _draw_meta_card(
+                        _mx + 2 * (_card_w + _gap), _my, _card_w, _card_h,
+                        "Skyggelengde", _sh_val, _sh_hint
+                    )
+                    pdf.set_xy(25, _my + _card_h + 3)
+
+                    # Kildemerking — hvor kommer bildet fra (per bilde, ikke globalt)
+                    pdf.set_font(PDF_FONT, "I", 7.5)
+                    pdf.set_text_color(*_MUTED)
+                    _source = (
+                        "Kilde: Interaktiv 3D-modell · Three.js WebGL-renderer · "
+                        "Inkluderer volum og nabobygg"
+                        if this_uses_3d else
+                        "Kilde: Builtly skyggemotor · Python/Shapely · "
+                        "2D-projeksjon med astronomisk solposisjon"
+                    )
+                    pdf.cell(0, 3, clean_pdf_text(_source), 0, 0, "L")
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+    # ================================================================
+    # STEDSKONTEKST OG GEODATA + HISTORISK FLYFOTO (v15 - plassert etter sol/skygge)
+    # Dette gir leseflyten: nøkkeltall → volumer → planvisning → sol/skygge →
+    # stedskontekst → narrativ oppsummering (pkt. 1–10).
+    # ================================================================
+    try:
+        build_geo_context_pages(
+            pdf,
+            geodata_bundle=geodata_bundle,
+            historical_analysis=historical_analysis,
+            site_intelligence=site_intelligence,
+        )
+    except Exception as _geo_exc:
+        # Skip geo-sider hvis noe feiler — ikke la det bryte hele PDF-en
+        pass
+
+    # ================================================================
+    # RAPPORT TEKST (v13: tabeller for ALTERNATIVER)
+    # ================================================================
+    pdf.add_page()
+    report_lines = report_text.split("\n")
+    i_line = 0
+    while i_line < len(report_lines):
+        raw_line = report_lines[i_line]
+        line = raw_line.strip()
+
+        # Detect ALTERNATIVER section → render as professional comparison
+        if re.match(r"^#?\s*\d*\.?\s*ALTERNATIVER", line) or "# 8. ALTERNATIVER" in raw_line:
+            pdf.section_title(line.replace("#", "").strip(), 14)
+            i_line += 1
+
+            # --- Sammenligningstabellen: alle alternativer i én tabell ---
+            cmp_headers = ["Alt", "Typologi", "BTA m\u00b2", "BRA m\u00b2", "Enheter", "Fotavtrykk", "Sol", "Score"]
+            cmp_widths = [28, 25, 20, 20, 16, 22, 14, 15]
+            cmp_rows = []
+            for opt in options:
+                bra_est = opt.gross_bta_m2 * opt.efficiency_ratio
+                cmp_rows.append([
+                    opt.name.replace("Alt ", ""),
+                    opt.typology,
+                    f"{opt.gross_bta_m2:.0f}",
+                    f"~{bra_est:.0f}",
+                    str(opt.unit_count),
+                    f"{opt.footprint_area_m2:.0f}",
+                    f"{opt.solar_score:.0f}",
+                    f"{opt.score}",
+                ])
+            add_pdf_table(pdf, cmp_headers, cmp_rows, cmp_widths, score_col=7)
+
+            # --- Detaljkort per alternativ ---
+            for option in options:
+                bra_est = option.gross_bta_m2 * option.efficiency_ratio
+                pdf.check_space(45)
+                # Alternativnavn med accent-linje
+                pdf.set_draw_color(*_BUILTLY_BLUE)
+                pdf.set_line_width(0.5)
+                pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+                pdf.set_line_width(0.2)
+                pdf.ln(3)
+                pdf.set_font(PDF_FONT, "B", 11)
+                pdf.set_text_color(*_NAVY)
+                pdf.set_x(25)
+                pdf.cell(0, 6, clean_pdf_text(option.name), 0, 1)
+                # Kompakt nøkkeltall-linje
+                pdf.set_font(PDF_FONT, "", 8)
+                pdf.set_text_color(*_MUTED)
+                pdf.set_x(25)
+                mix_str = ", ".join(f"{k}: {v}" for k, v in (option.mix_counts or {}).items())
+                kpi_line = (
+                    f"{option.typology}  |  BTA {option.gross_bta_m2:.0f}  |  BRA ~{bra_est:.0f}  |  "
+                    f"{option.unit_count} boliger ({mix_str})  |  "
+                    f"P: {option.parking_spaces}  |  Sol {option.solar_score:.0f}/100  |  "
+                    f"Uteareal {option.sunlit_open_space_pct:.0f}%  |  Skygge {option.winter_noon_shadow_m:.0f} m"
+                )
+                pdf.multi_cell(160, 4, clean_pdf_text(kpi_line))
+                pdf.set_text_color(*_BODY_BLACK)
+                pdf.ln(1)
+                # Notes
+                for note in option.notes:
+                    pdf.check_space(7)
+                    pdf.set_font(PDF_FONT, "", 9)
+                    pdf.set_x(25)
+                    pdf.multi_cell(160, 4.5, ironclad_text_formatter(note))
+                pdf.ln(3)
+
+            # Skip bullet lines in report_text until next # section
+            while i_line < len(report_lines):
+                peek = report_lines[i_line].strip()
+                if peek.startswith("# ") or re.match(r"^\d+\.\s[A-ZÆØÅ]", peek):
+                    break
+                i_line += 1
+            continue
+
+        if not line:
+            pdf.ln(3)
+            i_line += 1
+            continue
+        if line.startswith("# ") or re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
+            pdf.section_title(line.replace("#", "").strip(), 14)
+        elif line.startswith("##"):
+            pdf.subtitle(line.replace("#", "").strip())
+        elif re.match(r"^[-\*•]\s+", line):
+            # Aksepterer både "- ", "* " og "• " som bullet-marker (safety net —
+            # skal normaliseres til "- " av _normalize_bullets, men dette sikrer
+            # konsistent rendering selv om AI-rapport slipper gjennom med *)
+            pdf.check_space(7)
+            pdf.set_x(30)
+            pdf.set_font(PDF_FONT, "", 10)
+            pdf.set_text_color(*_BODY_BLACK)
+            # v16.2.1: Sjekk faktisk aktivt font på PDF-objektet (ikke global PDF_FONT)
+            # for robusthet mot race conditions ved regenerering. FPDF lagrer aktivt
+            # font som pdf.font_family i lowercase. Hvis det ikke er "dejavu", faller
+            # vi trygt tilbake til "*" selv om PDF_FONT-globalen sier "DejaVu".
+            _pdf_current_font = str(getattr(pdf, "font_family", "") or "").lower()
+            bullet = "\u2022 " if _pdf_current_font == "dejavu" else "* "
+            # Strip bullet-marker (ett tegn + minst ett mellomrom) før rendering
+            content = re.sub(r"^[-\*•]\s+", "", line)
+            pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + content))
+        else:
+            pdf.check_space(7)
+            pdf.body_text(line)
+        i_line += 1
+
+    # Note: Flyfoto og støykart er flyttet til "TOMT OG KONTEKST" tidlig i rapporten
+    # (før Nøkkeltall fra motor). Ingen separat vedlegg-seksjon her.
+
+    output = pdf.output(dest="S")
+
+    # Cleanup deferred cover image temp file
+    if _cover_tmp_path is not None:
+        try:
+            os.unlink(_cover_tmp_path)
+        except Exception:
+            pass
+
+    if isinstance(output, bytes):
+        return output
+    elif isinstance(output, str):
+        return output.encode("latin-1")
+    else:
+        return bytes(output)
 
 
-# -------------------------------------------------
-# 6) CSS
-# -------------------------------------------------
+# --- 6. STYLING ---
 st.markdown(
     """
 <style>
     :root {
         --bg: #06111a;
         --panel: rgba(10, 22, 35, 0.78);
-        --panel-2: rgba(13, 27, 42, 0.94);
         --stroke: rgba(120, 145, 170, 0.18);
-        --stroke-strong: rgba(120, 145, 170, 0.28);
         --text: #f5f7fb;
         --muted: #9fb0c3;
         --soft: #c8d3df;
-        --accent: #38c2c9;
-        --accent-2: #78dce1;
-        --accent-3: #112c3f;
-        --ok: #7ee081;
-        --warn: #f4bf4f;
-        --shadow: 0 24px 90px rgba(0,0,0,0.35);
-        --radius-xl: 28px;
-        --radius-lg: 22px;
-        --radius-md: 14px;
+        --accent: #38bdf8;
+        --accent2: #34d399;
+        --radius-lg: 16px;
+        --radius-xl: 24px;
     }
-
     html, body, [class*="css"] {
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        overflow-x: hidden !important;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
     }
-
     .stApp {
-        overflow-x: hidden !important;
-        background:
-            radial-gradient(1100px 500px at 15% -5%, rgba(56,194,201,0.18), transparent 50%),
-            radial-gradient(900px 500px at 100% 0%, rgba(64,170,255,0.12), transparent 45%),
-            linear-gradient(180deg, #071018 0%, #08131d 35%, #071018 100%);
+        background-color: var(--bg) !important;
         color: var(--text);
     }
-
-    /* Prevent Streamlit from injecting white backgrounds on inner containers */
-    div[data-testid="stExpander"] [data-testid="stVerticalBlock"],
-    div[data-testid="stExpander"] [data-testid="element-container"],
-    div[data-testid="stExpander"] [class*="stElementContainer"],
-    div[data-testid="stExpander"] section,
-    div[data-testid="stExpander"] [class*="block-container"] {
-        background: transparent !important;
-        background-color: transparent !important;
-    }
-
-    header[data-testid="stHeader"] {
-        visibility: hidden;
-        height: 0;
-    }
-
-    [data-testid="stSidebar"] {
-        background: rgba(7, 16, 24, 0.96);
-        border-right: 1px solid var(--stroke);
-    }
-
+    header[data-testid="stHeader"] { visibility: hidden; height: 0; }
     .block-container {
-        max-width: 1300px !important;
-        padding-top: 1.35rem !important;
-        padding-bottom: 2rem !important;
+        max-width: 1320px !important;
+        padding-top: 1.5rem !important;
+        padding-bottom: 4rem !important;
     }
-
-    .top-shell {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1.25rem;
-    }
-
-    .brand-left {
-        display: flex;
-        align-items: center;
-        gap: 0.9rem;
-        min-width: 0;
-    }
-
     .brand-logo {
-        display: block;
-        height: 85px;
-        width: auto;
-        flex-shrink: 0;
+        height: 65px;
         filter: drop-shadow(0 0 18px rgba(120,220,225,0.08));
     }
-
-    .brand-name {
-        color: var(--text);
-        font-weight: 750;
-        font-size: 1.5rem;
-        line-height: 1.1;
-        letter-spacing: -0.02em;
+    button[kind="primary"] {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important;
+        border: none !important;
+        font-weight: 750 !important;
+        border-radius: 12px !important;
+        padding: 14px 28px !important;
+        font-size: 1.08rem !important;
+        letter-spacing: 0.02em !important;
+        transition: all 0.2s ease !important;
     }
-
-    [data-testid="stSelectbox"] {
-        margin-bottom: 0 !important;
-        width: 100%;
-        max-width: 200px;
+    button[kind="primary"]:hover {
+        transform: translateY(-2px) !important;
+        box-shadow: 0 12px 28px rgba(56,194,201,0.3) !important;
     }
-
-    [data-testid="stSelectbox"] label {
-        display: none !important;
+    button[kind="secondary"] {
+        background-color: rgba(255,255,255,0.05) !important;
+        color: #f8fafc !important;
+        border: 1px solid rgba(120,145,170,0.3) !important;
+        border-radius: 12px !important;
+        font-weight: 650 !important;
+        padding: 10px 24px !important;
+        transition: all 0.2s;
     }
-
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)) !important;
-        color: var(--text) !important;
-        border: 1px solid rgba(120,145,170,0.28) !important;
-        border-radius: 16px !important;
-        min-height: 44px !important;
-        padding-left: 10px !important;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
-        cursor: pointer;
+    button[kind="secondary"]:hover {
+        background-color: rgba(56,194,201,0.1) !important;
+        border-color: var(--accent) !important;
+        color: var(--accent) !important;
+        transform: translateY(-2px) !important;
     }
-
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover,
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within {
-        border-color: rgba(120,220,225,0.42) !important;
-        background: linear-gradient(180deg, rgba(14,28,43,0.98), rgba(9,19,30,0.98)) !important;
+    div[data-baseweb="base-input"], div[data-baseweb="select"] > div, .stTextArea > div > div > div {
+        background-color: #0d1824 !important;
+        border: 1px solid rgba(120, 145, 170, 0.4) !important;
+        border-radius: 8px !important;
     }
-
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] span,
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] input,
-    div[data-testid="stSelectbox"] div[data-baseweb="select"] div {
-        color: var(--text) !important;
-        -webkit-text-fill-color: var(--text) !important;
+    .stTextInput input, .stNumberInput input, .stTextArea textarea, div[data-baseweb="select"] * {
+        background-color: transparent !important;
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        border: none !important;
+        box-shadow: none !important;
     }
-
-    div[data-testid="stSelectbox"] svg {
-        color: var(--muted) !important;
-        fill: var(--muted) !important;
+    div[data-baseweb="base-input"]:focus-within, div[data-baseweb="select"] > div:focus-within, .stTextArea > div > div > div:focus-within {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 1px rgba(56, 194, 201, 0.5) !important;
     }
-
-    .hero-action.disabled,
-    .module-cta.disabled {
-        opacity: 0.45;
-        pointer-events: none;
-        cursor: default;
+    .stTextInput label, .stSelectbox label, .stNumberInput label, .stTextArea label, .stFileUploader label {
+        color: #c8d3df !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+        margin-bottom: 4px !important;
     }
-
-    .hero {
+    div[data-testid="stExpander"] {
+        border: 1px solid rgba(120,145,170,0.2) !important;
+        margin-bottom: 1rem !important;
+        border-radius: 12px !important;
+    }
+    div[data-testid="stExpander"] details, div[data-testid="stExpander"] details summary {
+        background-color: #0c1520 !important;
+        color: #f5f7fb !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: #0d1824 !important;
+        border: 1px dashed rgba(120, 145, 170, 0.6) !important;
+        border-radius: 12px !important;
+        padding: 2rem !important;
+    }
+    [data-testid="stAlert"] {
+        background-color: rgba(56, 194, 201, 0.05) !important;
+        border: 1px solid rgba(56, 194, 201, 0.2) !important;
+        border-radius: 12px !important;
+    }
+    [data-testid="stAlert"] * {
+        color: #f5f7fb !important;
+    }
+    /* KPI Cards — enhanced with accent bar */
+    .kpi-card {
+        padding: 1.1rem 1.3rem;
+        background: linear-gradient(145deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+        border: 1px solid rgba(120,145,170,0.18);
+        border-radius: 16px;
+        margin-bottom: 1rem;
         position: relative;
         overflow: hidden;
-        background: linear-gradient(180deg, rgba(13,27,42,0.96), rgba(8,18,28,0.96));
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: var(--radius-xl);
-        padding: 2.5rem;
-        box-shadow: var(--shadow);
-        margin-bottom: 0;
-        min-height: 560px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+        backdrop-filter: blur(8px);
     }
-
-    .hero::before {
-        content: "";
+    .kpi-card::before {
+        content: '';
         position: absolute;
-        inset: -80px -120px auto auto;
-        width: 420px;
-        height: 420px;
-        background: radial-gradient(circle, rgba(56,194,201,0.16) 0%, transparent 62%);
-        pointer-events: none;
-    }
-
-    .eyebrow {
-        color: var(--accent-2);
-        text-transform: uppercase;
-        letter-spacing: 0.14em;
-        font-size: 0.78rem;
-        font-weight: 700;
-        margin-bottom: 1rem;
-    }
-
-    .hero-title {
-        font-size: clamp(2.55rem, 5vw, 4.35rem);
-        line-height: 1.05;
-        letter-spacing: -0.03em;
-        font-weight: 800;
-        margin: 0 0 1rem 0;
-        color: var(--text);
-        max-width: none;
-    }
-
-    .hero-title .accent {
-        color: var(--accent-2);
-    }
-
-    .hero-subtitle {
-        max-width: 58ch;
-        font-size: 1.08rem;
-        line-height: 1.8;
-        color: var(--soft);
-        margin-bottom: 1.5rem;
-    }
-
-    .hero-actions {
-        display: flex;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        margin-bottom: 1.5rem;
-    }
-
-    .hero-action {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 46px;
-        padding: 0.78rem 1rem;
-        border-radius: 12px;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.95rem;
-        transition: all 0.2s ease;
-        border: 1px solid transparent;
-    }
-
-    .hero-action.primary {
-        color: #041018 !important;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border-color: rgba(120,220,225,0.45);
-    }
-
-    .hero-action.secondary {
-        color: #ffffff !important;
-        background: rgba(255,255,255,0.05);
-        border-color: rgba(120,145,170,0.22);
-    }
-
-    .hero-action:hover,
-    .module-cta:hover {
-        transform: translateY(-1px);
-    }
-
-    .proof-strip {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.55rem;
-    }
-
-    .proof-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        padding: 0.42rem 0.7rem;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(120,145,170,0.16);
-        color: var(--soft);
-        font-size: 0.82rem;
-    }
-
-    .hero-panel {
-        background: rgba(20, 35, 50, 0.4);
-        border: 1px solid var(--stroke);
-        border-radius: var(--radius-xl);
-        padding: 1.35rem;
-        height: 560px;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-start;
-        gap: 1rem;
-    }
-
-    .panel-title {
-        font-size: 0.86rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--muted);
-        margin-bottom: 0.1rem;
-    }
-
-    .mini-stat-grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        grid-template-rows: repeat(2, minmax(0, 1fr));
-        gap: 0.85rem;
-        flex: 1 1 auto;
-        align-items: stretch;
-    }
-
-    .mini-stat {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.08rem 1.08rem;
-        min-height: 0;
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        justify-content: flex-start;
-    }
-
-    .mini-stat-value {
-        font-size: 1.35rem;
-        font-weight: 760;
-        color: var(--text);
-        line-height: 1.1;
-    }
-
-    .mini-stat-label {
-        margin-top: 0.28rem;
-        color: var(--muted);
-        font-size: 0.88rem;
-        line-height: 1.5;
-    }
-
-    .assistant-teaser {
-        margin-top: auto;
-        background: linear-gradient(135deg, rgba(56,194,201,0.08), rgba(17,44,63,0.78));
-        border: 1px solid rgba(56,194,201,0.22);
-        border-radius: 22px;
-        padding: 1rem;
-        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-    }
-
-    .assistant-kicker {
-        color: var(--accent-2);
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        font-size: 0.74rem;
-        font-weight: 700;
-        margin-bottom: 0.55rem;
-    }
-
-    .assistant-title {
-        font-size: 1.55rem;
-        font-weight: 760;
-        line-height: 1.15;
-        letter-spacing: -0.02em;
-        margin-bottom: 0.65rem;
-        color: var(--text);
-    }
-
-    .assistant-subtitle {
-        color: var(--soft);
-        line-height: 1.72;
-        font-size: 0.96rem;
-        margin-bottom: 0.9rem;
-    }
-
-    .assistant-teaser .assistant-title {
-        font-size: 1.08rem;
-        margin-bottom: 0.45rem;
-    }
-
-    .assistant-teaser .assistant-subtitle {
-        font-size: 0.88rem;
-        line-height: 1.6;
-        color: var(--muted);
-        display: -webkit-box;
-        -webkit-line-clamp: 3;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-        margin-bottom: 0.75rem;
-    }
-
-    .assistant-scope {
-        color: var(--muted);
-        line-height: 1.6;
-        font-size: 0.84rem;
-        margin-top: 0.55rem;
-    }
-
-    .context-chips {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.55rem;
-    }
-
-    .context-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.42rem;
-        padding: 0.42rem 0.72rem;
-        border-radius: 999px;
-        background: rgba(255,255,255,0.04);
-        border: 1px solid rgba(120,145,170,0.16);
-        color: var(--soft);
-        font-size: 0.82rem;
-    }
-
-    .context-chip span {
-        color: var(--muted);
-    }
-
-    .context-chip.live {
-        border-color: rgba(126,224,129,0.28);
-        background: rgba(126,224,129,0.1);
-        color: #d8f8de;
-    }
-
-    .context-chip.ready {
-        border-color: rgba(244,191,79,0.22);
-        background: rgba(244,191,79,0.1);
-        color: #f6ddb0;
-    }
-
-    .assistant-teaser-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 44px;
-        padding: 0.75rem 1rem;
-        border-radius: 12px;
-        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96));
-        border: 1px solid rgba(120,220,225,0.45);
-        color: #041018 !important;
-        text-decoration: none !important;
-        font-weight: 700;
-        margin-top: 0.85rem;
-        transition: transform 0.2s ease;
-    }
-
-    .assistant-teaser-link:hover {
-        transform: translateY(-1px);
-    }
-
-    .assistant-dialog-hero {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
-        border: 1px solid var(--stroke);
-        border-radius: 22px;
-        padding: 1.25rem 1.2rem 1rem 1.2rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
-    }
-
-    .assistant-dialog-note {
-        color: var(--muted);
-        line-height: 1.62;
-        font-size: 0.86rem;
-        margin-top: 0.75rem;
-    }
-
-    .example-label {
-        color: var(--muted);
-        font-size: 0.82rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-weight: 700;
-        margin-bottom: 0.45rem;
-    }
-
-    .example-chip-wrap {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.55rem;
-        margin-bottom: 0.85rem;
-    }
-
-    .example-chip {
-        display: inline-flex;
-        align-items: center;
-        padding: 0.46rem 0.72rem;
-        border-radius: 999px;
-        border: 1px solid rgba(120,145,170,0.16);
-        background: rgba(255,255,255,0.03);
-        color: var(--soft);
-        font-size: 0.82rem;
-        line-height: 1.4;
-    }
-
-    .assistant-rail {
-        position: fixed;
-        right: -48px;
-        top: 48%;
-        transform: translateY(-50%) rotate(-90deg);
-        z-index: 999;
-        display: inline-flex;
-        align-items: center;
-        gap: 0.55rem;
-        padding: 0.72rem 1rem;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #38bdf8, #34d399);
         border-radius: 16px 16px 0 0;
-        background: linear-gradient(135deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96));
-        border: 1px solid rgba(56,194,201,0.26);
-        box-shadow: 0 18px 42px rgba(0,0,0,0.32);
-        color: #f5f7fb !important;
-        text-decoration: none !important;
-        font-weight: 650;
-        letter-spacing: 0.01em;
-        backdrop-filter: blur(14px);
     }
-
-    .assistant-rail:hover {
-        transform: translateY(-50%) rotate(-90deg) translateX(4px);
-    }
-
-    .assistant-rail-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: var(--accent-2);
-        box-shadow: 0 0 0 6px rgba(56,194,201,0.12);
-    }
-
-    div[data-testid="stForm"] {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
-        background-color: rgba(12,25,39,0.98) !important;
-        border: 1px solid var(--stroke) !important;
-        border-radius: 22px !important;
-        padding: 1.2rem 1.15rem 1.15rem 1.15rem !important;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
-    }
-
-    /* All direct children of stForm */
-    div[data-testid="stForm"] > div {
-        background: transparent !important;
-        background-color: transparent !important;
-    }
-
-    div[data-testid="stForm"] label {
-        color: var(--soft) !important;
-        font-weight: 650 !important;
-    }
-
-    div[data-testid="stMultiSelect"] > div,
-    div[data-testid="stTextArea"] > div {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: 14px;
-    }
-
-    div[data-testid="stMultiSelect"] div[data-baseweb="tag"] {
-        background: rgba(56,194,201,0.12) !important;
-        border: 1px solid rgba(56,194,201,0.18) !important;
-    }
-
-    div[data-testid="stTextArea"] textarea {
-        min-height: 130px !important;
-        background: rgba(255,255,255,0.02) !important;
-        color: var(--text) !important;
-        border-radius: 14px !important;
-    }
-
-    div[data-testid="stTextArea"] textarea::placeholder {
-        color: var(--muted) !important;
-    }
-
-    div[data-testid="stFormSubmitButton"] button,
-    div.stButton > button {
-        width: 100%;
-        min-height: 46px;
-        border-radius: 12px;
-        background: rgba(56,194,201,0.12);
-        border: 1px solid rgba(56,194,201,0.28);
-        color: #f5f7fb !important;
-        font-weight: 650;
-        transition: all 0.2s ease;
-    }
-
-    div[data-testid="stFormSubmitButton"] button:hover,
-    div.stButton > button:hover {
-        border-color: rgba(120,220,225,0.42);
-        transform: translateY(-1px);
-    }
-
-    .assistant-note {
-        margin-top: 0.9rem;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: 18px;
-        padding: 1rem 1rem 1rem 1rem;
-        color: var(--soft);
-        line-height: 1.65;
-        font-size: 0.92rem;
-    }
-
-    .assistant-note strong {
-        color: var(--text);
-        display: block;
-        margin-bottom: 0.25rem;
-    }
-
-    div[data-testid="stExpander"] {
-        border: 1px solid rgba(120,145,170,0.16) !important;
-        border-radius: 18px !important;
-        background: rgba(12,24,38,0.98) !important;
-        background-color: rgba(12,24,38,0.98) !important;
-    }
-
-    /* Expander clickable header row */
-    div[data-testid="stExpander"] details > summary,
-    div[data-testid="stExpander"] details summary {
-        background: rgba(12,24,38,0.98) !important;
-        background-color: rgba(12,24,38,0.98) !important;
-        border-radius: 18px !important;
-        color: #c8d3df !important;
-        padding: 0.85rem 1.1rem !important;
-    }
-
-    div[data-testid="stExpander"] details[open] > summary {
-        border-radius: 18px 18px 0 0 !important;
-    }
-
-    div[data-testid="stExpander"] details > summary span,
-    div[data-testid="stExpander"] details > summary p,
-    div[data-testid="stExpander"] details > summary svg {
-        color: #c8d3df !important;
-        fill: #9fb0c3 !important;
-    }
-
-    /* Expander content area – the inner div Streamlit wraps content in */
-    div[data-testid="stExpander"] > div,
-    div[data-testid="stExpander"] > div > div,
-    div[data-testid="stExpander"] details,
-    div[data-testid="stExpander"] details > div,
-    div[data-testid="stExpander"] details summary ~ div {
-        background: rgba(12,24,38,0.98) !important;
-        background-color: rgba(12,24,38,0.98) !important;
-    }
-
-    /* Force all text inside expander dark-mode */
-    div[data-testid="stExpander"] p,
-    div[data-testid="stExpander"] span,
-    div[data-testid="stExpander"] label,
-    div[data-testid="stExpander"] .stMarkdown,
-    div[data-testid="stExpander"] .stCaptionContainer {
-        color: #c8d3df !important;
-    }
-
-    div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 18px !important;
-        border: 1px solid rgba(120,145,170,0.18) !important;
-        background: rgba(255,255,255,0.03);
-    }
-
-    .stats-row {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 1rem;
-        margin-top: 1.15rem;
-    }
-
-    .stat-card {
-        background: var(--panel);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.15rem;
-        min-height: 132px;
-    }
-
-    .stat-value {
-        font-size: 1.35rem;
-        font-weight: 750;
-        color: var(--text);
-        line-height: 1.1;
-    }
-
-    .stat-title {
-        margin-top: 0.3rem;
-        font-size: 0.96rem;
-        font-weight: 660;
-        color: var(--text);
-    }
-
-    .stat-desc {
-        margin-top: 0.2rem;
-        color: var(--muted);
-        font-size: 0.86rem;
-        line-height: 1.55;
-    }
-
-    .section-head {
-        margin-top: 2.25rem;
+    .kpi-card-hero {
+        padding: 1.3rem 1.5rem;
+        background: linear-gradient(145deg, rgba(56,194,201,0.08), rgba(52,211,153,0.04));
+        border: 1px solid rgba(56,194,201,0.25);
+        border-radius: 16px;
         margin-bottom: 1rem;
+        position: relative;
+        overflow: hidden;
     }
-
-    .section-kicker {
-        color: var(--accent-2);
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-        font-size: 0.74rem;
-        font-weight: 700;
-        margin-bottom: 0.4rem;
+    .kpi-card-hero::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #38bdf8, #34d399, #38bdf8);
     }
-
-    .section-title {
-        font-size: 1.86rem;
-        font-weight: 750;
-        letter-spacing: -0.03em;
-        color: var(--text);
-        margin: 0;
-    }
-
-    .section-subtitle {
-        margin-top: 0.35rem;
-        color: var(--muted);
-        line-height: 1.75;
-        max-width: 74ch;
-    }
-
-    .trust-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 1rem;
-        margin-top: 0.8rem;
-    }
-
-    .trust-card {
-        background: var(--panel);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.2rem;
-        min-height: 136px;
-    }
-
-    .trust-title {
-        font-size: 1.05rem;
-        font-weight: 650;
-        color: var(--text);
-        margin-bottom: 0.45rem;
-    }
-
-    .trust-desc {
-        font-size: 0.92rem;
-        line-height: 1.65;
-        color: var(--muted);
-    }
-
-    .loop-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 1rem;
-        margin-top: 0.8rem;
-    }
-
-    .loop-card {
-        background: var(--panel-2);
-        border: 1px solid var(--stroke);
-        border-radius: 18px;
-        padding: 1.2rem;
-        min-height: 172px;
-    }
-
-    .loop-number {
-        width: 34px;
-        height: 34px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 999px;
-        background: rgba(56,194,201,0.12);
-        border: 1px solid rgba(56,194,201,0.22);
-        color: var(--accent-2);
-        font-weight: 700;
-        font-size: 0.92rem;
-        margin-bottom: 0.8rem;
-    }
-
-    .loop-title {
-        font-size: 1.05rem;
-        font-weight: 650;
-        color: var(--text);
-        margin-bottom: 0.45rem;
-    }
-
-    .loop-desc {
-        font-size: 0.92rem;
-        line-height: 1.65;
-        color: var(--muted);
-    }
-
-    .subsection-title {
-        margin-top: 1.5rem;
-        margin-bottom: 0.9rem;
-        font-size: 1.05rem;
-        font-weight: 700;
-        color: var(--text);
-    }
-
-    .module-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 1.2rem;
-        align-items: stretch;
-        margin-top: 0.8rem;
-    }
-
-    .module-grid-two {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .module-card {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
-        border: 1px solid var(--stroke);
-        border-radius: 22px;
-        padding: 1.25rem;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
-        display: flex;
-        flex-direction: column;
-        min-height: 360px;
-        height: 100%;
-    }
-
-    .module-card:hover {
-        border-color: rgba(56,194,201,0.24);
-        box-shadow: 0 16px 42px rgba(0,0,0,0.24);
-    }
-
-    .module-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.75rem;
-        margin-bottom: 1rem;
-    }
-
-    .module-badge {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        padding: 0.32rem 0.62rem;
-        border-radius: 999px;
-        border: 1px solid rgba(120,145,170,0.18);
-        background: rgba(255,255,255,0.03);
-        color: var(--muted);
-        font-size: 0.75rem;
-        font-weight: 650;
-        letter-spacing: 0.01em;
-        white-space: nowrap;
-    }
-
-    .badge-priority { color: #8ef0c0; border-color: rgba(142,240,192,0.25); background: rgba(126,224,129,0.08); }
-    .badge-phase2 { color: #9fe7ff; border-color: rgba(120,220,225,0.22); background: rgba(56,194,201,0.08); }
-    .badge-early { color: #d7def7; border-color: rgba(215,222,247,0.18); background: rgba(255,255,255,0.03); }
-    .badge-roadmap { color: #f4bf4f; border-color: rgba(244,191,79,0.22); background: rgba(244,191,79,0.08); }
-
-    .module-icon {
-        width: 46px;
-        height: 46px;
-        border-radius: 14px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        background: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.18);
-        color: var(--accent-2);
-        font-size: 1.32rem;
-        flex-shrink: 0;
-    }
-
-    .module-title {
-        font-size: 1.08rem;
-        font-weight: 720;
-        line-height: 1.35;
-        color: var(--text);
-        margin-bottom: 0.5rem;
-    }
-
-    .module-desc {
-        font-size: 0.95rem;
-        line-height: 1.72;
-        color: var(--muted);
-        min-height: 80px;
-    }
-
-    .module-meta {
-        font-size: 0.86rem;
-        line-height: 1.75;
-        color: var(--soft);
-        padding-top: 0.95rem;
-        border-top: 1px solid rgba(120,145,170,0.14);
-        min-height: 65px;
-    }
-
-    .module-spacer {
-        flex: 1;
-        min-height: 1rem;
-    }
-
-    .module-cta-wrap {
-        margin-top: 1rem;
-    }
-
-    .module-cta {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 100%;
-        min-height: 46px;
-        padding: 0.78rem 1rem;
-        border-radius: 12px;
-        background: rgba(56,194,201,0.1);
-        border: 1px solid rgba(56,194,201,0.28);
-        color: #f5f7fb !important;
-        text-decoration: none !important;
-        font-weight: 650;
-        font-size: 0.94rem;
-        transition: all 0.2s ease;
-    }
-
-    .cta-band {
-        margin-top: 4rem;
-        background: linear-gradient(135deg, rgba(56,194,201,0.08), rgba(18,49,76,0.3));
-        border: 1px solid rgba(56,194,201,0.2);
-        border-radius: 20px;
-        padding: 2.5rem 3rem;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 2rem;
-    }
-
-    .cta-text-wrapper {
-        max-width: 65ch;
-    }
-
-    .cta-title {
-        font-size: 1.45rem;
-        font-weight: 750;
-        color: var(--text);
-        margin-bottom: 0.5rem;
-    }
-
-    .cta-desc {
-        color: var(--muted);
-        line-height: 1.6;
-        font-size: 1rem;
-    }
-
-    .cta-actions {
-        display: flex;
-        gap: 1rem;
-        flex-shrink: 0;
-    }
-
-    .integration-footer-callout {
-        margin-top: 1.35rem;
-        text-align: center;
-    }
-
-    .integration-footer-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        gap: 0.35rem;
-        color: rgba(192, 206, 223, 0.78) !important;
-        font-size: 0.92rem;
-        text-decoration: none !important;
-        border-bottom: 1px solid rgba(112, 214, 220, 0.18);
-        padding-bottom: 0.1rem;
-        transition: color 0.18s ease, border-color 0.18s ease;
-    }
-
-    .integration-footer-link:hover {
-        color: #f5f7fb !important;
-        border-color: rgba(112, 214, 220, 0.36);
-    }
-
-    .integration-close-link {
-        color: rgba(159,176,195,0.82) !important;
-        font-size: 0.85rem;
-        text-decoration: none !important;
-    }
-
-    .integration-close-link:hover {
-        color: #f5f7fb !important;
-    }
-
-    .footer-block {
-        text-align: center;
-        margin-top: 2.1rem;
-        padding-top: 1.5rem;
-        padding-bottom: 1rem;
-        border-top: 1px solid rgba(120,145,170,0.15);
-    }
-
-    .footer-copy {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin-bottom: 0.35rem;
-    }
-
-    .footer-meta {
-        color: rgba(159,176,195,0.55);
-        font-size: 0.8rem;
-    }
-
-    @media (max-width: 1180px) {
-        .top-shell {
-            flex-direction: column;
-            align-items: flex-start;
-        }
-        .mini-stat-grid,
-        .stats-row,
-        .trust-grid,
-        .loop-grid,
-        .module-grid,
-        .module-grid-two {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-    }
-
-    @media (max-width: 900px) {
-        .cta-band {
-            flex-direction: column;
-            align-items: flex-start;
-            padding: 2rem;
-        }
-        .cta-actions {
-            margin-top: 1rem;
-            flex-wrap: wrap;
-        }
-    }
-
-    @media (max-width: 900px) {
-        .assistant-rail {
-            display: none;
-        }
-        .hero-panel {
-            height: auto;
-        }
-    }
-
-    /* ── MOBILE FIXES ── */
-
-    /* Prevent ALL horizontal overflow */
-    html, body, .stApp, [data-testid="stAppViewContainer"],
-    [data-testid="stAppViewBlockContainer"], .block-container {
-        max-width: 100vw !important;
-        overflow-x: hidden !important;
-    }
-    [data-testid="stColumn"] {
-        min-width: 0 !important;
-    }
-
-    /* Desktop: ensure gap between top bar dropdowns */
-    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
-        display: flex !important;
-        justify-content: flex-end !important;
-    }
-    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
-        gap: 0.75rem !important;
-        justify-content: flex-end !important;
-        flex-wrap: nowrap !important;
-    }
-    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-        padding: 0 !important;
-        flex: 0 0 auto !important;
-        width: auto !important;
-    }
-    [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] {
-        width: 170px;
-        max-width: 170px;
-    }
-
-    /* Tablet: slightly narrower controls */
-    @media (max-width: 1180px) and (min-width: 761px) {
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stSelectbox"] {
-            width: 150px;
-            max-width: 150px;
-        }
-    }
-
-    @media (max-width: 760px) {
-        .block-container {
-            padding-left: 0.75rem !important;
-            padding-right: 0.75rem !important;
-        }
-
-        /* Stack ALL column rows vertically on mobile */
-        [data-testid="stHorizontalBlock"] {
-            flex-direction: column !important;
-            gap: 0.5rem !important;
-        }
-        [data-testid="stColumn"] {
-            width: 100% !important;
-            flex: 1 1 100% !important;
-            max-width: 100% !important;
-        }
-
-        /* EXCEPTION: top bar stays horizontal */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) {
-            flex-direction: row !important;
-            flex-wrap: nowrap !important;
-            align-items: center !important;
-            gap: 0 !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:first-child {
-            flex: 1 1 0 !important;
-            min-width: 0 !important;
-        }
-        /* Controls wrapper - auto width, right-aligned, keep away from edge */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
-            flex: 0 0 auto !important;
-            width: auto !important;
-            max-width: none !important;
-            margin-right: 12px !important;
-            padding-right: 4px !important;
-        }
-        /* Kill ALL backgrounds on wrapper divs so pills don't merge */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div > div,
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"],
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] > div {
-            background: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
-            padding: 0 !important;
-            margin: 0 !important;
-        }
-        /* Sub-columns: horizontal, right-aligned */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] {
-            flex-direction: row !important;
-            flex-wrap: nowrap !important;
-            gap: 8px !important;
-            justify-content: flex-end !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 60px !important;
-            width: 60px !important;
-            max-width: 60px !important;
-        }
-        /* Each selectbox: compact pill */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] {
-            width: 60px !important;
-            max-width: 60px !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
-            padding: 0 !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div {
-            background: rgba(150,180,210,0.10) !important;
-            border: 1px solid rgba(150,180,210,0.20) !important;
-            border-radius: 12px !important;
-            height: 44px !important;
-            min-height: 44px !important;
-            max-height: 44px !important;
-            width: 58px !important;
-            max-width: 58px !important;
-            padding: 0 !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            overflow: hidden !important;
-            cursor: pointer !important;
-        }
-        /* Inner value wrapper — must be wide enough to show emoji fully */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 100% !important;
-            max-width: 100% !important;
-            overflow: hidden !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            display: flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-        }
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
-            display: none !important;
-        }
-        /* Emoji-pille — begrens span-bredden så kun emojien vises, teksten etter klippes.
-           Vi setter bredde mindre enn én emoji + space for å sikre at kun emojien rendres. */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 22px !important;
-            line-height: 1 !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: flex-start !important;
-            width: 28px !important;
-            max-width: 28px !important;
-            height: 44px !important;
-            overflow: hidden !important;
-            text-overflow: clip !important;
-            white-space: nowrap !important;
-            text-align: left !important;
-            padding: 0 !important;
-            margin: 0 auto !important;
-            color: #f5f7fb !important;
-        }
-
-        /* Gi block-container nok høyre-padding slik at topbar-pillene ikke
-           klippes av viewport-kanten */
-        .block-container {
-            padding-right: 1.25rem !important;
-            padding-left: 0.75rem !important;
-        }
-
-        .mini-stat-grid,
-        .stats-row,
-        .trust-grid,
-        .loop-grid,
-        .module-grid,
-        .module-grid-two {
-            grid-template-columns: 1fr;
-        }
-        .hero, .hero-panel {
-            min-height: auto;
-            height: auto;
-        }
-        .brand-logo {
-            height: 45px !important;
-        }
-        .hero {
-            padding: 1.5rem !important;
-            min-height: auto !important;
-            border-radius: 16px !important;
-            position: relative !important;
-            z-index: 1 !important;
-        }
-        .hero::before {
-            display: none !important;
-        }
-        .eyebrow {
-            font-size: 0.65rem !important;
-            letter-spacing: 0.1em !important;
-            margin-bottom: 0.5rem !important;
-        }
-        .hero-title {
-            font-size: 1.8rem !important;
-            margin-bottom: 0.6rem !important;
-        }
-        .hero-subtitle {
-            font-size: 0.9rem !important;
-            line-height: 1.6 !important;
-            margin-bottom: 1rem !important;
-        }
-        .hero-actions {
-            gap: 0.5rem !important;
-            margin-bottom: 1rem !important;
-        }
-        .hero-action {
-            white-space: normal !important;
-            font-size: 0.8rem !important;
-            padding: 8px 14px !important;
-            min-height: 38px !important;
-            border-radius: 10px !important;
-        }
-        .proof-strip {
-            gap: 0.35rem !important;
-        }
-        .proof-chip {
-            font-size: 0.68rem !important;
-            padding: 0.25rem 0.5rem !important;
-        }
-        .hero-panel {
-            padding: 1rem !important;
-            border-radius: 16px !important;
-        }
-        .panel-title {
-            font-size: 0.75rem !important;
-        }
-        .mini-stat {
-            padding: 0.8rem !important;
-        }
-        .mini-stat-value {
-            font-size: 1rem !important;
-        }
-        .mini-stat-label {
-            font-size: 0.78rem !important;
-        }
-        .cta-band, .hero-panel, .card {
-            max-width: 100% !important;
-            box-sizing: border-box !important;
-        }
-        .module-card {
-            padding: 1.2rem !important;
-            border-radius: 16px !important;
-        }
-        .cta-band {
-            flex-direction: column;
-            align-items: flex-start;
-            padding: 1.2rem;
-            border-radius: 16px !important;
-        }
-        .cta-title {
-            font-size: 1.3rem !important;
-        }
-        .cta-desc {
-            font-size: 0.85rem !important;
-        }
-        }
-        .cta-actions {
-            margin-top: 1rem;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-        }
-        .assistant-rail {
-            display: none;
-        }
-    }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-st.markdown(
-    """
-<style>
-    .assistant-teaser {
-        margin-top: auto;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: 20px;
-        padding: 1rem 1rem 0.95rem 1rem;
-        box-shadow: none;
-    }
-
-    .assistant-teaser-row {
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 1rem;
-    }
-
-    .assistant-teaser-copy {
-        flex: 1 1 auto;
-        min-width: 0;
-    }
-
-    .assistant-teaser .assistant-title {
-        font-size: 1.02rem;
-        margin-bottom: 0.32rem;
-    }
-
-    .assistant-teaser .assistant-subtitle {
-        font-size: 0.88rem;
-        line-height: 1.58;
-        color: var(--muted);
-        margin-bottom: 0;
-        display: block;
-    }
-
-    .assistant-teaser-link.compact {
-        margin-top: 0;
-        min-height: 42px;
-        padding: 0.7rem 0.95rem;
-        border-radius: 12px;
-        white-space: nowrap;
-        background: rgba(56,194,201,0.12);
-        border: 1px solid rgba(56,194,201,0.24);
-        color: var(--text) !important;
-        flex-shrink: 0;
-    }
-
-    .assistant-teaser-link.compact:hover {
-        background: rgba(56,194,201,0.16);
-    }
-
-    .assistant-teaser-foot {
-        margin-top: 0.72rem;
-        padding-top: 0.72rem;
-        border-top: 1px solid rgba(120,145,170,0.12);
-        color: var(--muted);
+    .metric-title {
+        color: #9fb0c3;
         font-size: 0.82rem;
-        line-height: 1.55;
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 500;
     }
-
-    .context-chips.compact {
-        margin-top: 0.05rem;
+    .metric-value {
+        color: #f5f7fb;
+        font-size: 1.45rem;
+        font-weight: 700;
+        line-height: 1.2;
     }
-
-    div[data-testid="stDialog"] {
-        backdrop-filter: blur(6px);
+    .metric-value-hero {
+        color: #38bdf8;
+        font-size: 1.6rem;
+        font-weight: 800;
+        line-height: 1.2;
     }
-
-    div[data-testid="stDialog"] [role="dialog"] {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98)) !important;
-        border: 1px solid rgba(120,145,170,0.18) !important;
-        border-radius: 26px !important;
-        box-shadow: 0 32px 90px rgba(0,0,0,0.44) !important;
-        color: var(--text) !important;
-        overflow: hidden !important;
-    }
-
-    div[data-testid="stDialog"] [data-baseweb="modal"],
-    div[data-testid="stDialog"] [data-baseweb="modal-header"],
-    div[data-testid="stDialog"] [data-baseweb="modal-body"],
-    div[data-testid="stDialog"] [data-testid="stDialogContent"] {
-        background: transparent !important;
-        color: var(--text) !important;
-    }
-
-    div[data-testid="stDialog"] [data-baseweb="modal-header"] {
-        border-bottom: 1px solid rgba(120,145,170,0.12);
-    }
-
-    div[data-testid="stDialog"] div[data-testid="stForm"] {
-        background: rgba(255,255,255,0.03) !important;
-        border: 1px solid rgba(120,145,170,0.16) !important;
-        border-radius: 22px !important;
-        padding: 1.1rem 1.05rem 1.05rem 1.05rem !important;
-        box-shadow: none !important;
-    }
-
-    div[data-testid="stDialog"] div[data-testid="stForm"] label,
-    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] p,
-    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] li,
-    div[data-testid="stDialog"] div[data-testid="stCaptionContainer"],
-    div[data-testid="stDialog"] .stCaptionContainer {
-        color: var(--soft) !important;
-    }
-
-    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] strong,
-    div[data-testid="stDialog"] h1,
-    div[data-testid="stDialog"] h2,
-    div[data-testid="stDialog"] h3,
-    div[data-testid="stDialog"] div[data-testid="stMarkdownContainer"] p strong {
-        color: var(--text) !important;
-    }
-
-    div[data-testid="stDialog"] div[data-testid="stVerticalBlockBorderWrapper"] {
-        border-radius: 18px !important;
-        border: 1px solid rgba(120,145,170,0.16) !important;
-        background: rgba(255,255,255,0.03) !important;
-    }
-
-    div[data-testid="stDialog"] div[data-testid="stMultiSelect"] > div,
-    div[data-testid="stDialog"] div[data-testid="stTextArea"] > div {
-        background: transparent !important;
-        border: 0 !important;
-    }
-
-    div[data-testid="stDialog"] div[data-baseweb="select"] > div,
-    div[data-testid="stDialog"] div[data-baseweb="base-input"] > div,
-    div[data-testid="stDialog"] div[data-baseweb="textarea"] > div,
-    div[data-testid="stDialog"] div[data-testid="stTextArea"] textarea {
-        background: rgba(255,255,255,0.03) !important;
-        border: 1px solid rgba(120,145,170,0.16) !important;
-        color: var(--text) !important;
-    }
-
-    div[data-testid="stDialog"] input,
-    div[data-testid="stDialog"] textarea,
-    div[data-testid="stDialog"] div[data-baseweb="select"] input {
-        color: var(--text) !important;
-        -webkit-text-fill-color: var(--text) !important;
-        caret-color: var(--accent-2) !important;
-    }
-
-    div[data-testid="stDialog"] input::placeholder,
-    div[data-testid="stDialog"] textarea::placeholder {
-        color: var(--muted) !important;
-    }
-
-    div[data-testid="stDialog"] div[data-baseweb="select"] > div,
-    div[data-testid="stDialog"] div[data-baseweb="base-input"] > div,
-    div[data-testid="stDialog"] div[data-baseweb="textarea"] {
-        background: linear-gradient(180deg, rgba(12,25,39,0.96), rgba(8,18,28,0.96)) !important;
-        border-radius: 14px !important;
-    }
-
-    div[data-testid="stDialog"] div[data-baseweb="textarea"] textarea {
-        background: transparent !important;
-    }
-
-    div[data-testid="stDialog"] div[data-baseweb="tag"] {
-        background: rgba(56,194,201,0.12) !important;
-        border: 1px solid rgba(56,194,201,0.2) !important;
-    }
-
-    div[data-testid="stDialog"] div[data-baseweb="tag"] span {
-        color: var(--text) !important;
-    }
-
-    div[data-testid="stDialog"] div.stButton > button,
-    div[data-testid="stDialog"] div[data-testid="stFormSubmitButton"] button {
-        background: rgba(56,194,201,0.12) !important;
-        border: 1px solid rgba(56,194,201,0.28) !important;
-        color: var(--text) !important;
-    }
-
-    div[data-testid="stDialog"] div.stButton > button:hover,
-    div[data-testid="stDialog"] div[data-testid="stFormSubmitButton"] button:hover {
-        background: rgba(56,194,201,0.16) !important;
-        border-color: rgba(120,220,225,0.42) !important;
-        transform: translateY(-1px);
-    }
-
-    div[data-baseweb="popover"],
-    div[data-baseweb="menu"] {
-        background: transparent !important;
-        border: 0 !important;
-        color: var(--text) !important;
-        box-shadow: none !important;
-    }
-
-    div[data-baseweb="popover"] > div,
-    div[data-baseweb="menu"] > div,
-    div[data-baseweb="popover"] ul,
-    div[data-baseweb="menu"] ul,
-    div[data-baseweb="popover"] [role="listbox"],
-    div[data-baseweb="menu"] [role="listbox"] {
-        background: linear-gradient(180deg, rgba(10,22,35,0.99), rgba(7,16,24,0.99)) !important;
-        border: 1px solid rgba(120,145,170,0.2) !important;
-        color: var(--text) !important;
-        border-radius: 18px !important;
-        box-shadow: 0 20px 40px rgba(0,0,0,0.34) !important;
-        overflow: hidden !important;
-    }
-
-    div[data-baseweb="popover"] *,
-    div[data-baseweb="menu"] *,
-    ul[role="listbox"] *,
-    li[role="option"] * {
-        color: var(--text) !important;
-        -webkit-text-fill-color: var(--text) !important;
-    }
-
-    div[data-baseweb="popover"] li,
-    div[data-baseweb="menu"] li,
-    li[role="option"] {
-        background: transparent !important;
-        border-radius: 12px !important;
-        margin: 0.15rem 0 !important;
-    }
-
-    div[data-baseweb="popover"] li > div,
-    div[data-baseweb="menu"] li > div,
-    li[role="option"] > div {
-        background: transparent !important;
-    }
-
-    div[data-baseweb="popover"] li[aria-selected="true"],
-    div[data-baseweb="popover"] li:hover,
-    div[data-baseweb="menu"] li[aria-selected="true"],
-    div[data-baseweb="menu"] li:hover,
-    li[role="option"][aria-selected="true"],
-    li[role="option"]:hover {
-        background: rgba(56,194,201,0.14) !important;
-    }
-
-    div[data-testid="stTextInput"] > div {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(120,145,170,0.16);
-        border-radius: 14px;
-    }
-
-    div[data-testid="stTextInput"] input {
-        background: transparent !important;
-        color: var(--text) !important;
-        -webkit-text-fill-color: var(--text) !important;
-        border-radius: 14px !important;
-    }
-
-    div[data-testid="stTextInput"] input::placeholder {
-        color: var(--muted) !important;
-        -webkit-text-fill-color: var(--muted) !important;
-    }
-
-    div[data-testid="stTextInput"] div[data-baseweb="base-input"],
-    div[data-testid="stTextInput"] div[data-baseweb="input"] {
-        background-color: transparent !important;
-        background: transparent !important;
-    }
-
-    div[data-testid="stExpander"] div[data-testid="stTextInput"] > div,
-    div[data-testid="stForm"] div[data-testid="stTextInput"] > div {
-        background: rgba(255,255,255,0.04) !important;
-        border: 1px solid rgba(120,145,170,0.22) !important;
-    }
-
-    div[data-testid="stExpander"] div[data-testid="stTextInput"] input,
-    div[data-testid="stForm"] div[data-testid="stTextInput"] input {
-        background: transparent !important;
-        color: #f5f7fb !important;
-        -webkit-text-fill-color: #f5f7fb !important;
-    }
-
-    div[data-testid="stExpander"] div[data-testid="stTextArea"] textarea,
-    div[data-testid="stForm"] div[data-testid="stTextArea"] textarea {
-        background: transparent !important;
-        color: #f5f7fb !important;
-        -webkit-text-fill-color: #f5f7fb !important;
-    }
-
-    div[data-testid="stExpander"] div[data-baseweb="base-input"],
-    div[data-testid="stExpander"] div[data-baseweb="input"],
-    div[data-testid="stForm"] div[data-baseweb="base-input"],
-    div[data-testid="stForm"] div[data-baseweb="input"] {
-        background-color: transparent !important;
-        background: transparent !important;
-    }
-
-    /* Contact form – nuclear fix for white-on-white inputs */
-    div[data-testid="stExpander"] input,
-    div[data-testid="stExpander"] textarea,
-    div[data-testid="stForm"] input,
-    div[data-testid="stForm"] textarea {
-        background: rgba(255,255,255,0.03) !important;
-        background-color: rgba(255,255,255,0.03) !important;
-        color: #f5f7fb !important;
-        -webkit-text-fill-color: #f5f7fb !important;
-        caret-color: #38c2c9 !important;
-    }
-
-    div[data-testid="stExpander"] input:-webkit-autofill,
-    div[data-testid="stExpander"] textarea:-webkit-autofill,
-    div[data-testid="stForm"] input:-webkit-autofill,
-    div[data-testid="stForm"] textarea:-webkit-autofill {
-        -webkit-box-shadow: 0 0 0px 1000px rgba(12,25,39,0.98) inset !important;
-        -webkit-text-fill-color: #f5f7fb !important;
-        caret-color: #38c2c9 !important;
-    }
-
-    div[data-testid="stExpander"] input::placeholder,
-    div[data-testid="stExpander"] textarea::placeholder,
-    div[data-testid="stForm"] input::placeholder,
-    div[data-testid="stForm"] textarea::placeholder {
-        color: rgba(159,176,195,0.7) !important;
-        -webkit-text-fill-color: rgba(159,176,195,0.7) !important;
-    }
-
-    .access-gate-head {
-        background: linear-gradient(180deg, rgba(12,25,39,0.98), rgba(8,18,28,0.98));
-        border: 1px solid var(--stroke);
-        border-radius: 22px;
-        padding: 1.3rem 1.2rem 1.05rem 1.2rem;
+    /* Section headers */
+    .section-header {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #f5f7fb;
+        margin-top: 2rem;
         margin-bottom: 1rem;
-        box-shadow: 0 12px 38px rgba(0,0,0,0.18);
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(120,145,170,0.15);
     }
-
-    .access-gate-title {
-        font-size: 1.7rem;
-        font-weight: 760;
-        line-height: 1.12;
-        letter-spacing: -0.02em;
-        margin-bottom: 0.55rem;
-        color: var(--text);
+    /* Dataframe table styling */
+    [data-testid="stDataFrame"] {
+        border: 1px solid rgba(120,145,170,0.15) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
     }
-
-    .access-gate-subtitle {
-        color: var(--soft);
-        line-height: 1.72;
-        font-size: 0.98rem;
-        margin-bottom: 0.85rem;
+    /* Download button */
+    [data-testid="stDownloadButton"] button {
+        background: linear-gradient(135deg, rgba(56,194,201,0.96), rgba(120,220,225,0.96)) !important;
+        color: #041018 !important;
+        border: none !important;
+        font-weight: 700 !important;
+        border-radius: 12px !important;
+        transition: all 0.2s ease !important;
     }
-
-    @media (max-width: 1100px) {
-        .assistant-teaser-row {
-            flex-direction: column;
-            align-items: stretch;
-        }
-
-        .assistant-teaser-link.compact {
-            width: 100%;
-            justify-content: center;
-        }
+    [data-testid="stDownloadButton"] button:hover {
+        transform: translateY(-1px) !important;
+        box-shadow: 0 8px 20px rgba(56,194,201,0.25) !important;
+    }
+    /* Volume sketch cards */
+    .volume-card {
+        background: rgba(255,255,255,0.02);
+        border: 1px solid rgba(120,145,170,0.15);
+        border-radius: 12px;
+        padding: 0.8rem;
+        transition: all 0.2s ease;
+    }
+    .volume-card:hover {
+        border-color: rgba(56,194,201,0.4);
+        background: rgba(56,194,201,0.03);
     }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# -------------------------------------------------
-# 7) TOP BAR
-# -------------------------------------------------
-apply_language_from_query()
 
-top_l, top_r_wrap = st.columns([5, 2], gap="small")
+# --- 7. SESSION STATE ---
+DB_DIR = Path("qa_database")
+SSOT_FILE = DB_DIR / "ssot.json"
+IMG_DIR = DB_DIR / "project_images"
 
-with top_l:
-    logo_uri = logo_data_uri()
-    logo_html = f'<img src="{logo_uri}" class="brand-logo" alt="Builtly logo" />' if logo_uri else '<div class="brand-name">Builtly</div>'
-    _logo_href = f"/?lang={language_slug(st.session_state.app_lang)}"
-    render_html(f'<div class="top-shell" style="margin-bottom: 0;"><div class="brand-left"><a href="{_logo_href}" target="_self" style="text-decoration:none;cursor:pointer;">{logo_html}</a></div></div>')
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {
+        "p_name": "",
+        "c_name": "",
+        "p_desc": "",
+        "adresse": "",
+        "kommune": "",
+        "gnr": "",
+        "bnr": "",
+        "b_type": "Bolig",
+        "etasjer": 4,
+        "bta": 0,
+        "land": "Norge",
+    }
+if "ark_kart" not in st.session_state:
+    st.session_state.ark_kart = None
 
-with top_r_wrap:
-    st.markdown('<div class="topbar-controls"></div>', unsafe_allow_html=True)
-    ctrl_acct, ctrl_lang = st.columns(2, gap="small")
-    with ctrl_acct:
-        _at_menu = get_auth_text(st.session_state.app_lang)
-        if _is_user_logged_in():
-            _acct_options = [_at_menu.get("acct_label", "👤 Account"),
-                             _at_menu.get("acct_my_page", "My page"),
-                             _at_menu.get("acct_logout", "Log out")]
-            _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-            if _acct_choice == _at_menu.get("acct_my_page", "My page") and _get_auth_page() != "dashboard":
-                del st.session_state["acct_menu"]
-                try:
-                    st.query_params["auth"] = "dashboard"
-                except Exception:
-                    pass
-                st.rerun()
-            elif _acct_choice == _at_menu.get("acct_logout", "Log out"):
-                if _HAS_AUTH:
-                    builtly_auth.logout()
-                else:
-                    st.session_state.user_authenticated = False
-                    st.session_state.user_email = ""
-                    st.session_state.user_name = ""
-                    st.session_state.user_plan = ""
-                    st.session_state.user_reports = []
-                try:
-                    params = get_query_params_dict()
-                    params.pop("auth", None)
-                    set_query_params_dict(params)
-                except Exception:
-                    pass
-                st.rerun()
-        else:
-            _acct_options = [_at_menu.get("acct_label", "👤 Account"),
-                             _at_menu.get("acct_login", "Log in"),
-                             _at_menu.get("acct_plans", "Plans / Sign up")]
-            _acct_choice = st.selectbox("Konto", _acct_options, index=0, label_visibility="collapsed", key="acct_menu")
-            if _acct_choice == _at_menu.get("acct_login", "Log in") and _get_auth_page() != "login":
-                del st.session_state["acct_menu"]
-                try:
-                    st.query_params["auth"] = "login"
-                except Exception:
-                    pass
-                st.rerun()
-            elif _acct_choice == _at_menu.get("acct_plans", "Plans / Sign up") and _get_auth_page() != "register":
-                del st.session_state["acct_menu"]
-                try:
-                    st.query_params["auth"] = "register"
-                except Exception:
-                    pass
-                st.rerun()
+if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
+    with open(SSOT_FILE, "r", encoding="utf-8") as f:
+        st.session_state.project_data = json.load(f)
 
-    with ctrl_lang:
-        chosen_language = st.selectbox(
-            "Språk",
-            list(TEXTS.keys()),
-            index=list(TEXTS.keys()).index(st.session_state.app_lang) if st.session_state.app_lang in TEXTS else 0,
-            label_visibility="collapsed",
-        )
-        if chosen_language != st.session_state.app_lang:
-            st.session_state.app_lang = chosen_language
-            st.session_state.project_data["land"] = get_locale_profile(chosen_language)["project_land_label"]
-            reset_assistant_conversation()
-            st.session_state.assistant_discipline_codes = list(DEFAULT_DISCIPLINES)
-            sync_language_query_param(chosen_language)
-            st.rerun()
-
-lang = get_text_bundle(st.session_state.app_lang)
-locale_profile = get_locale_profile(st.session_state.app_lang)
-for key, value in MODULE_COPY_OVERRIDES.get("default", {}).items():
-    lang.setdefault(key, value)
-for key, value in MODULE_COPY_OVERRIDES.get(st.session_state.app_lang, {}).items():
-    lang[key] = value
-
-st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
-
-# Restore session from URL token if present (silent, no st.stop)
-if not st.session_state.get("site_access_granted"):
-    _restore_session_from_url()
-
-# If user clicked a module card while unauthenticated, redirect to login
-_gate_dest = get_query_params_dict().get("gate", "").strip()
-if _gate_dest and not st.session_state.get("site_access_granted"):
-    try:
-        st.query_params["auth"] = "login"
-    except Exception:
-        pass
-    st.rerun()
-
-# Auth page routing (login, register, plans, dashboard, demo)
-if handle_auth_routing(st.session_state.app_lang):
-    # Persist language to localStorage before stopping — auth pages call st.stop()
-    # which prevents the normal persist at the bottom of the script from running
-    st.components.v1.html(f"""<script>
-    try {{ localStorage.setItem('builtly_lang', '{language_slug(st.session_state.app_lang)}'); }} catch(e) {{}}
-    </script>""", height=0)
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    logo_html = (
+        f'<img src="{logo_data_uri()}" class="brand-logo">'
+        if logo_data_uri()
+        else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    )
+    render_html(f"<div style='margin-bottom:2rem;'>{logo_html}</div>")
+    st.warning("Du må sette opp prosjektdata før du kan bruke denne modulen.")
+    if find_page("Project"):
+        if st.button("Gå til Project Setup", type="primary"):
+            st.switch_page(find_page("Project"))
     st.stop()
 
-# -------------------------------------------------
-# 8) HERO + ASSISTANT ENTRYPOINT
-# -------------------------------------------------
-if assistant_query_requested():
-    open_assistant()
-    clear_assistant_query_param()
+pd_state = st.session_state.project_data
 
-render_html(
-    f"""
-    <a href="{assistant_href(st.session_state.app_lang)}" target="_self" class="assistant-rail">
-        <span class="assistant-rail-dot"></span>{lang['assistant_btn']}
-    </a>
-    """
+
+# --- 8. HEADER ---
+top_l, top_r = st.columns([4, 1])
+with top_l:
+    logo_html = (
+        f'<img src="{logo_data_uri()}" class="brand-logo">'
+        if logo_data_uri()
+        else '<h2 style="margin:0; color:white;">Builtly</h2>'
+    )
+    render_html(logo_html)
+with top_r:
+    st.markdown("<div style='margin-top:0.5rem;'></div>", unsafe_allow_html=True)
+    if st.button("Tilbake til SSOT", use_container_width=True, type="secondary"):
+        st.switch_page(find_page("Project"))
+
+st.markdown(
+    "<hr style='border-color: rgba(120,145,170,0.1); margin-top: -1rem; margin-bottom: 2rem;'>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    "<h1 style='font-size: 2.5rem; margin-bottom: 0; font-weight: 800; letter-spacing: -0.02em;'>Mulighetsstudie</h1>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
+    "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.5</span>"
+    "</p>",
+    unsafe_allow_html=True,
 )
 
-left, right = st.columns([1.2, 0.8], gap="large")
+if ANTHROPIC_API_KEY:
+    st.success("AI-tekst er tilgjengelig (Claude). Tallsiden beregnes alltid deterministisk først.")
+elif llm_available:
+    st.success("AI-tekst er tilgjengelig (Gemini fallback). Tallsiden beregnes alltid deterministisk først.")
+else:
+    st.info("AI-tekst er ikke tilgjengelig akkurat nå. Modulen kjører fortsatt hele feasibility-motoren deterministisk.")
 
-with left:
-    render_html(
-        f"""
-        <div class="hero">
-            <div class="eyebrow">{lang['eyebrow']}</div>
-            <h1 class="hero-title">{lang['title']}</h1>
-            <div class="hero-subtitle">{lang['subtitle']}</div>
-            <div class="hero-actions">
-                {hero_action('project', lang['btn_setup'], 'primary')}
-                {hero_action('review', lang['btn_qa'], 'secondary')}
-            </div>
-            <div class="proof-strip">
-                {''.join([f'<div class="proof-chip">{proof}</div>' for proof in lang['proofs']])}
-            </div>
-        </div>
-        """
+for geo_note in geo_runtime_notes():
+    st.warning(geo_note)
+
+if geodata_token_ok:
+    st.success("Eiendomsdata tilkoblet — tomtehenting, nabobygg og ortofoto er tilgjengelig.")
+elif HAS_GEODATA_ONLINE and gdo is not None and gdo.is_available():
+    st.warning("Eiendomsdata: tilkobling feilet. Sjekk brukernavn/passord.")
+
+
+# --- 9. INPUT UI ---
+with st.expander("1. Prosjekt og lokasjon (SSOT)", expanded=True):
+    c1, c2 = st.columns(2)
+    p_name = c1.text_input("Prosjektnavn", value=pd_state.get("p_name"), disabled=True)
+    b_type = c2.text_input("Formål / bygningstype", value=pd_state.get("b_type", "Bolig"), disabled=True)
+    adresse_vis = f"{pd_state.get('adresse', '')}, {pd_state.get('kommune', '')}".strip(", ")
+    adresse = st.text_input("Adresse", value=adresse_vis, disabled=True)
+    c3, c4, c5 = st.columns(3)
+    c3.text_input("Kunde", value=pd_state.get("c_name", ""), disabled=True)
+    c4.number_input("Ønsket BTA fra prosjektdata", value=int(pd_state.get("bta", 0)), disabled=True)
+    c5.text_input("Land", value=pd_state.get("land", "Norge"), disabled=True)
+
+with st.expander("2. Tomtegeometri og regulering", expanded=True):
+    # Sjekk om polygon er hentet — påvirker hvordan vi viser fallback-feltene
+    _polygon_loaded = st.session_state.get("auto_site_polygon") is not None
+    _polygon_area = float(st.session_state.auto_site_polygon.area) if _polygon_loaded else 0.0
+
+    if _polygon_loaded:
+        st.success(
+            f"✅ Bruker faktisk tomtepolygon ({_polygon_area:,.0f} m²). "
+            "Fallback-tallene under (areal, bredde, dybde) blir **ikke brukt** av motoren så lenge polygon er hentet."
+        )
+    else:
+        st.info(
+            "Dere kan bruke rektangulære fallback-tall, men modulen støtter også faktisk tomtepolygon, naboer og terreng."
+        )
+    regulation_text = st.text_area(
+        "Fritekst fra reguleringsplan (valgfritt, motoren henter ut BYA/BRA/høyde hvis den finner noe)",
+        placeholder="Lim inn planbestemmelser, f.eks. %-BYA 35, maks gesimshøyde 12 m, 4 etasjer ...",
+        height=110,
+    )
+    parsed = parse_regulation_hints(regulation_text)
+    if parsed:
+        st.caption(f"Tolket fra tekst: {parsed}")
+
+    d1, d2, d3 = st.columns(3)
+    default_site_area = max(1500.0, float(pd_state.get("bta", 0)) * 1.25) if pd_state.get("bta", 0) else 2500.0
+    # Når polygon er lastet: vis faktisk areal som (disabled) info, men behold variabelen
+    # slik at all nedstrøms logikk som leser site_area_m2 fortsatt fungerer.
+    if _polygon_loaded:
+        d1.number_input(
+            "Tomteareal (fra polygon, m²)",
+            min_value=100.0,
+            value=round(_polygon_area, 0),
+            step=50.0,
+            disabled=True,
+            help="Dette er det faktiske arealet fra den hentede tomtepolygonen. Fallback-tallet under brukes kun hvis polygon fjernes.",
+        )
+        site_area_m2 = _polygon_area  # motoren skal uansett bruke polygon-areal
+        d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0, disabled=True)
+        d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0, disabled=True)
+        site_width_m = 45.0
+        site_depth_m = 55.0
+    else:
+        site_area_m2 = d1.number_input("Tomteareal fallback (m²)", min_value=100.0, value=float(default_site_area), step=50.0)
+        site_width_m = d2.number_input("Tomtebredde fallback (m)", min_value=10.0, value=45.0, step=1.0)
+        site_depth_m = d3.number_input("Tomtedybde fallback (m)", min_value=10.0, value=55.0, step=1.0)
+
+    s1, s2, s3, s4 = st.columns(4)
+    front_setback_m = s1.number_input("Byggegrense mot gate / front (m)", min_value=0.0, value=4.0, step=0.5)
+    rear_setback_m = s2.number_input("Bakre byggegrense (m)", min_value=0.0, value=4.0, step=0.5)
+    side_setback_m = s3.number_input("Sideavstand (m)", min_value=0.0, value=4.0, step=0.5)
+    polygon_setback_m = s4.number_input("Ekstra inntrekk fra tomtegrense (m)", min_value=0.0, value=0.0, step=0.5, help="Bufferavstand FRA tomtegrensen — kommer i tillegg til byggegrensene over. La stå på 0 hvis byggegrensene (front/bak/side) allerede dekker alt. Bruk positivt tall hvis du vil modellere ekstra fri flate mot tomtegrense (f.eks. terrengtilpasning, snølagring) utover det byggegrensene sier.")
+
+    r1, r2, r3, r4 = st.columns(4)
+    max_bya_pct = r1.number_input("Maks BYA (%)", min_value=1.0, max_value=100.0, value=float(parsed.get("max_bya_pct", 35.0)), step=1.0)
+    max_bra_m2 = r2.number_input("Maks BRA (m², 0 = ikke satt)", min_value=0.0, value=float(parsed.get("max_bra_m2", 0.0)), step=50.0)
+    max_floors = r3.number_input("Maks etasjer", min_value=1, max_value=30, value=int(parsed.get("max_floors", max(3, int(pd_state.get("etasjer", 4))))), step=1)
+    max_height_m = r4.number_input("Maks høyde (m)", min_value=3.0, value=float(parsed.get("max_height_m", max(10.0, float(pd_state.get("etasjer", 4)) * 3.2))), step=0.5)
+
+    st.markdown("---")
+    u1, u2, u3 = st.columns([1.2, 1, 1.5])
+    bra_pct_override = u1.checkbox("Styr volum fra %-BRA", value=False, key="bra_override",
+                                    help="Når aktivert overstyrer %-BRA alle andre begrensende faktorer (BYA, maks BRA). Brukes typisk for leilighetsprosjekter.")
+    utnyttelsesgrad_bra_pct = u2.number_input(
+        "Forutsatt %-BRA",
+        min_value=50.0, max_value=500.0, value=150.0, step=10.0,
+        disabled=not bra_pct_override,
+    )
+    if not bra_pct_override:
+        utnyttelsesgrad_bra_pct = 0.0
+    if bra_pct_override:
+        target_bra_from_pct = site_area_m2 * utnyttelsesgrad_bra_pct / 100.0
+        u3.markdown(
+            f"<div class='kpi-card-hero' style='padding:10px 14px;'>"
+            f"<div class='metric-title'>Mål-BRA fra {utnyttelsesgrad_bra_pct:.0f}%</div>"
+            f"<div class='metric-value-hero'>{target_bra_from_pct:,.0f} m²</div></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        u3.caption("Aktiver «Styr volum fra %-BRA» for å bruke utnyttelsesgrad som primær volumdriver.")
+
+with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
+    st.markdown("##### 1. Hent eiendom fra matrikkel")
+    if not geodata_token_ok:
+        st.warning("Eiendomsdata er ikke tilkoblet. Kontakt administrator for oppsett.")
+    st.info("Skriv inn kommune (f.eks. Trondheim eller 5001) og Gnr/Bnr. For flere tomter, separer med komma (f.eks. 15/2, 15/4).")
+
+    c_k, c_g = st.columns(2)
+    kommune_nr_input = c_k.text_input("Kommune (Navn eller 4-sifret nummer)", value=pd_state.get('kommune', ''))
+
+    default_gnr_bnr = ""
+    if pd_state.get('gnr') and pd_state.get('bnr'):
+        default_gnr_bnr = f"{pd_state.get('gnr')}/{pd_state.get('bnr')}"
+
+    gnr_bnr_input = c_g.text_input("Gnr/Bnr (Bruk komma for flere)", value=default_gnr_bnr)
+
+    if st.button("Søk opp og lagre tomt", type="secondary"):
+        if not kommune_nr_input or not gnr_bnr_input:
+            st.warning("Fyll inn både kommune og Gnr/Bnr.")
+        elif not geodata_token_ok:
+            st.error("Eiendomsdata er ikke tilkoblet. Kan ikke hente tomt.")
+        else:
+            pairs = []
+            # Stoett komma-separert ("57/270, 57/156") og slash-separert ("57/270/57/156")
+            raw = gnr_bnr_input.replace(" ", "")
+            # Splitt paa komma foerst
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                segments = part.split("/")
+                if len(segments) == 2:
+                    # Standard: "57/270"
+                    pairs.append((segments[0], segments[1]))
+                elif len(segments) >= 4 and len(segments) % 2 == 0:
+                    # Flere par i ett: "57/270/57/156" -> (57,270), (57,156)
+                    for i in range(0, len(segments), 2):
+                        pairs.append((segments[i], segments[i + 1]))
+                elif len(segments) == 1 and segments[0].isdigit():
+                    continue  # Bare et tall, ignorer
+                else:
+                    st.warning(f"Kunne ikke tolke '{part}'. Bruk formatet Gnr/Bnr (f.eks. 57/270).")
+            if not pairs:
+                st.warning("Ugyldig format. Bruk formatet 15/2.")
+            else:
+                with st.spinner("Henter tomtegrense fra matrikkelen..."):
+                    knr = get_kommunenummer(kommune_nr_input) or kommune_nr_input.strip().zfill(4)
+                    poly, msg = gdo.fetch_tomt_polygon(knr, pairs)
+                    if poly:
+                        st.session_state.auto_site_polygon = poly
+                        st.session_state.auto_site_msg = msg
+                        st.rerun()
+                    else:
+                        st.error(f"Feilet: {msg}")
+                    
+    if st.session_state.get("auto_site_polygon") is not None:
+        st.success(f"✅ **Klar til bruk!** Tomtegrense hentet. Nøyaktig areal: ca. {int(st.session_state.auto_site_polygon.area)} m²")
+        if st.button("Tøm hentet tomt", type="secondary"):
+            st.session_state.auto_site_polygon = None
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("##### 📎 2. Eller bruk manuell opplasting")
+    g1, g2 = st.columns(2)
+    with g1:
+        site_polygon_upload = st.file_uploader(
+            "Last opp tomtepolygon (GeoJSON)",
+            type=["geojson", "json"],
+            key="site_polygon_geojson",
+        )
+    with g2:
+        site_polygon_text = st.text_area(
+            "Eller lim inn koordinater (x,y eller lon,lat per linje)",
+            height=120,
+            placeholder="597380,6643012\n597412,6643005\n597428,6643046\n...",
+        )
+
+    st.markdown("---")
+    st.markdown("##### Nabobebyggelse")
+    n1, n2, n3 = st.columns([1.5, 1, 1])
+    neighbor_mode = n1.radio(
+        "Kilde for naboer",
+        ["Ingen", "Last opp GeoJSON", "Hent fra OSM rundt tomten"],
+        horizontal=False,
+    )
+    default_neighbor_height_m = n2.number_input("Fallback nabohøyde (m)", min_value=3.0, max_value=80.0, value=9.0, step=0.5)
+    neighbor_radius_m = n3.number_input("Radius for nabosøk (m)", min_value=30.0, max_value=400.0, value=160.0, step=10.0)
+    neighbor_geojson = None
+    if neighbor_mode == "Last opp GeoJSON":
+        neighbor_geojson = st.file_uploader(
+            "Nabobygg (GeoJSON med polygoner og gjerne height / levels / etasjer)",
+            type=["geojson", "json"],
+            key="neighbor_geojson",
+        )
+
+    st.markdown("##### Terreng")
+    terrain_upload = st.file_uploader(
+        "Terrenggrunnlag (CSV/TXT med x,y,z eller GeoTIFF/ASC)",
+        type=["csv", "txt", "tif", "tiff", "asc"],
+        key="terrain_upload",
+    )
+    st.caption(
+        "GeoJSON for tomt/naboer kan ligge i lon/lat eller i meter. Terreng kan lastes opp som punktfil med x,y,z eller georeferert raster."
     )
 
-with right:
-    render_html(
-        f"""
-        <div class="hero-panel">
-            <div class="panel-title">{lang['why_kicker']}</div>
-            <div class="mini-stat-grid">
-                <div class="mini-stat">
-                    <div class="mini-stat-value">{lang['stat1_v']}</div>
-                    <div class="mini-stat-label"><b>{lang['stat1_t']}</b><br>{lang['stat1_d']}</div>
-                </div>
-                <div class="mini-stat">
-                    <div class="mini-stat-value">{lang['stat2_v']}</div>
-                    <div class="mini-stat-label"><b>{lang['stat2_t']}</b><br>{lang['stat2_d']}</div>
-                </div>
-                <div class="mini-stat">
-                    <div class="mini-stat-value">{lang['stat3_v']}</div>
-                    <div class="mini-stat-label"><b>{lang['stat3_t']}</b><br>{lang['stat3_d']}</div>
-                </div>
-                <div class="mini-stat">
-                    <div class="mini-stat-value">{lang['stat4_v']}</div>
-                    <div class="mini-stat-label"><b>{lang['stat4_t']}</b><br>{lang['stat4_d']}</div>
-                </div>
-            </div>
-        </div>
+with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
+
+    st.info("Her styrer dere hvor aggressivt motoren skal sikte mot volum, effektivitet og miks.")
+    a1, a2, a3, a4 = st.columns(4)
+    desired_bta_m2 = a1.number_input(
+        "Ønsket BTA i studien (m²)",
+        min_value=100.0,
+        value=float(pd_state.get("bta", 0) or 2500.0),
+        step=50.0,
+    )
+    efficiency_ratio = a2.number_input("Salgbarhetsfaktor", min_value=0.55, max_value=0.9, value=0.78, step=0.01)
+    floor_to_floor_m = a3.number_input("Etasjehøyde brutto (m)", min_value=2.8, max_value=5.5, value=3.2, step=0.1)
+    latitude_manual = a4.number_input("Breddegrad for solanalyse", min_value=45.0, max_value=72.0, value=59.91, step=0.01)
+
+    p1, p2, p3 = st.columns(3)
+    parking_ratio_per_unit = p1.number_input("Parkering pr. bolig", min_value=0.0, max_value=3.0, value=0.8, step=0.05)
+    parking_area_per_space_m2 = p2.number_input("Areal pr. p-plass (m²)", min_value=15.0, max_value=50.0, value=28.0, step=1.0)
+    north_rotation_deg = p3.number_input("Nordretning i modell (grader)", min_value=0.0, max_value=359.0, value=0.0, step=1.0)
+
+    st.markdown("##### Leilighetsmiks")
+    mcols = st.columns(4)
+    mix_inputs = []
+    defaults = [
+        ("1-rom", 15.0, 20.0),
+        ("2-rom", 35.0, 38.0),
+        ("3-rom", 35.0, 60.0),
+        ("4-rom+", 15.0, 85.0),
+    ]
+    for idx, (label, share_default, size_default) in enumerate(defaults):
+        with mcols[idx]:
+            st.markdown(f"**{label}**")
+            share = st.number_input(f"Andel {label} (%)", min_value=0.0, max_value=100.0, value=share_default, step=1.0, key=f"share_{idx}")
+            avg_size = st.number_input(f"Gj.sn. størrelse {label} (m²)", min_value=20.0, max_value=180.0, value=size_default, step=1.0, key=f"size_{idx}")
+            mix_inputs.append(MixSpec(label, share, avg_size))
+    share_sum = sum(item.share_pct for item in mix_inputs)
+    if abs(share_sum - 100.0) > 0.01:
+        st.warning(f"Andelene summerer til {share_sum:.1f}%. Motoren normaliserer dette automatisk.")
+
+with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
+    saved_images: List[Image.Image] = []
+    if IMG_DIR.exists():
+        for path in sorted(IMG_DIR.glob("*.jpg")):
+            try:
+                saved_images.append(Image.open(path).convert("RGB"))
+            except Exception:
+                continue
+
+    if saved_images:
+        st.success(f"Fant {len(saved_images)} tegninger/skisser fra Project Setup.")
+    else:
+        st.warning("Ingen felles tegninger funnet. Kart eller opplastede skisser anbefales for bedre kontekst.")
+
+    c_map, c_upload = st.columns(2)
+    with c_map:
+        if st.button("Hent kart automatisk for tomten", type="secondary"):
+            with st.spinner("Henter kart ..."):
+                auto_poly = st.session_state.get("auto_site_polygon")
+                bounds_for_map = auto_poly.bounds if auto_poly else None
+                
+                img, source = fetch_map_image(
+                    pd_state.get("adresse", ""),
+                    pd_state.get("kommune", ""),
+                    pd_state.get("gnr", ""),
+                    pd_state.get("bnr", ""),
+                    google_key or "",
+                    bounds=bounds_for_map,
+                    _gdo_client=gdo if geodata_token_ok else None,
+                )
+                if img is not None:
+                    st.session_state.ark_kart = img
+                    st.success(f"Kart hentet! (Kilde: {source})")
+                else:
+                    st.error(source)
+        if st.session_state.ark_kart is not None:
+            st.image(st.session_state.ark_kart, caption="Situasjonskart", use_container_width=True)
+
+        # Støykart — hentes automatisk og legges over ortofoto
+        if "ark_stoykart" not in st.session_state:
+            st.session_state.ark_stoykart = None
+        if st.session_state.ark_kart is not None and st.session_state.ark_stoykart is None:
+            auto_poly = st.session_state.get("auto_site_polygon")
+            if auto_poly is not None and geodata_token_ok:
+                with st.spinner("Henter støykart fra DOK Forurensning..."):
+                    # Bruk SAMME bounds som ortofoto (80m buffer)
+                    noise_img, noise_src = fetch_noise_map_image(
+                        auto_poly.bounds,
+                        buffer_m=80.0,  # Match ortofoto-buffer
+                        gdo_client=gdo,
+                        width=1200,
+                        height=1200,
+                    )
+                    if noise_img is not None:
+                        # Komponer støykart over ortofoto
+                        combined = None
+                        try:
+                            ortofoto_raw = st.session_state.ark_kart
+                            if isinstance(ortofoto_raw, Image.Image):
+                                ortofoto = ortofoto_raw.convert("RGBA")
+                                noise_rgba = noise_img.convert("RGBA")
+                                # Resize til samme størrelse
+                                target_size = ortofoto.size
+                                if noise_rgba.size != target_size:
+                                    try:
+                                        noise_rgba = noise_rgba.resize(target_size, Image.Resampling.LANCZOS)
+                                    except AttributeError:
+                                        noise_rgba = noise_rgba.resize(target_size, Image.LANCZOS)
+                                # Forsterk alpha med point() (rask)
+                                r, g, b, a = noise_rgba.split()
+                                a = a.point(lambda x: min(int(x * 1.3), 180) if x > 5 else 0)
+                                noise_rgba = Image.merge("RGBA", (r, g, b, a))
+                                combined = Image.alpha_composite(ortofoto, noise_rgba).convert("RGB")
+                        except Exception as comp_err:
+                            st.caption(f"Kompositt-feil: {comp_err}")
+
+                        if combined is not None:
+                            st.session_state.ark_stoykart = combined
+                            st.success(f"Støykart lagt over ortofoto ({noise_src})")
+                        else:
+                            st.session_state.ark_stoykart = noise_img.convert("RGB")
+                            st.success(f"Støykart hentet ({noise_src})")
+                    else:
+                        st.session_state.ark_stoykart = "empty"
+                        st.caption(f"Støykart: {noise_src}")
+        if st.session_state.get("ark_stoykart") is not None and st.session_state.ark_stoykart != "empty":
+            st.image(st.session_state.ark_stoykart, caption="Ortofoto med støysoner (T-1442 — Gul: 55-65 dB, Rød: >65 dB)", use_container_width=True)
+
+    with c_upload:
+        uploaded_files = st.file_uploader(
+            "Last opp kart, situasjonsplan, PDF eller skisser",
+            accept_multiple_files=True,
+            type=["png", "jpg", "jpeg", "pdf"],
+        )
+
+with st.expander("5. Hva modulen faktisk gjør nå", expanded=False):
+    st.markdown(
         """
+- Leser **ekte tomtepolygon** fra matrikkel, GeoJSON eller koordinatliste.
+- Regner **7 volumalternativer** (lamell, karre, punkthus, tarn, podium+tarn, tun/U-form og rekke) innenfor faktisk byggefelt.
+- Lager **sammensatte volumdeler** som kan vises videre i 3D-scene.
+- Bruker **stedsintelligens** for plan, utbygging og mobilitet i rangering av typologier.
+- Kan vise volumene i **3D terrengscene** med terrengmodell som grunnlag.
+- Leser **nabobebyggelse** automatisk fra kartdata, GeoJSON eller OSM og bruker høyder i sol/skygge.
+- Henter **HD-ortofoto** for bedre kartgrunnlag i rapporten.
+- Leser **terreng** via punktfil eller raster og estimerer fall/relieff.
+- Degraderer kontrollert til fallback hvis geostacken i deployen mangler pyproj eller rasterio.
+- Regner **fotavtrykk, BTA, salgbart areal, boligantall, leilighetsmiks og parkeringstrykk**.
+- Bruker eventuelt AI bare til å forklare funnene. Tallene kommer fra motoren.
+"""
     )
 
-maybe_render_assistant_dialog(st.session_state.app_lang)
 
-# -------------------------------------------------
-# 10) CORE VALUE PROPOSITION & WORKFLOW
-# -------------------------------------------------
-render_html(
-    f"""
-    <div class="section-head">
-        <div class="section-kicker">{lang['sec_val_kicker']}</div>
-        <h2 class="section-title">{lang['sec_val_title']}</h2>
-        <div class="section-subtitle">{lang['sec_val_sub']}</div>
-    </div>
-    <div class="trust-grid">
-        <div class="trust-card"><div class="trust-title">{lang['val_1_t']}</div><div class="trust-desc">{lang['val_1_d']}</div></div>
-        <div class="trust-card"><div class="trust-title">{lang['val_2_t']}</div><div class="trust-desc">{lang['val_2_d']}</div></div>
-        <div class="trust-card"><div class="trust-title">{lang['val_3_t']}</div><div class="trust-desc">{lang['val_3_d']}</div></div>
-        <div class="trust-card"><div class="trust-title">{lang['val_4_t']}</div><div class="trust-desc">{lang['val_4_d']}</div></div>
-    </div>
+# --- 10. KJOR ANALYSE ---
+run_analysis = st.button("Kjør tomtestudie / volumstudie", type="primary", use_container_width=True)
 
-    <div class="section-head">
-        <div class="section-kicker">{lang['sec_loop_kicker']}</div>
-        <h2 class="section-title">{lang['sec_loop_title']}</h2>
-        <div class="section-subtitle">{lang['sec_loop_sub']}</div>
-    </div>
-    <div class="loop-grid">
-        <div class="loop-card"><div class="loop-number">1</div><div class="loop-title">{lang['loop_1_t']}</div><div class="loop-desc">{lang['loop_1_d']}</div></div>
-        <div class="loop-card"><div class="loop-number">2</div><div class="loop-title">{lang['loop_2_t']}</div><div class="loop-desc">{lang['loop_2_d']}</div></div>
-        <div class="loop-card"><div class="loop-number">3</div><div class="loop-title">{lang['loop_3_t']}</div><div class="loop-desc">{lang['loop_3_d']}</div></div>
-        <div class="loop-card"><div class="loop-number">4</div><div class="loop-title">{lang['loop_4_t']}</div><div class="loop-desc">{lang['loop_4_d']}</div></div>
-    </div>
-    """
-)
+if run_analysis:
+    images_for_context = list(saved_images)
+    if st.session_state.ark_kart is not None:
+        images_for_context.append(st.session_state.ark_kart)
+    stoykart = st.session_state.get("ark_stoykart")
+    if stoykart is not None and stoykart != "empty":
+        images_for_context.append(stoykart)
+    images_for_context.extend(load_uploaded_visuals(uploaded_files))
 
-# -------------------------------------------------
-# 11) MODULES
-# -------------------------------------------------
-available_cards = [
-    module_card("geo", "🌍", lang["badge_geo"], "badge-priority", lang["m_geo_t"], lang["m_geo_d"], lang["m_geo_in"], lang["m_geo_out"], lang["m_geo_btn"]),
-    module_card("akustikk", "🔊", lang["badge_acoustics"], "badge-phase2", lang["m_aku_t"], lang["m_aku_d"], lang["m_aku_in"], lang["m_aku_out"], lang["m_aku_btn"]),
-    module_card("brann", "🔥", lang["badge_fire"], "badge-phase2", lang["m_brann_t"], lang["m_brann_d"], lang["m_brann_in"], lang["m_brann_out"], lang["m_brann_btn"]),
-]
+    auto_poly = st.session_state.get("auto_site_polygon")
+    site_polygon_input, site_crs, polygon_meta = load_site_polygon_input(auto_poly, site_polygon_upload, site_polygon_text)
+    
+    # Skuddsikker lat/lon henting
+    if auto_poly is not None and HAS_PYPROJ:
+        try:
+            centroid = auto_poly.centroid
+            transformer = Transformer.from_crs(CRS.from_epsg(25833), CRS.from_epsg(4326), always_xy=True)
+            lon_geocoded, lat_geocoded = transformer.transform(centroid.x, centroid.y)
+            geo_source = "Matrikkel" if geodata_token_ok else "Kartverket"
+        except:
+            lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
+    else:
+        lat_geocoded, lon_geocoded, geo_source = fetch_lat_lon(pd_state.get("adresse", ""), pd_state.get("kommune", ""))
 
-roadmap_cards = [
-    module_card("mulighetsstudie", "📐", lang["badge_feasibility"], "badge-early", lang["m_ark_t"], lang["m_ark_d"], lang["m_ark_in"], lang["m_ark_out"], lang["m_ark_btn"]),
-    module_card("konstruksjon", "🏢", lang["badge_structural"], "badge-roadmap", lang["m_rib_t"], lang["m_rib_d"], lang["m_rib_in"], lang["m_rib_out"], lang["m_rib_btn"]),
-    module_card("trafikk", "🚦", lang["badge_traffic"], "badge-roadmap", lang["m_tra_t"], lang["m_tra_d"], lang["m_tra_in"], lang["m_tra_out"], lang["m_tra_btn"]),
-]
+    latitude_deg = lat_geocoded if lat_geocoded is not None else polygon_meta.get("centroid_lat", latitude_manual)
+    longitude_deg = lon_geocoded if lon_geocoded is not None else polygon_meta.get("centroid_lon")
 
-sustainability_cards = [
-    module_card("sha", "🦺", lang["badge_sha"], "badge-priority", lang["m_sha_t"], lang["m_sha_d"], lang["m_sha_in"], lang["m_sha_out"], lang["m_sha_btn"]),
-    module_card("breeam", "🌿", lang["badge_breeam"], "badge-phase2", lang["m_breeam_t"], lang["m_breeam_d"], lang["m_breeam_in"], lang["m_breeam_out"], lang["m_breeam_btn"]),
-    module_card("mop", "♻️", lang["badge_mop"], "badge-roadmap", lang["m_mop_t"], lang["m_mop_d"], lang["m_mop_in"], lang["m_mop_out"], lang["m_mop_btn"]),
-]
+    # === GEODATA ONLINE: AUTOMATISK HENTING AV ALT ===
+    neighbor_inputs: List[Dict[str, Any]] = []
+    neighbor_meta: Dict[str, Any] = {"source": "Ingen naboer"}
 
-commercial_cards = [
-    module_card("tender_control", "📑", lang["badge_tender"], "badge-priority", lang["m_tender_t"], lang["m_tender_d"], lang["m_tender_in"], lang["m_tender_out"], lang["m_tender_btn"]),
-    module_card("quantity_scope", "📏", lang["badge_quantity"], "badge-phase2", lang["m_quantity_t"], lang["m_quantity_d"], lang["m_quantity_in"], lang["m_quantity_out"], lang["m_quantity_btn"]),
-    module_card("yield_optimizer", "🏙️", lang["badge_yield"], "badge-early", lang["m_yield_t"], lang["m_yield_d"], lang["m_yield_in"], lang["m_yield_out"], lang["m_yield_btn"]),
-]
+    # A) Nabobygg fra ByggFlate — ALLTID naar GDO er tilkoblet og tomt finnes
+    if geodata_token_ok and site_polygon_input is not None:
+        with st.spinner("Henter nabobebyggelse..."):
+            try:
+                fkb_buildings, fkb_meta = gdo.fetch_byggflater(
+                    bbox=site_polygon_input.bounds,
+                    buffer_m=float(neighbor_radius_m),
+                )
+                if fkb_buildings:
+                    neighbor_inputs = geodata_buildings_to_neighbors(
+                        fkb_buildings,
+                        site_polygon=site_polygon_input,
+                        max_distance_m=float(neighbor_radius_m) + 20,
+                    )
+                    neighbor_meta = fkb_meta
+                    st.success(f"Hentet {len(neighbor_inputs)} nabobygg i nærheten")
+                else:
+                    st.info("Ingen nabobygg funnet innenfor søkeradius.")
+            except Exception as exc:
+                st.warning(f"Nabohenting feilet: {exc}")
 
-platform_cards = [
-    module_card("climate_risk", "🌊", lang["badge_climate"], "badge-phase2", lang["m_climate_t"], lang["m_climate_d"], lang["m_climate_in"], lang["m_climate_out"], lang["m_climate_btn"]),
-    module_card("tdd", "🏦", lang["badge_tdd"], "badge-phase2", lang["m_tdd_t"], lang["m_tdd_d"], lang["m_tdd_in"], lang["m_tdd_out"], lang["m_tdd_btn"]),
-]
-
-bank_cards = [
-    module_card("byggelanskontroll", "🏗️", lang["badge_byggelanskontroll"], "badge-phase2", lang["m_byggelanskontroll_t"], lang["m_byggelanskontroll_d"], lang["m_byggelanskontroll_in"], lang["m_byggelanskontroll_out"], lang["m_byggelanskontroll_btn"]),
-    module_card("kredittgrunnlag", "📋", lang["badge_kredittgrunnlag"], "badge-phase2", lang["m_kredittgrunnlag_t"], lang["m_kredittgrunnlag_d"], lang["m_kredittgrunnlag_in"], lang["m_kredittgrunnlag_out"], lang["m_kredittgrunnlag_btn"]),
-]
-
-render_html(
-    f"""
-    <div class="section-head">
-        <div class="section-kicker">{lang['mod_sec_kicker']}</div>
-        <h2 class="section-title">{lang['mod_sec_title']}</h2>
-        <div class="section-subtitle">{lang['mod_sec_sub']}</div>
-    </div>
-
-    <div class="subsection-title">{lang['mod_sec1']}</div>
-    <div class="module-grid">{''.join(available_cards)}</div>
-
-    <div class="subsection-title">{lang['mod_sec2']}</div>
-    <div class="module-grid">{''.join(roadmap_cards)}</div>
-
-    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec3']}</div>
-    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec3_sub']}</div>
-    <div class="module-grid">{''.join(sustainability_cards)}</div>
-
-    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec4']}</div>
-    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec4_sub']}</div>
-    <div class="module-grid">{''.join(commercial_cards)}</div>
-
-    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec5']}</div>
-    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec5_sub']}</div>
-    <div class="module-grid module-grid-two">{''.join(platform_cards)}</div>
-
-    <div class="subsection-title" style="margin-top: 2.5rem;">{lang['mod_sec6']}</div>
-    <div class="section-subtitle" style="margin-top: -0.5rem; margin-bottom: 1rem;">{lang['mod_sec6_sub']}</div>
-    <div class="module-grid module-grid-two">{''.join(bank_cards)}</div>
-    """
-)
-
-# -------------------------------------------------
-# 12) CTA BAND
-# -------------------------------------------------
-render_html(
-    f"""
-    <div class="cta-band">
-        <div class="cta-text-wrapper">
-            <div class="cta-title">{lang['cta_title']}</div>
-            <div class="cta-desc">{lang['cta_desc']}</div>
-        </div>
-        <div class="cta-actions">
-            {hero_action('project', lang['cta_btn1'], 'primary')}
-            <a href="?auth=register" target="_self" class="hero-action secondary">{lang.get('cta_btn_plans', 'View plans')}</a>
-        </div>
-    </div>
-    """
-)
-
-# -------------------------------------------------
-# 13) CONTACT LINK + CONTACT FORM
-# -------------------------------------------------
-
-# Anchor element that the scroll targets
-render_html('<div id="contact-form-anchor" style="position:relative;top:-100px;height:1px;pointer-events:none;"></div>')
-
-# Render the partner link visually as normal HTML
-render_html(
-    f"""
-    <div class="integration-footer-callout">
-        <a href="{contact_href(st.session_state.app_lang)}" target="_self" class="integration-footer-link">{lang['partner_line']}</a>
-    </div>
-    """
-)
-
-# Hidden component: attaches onclick to the link (sets sessionStorage flag)
-# and on page load checks if flag is set and scrolls to contact form
-st.components.v1.html(
-    """<script>
-    (function() {
-        // Check sessionStorage on every load
-        if (sessionStorage.getItem('builtly_scroll_contact') === '1') {
-            sessionStorage.removeItem('builtly_scroll_contact');
-            function scrollToContact(n) {
-                try {
-                    var doc = window.parent.document;
-                    var el = doc.getElementById('contact-form-anchor');
-                    if (!el) {
-                        var exps = doc.querySelectorAll('[data-testid="stExpander"]');
-                        if (exps.length) el = exps[exps.length - 1];
-                    }
-                    if (el) {
-                        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    } else if (n > 0) {
-                        setTimeout(function() { scrollToContact(n - 1); }, 250);
-                    }
-                } catch(e) {
-                    if (n > 0) setTimeout(function() { scrollToContact(n - 1); }, 250);
-                }
-            }
-            setTimeout(function() { scrollToContact(12); }, 400);
-        }
-
-        // Attach onclick to the partner link in parent document
-        function attachClickHandler(n) {
-            try {
-                var doc = window.parent.document;
-                var link = doc.querySelector('.integration-footer-link');
-                if (link) {
-                    link.addEventListener('click', function() {
-                        sessionStorage.setItem('builtly_scroll_contact', '1');
-                    });
-                } else if (n > 0) {
-                    setTimeout(function() { attachClickHandler(n - 1); }, 200);
-                }
-            } catch(e) {}
-        }
-        setTimeout(function() { attachClickHandler(10); }, 300);
-    })();
-    </script>""",
-    height=0,
-)
-
-if contact_query_requested():
-    with st.expander(lang["contact_form_title"], expanded=True):
-        col_info, col_close = st.columns([0.82, 0.18], gap="small")
-        with col_info:
-            st.caption(lang["contact_form_sub"])
-            st.caption(lang["contact_direct_email"].format(email=contact_recipient()))
-        with col_close:
-            render_html(
-                f'<div style="text-align:right; padding-top: 0.4rem;"><a href="{contact_close_href(st.session_state.app_lang)}" target="_self" class="integration-close-link">{lang["contact_close"]}</a></div>'
+    # B) Fallback til GeoJSON/OSM KUN hvis GDO ikke ga resultat
+    if not neighbor_inputs:
+        if neighbor_mode == "Last opp GeoJSON":
+            neighbor_inputs, neighbor_meta = load_neighbors_from_geojson(
+                neighbor_geojson,
+                site_polygon_input,
+                site_crs,
+                default_neighbor_height_m,
+            )
+        elif neighbor_mode == "Hent fra OSM rundt tomten":
+            neighbor_inputs, neighbor_meta = fetch_osm_neighbors(
+                latitude_deg,
+                longitude_deg,
+                site_polygon_input,
+                site_crs,
+                neighbor_radius_m,
+                default_neighbor_height_m,
             )
 
-        fallback_mailto = None
-        with st.form("builtly_integration_contact_form", clear_on_submit=True):
-            col_a, col_b = st.columns(2, gap="medium")
-            with col_a:
-                contact_name = st.text_input(lang["contact_name"])
-                contact_company = st.text_input(lang["contact_company"])
-            with col_b:
-                contact_email = st.text_input(lang["contact_email"])
-            contact_message = st.text_area(lang["contact_message"], height=160)
-            contact_submit = st.form_submit_button(lang["contact_send"], use_container_width=True)
-
-        if contact_submit:
-            stripped_name = contact_name.strip()
-            stripped_company = contact_company.strip()
-            stripped_email = contact_email.strip()
-            stripped_message = contact_message.strip()
-            email_ok = bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", stripped_email))
-
-            if not stripped_name or not stripped_email or not stripped_message:
-                st.error(lang["contact_missing_fields"])
-            elif not email_ok:
-                st.error(lang["contact_invalid_email"])
-            else:
-                sent, fallback_mailto = send_contact_email(
-                    name=stripped_name,
-                    email=stripped_email,
-                    company=stripped_company,
-                    message=stripped_message,
-                    lang_bundle=lang,
+    # C) Ortofoto — AUTOMATISK naar GDO er tilkoblet og tomt finnes
+    if geodata_token_ok and site_polygon_input is not None and st.session_state.ark_kart is None:
+        with st.spinner("Henter HD-ortofoto..."):
+            try:
+                hd_img, hd_source = gdo.fetch_ortofoto(
+                    bbox=site_polygon_input.bounds,
+                    buffer_m=100.0,
+                    width=1400,
+                    height=1400,
                 )
-                if sent:
-                    st.success(lang["contact_success"])
+                if hd_img:
+                    st.session_state.ark_kart = hd_img
+                    images_for_context.append(hd_img)
+                    st.success("HD-ortofoto hentet")
+            except Exception as exc:
+                st.caption(f"Ortofoto-henting feilet: {exc}")
+
+    terrain_ctx, terrain_meta = load_terrain_input(terrain_upload, site_polygon_input, site_crs)
+    if terrain_ctx is None and geodata_token_ok and site_polygon_input is not None and gdo is not None:
+        try:
+            terrain_ctx = gdo.fetch_terrain_model(site_polygon_input, sample_spacing_m=10.0, max_points=180)
+            if terrain_ctx is not None:
+                terrain_meta = {'source': terrain_ctx.get('source', 'Terrengmodell'), 'point_count': terrain_ctx.get('point_count', 0)}
+        except Exception as exc:
+            terrain_meta = {'source': 'Terrengmodell', 'error': str(exc)[:120]}
+
+    site = SiteInputs(
+        site_area_m2=site_area_m2,
+        site_width_m=site_width_m,
+        site_depth_m=site_depth_m,
+        front_setback_m=front_setback_m,
+        rear_setback_m=rear_setback_m,
+        side_setback_m=side_setback_m,
+        max_bya_pct=max_bya_pct,
+        max_bra_m2=max_bra_m2,
+        desired_bta_m2=desired_bta_m2,
+        max_floors=int(max_floors),
+        max_height_m=max_height_m,
+        floor_to_floor_m=floor_to_floor_m,
+        efficiency_ratio=efficiency_ratio,
+        parking_ratio_per_unit=parking_ratio_per_unit,
+        parking_area_per_space_m2=parking_area_per_space_m2,
+        latitude_deg=latitude_deg,
+        north_rotation_deg=north_rotation_deg,
+        polygon_setback_m=polygon_setback_m,
+        site_geometry_source=polygon_meta.get("source", "Rektangel"),
+        polygon_crs=(site_crs.to_string() if site_crs is not None else polygon_meta.get("crs", "")),
+        neighbor_count=len(neighbor_inputs),
+        terrain_slope_pct=float((terrain_ctx or {}).get("slope_pct", 0.0)),
+        terrain_relief_m=float((terrain_ctx or {}).get("relief_m", 0.0)),
+        utnyttelsesgrad_bra_pct=utnyttelsesgrad_bra_pct,
+    )
+
+    geodata_context = prepare_site_context(
+        site=site,
+        site_polygon_input=site_polygon_input,
+        polygon_setback_m=polygon_setback_m,
+        neighbors=neighbor_inputs,
+        terrain=terrain_ctx,
+        polygon_meta=polygon_meta,
+    )
+    site.site_area_m2 = float(geodata_context["site_area_m2"])
+    site.site_width_m = float(geodata_context["site_width_m"])
+    site.site_depth_m = float(geodata_context["site_depth_m"])
+    site.site_geometry_source = geodata_context.get("source", site.site_geometry_source)
+    site.neighbor_count = len(geodata_context.get("neighbors", []))
+    site.terrain_slope_pct = float((terrain_ctx or {}).get("slope_pct", 0.0))
+    site.terrain_relief_m = float((terrain_ctx or {}).get("relief_m", 0.0))
+
+    site_intelligence_bundle: Dict[str, Any] = {}
+    if HAS_SITE_INTELLIGENCE and geodata_token_ok and site_polygon_input is not None and gdo is not None:
+        try:
+            site_intelligence_bundle = build_site_intelligence_bundle(gdo, geodata_context['site_polygon'], search_buffer_m=350.0)
+            geodata_context['site_intelligence'] = site_intelligence_bundle
+        except Exception as exc:
+            site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
+
+    ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
+    bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
+    with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+        options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+
+    # Diagnostikk — lagre i session_state for visning i resultatene
+    if site.utnyttelsesgrad_bra_pct > 0:
+        limits_diag = derive_limits(site, geodata_context)
+        sp_area = float(geodata_context["site_polygon"].area) if geodata_context.get("site_polygon") else 0
+        bp_area = float(geodata_context["buildable_polygon"].area) if geodata_context.get("buildable_polygon") else 0
+        pp_area = float(placement_polygon.area) if 'placement_polygon' in dir() else 0
+        target_bra_diag = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
+        best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
+        st.session_state["_motor_diag"] = (
+            f"v9.5 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
+            f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
+        )
+
+    if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
+        options = apply_site_intelligence_to_options(options, site_intelligence_bundle)
+
+    if not options:
+        st.error("Klarte ikke å generere alternativer. Kontroller tomtepolygon, byggegrenser og BYA.")
+        st.stop()
+
+    # --- MILJØANALYSE ---
+    environment_data: Dict[str, Any] = {"available": False}
+    if site_polygon_input is not None:
+        with st.spinner("Analyserer miljøforhold: støy, dagslys, utsikt, vind..."):
+            try:
+                best_option = max(options, key=lambda o: o.score)
+                fp_polys = split_geometry_to_polygons(
+                    Polygon(flatten_coord_groups(best_option.geometry.get("footprint_polygon_coords", [])))
+                ) if best_option.geometry.get("footprint_polygon_coords") else []
+                fp_heights = [best_option.building_height_m] * max(len(fp_polys), 1)
+
+                environment_data = build_environment_analysis(
+                    site_polygon=site_polygon_input,
+                    building_polygons=fp_polys,
+                    building_heights=fp_heights,
+                    neighbors=[n for n in geodata_context.get("neighbors", []) if n.get("polygon") is not None],
+                    latitude_deg=latitude_deg,
+                    longitude_deg=longitude_deg,
+                    terrain=terrain_ctx,
+                    gdo_client=gdo if geodata_token_ok else None,
+                )
+            except Exception as exc:
+                environment_data = {"available": False, "error": str(exc)[:120]}
+
+    # --- GEODATA-BUNDLE FOR PDF (v15): historisk flyfoto + grunnforurensning + aktsomhetskart ---
+    geodata_bundle: Dict[str, Any] = {"available": False}
+    historical_analysis: Optional[Dict[str, str]] = None
+    if site_polygon_input is not None:
+        with st.spinner("Henter historisk flyfoto og grunnforurensningsdata..."):
+            try:
+                geodata_bundle = build_geo_context_bundle(
+                    site_polygon=geodata_context.get("site_polygon"),
+                    coords=geodata_context.get("coords"),
+                    gdo_client=gdo if geodata_token_ok else None,
+                    radius_m=300.0,
+                )
+            except Exception as exc:
+                geodata_bundle = {"available": False, "error": str(exc)[:120]}
+        # SSOT: lagre i session_state så "Oppdater PDF"-knapper kan gjenbruke uten ny fetch
+        st.session_state["geodata_bundle"] = geodata_bundle
+
+        if geodata_bundle.get("historisk") is not None and ANTHROPIC_API_KEY:
+            with st.spinner("AI-analyse av historisk flyfoto (tidligere bruk + forurensningsrisiko)..."):
+                try:
+                    addr_hint = f"{pd_state.get('adresse', '')} {pd_state.get('kommune', '')}".strip()
+                    historical_analysis = analyze_historical_aerial_with_claude(
+                        historical_image=geodata_bundle["historisk"],
+                        year=geodata_bundle.get("historisk_year"),
+                        contamination_sites=geodata_bundle.get("grunnforurensning", []),
+                        address_hint=addr_hint,
+                    )
+                except Exception:
+                    historical_analysis = None
+            st.session_state["historical_analysis"] = historical_analysis
+
+    option_images = [render_plan_diagram(site, option) for option in options]
+
+    # Auto-generer planvisninger som 3D-scene fallback (v13: per-option error handling)
+    auto_scene_images = []
+    for opt in options[:3]:
+        try:
+            auto_scene_images.append(render_plan_view(site, opt))
+        except Exception:
+            pass  # Skip individual failures, keep other plan views
+    deterministic_report = build_deterministic_report(
+        site, options, parsed,
+        has_visual_input=bool(images_for_context),
+        environment_data=environment_data,
+        geodata_bundle=geodata_bundle,
+        historical_analysis=historical_analysis,
+    )
+    if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
+        si_markdown = build_site_intelligence_markdown(site_intelligence_bundle)
+        # Rekke er slått sammen med Lamell — erstatt i output
+        si_markdown = si_markdown.replace("Rekke:", "Lamell (tidl. Rekke):").replace("favoriserer mest Rekke", "favoriserer mest Lamell")
+        # Slå sammen Lamell (tidl. Rekke) og Lamell til én post
+        def _merge_lamell_entries(md: str) -> str:
+            lines = md.split("\n")
+            lamell_total = 0.0
+            lamell_indices = []
+            # Samle alle typologi-scores for å finne riktig vinner
+            all_scores: Dict[str, float] = {}
+            for i, line in enumerate(lines):
+                m = re.match(r"^-\s*Lamell[^:]*:\s*([+-]?\d+(?:\.\d+)?)\s*poeng", line)
+                if m:
+                    lamell_total += float(m.group(1))
+                    lamell_indices.append(i)
                 else:
-                    st.info(lang["contact_fallback"])
-                    if fallback_mailto:
-                        render_html(
-                            f'<div style="margin-top:0.5rem; margin-bottom:0.25rem;"><a href="{html.escape(fallback_mailto, quote=True)}" class="module-cta">{lang["contact_fallback_button"]}</a></div>'
+                    m2 = re.match(r"^-\s*(\w[^:]+):\s*([+-]?\d+(?:\.\d+)?)\s*poeng", line)
+                    if m2:
+                        all_scores[m2.group(1).strip()] = float(m2.group(2))
+            if len(lamell_indices) >= 2:
+                sign = "+" if lamell_total >= 0 else ""
+                lines[lamell_indices[0]] = f"- Lamell: {sign}{lamell_total:.1f} poeng (inkl. rekke)"
+                for idx in reversed(lamell_indices[1:]):
+                    lines.pop(idx)
+            # Oppdater samlet score-map og fiks «favoriserer mest»-linjen
+            all_scores["Lamell"] = lamell_total
+            if all_scores:
+                best_typo = max(all_scores, key=lambda k: all_scores[k])
+                best_val = all_scores[best_typo]
+                sign_b = "+" if best_val >= 0 else ""
+                for i, line in enumerate(lines):
+                    if "favoriserer mest" in line:
+                        lines[i] = f"Stedsdata favoriserer mest {best_typo} i denne runden ({sign_b}{best_val:.1f} poeng)."
+                        break
+            return "\n".join(lines)
+        si_markdown = _merge_lamell_entries(si_markdown)
+        deterministic_report = deterministic_report + "\n\n" + si_markdown
+    final_report_text = deterministic_report
+
+    # --- AI-rapport via Claude (v13: migrert fra Gemini) ---
+    if ANTHROPIC_API_KEY:
+        try:
+            # Build compact environment summary for AI (v13: støydata + dagslys)
+            env_summary = {}
+            if environment_data and isinstance(environment_data, dict):
+                noise_d = environment_data.get("noise", {})
+                if noise_d.get("available") and noise_d.get("zones"):
+                    env_summary["noise"] = {
+                        "zones": noise_d["zones"],
+                        "source": noise_d.get("source", ""),
+                    }
+                dl_d = environment_data.get("daylight", {})
+                if dl_d.get("available") and dl_d.get("overall_score", 0) > 0:
+                    env_summary["daylight"] = {"overall_score": dl_d["overall_score"]}
+                wc_d = environment_data.get("wind_comfort", {})
+                if wc_d.get("available"):
+                    env_summary["wind_comfort"] = {
+                        "lawson_class": wc_d.get("lawson_class"),
+                        "overall": wc_d.get("overall"),
+                    }
+            # Geo-bundle sammendrag for AI (v15/v16 — gir AI-en grunnlag til å
+            # kommentere forurensningsrisiko i pkt. 4 og pkt. 9)
+            geo_summary = {}
+            if geodata_bundle and geodata_bundle.get("available"):
+                contamination = geodata_bundle.get("grunnforurensning", []) or []
+                geo_summary = {
+                    "available": True,
+                    "historisk_flyfoto_aar": geodata_bundle.get("historisk_year"),
+                    "historisk_flyfoto_kilde": geodata_bundle.get("historisk_source", ""),
+                    "grunnforurensning_antall_innen_500m": len(contamination),
+                    "grunnforurensning_top_lokaliteter": [
+                        {
+                            "navn": s.get("navn"),
+                            "type": s.get("type"),
+                            "status": s.get("status"),
+                            "avstand_m": int(s["distance_m"]) if s.get("distance_m") is not None else None,
+                        }
+                        for s in contamination[:5]
+                    ],
+                }
+                # v16: Strukturerte aktsomhetsdata fra Geodata Online DOK
+                akt_bundle = geodata_bundle.get("aktsomhet", {}) or {}
+                if akt_bundle.get("available"):
+                    akt_cats = akt_bundle.get("categories", {}) or {}
+                    # Bygg kun et sammendrag med treff — tom hvis ingenting
+                    akt_hits = {}
+                    for cat_key, cat_data in akt_cats.items():
+                        if cat_data.get("hit"):
+                            akt_hits[cat_key] = {
+                                "severity": cat_data.get("severity", "registrert"),
+                                "detail": cat_data.get("detail", ""),
+                            }
+                    geo_summary["aktsomhet"] = {
+                        "data_hentet": True,
+                        "total_treff": sum(1 for c in akt_cats.values() if c.get("hit")),
+                        "kategorier_med_treff": akt_hits,
+                        "kilde": akt_bundle.get("source", "Geodata Online DOK"),
+                    }
+                else:
+                    geo_summary["aktsomhet"] = {"data_hentet": False}
+
+                if historical_analysis:
+                    geo_summary["ai_historisk_analyse"] = {
+                        "risiko_niva": historical_analysis.get("risiko_niva"),
+                        "tidligere_bruk": historical_analysis.get("tidligere_bruk"),
+                        "forurensningsrisiko": historical_analysis.get("forurensningsrisiko"),
+                        "anbefalte_tiltak": historical_analysis.get("anbefalte_tiltak"),
+                    }
+
+            analysis_payload = {
+                "site": asdict(site),
+                "alternatives": [asdict(option) | {"geometry": None} for option in options],
+                "parsed_regulation_hints": parsed,
+                "visual_input_count": len(images_for_context),
+                "geocoding_source": geo_source,
+                "polygon_meta": polygon_meta,
+                "neighbor_meta": neighbor_meta,
+                "terrain_meta": terrain_meta,
+                "site_intelligence": site_intelligence_bundle,
+                "environment": env_summary,
+                "geo_context": geo_summary,
+            }
+            _report_system = (
+                "Du er senior arkitekt og utviklingsrådgiver. Du får et ferdig, deterministisk analysegrunnlag i JSON. "
+                "Du skal forklare, prioritere og skrive rapporten for bruk i Builtly. Du MÅ IKKE endre tallene. "
+                "Hvis det finnes svakheter i grunnlaget, skal du si det tydelig."
+            )
+            _report_user = f"""Skriv en profesjonell mulighetsstudie-rapport basert på dette grunnlaget.
+
+JSON-GRUNNLAG:
+{json.dumps(analysis_payload, ensure_ascii=False, indent=2)}
+
+KRAV:
+- Bruk nøyaktig disse overskriftene (med # foran):
+# 1. OPPSUMMERING
+# 2. GRUNNLAG
+# 3. VIKTIGSTE FORUTSETNINGER
+# 4. TOMT OG KONTEKST
+# 5. REGULERINGSMESSIGE FORHOLD
+# 6. ARKITEKTONISK VURDERING
+# 7. MULIGE UTVIKLINGSGREP
+# 8. ALTERNATIVER
+# 9. RISIKO OG AVKLARINGSPUNKTER
+# 10. ANBEFALING / NESTE STEG
+
+- Tallene i JSON er kilde til sannhet. Ikke dikter opp tall.
+- Sol/skygge skal omtales som indikativ 2.5D, ikke full detaljsimulering.
+- Leilighetsmiks skal beskrives som kapasitetsestimat.
+- Ikke skriv om noe du ikke vet.
+- FORBUDT: Ikke skriv forside-blokker, meta-headers eller tittelavsnitt (eksempel: "MULIGHETSSTUDIE", "Dato: [Dagens dato]", "Prosjekt: Boligutvikling", "Tomteareal: X m²"). Start rapporten DIREKTE med "# 1. OPPSUMMERING" som første linje. Alle tittel- og metadata-elementer håndteres av PDF-layouten.
+- FORBUDT: Ikke bruk placeholder-verdier som "[Dagens dato]", "[Sett inn verdi]", eller tilsvarende — rapporten genereres automatisk og må være komplett.
+- FORBUDT: Ikke lag en "VEDLEGG"-seksjon, "APPENDIKS" eller tilsvarende etter pkt. 10. Siste seksjon i rapporten SKAL være "# 10. ANBEFALING / NESTE STEG". Geo-data, støydata og aktsomhetskart er allerede presentert i dedikerte seksjoner FØR rapportteksten — ikke dupliser dem i vedlegg.
+- BULLET-FORMAT: Bruk bindestrek "- " som bullet-marker, IKKE asterisk "*" eller punkt "•". Eksempel: "- Punkt 1" (ikke "* Punkt 1" eller "• Punkt 1").
+- OBLIGATORISK: Hvis støydata finnes i JSON (environment.noise), SKAL du kommentere støynivå i dB, kildetype og konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
+- OBLIGATORISK — GEO-DATA: Hvis geo_context.available = true i JSON, SKAL du:
+  - I pkt. 4 (TOMT OG KONTEKST): Nevne kort at det er gjennomført automatisk uttrekk av stedskontekst- og geodata (Miljødirektoratet, NGU, NVE), og at detaljert gjennomgang finnes i dedikert seksjon "Stedskontekst og geodata" etter sol/skygge-analysen. Hvis grunnforurensning_antall_innen_500m > 0, nevn tallet og flagg at miljøteknisk undersøkelse bør vurderes. Hvis ai_historisk_analyse.risiko_niva finnes (Lav/Moderat/Høy), nevn samlet forurensningsrisiko-nivå i 1 setning. Hvis geo_context.aktsomhet.total_treff > 0, nevn kort at tomten er registrert i X aktsomhetskategorier (radon/flom/skred/kvikkleire) og henvis til geo-seksjonen.
+  - I pkt. 9 (RISIKO OG AVKLARINGSPUNKTER): Lag et eget risikopunkt om grunnforurensning med antall registrerte lokaliteter og tiltaksanbefaling. Hvis ai_historisk_analyse finnes, nevn AI-screening av historisk flyfoto og henvis til den dedikerte geo-seksjonen for full vurdering. Hvis geo_context.aktsomhet.kategorier_med_treff inneholder noe, lag ETT eget risikopunkt per kategori (f.eks. "- Radon: moderat aktsomhet — radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5", "- Kvikkleire: registrert faresone — geoteknisk vurdering er obligatorisk før byggesøknad"). Vær konkret om hva utbygger må gjøre. Ikke reproduser hele AI-analyseteksten — oppsummer kort (1-2 setninger per punkt).
+  - Ikke dupliser innholdet fra den dedikerte geo-seksjonen — kort henvisning er tilstrekkelig i den narrative teksten.
+- Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger, sol/skygge-diagrammer og (hvis tilgjengelig) historisk flyfoto med AI-vurdering.
+- Skriv sammenhengende norsk tekst. Bullets kan brukes i pkt. 9 (RISIKO) og pkt. 10 (ANBEFALING) hvis det gir leseflyt, ellers sammenhengende prosa. Bruk riktig norsk (æ, ø, å).
+"""
+            ai_report = _call_claude_text(_report_system, _report_user, max_tokens=6000)
+            if ai_report:
+                # Post-filter: fjern eventuell hallusinert forside-blokk før pkt. 1
+                # (Claude ignorerer av og til FORBUDT-klausulen)
+                ai_report = _strip_hallucinated_preamble(ai_report)
+                # Post-filter: fjern eventuell hallusinert VEDLEGG-seksjon etter pkt. 10
+                ai_report = _strip_hallucinated_appendix(ai_report)
+                # Normaliser *-bullets til -
+                ai_report = _normalize_bullets(ai_report)
+                final_report_text = ai_report
+        except Exception:
+            final_report_text = deterministic_report
+
+    # v16.2.1: Safety net — normaliser bullets på final_report_text uansett codepath.
+    # Dette dekker den deterministiske fallback-teksten og site_intelligence-markdown
+    # som konkateneres inn. _normalize_bullets er idempotent så trygt å kalle flere ganger.
+    # Dette sikrer at ingen • eller * slipper gjennom til PDF selv om fontregistrering feiler.
+    final_report_text = _normalize_bullets(final_report_text)
+
+    try:
+        solar_grid_img = None
+        if options and site is not None:
+            try:
+                solar_grid_img = render_solar_snapshot_grid(site, options[0])
+            except Exception:
+                pass
+        # AI-analyse av planvisninger (v13)
+        pv_analyses: List[str] = []
+        scene_imgs_for_pdf = st.session_state.get("ark_scene_images") or auto_scene_images or []
+        if scene_imgs_for_pdf and ANTHROPIC_API_KEY:
+            with st.spinner("Arkitektonisk vurdering av planvisninger (Claude)..."):
+                try:
+                    pv_analyses = analyze_plan_views_with_ai(
+                        scene_imgs_for_pdf, options, site, environment_data
+                    )
+                except Exception:
+                    pv_analyses = []
+        pdf_bytes = create_full_report_pdf(
+            name=p_name,
+            client=pd_state.get("c_name", "Ukjent"),
+            land=pd_state.get("land", "Norge"),
+            report_text=final_report_text,
+            options=options,
+            option_images=option_images,
+            visual_attachments=images_for_context,
+            site=site,
+            environment_data=environment_data,
+            solar_grid_image=solar_grid_img,
+            scene_images=scene_imgs_for_pdf or None,
+            plan_view_analyses=pv_analyses or None,
+            cover_image=st.session_state.get("stability_render_image"),
+            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+            geodata_bundle=st.session_state.get("geodata_bundle") or geodata_bundle,
+            historical_analysis=st.session_state.get("historical_analysis") or historical_analysis,
+            site_intelligence=site_intelligence_bundle,
+        )
+        # Suksess — fjern eventuell tidligere feilmelding
+        st.session_state.pop("_pdf_generation_error", None)
+    except Exception as pdf_exc:
+        # v16.1: Persistent feilmelding som overlever st.rerun()
+        # I tillegg beholder vi tidligere PDF hvis den finnes, slik at brukeren
+        # kan fortsette å laste ned forrige vellykkede versjon.
+        import traceback
+        _err_detail = f"{type(pdf_exc).__name__}: {pdf_exc}"
+        st.session_state["_pdf_generation_error"] = _err_detail
+        st.error(f"PDF-generering feilet: {_err_detail}")
+        # Logg full traceback til console for debugging
+        print(f"[Mulighetsstudie PDF error] {traceback.format_exc()}")
+        pdf_bytes = None  # Signalerer "feilet" — vi setter IKKE generated_ark_pdf til dette
+
+    if "pending_reviews" not in st.session_state:
+        st.session_state.pending_reviews = {}
+    if "review_counter" not in st.session_state:
+        st.session_state.review_counter = 1
+
+    doc_id = f"PRJ-{datetime.now().strftime('%y')}-ARK{st.session_state.review_counter:03d}"
+    st.session_state.review_counter += 1
+
+    best = options[0]
+    st.session_state.pending_reviews[doc_id] = {
+        "title": pd_state.get("p_name", "Nytt Prosjekt"),
+        "module": "ARK (Mulighetsstudie v3)",
+        "drafter": "Builtly AI + Geospatial Feasibility Engine",
+        "reviewer": "Senior Arkitekt",
+        "status": "Pending Lead Architect Review",
+        "class": "badge-pending",
+        "pdf_bytes": pdf_bytes if pdf_bytes else b"",  # v16.1: Safely handle None
+    }
+
+    st.session_state.analysis_results = {
+        "site": asdict(site),
+        "options": [asdict(option) for option in options],
+        "report_text": final_report_text,
+        "geo_source": geo_source,
+        "option_images": option_images,
+        "polygon_meta": polygon_meta,
+        "neighbor_meta": neighbor_meta,
+        "terrain_meta": terrain_meta,
+        "terrain_ctx": terrain_ctx,
+        "site_intelligence": site_intelligence_bundle,
+        "environment": environment_data,
+        "visual_attachments": images_for_context,
+    }
+    # v16.1: Kun lagre PDF hvis den faktisk ble generert. Tidligere overskrev vi
+    # med b"" ved feil, som ga "PDF er ikke generert"-melding i nedlasting-seksjonen.
+    # Nå bevares eventuell tidligere vellykket PDF hvis ny generering feilet.
+    if pdf_bytes:
+        st.session_state.generated_ark_pdf = pdf_bytes
+        st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
+
+    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
+    if pdf_bytes:
+        try:
+            from builtly_auth import save_report
+            save_report(
+                project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
+                report_name=f"Mulighetsstudie — {p_name}",
+                module="Mulighetsstudie",
+                file_path=st.session_state.generated_ark_filename,
+                pdf_bytes=pdf_bytes,
+            )
+        except ImportError:
+            pass  # Frontpage not available (standalone run)
+        except Exception as _save_exc:
+            # Ikke blokker videre flyt — logg kun
+            print(f"[Mulighetsstudie] save_report feilet: {_save_exc}")
+
+    st.rerun()
+
+
+# --- 11. RENDER RESULTATER ---
+if "analysis_results" in st.session_state:
+    result = st.session_state.analysis_results
+    options = []
+    for option_data in result["options"]:
+        options.append(OptionResult(**option_data))
+
+    best = options[0]
+    site_result = result.get("site", {})
+
+    # Hero section — recommended option
+    st.markdown(
+        "<div style='margin-top:1rem; margin-bottom:0.5rem;'>"
+        "<span style='color:#38bdf8; font-size:0.9rem; text-transform:uppercase; letter-spacing:0.08em; font-weight:600;'>Anbefalt alternativ</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Typologi</div><div class='metric-value-hero'>{}</div></div>".format(best.typology), unsafe_allow_html=True)
+    with k2:
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>BTA</div><div class='metric-value-hero'>{:,.0f} m²</div></div>".format(best.gross_bta_m2), unsafe_allow_html=True)
+    with k3:
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Boliger</div><div class='metric-value-hero'>{}</div></div>".format(best.unit_count), unsafe_allow_html=True)
+    with k4:
+        st.markdown("<div class='kpi-card-hero'><div class='metric-title'>Score</div><div class='metric-value-hero'>{:.0f}/100</div></div>".format(best.score), unsafe_allow_html=True)
+
+    g1, g2, g3, g4 = st.columns(4)
+    geo_src_raw = site_result.get("site_geometry_source", "-")
+    geo_src_display = "Eksakt polygon" if any(k in geo_src_raw for k in ["Eksakt", "Hentet", "Geodata"]) else ("GeoJSON" if "GeoJSON" in geo_src_raw else geo_src_raw)
+
+    # Beregn %-BRA og BYA for best alternativ
+    sa = max(site_result.get("site_area_m2", 1.0), 1.0)
+    actual_bra_pct = (best.saleable_area_m2 / sa) * 100.0
+    actual_bya_pct = (best.footprint_area_m2 / sa) * 100.0
+
+    with g1:
+        st.markdown(f"<div class='kpi-card'><div class='metric-title'>%-BRA (utnyttelse)</div><div class='metric-value'>{actual_bra_pct:.0f}%</div></div>", unsafe_allow_html=True)
+    with g2:
+        st.markdown(f"<div class='kpi-card'><div class='metric-title'>BYA (bebygd)</div><div class='metric-value'>{actual_bya_pct:.0f}%</div></div>", unsafe_allow_html=True)
+    with g3:
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Solscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(best.solar_score), unsafe_allow_html=True)
+    with g4:
+        st.markdown("<div class='kpi-card'><div class='metric-title'>Nabobygg i modell</div><div class='metric-value'>{}</div></div>".format(best.neighbor_count), unsafe_allow_html=True)
+
+    polygon_meta = result.get("polygon_meta", {})
+    neighbor_meta = result.get("neighbor_meta", {})
+    terrain_meta = result.get("terrain_meta", {})
+    site_intelligence_bundle = result.get('site_intelligence', {}) or {}
+
+    if site_intelligence_bundle.get('available'):
+        st.markdown(
+            "<div class='section-header'>Stedsintelligens</div>",
+            unsafe_allow_html=True,
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Stedscore</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('site_score', 0.0))), unsafe_allow_html=True)
+        with s2:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Mulighet</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('opportunity_score', 0.0))), unsafe_allow_html=True)
+        with s3:
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Plan-/stedsrisiko</div><div class='metric-value'>{:.0f}/100</div></div>".format(float(site_intelligence_bundle.get('risk_score', 0.0))), unsafe_allow_html=True)
+        with s4:
+            # Merge Rekke into Lamell before picking top typology
+            raw_adj = dict(site_intelligence_bundle.get('typology_score_adjustments') or {})
+            if "Rekke" in raw_adj:
+                raw_adj["Lamell"] = raw_adj.get("Lamell", 0.0) + raw_adj.pop("Rekke")
+            favored = sorted(raw_adj.items(), key=lambda item: item[1], reverse=True)
+            favored_text = favored[0][0] if favored else '-'
+            st.markdown("<div class='kpi-card'><div class='metric-title'>Favorisert grep</div><div class='metric-value'>{}</div></div>".format(favored_text), unsafe_allow_html=True)
+
+    # Data source caption
+    meta_lines = []
+    if polygon_meta:
+        src = polygon_meta.get('source', '-')
+        clean_src = "Eksakt polygon" if any(k in src for k in ["Eksakt", "Hentet", "Geodata"]) else src
+        meta_lines.append(f"Tomt: {clean_src}")
+    if neighbor_meta:
+        n_count = neighbor_meta.get('count', best.neighbor_count)
+        if n_count:
+            meta_lines.append(f"Naboer: {n_count} stk")
+    if terrain_meta and not terrain_meta.get("error"):
+        meta_lines.append("Terreng: aktiv")
+    if best.terrain_slope_pct > 0:
+        meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
+    if meta_lines:
+        st.caption(" · ".join(meta_lines))
+
+    # Motor-diagnostikk (persistent)
+    diag = st.session_state.get("_motor_diag")
+    if diag:
+        st.caption(f"🔧 {diag}")
+
+    st.markdown("<div class='section-header'>Alternativsammenligning</div>", unsafe_allow_html=True)
+    comparison_df = pd.DataFrame(
+        [
+            {
+                "Alternativ": option.name,
+                "Typologi": option.typology,
+                "Etasjer": option.floors,
+                "Fotavtrykk m²": round(option.footprint_area_m2, 0),
+                "BTA m²": round(option.gross_bta_m2, 0),
+                "BRA m²": round(option.saleable_area_m2, 0),
+                "%-BRA": round(option.saleable_area_m2 / max(sa, 1) * 100, 0),
+                "Boliger": option.unit_count,
+                "Solscore": round(option.solar_score, 0),
+                "Score": round(option.score, 1),
+            }
+            for option in options
+        ]
+    )
+    st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+
+    # --- INTERAKTIV RADARDIAGRAM ---
+    st.markdown("<div class='section-header'>Visuell sammenligning</div>", unsafe_allow_html=True)
+    radar_data = json.dumps([
+        {
+            "name": opt.name.replace("Alt ", ""),
+            "typology": opt.typology,
+            "score": round(opt.score, 1),
+            "solar": round(opt.solar_score, 1),
+            "bta_pct": round(100.0 * opt.gross_bta_m2 / max(best.gross_bta_m2, 1.0), 1),
+            "open_space": round(opt.open_space_ratio * 100, 1),
+            "efficiency": round(opt.efficiency_ratio * 100, 1),
+            "target_fit": round(min(100.0, opt.target_fit_pct), 1),
+        }
+        for opt in options
+    ], ensure_ascii=False)
+    radar_html = f"""
+<div id="radar-chart" style="width:100%;height:420px;position:relative;overflow:hidden;">
+<canvas id="radarCanvas" style="width:100%;height:100%;"></canvas>
+</div>
+<script>
+(function() {{
+  const D = {radar_data};
+  const canvas = document.getElementById('radarCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth;
+  const H = 420;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  const axes = ['Score', 'Sol', 'BTA-treff', 'Frirom', 'Effektivitet', 'Måloppnåelse'];
+  const keys = ['score', 'solar', 'bta_pct', 'open_space', 'efficiency', 'target_fit'];
+  const colors = ['#38bdf8','#34d399','#f59e0b','#ef4444','#a78bfa','#ec4899','#06b6d4'];
+  const cx = W * 0.42, cy = H * 0.50, R = Math.min(W * 0.30, H * 0.40);
+  const n = axes.length;
+
+  function angle(i) {{ return (Math.PI * 2 * i / n) - Math.PI / 2; }}
+
+  // Grid
+  for (let r = 0.2; r <= 1.0; r += 0.2) {{
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {{
+      const a = angle(i % n);
+      const x = cx + Math.cos(a) * R * r, y = cy + Math.sin(a) * R * r;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }}
+    ctx.strokeStyle = 'rgba(120,145,170,0.15)'; ctx.stroke();
+  }}
+  // Axes + labels
+  ctx.font = '11px Inter, sans-serif'; ctx.fillStyle = '#9fb0c3';
+  for (let i = 0; i < n; i++) {{
+    const a = angle(i);
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    ctx.strokeStyle = 'rgba(120,145,170,0.2)'; ctx.stroke();
+    const lx = cx + Math.cos(a) * (R + 18), ly = cy + Math.sin(a) * (R + 18);
+    ctx.textAlign = Math.cos(a) > 0.1 ? 'left' : Math.cos(a) < -0.1 ? 'right' : 'center';
+    ctx.textBaseline = Math.sin(a) > 0.1 ? 'top' : Math.sin(a) < -0.1 ? 'bottom' : 'middle';
+    ctx.fillText(axes[i], lx, ly);
+  }}
+  // Data polygons
+  D.forEach((d, di) => {{
+    ctx.beginPath();
+    keys.forEach((k, i) => {{
+      const v = (d[k] || 0) / 100.0;
+      const a = angle(i);
+      const x = cx + Math.cos(a) * R * v, y = cy + Math.sin(a) * R * v;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }});
+    ctx.closePath();
+    const c = colors[di % colors.length];
+    ctx.fillStyle = c + '18'; ctx.fill();
+    ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.stroke();
+  }});
+  // Legend
+  const lgX = W * 0.78, lgY = 20;
+  ctx.font = 'bold 10px Inter, sans-serif';
+  D.forEach((d, i) => {{
+    ctx.fillStyle = colors[i % colors.length];
+    ctx.fillRect(lgX, lgY + i * 20, 12, 12);
+    ctx.fillStyle = '#c8d3df';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(d.name + ' (' + d.typology + ')', lgX + 18, lgY + i * 20 + 6);
+  }});
+}})();
+</script>
+"""
+    components.html(radar_html, height=440, scrolling=False)
+
+    # --- SIDE-BY-SIDE SAMMENLIGNING ---
+    st.markdown("<div class='section-header'>Sammenlign to alternativer</div>", unsafe_allow_html=True)
+    cmp_col1, cmp_col2 = st.columns(2)
+    opt_names = [opt.name for opt in options]
+    with cmp_col1:
+        cmp_a_name = st.selectbox("Alternativ A", opt_names, index=0, key="cmp_a")
+    with cmp_col2:
+        cmp_b_name = st.selectbox("Alternativ B", opt_names, index=min(1, len(opt_names)-1), key="cmp_b")
+    cmp_a = next((o for o in options if o.name == cmp_a_name), options[0])
+    cmp_b = next((o for o in options if o.name == cmp_b_name), options[-1])
+
+    def _delta_html(label: str, val_a: float, val_b: float, fmt: str = ".0f", unit: str = "", higher_better: bool = True) -> str:
+        diff = val_b - val_a
+        arrow = ""
+        if abs(diff) > 0.1:
+            is_better = (diff > 0) == higher_better
+            color = "#34d399" if is_better else "#f87171"
+            arrow = f"<span style='color:{color};font-size:0.8rem;margin-left:6px;'>{'▲' if diff > 0 else '▼'} {abs(diff):{fmt}}{unit}</span>"
+        return (
+            f"<div style='display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(120,145,170,0.1);'>"
+            f"<span style='color:#9fb0c3;font-size:0.9rem;'>{label}</span>"
+            f"<span style='color:#f5f7fb;font-weight:600;'>{val_a:{fmt}}{unit} vs {val_b:{fmt}}{unit}{arrow}</span>"
+            f"</div>"
+        )
+
+    cmp_html = (
+        f"<div style='background:rgba(255,255,255,0.02);border:1px solid rgba(120,145,170,0.15);border-radius:12px;padding:16px 20px;'>"
+        f"<div style='display:flex;justify-content:space-between;margin-bottom:12px;'>"
+        f"<span style='color:#38bdf8;font-weight:700;font-size:1.1rem;'>{cmp_a.name} ({cmp_a.typology})</span>"
+        f"<span style='color:#34d399;font-weight:700;font-size:1.1rem;'>{cmp_b.name} ({cmp_b.typology})</span>"
+        f"</div>"
+        + _delta_html("Score", cmp_a.score, cmp_b.score, ".1f", "/100")
+        + _delta_html("BTA", cmp_a.gross_bta_m2, cmp_b.gross_bta_m2, ",.0f", " m²")
+        + _delta_html("Salgbart areal", cmp_a.saleable_area_m2, cmp_b.saleable_area_m2, ",.0f", " m²")
+        + _delta_html("Boliger", cmp_a.unit_count, cmp_b.unit_count, ".0f")
+        + _delta_html("Solscore", cmp_a.solar_score, cmp_b.solar_score, ".0f", "/100")
+        + _delta_html("Sol uteareal", cmp_a.sunlit_open_space_pct, cmp_b.sunlit_open_space_pct, ".0f", "%")
+        + _delta_html("Etasjer", cmp_a.floors, cmp_b.floors, ".0f", "", False)
+        + _delta_html("Fotavtrykk", cmp_a.footprint_area_m2, cmp_b.footprint_area_m2, ",.0f", " m²", False)
+        + _delta_html("Parkering", cmp_a.parking_spaces, cmp_b.parking_spaces, ".0f")
+        + _delta_html("Vinterskygge kl.12", cmp_a.winter_noon_shadow_m, cmp_b.winter_noon_shadow_m, ".1f", " m", False)
+        + "</div>"
+    )
+    st.markdown(cmp_html, unsafe_allow_html=True)
+
+    # --- INTERAKTIV SOL/SKYGGE-KLOKKE ---
+    st.markdown("<div class='section-header'>Sol og skygge gjennom dagen</div>", unsafe_allow_html=True)
+    shadow_opt_name = st.selectbox("Velg alternativ for solanalyse", opt_names, index=0, key="shadow_opt")
+    shadow_opt = next((o for o in options if o.name == shadow_opt_name), options[0])
+    shadow_season = st.radio("Sesong", ["Vår/høst (mars)", "Vinter (desember)", "Sommer (juni)"], horizontal=True, key="shadow_season")
+    season_doy = {"Vår/høst (mars)": 80, "Vinter (desember)": 355, "Sommer (juni)": 172}.get(shadow_season, 80)
+
+    shadow_hours = list(range(7, 21))
+    shadow_fracs = []
+    for h in shadow_hours:
+        alt_deg = solar_altitude_deg(site_result.get("latitude_deg", 59.91), season_doy, float(h))
+        if alt_deg <= 0.5:
+            shadow_fracs.append(0.0)
+        else:
+            shadow_fracs.append(round(alt_deg, 1))
+
+    shadow_chart_data = json.dumps({"hours": shadow_hours, "altitudes": shadow_fracs, "typology": shadow_opt.typology, "height_m": shadow_opt.building_height_m, "lat": site_result.get("latitude_deg", 59.91), "season": shadow_season})
+    shadow_html = f"""
+<div style="width:100%;height:280px;position:relative;">
+<canvas id="shadowCanvas" style="width:100%;height:100%;"></canvas>
+</div>
+<script>
+(function() {{
+  const D = {shadow_chart_data};
+  const canvas = document.getElementById('shadowCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth, H = 280;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  const pad = {{l:55, r:20, t:30, b:45}};
+  const cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+  const hours = D.hours, alts = D.altitudes;
+  const maxAlt = Math.max(...alts, 1);
+
+  // Background gradient (day/night)
+  const grad = ctx.createLinearGradient(pad.l, 0, pad.l + cw, 0);
+  hours.forEach((h, i) => {{
+    const t = i / (hours.length - 1);
+    const a = alts[i];
+    grad.addColorStop(t, a > 0 ? 'rgba(56,189,248,0.06)' : 'rgba(15,23,42,0.15)');
+  }});
+  ctx.fillStyle = grad;
+  ctx.fillRect(pad.l, pad.t, cw, ch);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(120,145,170,0.1)'; ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {{
+    const y = pad.t + ch - (g / 4) * ch;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y); ctx.stroke();
+    ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter, sans-serif';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.round(maxAlt * g / 4) + '°', pad.l - 8, y);
+  }}
+
+  // Bars
+  const bw = cw / hours.length * 0.7;
+  hours.forEach((h, i) => {{
+    const x = pad.l + (i + 0.5) * (cw / hours.length);
+    const val = alts[i] / maxAlt;
+    const bh = val * ch;
+    const hue = alts[i] > 20 ? '48,96%' : alts[i] > 10 ? '35,90%' : alts[i] > 0 ? '200,70%' : '220,20%';
+    ctx.fillStyle = `hsla(${{hue}},${{alts[i] > 0 ? '60%' : '20%'}})`;
+    ctx.fillRect(x - bw/2, pad.t + ch - bh, bw, bh);
+    // Shadow length indicator on top
+    if (alts[i] > 0.5) {{
+      const shadowLen = D.height_m / Math.tan(alts[i] * Math.PI / 180);
+      ctx.fillStyle = '#f5f7fb'; ctx.font = 'bold 9px Inter'; ctx.textAlign = 'center';
+      ctx.fillText(Math.round(shadowLen) + 'm', x, pad.t + ch - bh - 6);
+    }}
+    // Hour label
+    ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
+    ctx.fillText(h + ':00', x, pad.t + ch + 16);
+  }});
+
+  // Title
+  ctx.fillStyle = '#c8d3df'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'left';
+  ctx.fillText('Solhøyde og skyggelengde — ' + D.typology + ' (' + D.height_m.toFixed(1) + ' m) — ' + D.season, pad.l, 18);
+  ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter';
+  ctx.fillText('Breddegrad: ' + D.lat.toFixed(2) + '° | Tall over søylene = skyggelengde fra bygghøyde', pad.l, pad.t + ch + 38);
+}})();
+</script>
+"""
+    components.html(shadow_html, height=300, scrolling=False)
+
+    if site_intelligence_bundle.get('available'):
+        st.markdown("<div class='section-header'>Stedskontekst</div>", unsafe_allow_html=True)
+        gi_plan, gi_projects, gi_transport = st.columns(3)
+
+        # Plan og regulering — lesbar oppsummering
+        plan_data = site_intelligence_bundle.get('plan', {})
+        with gi_plan:
+            nearby = plan_data.get('nearby_plan_count', plan_data.get('feature_count', 0))
+            risk = plan_data.get('regulatory_risk_score', 0)
+            risk_label = "Lav" if risk < 30 else "Moderat" if risk < 60 else "Høy"
+            risk_color = "#34d399" if risk < 30 else "#f59e0b" if risk < 60 else "#f87171"
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Plan og regulering</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;'>{nearby} planer i nærheten</div>"
+                f"<div style='color:{risk_color};font-size:0.85rem;margin-top:4px;'>Planrisiko: {risk_label}</div>"
+                f"</div>", unsafe_allow_html=True)
+
+        # Utbyggingsaktivitet
+        proj_data = site_intelligence_bundle.get('projects', {})
+        with gi_projects:
+            proj_count = proj_data.get('feature_count', proj_data.get('nearby_count', 0))
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Utbyggingsaktivitet</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;'>{proj_count} prosjekter</div>"
+                f"<div style='color:#9fb0c3;font-size:0.85rem;margin-top:4px;'>I nærområdet</div>"
+                f"</div>", unsafe_allow_html=True)
+
+        # Mobilitet og adkomst
+        transport = site_intelligence_bundle.get('transport', {})
+        with gi_transport:
+            mob_score = transport.get('mobility_score', 0)
+            transit_m = transport.get('nearest_transit_m')
+            parking_n = transport.get('parking_within_300_m', 0)
+            transit_txt = f"{transit_m:.0f} m til kollektiv" if transit_m and transit_m > 0 else "Ingen kollektiv funnet"
+            mob_color = "#34d399" if mob_score >= 60 else "#f59e0b" if mob_score >= 30 else "#f87171"
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Mobilitet</div>"
+                f"<div class='metric-value' style='font-size:1.1rem;color:{mob_color};'>{mob_score}/100</div>"
+                f"<div style='color:#9fb0c3;font-size:0.85rem;margin-top:4px;'>{transit_txt} · {parking_n} p-plasser</div>"
+                f"</div>", unsafe_allow_html=True)
+
+    # --- MILJØANALYSE RESULTATER ---
+    env_data = result.get("environment", {})
+    if env_data.get("available"):
+        st.markdown("<div class='section-header'>Miljøanalyse</div>", unsafe_allow_html=True)
+
+        env_cols = st.columns(4)
+
+        # Støy
+        noise = env_data.get("noise", {})
+        with env_cols[0]:
+            if noise.get("available") and noise.get("zones"):
+                worst_zone = max(noise["zones"], key=lambda z: z.get("db", 0))
+                db_val = worst_zone.get("db", 0)
+                noise_color = "#f87171" if db_val > 65 else "#f59e0b" if db_val > 55 else "#34d399"
+                st.markdown(f"<div class='kpi-card'><div class='metric-title'>Støy (T-1442)</div><div class='metric-value' style='color:{noise_color}'>{worst_zone.get('zone', '–')}</div></div>", unsafe_allow_html=True)
+                if db_val > 0:
+                    st.caption(f"{db_val:.0f} dB, {worst_zone.get('source_type', 'vei')} | Kilde: {noise.get('source', '?')}")
+            else:
+                st.markdown("<div class='kpi-card'><div class='metric-title'>Støy</div><div class='metric-value' style='color:#34d399'>Ingen data</div></div>", unsafe_allow_html=True)
+                debug = noise.get("debug", [])
+                if debug:
+                    st.caption(f"Debug: {' | '.join(debug[:3])}")
+
+        # Dagslys
+        daylight = env_data.get("daylight", {})
+        with env_cols[1]:
+            dl_score = daylight.get("overall_score", 0)
+            dl_color = "#34d399" if dl_score >= 70 else "#f59e0b" if dl_score >= 50 else "#f87171"
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Dagslys §13-7</div><div class='metric-value' style='color:{dl_color}'>{dl_score:.0f}/100</div></div>", unsafe_allow_html=True)
+
+        # Utsikt
+        views = env_data.get("views", {})
+        with env_cols[2]:
+            view_score = views.get("overall_score", 0)
+            view_color = "#34d399" if view_score >= 70 else "#f59e0b" if view_score >= 50 else "#f87171"
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Utsikt</div><div class='metric-value' style='color:{view_color}'>{view_score:.0f}/100</div></div>", unsafe_allow_html=True)
+
+        # Vind
+        wind_comfort = env_data.get("wind_comfort", {})
+        with env_cols[3]:
+            wc_class = wind_comfort.get("lawson_class", "–")
+            wc_color = "#34d399" if wc_class in ["A", "B"] else "#f59e0b" if wc_class == "C" else "#f87171"
+            wc_label = wind_comfort.get("overall", "Ikke vurdert")
+            st.markdown(f"<div class='kpi-card'><div class='metric-title'>Vindkomfort</div><div class='metric-value' style='color:{wc_color}'>Klasse {wc_class}</div></div>", unsafe_allow_html=True)
+
+        # Detaljer i expander
+        with st.expander("Miljødetaljer", expanded=False):
+            # Dagslys per fasade
+            if daylight.get("facades"):
+                st.markdown("**Dagslys per fasade (TEK17 §13-7 — forenklet)**")
+                dl_rows = [{"Bygg": f["building"], "Retning": f["direction"], "Score": f["score"], "Vurdering": f["rating"], "Obstruksjon": f"{f['obstruction_deg']}°"} for f in daylight["facades"]]
+                st.dataframe(pd.DataFrame(dl_rows), use_container_width=True, hide_index=True)
+
+            # Utsikt per bygg
+            if views.get("buildings"):
+                st.markdown("**Utsikt per bygg**")
+                for vb in views["buildings"]:
+                    st.caption(f"**{vb['building']}**: snitt {vb['average_score']:.0f}/100, best mot {vb['best_direction']} ({vb['best_score']:.0f}/100)")
+
+            # Vind
+            wind = env_data.get("wind", {})
+            if wind.get("available"):
+                st.markdown("**Vindforhold**")
+                st.caption(f"Kilde: {wind.get('source', '–')} | Dominerende retning: {wind.get('dominant_direction', '–')} | Snitt: {wind.get('avg_speed_ms', 0):.1f} m/s")
+                if wind_comfort.get("available"):
+                    st.caption(f"Vindkomfort: {wc_label} | Effektiv vind: {wind_comfort.get('effective_wind_ms', 0):.1f} m/s | Forsterkningsfaktor: {wind_comfort.get('amplification_factor', 1):.2f}")
+                    gap = wind_comfort.get("min_building_gap_m")
+                    if gap is not None:
+                        st.caption(f"Minste avstand mellom bygg: {gap:.0f} m" + (" ⚠️ Venturi-risiko" if gap < 12 else ""))
+
+    st.markdown("<div class='section-header'>Volumskisser</div>", unsafe_allow_html=True)
+    # Vis maks 4 per rad for lesbarhet
+    per_row = min(4, len(options))
+    option_image_pairs = list(zip(options, result["option_images"]))
+    for row_start in range(0, len(option_image_pairs), per_row):
+        row_items = option_image_pairs[row_start:row_start + per_row]
+        cols = st.columns(per_row)
+        for col_idx, (option, image) in enumerate(row_items):
+            with cols[col_idx]:
+                st.image(image, use_container_width=True)
+                is_best = (option.name == best.name)
+                badge = "⭐ " if is_best else ""
+                st.markdown(
+                    f"<div style='text-align:center;'>"
+                    f"<div style='color:{'#38bdf8' if is_best else '#c8d3df'};font-weight:{'700' if is_best else '500'};font-size:0.95rem;'>{badge}{option.typology}</div>"
+                    f"<div style='color:#9fb0c3;font-size:0.82rem;'>"
+                    f"BTA {option.gross_bta_m2:,.0f} m² · {option.unit_count} bol. · sol {option.solar_score:.0f}/100"
+                    f"</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+    # --- INTERAKTIV BYGNINGSEDITOR ---
+    st.markdown("<div class='section-header'>Planeditor — tegn og juster bygningsvolumer</div>", unsafe_allow_html=True)
+    st.caption("Klikk og dra for å plassere bygninger. Dra hjørner for å endre størrelse. Klikk på bygg for å endre etasjer. Dobbeltklikk for å slette.")
+
+    # Prepare site data for the editor
+    editor_site_coords = best.geometry.get("site_polygon_coords", [])
+    editor_buildable_coords = best.geometry.get("buildable_polygon_coords", [])
+    editor_neighbor_polys = best.geometry.get("neighbor_polygons", [])
+    editor_site_area = site_result.get("site_area_m2", 1000)
+    editor_max_bya = site_result.get("max_bya_pct", 35)
+    editor_efficiency = site_result.get("efficiency_ratio", 0.78)
+    editor_floor_h = site_result.get("floor_to_floor_m", 3.0)
+    editor_avg_unit = 55.0  # gjennomsnittlig leilighet m²
+
+    editor_payload = json.dumps({
+        "site": editor_site_coords,
+        "buildable": editor_buildable_coords,
+        "neighbors": editor_neighbor_polys,
+        "site_area": round(editor_site_area, 1),
+        "max_bya_pct": editor_max_bya,
+        "efficiency": editor_efficiency,
+        "floor_height": editor_floor_h,
+        "avg_unit_m2": editor_avg_unit,
+    }, ensure_ascii=False)
+
+    editor_html = """
+<div id="editor-wrap" style="width:100%;background:#0a1520;border:1px solid rgba(120,145,170,0.2);border-radius:12px;overflow:hidden;position:relative;">
+<canvas id="editorCanvas" style="width:100%;cursor:crosshair;display:block;"></canvas>
+<div id="editorHUD" style="position:absolute;top:12px;right:12px;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:12px 16px;font-family:Inter,sans-serif;min-width:200px;pointer-events:none;">
+  <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;font-weight:600;">Live beregning</div>
+  <div id="hudBTA" style="color:#f5f7fb;font-size:14px;font-weight:700;">BTA: 0 m²</div>
+  <div id="hudBRA" style="color:#c8d3df;font-size:12px;">BRA: 0 m²</div>
+  <div id="hudBRApct" style="color:#38bdf8;font-size:13px;font-weight:600;">%-BRA: 0%</div>
+  <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
+  <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
+</div>
+<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
+  <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
+  <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
+  <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
+  <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
+  <select id="floorSelect" onchange="setFloors()" style="background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
+    <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
+    <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
+  </select>
+</div>
+<div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
+  <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
+  <div style="color:#9fb0c3;font-size:12px;">JSON kopiert. Du kan også bruke «🔒 Lås og kjør motor» for direkte kjøring.</div>
+  <button onclick="document.getElementById('exportOverlay').style.display='none'" style="margin-top:12px;background:rgba(56,194,201,0.2);border:1px solid rgba(56,194,201,0.4);color:#38bdf8;padding:6px 16px;border-radius:8px;cursor:pointer;font-size:12px;">OK</button>
+</div>
+</div>
+<script>
+(function() {
+const P = __PAYLOAD__;
+const canvas = document.getElementById('editorCanvas');
+const ctx = canvas.getContext('2d');
+const dpr = window.devicePixelRatio || 1;
+const W = canvas.parentElement.clientWidth;
+const H = Math.min(W * 0.65, 620);
+canvas.width = W * dpr; canvas.height = H * dpr;
+canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+ctx.scale(dpr, dpr);
+
+// Parse site polygon
+function flatCoords(groups) {
+  if (!groups || !groups.length) return [];
+  if (typeof groups[0][0] === 'number') return groups;
+  let flat = [];
+  groups.forEach(g => { if (g && g.length) flat = flat.concat(g); });
+  return flat;
+}
+const siteCoords = flatCoords(P.site);
+const buildableCoords = flatCoords(P.buildable);
+if (!siteCoords.length) return;
+
+// Compute bounds
+let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+siteCoords.forEach(p => { minX = Math.min(minX, p[0]); minY = Math.min(minY, p[1]); maxX = Math.max(maxX, p[0]); maxY = Math.max(maxY, p[1]); });
+const spanX = maxX - minX || 1, spanY = maxY - minY || 1;
+const margin = 40;
+const scaleX = (W - 2*margin) / spanX, scaleY = (H - 2*margin) / spanY;
+const scale = Math.min(scaleX, scaleY);
+const offX = margin + (W - 2*margin - spanX*scale)/2;
+const offY = margin + (H - 2*margin - spanY*scale)/2;
+
+function toScreen(x, y) { return [offX + (x - minX) * scale, offY + (maxY - y) * scale]; }
+function toWorld(sx, sy) { return [(sx - offX) / scale + minX, maxY - (sy - offY) / scale]; }
+
+// Buildings state
+let buildings = [];
+let selectedIdx = -1;
+let dragging = false, resizing = false, dragOff = [0,0], resizeCorner = -1;
+let defaultFloors = 4;
+
+function drawPoly(coords, fill, stroke, lw) {
+  if (!coords.length) return;
+  ctx.beginPath();
+  coords.forEach((p, i) => { const s = toScreen(p[0], p[1]); i === 0 ? ctx.moveTo(s[0], s[1]) : ctx.lineTo(s[0], s[1]); });
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1; ctx.stroke(); }
+}
+
+function drawBuilding(b, idx) {
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  const corners = [
+    [b.cx + hw*cos - hd*sin, b.cy + hw*sin + hd*cos],
+    [b.cx - hw*cos - hd*sin, b.cy - hw*sin + hd*cos],
+    [b.cx - hw*cos + hd*sin, b.cy - hw*sin - hd*cos],
+    [b.cx + hw*cos + hd*sin, b.cy + hw*sin - hd*cos],
+  ];
+  const sel = idx === selectedIdx;
+  const alpha = sel ? '90' : '60';
+  const colors = ['#22c55e','#38bdf8','#a78bfa','#f59e0b','#ec4899','#06b6d4','#ef4444'];
+  const c = colors[idx % colors.length];
+  drawPoly(corners, c + alpha, sel ? '#fff' : c, sel ? 2.5 : 1.5);
+  // Label
+  const sc = toScreen(b.cx, b.cy);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(b.name || ('B'+(idx+1)), sc[0], sc[1] - 8);
+  ctx.font = '10px Inter'; ctx.fillStyle = '#c8d3df';
+  ctx.fillText(b.floors + ' etg | ' + Math.round(b.w * b.d) + ' m²', sc[0], sc[1] + 8);
+
+  // Veggmål — bredde og dybde langs kanter
+  const s0 = toScreen(corners[0][0], corners[0][1]);
+  const s1 = toScreen(corners[1][0], corners[1][1]);
+  const s2 = toScreen(corners[2][0], corners[2][1]);
+  const s3 = toScreen(corners[3][0], corners[3][1]);
+  ctx.font = 'bold 10px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // Bredde (topp-kant: s0→s1)
+  const wMidX = (s0[0]+s1[0])/2, wMidY = (s0[1]+s1[1])/2;
+  const wTxt = b.w.toFixed(1) + ' m';
+  const wTw = ctx.measureText(wTxt).width;
+  ctx.fillStyle = 'rgba(6,17,26,0.85)'; ctx.fillRect(wMidX-wTw/2-3, wMidY-14, wTw+6, 13);
+  ctx.fillStyle = '#38bdf8'; ctx.fillText(wTxt, wMidX, wMidY-8);
+  // Dybde (høyre-kant: s0→s3)
+  const dMidX = (s0[0]+s3[0])/2, dMidY = (s0[1]+s3[1])/2;
+  const dTxt = b.d.toFixed(1) + ' m';
+  const dTw = ctx.measureText(dTxt).width;
+  ctx.fillStyle = 'rgba(6,17,26,0.85)'; ctx.fillRect(dMidX+6, dMidY-7, dTw+6, 13);
+  ctx.fillStyle = '#38bdf8'; ctx.fillText(dTxt, dMidX+9+dTw/2, dMidY);
+
+  // Resize handles when selected
+  if (sel) {
+    corners.forEach(c => {
+      const s = toScreen(c[0], c[1]);
+      ctx.fillStyle = '#38bdf8'; ctx.fillRect(s[0]-4, s[1]-4, 8, 8);
+    });
+  }
+  return corners;
+}
+
+function computeStats() {
+  let totalFootprint = 0, totalBTA = 0;
+  buildings.forEach(b => { const fp = b.w * b.d; totalFootprint += fp; totalBTA += fp * b.floors; });
+  const bra = totalBTA * P.efficiency;
+  const units = Math.round(bra / P.avg_unit_m2);
+  const braPct = P.site_area > 0 ? (bra / P.site_area * 100) : 0;
+  document.getElementById('hudBTA').textContent = 'BTA: ' + Math.round(totalBTA).toLocaleString() + ' m²';
+  document.getElementById('hudBRA').textContent = 'BRA: ' + Math.round(bra).toLocaleString() + ' m²';
+  document.getElementById('hudBRApct').textContent = '%-BRA: ' + braPct.toFixed(0) + '%';
+  document.getElementById('hudBRApct').style.color = braPct > 300 ? '#f87171' : braPct > 200 ? '#f59e0b' : '#38bdf8';
+  document.getElementById('hudUnits').textContent = 'Boliger: ~' + units;
+  document.getElementById('hudBuildings').textContent = 'Bygg: ' + buildings.length;
+}
+
+// Avstandsmåling fra valgt bygg til tomtegrense
+function drawDistances(b) {
+  if (!siteCoords.length || siteCoords.length < 3) return;
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  // Midtpunkt på hver side av bygget
+  const sides = [
+    {label:'N', mx: b.cx - hd*sin, my: b.cy + hd*cos, dx: -sin, dy: cos},
+    {label:'S', mx: b.cx + hd*sin, my: b.cy - hd*cos, dx: sin, dy: -cos},
+    {label:'Ø', mx: b.cx + hw*cos, my: b.cy + hw*sin, dx: cos, dy: sin},
+    {label:'V', mx: b.cx - hw*cos, my: b.cy - hw*sin, dx: -cos, dy: -sin},
+  ];
+  sides.forEach(side => {
+    // Finn nærmeste punkt på tomtegrensen fra dette midtpunktet i denne retningen
+    let minDist = Infinity;
+    for (let i = 0; i < siteCoords.length; i++) {
+      const ax = siteCoords[i][0], ay = siteCoords[i][1];
+      const bx = siteCoords[(i+1)%siteCoords.length][0], by = siteCoords[(i+1)%siteCoords.length][1];
+      // Avstand fra punkt til linjestykke
+      const dx = bx-ax, dy = by-ay;
+      const len2 = dx*dx + dy*dy;
+      if (len2 < 0.01) continue;
+      let t = ((side.mx-ax)*dx + (side.my-ay)*dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const px = ax + t*dx, py = ay + t*dy;
+      const d = Math.hypot(side.mx-px, side.my-py);
+      if (d < minDist) minDist = d;
+    }
+    if (minDist < Infinity && minDist < 200) {
+      const endX = side.mx + side.dx * minDist;
+      const endY = side.my + side.dy * minDist;
+      const s1 = toScreen(side.mx, side.my);
+      const s2 = toScreen(endX, endY);
+      // Stiplet linje
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = 'rgba(248,250,252,0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(s1[0], s1[1]); ctx.lineTo(s2[0], s2[1]); ctx.stroke();
+      ctx.setLineDash([]);
+      // Avstandslabel
+      const midSx = (s1[0]+s2[0])/2, midSy = (s1[1]+s2[1])/2;
+      ctx.font = 'bold 11px Inter, sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const txt = minDist.toFixed(1) + ' m';
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = 'rgba(6,17,26,0.8)';
+      ctx.fillRect(midSx - tw/2 - 3, midSy - 7, tw + 6, 14);
+      ctx.fillStyle = '#f5f7fb';
+      ctx.fillText(txt, midSx, midSy);
+    }
+  });
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  // Neighbors — med høyde-labels
+  (P.neighbors || []).forEach(n => {
+    const nc = flatCoords(n.coords || []);
+    if (!nc.length) return;
+    drawPoly(nc, 'rgba(100,100,120,0.25)', 'rgba(150,150,170,0.4)', 1);
+    // Høyde-label — diskret, alltid synlig
+    const h = n.height_m || 0;
+    if (h > 0 && nc.length >= 3) {
+      let sx = 0, sy = 0;
+      nc.forEach(p => { const s = toScreen(p[0], p[1]); sx += s[0]; sy += s[1]; });
+      sx /= nc.length; sy /= nc.length;
+      ctx.font = '9px Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const txt = h.toFixed(0) + 'm';
+      ctx.fillStyle = 'rgba(150,155,170,0.7)';
+      ctx.fillText(txt, sx, sy);
+    }
+  });
+  // Site
+  drawPoly(siteCoords, 'rgba(56,189,248,0.06)', 'rgba(56,189,248,0.5)', 1.5);
+  // Buildable
+  if (buildableCoords.length) drawPoly(buildableCoords, null, 'rgba(52,211,153,0.35)', 1);
+  // Buildings
+  buildings.forEach((b, i) => drawBuilding(b, i));
+  // Avstandsmål for valgt bygg
+  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    drawDistances(buildings[selectedIdx]);
+  }
+  // Scale bar
+  const barM = Math.pow(10, Math.floor(Math.log10(spanX * 0.3)));
+  const barPx = barM * scale;
+  ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter'; ctx.textAlign = 'left';
+  ctx.fillRect(14, H - 20, barPx, 3); ctx.fillText(barM + ' m', 14, H - 26);
+  computeStats();
+}
+
+window.addBuilding = function() {
+  const cx = (minX + maxX) / 2 + (Math.random() - 0.5) * spanX * 0.3;
+  const cy = (minY + maxY) / 2 + (Math.random() - 0.5) * spanY * 0.3;
+  buildings.push({ cx, cy, w: 40, d: 14, angle: 0, floors: defaultFloors, name: 'Bygg ' + String.fromCharCode(65 + buildings.length) });
+  selectedIdx = buildings.length - 1;
+  render();
+};
+
+window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
+
+window.setFloors = function() {
+  defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
+  if (selectedIdx >= 0) { buildings[selectedIdx].floors = defaultFloors; render(); }
+};
+
+window.exportSketch = function() {
+  const data = buildings.map(b => ({
+    name: b.name, cx: Math.round(b.cx*100)/100, cy: Math.round(b.cy*100)/100,
+    w: Math.round(b.w*10)/10, d: Math.round(b.d*10)/10,
+    angle_deg: Math.round(b.angle * 180 / Math.PI * 10) / 10,
+    floors: b.floors, footprint_m2: Math.round(b.w * b.d),
+    bta_m2: Math.round(b.w * b.d * b.floors),
+  }));
+  const json = JSON.stringify(data, null, 2);
+  navigator.clipboard.writeText(json).then(() => {
+    document.getElementById('exportOverlay').style.display = 'block';
+    setTimeout(() => { document.getElementById('exportOverlay').style.display = 'none'; }, 3000);
+  }).catch(() => {
+    prompt('Kopier denne teksten:', json);
+  });
+};
+
+window.lockAndRunSketch = function() {
+  const data = buildings.map(b => ({
+    name: b.name, cx: Math.round(b.cx*100)/100, cy: Math.round(b.cy*100)/100,
+    w: Math.round(b.w*10)/10, d: Math.round(b.d*10)/10,
+    angle_deg: Math.round(b.angle * 180 / Math.PI * 10) / 10,
+    floors: b.floors, footprint_m2: Math.round(b.w * b.d),
+    bta_m2: Math.round(b.w * b.d * b.floors),
+  }));
+  if (data.length === 0) { alert('Tegn minst ett bygg først!'); return; }
+  const json = JSON.stringify(data, null, 2);
+  // Skriv direkte til Streamlit textarea og klikk «Kjør motor»
+  try {
+    const parent = window.parent.document;
+    const textareas = parent.querySelectorAll('textarea');
+    let filled = false;
+    for (const ta of textareas) {
+      const label = ta.getAttribute('aria-label') || '';
+      if (label.includes('Skisse-data') || label.includes('skisse')) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, json);
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+        filled = true;
+        break;
+      }
+    }
+    if (filled) {
+      // Klikk «Kjør motor fra skisse»-knappen
+      setTimeout(() => {
+        const buttons = parent.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent && btn.textContent.includes('motor fra skisse')) {
+            btn.click();
+            return;
+          }
+        }
+      }, 300);
+    } else {
+      // Fallback: kopier til utklippstavle
+      navigator.clipboard.writeText(json);
+      alert('Kunne ikke fylle feltet automatisk. Skissen er kopiert — lim inn manuelt.');
+    }
+  } catch(e) {
+    navigator.clipboard.writeText(json);
+    alert('Automatisk utfylling støttes ikke. Skissen er kopiert — lim inn manuelt.');
+  }
+};
+
+// Hit testing
+function hitTest(sx, sy) {
+  for (let i = buildings.length - 1; i >= 0; i--) {
+    const b = buildings[i];
+    const [wx, wy] = toWorld(sx, sy);
+    const dx = wx - b.cx, dy = wy - b.cy;
+    const cos = Math.cos(-b.angle), sin = Math.sin(-b.angle);
+    const lx = dx*cos - dy*sin, ly = dx*sin + dy*cos;
+    if (Math.abs(lx) <= b.w/2 + 2 && Math.abs(ly) <= b.d/2 + 2) return i;
+  }
+  return -1;
+}
+
+function cornerHit(sx, sy) {
+  if (selectedIdx < 0) return -1;
+  const b = buildings[selectedIdx];
+  const cos = Math.cos(b.angle), sin = Math.sin(b.angle);
+  const hw = b.w/2, hd = b.d/2;
+  const corners = [
+    [b.cx + hw*cos - hd*sin, b.cy + hw*sin + hd*cos],
+    [b.cx - hw*cos - hd*sin, b.cy - hw*sin + hd*cos],
+    [b.cx - hw*cos + hd*sin, b.cy - hw*sin - hd*cos],
+    [b.cx + hw*cos + hd*sin, b.cy + hw*sin - hd*cos],
+  ];
+  for (let i = 0; i < 4; i++) {
+    const s = toScreen(corners[i][0], corners[i][1]);
+    if (Math.hypot(sx - s[0], sy - s[1]) < 10) return i;
+  }
+  return -1;
+}
+
+let lastClick = 0;
+canvas.addEventListener('mousedown', e => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left), sy = (e.clientY - rect.top);
+  const now = Date.now();
+  // Double click = delete
+  if (now - lastClick < 350) {
+    const idx = hitTest(sx, sy);
+    if (idx >= 0) { buildings.splice(idx, 1); selectedIdx = -1; render(); lastClick = 0; return; }
+  }
+  lastClick = now;
+  // Corner resize
+  const ci = cornerHit(sx, sy);
+  if (ci >= 0) { resizing = true; resizeCorner = ci; return; }
+  // Building drag
+  const idx = hitTest(sx, sy);
+  if (idx >= 0) {
+    selectedIdx = idx;
+    const [wx, wy] = toWorld(sx, sy);
+    dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy];
+    dragging = true;
+    document.getElementById('floorSelect').value = buildings[idx].floors;
+    render();
+    return;
+  }
+  selectedIdx = -1;
+  render();
+});
+
+canvas.addEventListener('mousemove', e => {
+  const rect = canvas.getBoundingClientRect();
+  const sx = (e.clientX - rect.left), sy = (e.clientY - rect.top);
+  if (dragging && selectedIdx >= 0) {
+    const [wx, wy] = toWorld(sx, sy);
+    buildings[selectedIdx].cx = wx - dragOff[0];
+    buildings[selectedIdx].cy = wy - dragOff[1];
+    render();
+  } else if (resizing && selectedIdx >= 0) {
+    const [wx, wy] = toWorld(sx, sy);
+    const b = buildings[selectedIdx];
+    const dx = wx - b.cx, dy = wy - b.cy;
+    b.w = Math.max(8, Math.abs(dx) * 2);
+    b.d = Math.max(8, Math.abs(dy) * 2);
+    render();
+  } else {
+    // Cursor hint
+    const ci = cornerHit(sx, sy);
+    canvas.style.cursor = ci >= 0 ? 'nwse-resize' : hitTest(sx, sy) >= 0 ? 'move' : 'crosshair';
+  }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; resizing = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; resizing = false; });
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  const sx = t.clientX - rect.left, sy = t.clientY - rect.top;
+  const idx = hitTest(sx, sy);
+  if (idx >= 0) { selectedIdx = idx; const [wx, wy] = toWorld(sx, sy); dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy]; dragging = true; render(); }
+}, {passive: false});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!dragging || selectedIdx < 0) return;
+  const t = e.touches[0], rect = canvas.getBoundingClientRect();
+  const [wx, wy] = toWorld(t.clientX - rect.left, t.clientY - rect.top);
+  buildings[selectedIdx].cx = wx - dragOff[0]; buildings[selectedIdx].cy = wy - dragOff[1];
+  render();
+}, {passive: false});
+canvas.addEventListener('touchend', () => { dragging = false; });
+
+// Rotation with scroll on selected building
+canvas.addEventListener('wheel', e => {
+  if (selectedIdx >= 0) {
+    e.preventDefault();
+    buildings[selectedIdx].angle += e.deltaY > 0 ? 0.05 : -0.05;
+    render();
+  }
+}, {passive: false});
+
+render();
+})();
+</script>
+""".replace("__PAYLOAD__", editor_payload)
+    components.html(editor_html, height=680, scrolling=False)
+
+    # --- SKISSE TIL MOTOR ---
+    with st.expander("Kjør motor fra manuell skisse", expanded=False):
+        st.caption("Bruk «🔒 Lås og kjør motor» i editoren for direkte kjøring, eller lim inn manuelt her.")
+        sketch_json = st.text_area(
+            "Skisse-data",
+            height=60,
+            placeholder='Fylles automatisk fra «🔒 Lås og kjør motor» eller lim inn manuelt',
+            key="sketch_json_input",
+        )
+        sk_c1, sk_c2 = st.columns(2)
+        sketch_floors_override = sk_c1.number_input("Overstyr etasjer (0 = fra skisse)", min_value=0, max_value=12, value=0, key="sketch_floors")
+        sketch_efficiency = sk_c2.number_input("Salgbarhetsfaktor", min_value=0.55, max_value=0.90, value=0.78, step=0.01, key="sketch_eff")
+
+        if st.button("Kjør motor fra skisse", type="primary", use_container_width=True, key="run_sketch"):
+            if sketch_json and sketch_json.strip().startswith("["):
+                try:
+                    sketch_buildings = json.loads(sketch_json)
+                    SKETCH_COLORS = [
+                        [34, 197, 94, 200], [56, 189, 248, 200], [168, 130, 240, 200],
+                        [250, 180, 60, 200], [220, 80, 120, 200], [100, 200, 180, 200],
+                    ]
+
+                    total_footprint = 0.0
+                    total_bta = 0.0
+                    sketch_parts = []
+                    sketch_fp_polygons = []
+                    floor_to_floor = site_result.get("floor_to_floor_m", 3.0)
+
+                    for idx, bld in enumerate(sketch_buildings):
+                        floors = sketch_floors_override if sketch_floors_override > 0 else int(bld.get("floors", 4))
+                        w = float(bld.get("w", 40))
+                        d = float(bld.get("d", 14))
+                        cx_val = float(bld.get("cx", 0))
+                        cy_val = float(bld.get("cy", 0))
+                        angle = math.radians(float(bld.get("angle_deg", 0)))
+                        fp = w * d
+                        total_footprint += fp
+                        total_bta += fp * floors
+
+                        cos_a, sin_a = math.cos(angle), math.sin(angle)
+                        hw, hd = w / 2.0, d / 2.0
+                        corners = [
+                            (cx_val + hw*cos_a - hd*sin_a, cy_val + hw*sin_a + hd*cos_a),
+                            (cx_val - hw*cos_a - hd*sin_a, cy_val - hw*sin_a + hd*cos_a),
+                            (cx_val - hw*cos_a + hd*sin_a, cy_val - hw*sin_a - hd*cos_a),
+                            (cx_val + hw*cos_a + hd*sin_a, cy_val + hw*sin_a - hd*cos_a),
+                        ]
+                        bld_poly = Polygon(corners).buffer(0)
+                        sketch_fp_polygons.append(bld_poly)
+                        sketch_parts.append({
+                            "name": bld.get("name", f"Bygg {chr(65+idx)}"),
+                            "height_m": round(floors * floor_to_floor, 1),
+                            "floors": floors,
+                            "color": SKETCH_COLORS[idx % len(SKETCH_COLORS)],
+                            "coords": geometry_to_coord_groups(bld_poly),
+                        })
+
+                    # Bygg fullverdig OptionResult fra skissen
+                    site_area_val = site_result.get("site_area_m2", 1800)
+                    bya_pct = (total_footprint / max(site_area_val, 1.0)) * 100.0
+                    saleable = total_bta * sketch_efficiency
+                    avg_unit = sum(spec.share_pct * spec.avg_size_m2 for spec in mix_inputs) / max(sum(spec.share_pct for spec in mix_inputs), 1.0)
+                    mix_counts, _ = allocate_unit_mix(saleable, mix_inputs)
+                    unit_count = sum(mix_counts.values())
+                    max_floors = max((sketch_floors_override if sketch_floors_override > 0 else int(b.get("floors", 4))) for b in sketch_buildings)
+                    height_m = max_floors * floor_to_floor
+                    open_space_ratio = max(0.0, 1.0 - (total_footprint / max(site_area_val, 1.0)))
+                    parking_spaces = int(math.ceil(unit_count * site_result.get("parking_ratio_per_unit", 0.8)))
+
+                    # Sol/skygge
+                    combined_fp = unary_union(sketch_fp_polygons).buffer(0)
+                    site_poly = best.geometry.get("site_polygon_coords", [])
+                    site_polygon_obj = Polygon(flatten_coord_groups(site_poly)) if site_poly else box(0, 0, 50, 50)
+                    solar = evaluate_solar(
+                        site=SiteInputs(**site_result),
+                        site_polygon=site_polygon_obj,
+                        footprint_polygon=combined_fp,
+                        building_height_m=height_m,
+                        typology="Manuell",
+                    )
+
+                    sketch_option = OptionResult(
+                        name="Skisse (manuell)",
+                        typology="Manuell plassering",
+                        floors=max_floors,
+                        building_height_m=round(height_m, 1),
+                        footprint_area_m2=round(total_footprint, 1),
+                        gross_bta_m2=round(total_bta, 1),
+                        saleable_area_m2=round(saleable, 1),
+                        footprint_width_m=0.0,
+                        footprint_depth_m=0.0,
+                        buildable_area_m2=round(site_area_val, 1),
+                        open_space_ratio=round(open_space_ratio, 3),
+                        target_fit_pct=round(100.0 * total_bta / max(site_result.get("desired_bta_m2", total_bta), 1.0), 1),
+                        unit_count=unit_count,
+                        mix_counts=mix_counts,
+                        parking_spaces=parking_spaces,
+                        parking_pressure_pct=0.0,
+                        solar_score=round(solar["solar_score"], 1),
+                        estimated_equinox_sun_hours=round(solar["estimated_equinox_sun_hours"], 1),
+                        estimated_winter_sun_hours=round(solar["estimated_winter_sun_hours"], 1),
+                        sunlit_open_space_pct=round(solar["sunlit_open_space_pct"], 1),
+                        winter_noon_shadow_m=round(solar["winter_noon_shadow_m"], 1),
+                        equinox_noon_shadow_m=round(solar["equinox_noon_shadow_m"], 1),
+                        summer_afternoon_shadow_m=round(solar["summer_afternoon_shadow_m"], 1),
+                        efficiency_ratio=round(sketch_efficiency, 3),
+                        neighbor_count=best.neighbor_count,
+                        terrain_slope_pct=best.terrain_slope_pct,
+                        terrain_relief_m=best.terrain_relief_m,
+                        notes=[f"Manuell skisse med {len(sketch_buildings)} bygg.", f"BYA {bya_pct:.1f}% av tomteareal {site_area_val:.0f} m²."],
+                        score=round(solar["solar_score"] * 0.5 + min(100, 100 * total_bta / max(site_result.get("desired_bta_m2", total_bta), 1)) * 0.5, 1),
+                        geometry={
+                            "site_polygon_coords": best.geometry.get("site_polygon_coords", []),
+                            "buildable_polygon_coords": best.geometry.get("buildable_polygon_coords", []),
+                            "footprint_polygon_coords": geometry_to_coord_groups(combined_fp),
+                            "winter_shadow_polygon_coords": [],
+                            "neighbor_polygons": best.geometry.get("neighbor_polygons", []),
+                            "terrain_summary": best.geometry.get("terrain_summary", {}),
+                            "placement": {"source": "Manuell skisse"},
+                            "massing_parts": sketch_parts,
+                            "component_count": len(sketch_buildings),
+                        },
+                    )
+
+                    # Sett skissen som første (anbefalt) alternativ og behold de andre
+                    existing_options = result.get("options", [])
+                    new_options = [asdict(sketch_option)] + existing_options
+
+                    # Render flere visninger av den manuelle skissen
+                    site_obj = SiteInputs(**site_result)
+                    sketch_views = render_sketch_views(site_obj, sketch_option)
+                    sketch_image = sketch_views[0] if sketch_views else render_plan_diagram(site_obj, sketch_option)
+
+                    # --- SEKUNDÆR AI-ANALYSE av den låste skissen ---
+                    motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in existing_options]
+                    manual_override_data = {
+                        "gross_bta_m2": sketch_option.gross_bta_m2,
+                        "saleable_area_m2": sketch_option.saleable_area_m2,
+                        "unit_count": sketch_option.unit_count,
+                        "footprint_area_m2": sketch_option.footprint_area_m2,
+                        "floors": sketch_option.floors,
+                        "building_height_m": sketch_option.building_height_m,
+                        "solar_score": sketch_option.solar_score,
+                        "sunlit_open_space_pct": sketch_option.sunlit_open_space_pct,
+                        "mix_counts": sketch_option.mix_counts,
+                        "n_buildings": len(sketch_buildings),
+                    }
+
+                    # AI-rapport: Claude analyserer den låste skissen
+                    updated_report = None
+                    if ANTHROPIC_API_KEY:
+                        with st.spinner("Claude analyserer den valgte volumløsningen..."):
+                            try:
+                                # Bygg enkel geodata-kontekst for AI
+                                ai_geodata = {
+                                    "site_area_m2": site_result.get("site_area_m2", 1800),
+                                    "terrain": {
+                                        "slope_pct": site_result.get("terrain_slope_pct", 0),
+                                        "relief_m": site_result.get("terrain_relief_m", 0),
+                                    },
+                                }
+                                updated_report = generate_ai_report_for_locked_sketch(
+                                    sketch_option=sketch_option,
+                                    motor_options=motor_options,
+                                    site=site_obj,
+                                    geodata_context=ai_geodata,
+                                    environment_data=result.get("environment"),
+                                )
+                            except Exception:
+                                updated_report = None
+
+                    # Fallback: deterministisk rapport hvis AI feiler
+                    if not updated_report:
+                        try:
+                            updated_report = build_deterministic_report(
+                                site_obj, motor_options, {}, has_visual_input=True,
+                                manual_override=manual_override_data,
+                                environment_data=result.get("environment"),
+                                geodata_bundle=st.session_state.get("geodata_bundle"),
+                                historical_analysis=st.session_state.get("historical_analysis"),
+                            )
+                        except Exception:
+                            updated_report = result.get("report_text", "")
+
+                    # --- REGENERER PDF med skissebilder og AI-rapport ---
+                    all_option_images = [sketch_image] + result.get("option_images", [])
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        _solar_grid = None
+                        if motor_options and site_obj is not None:
+                            try:
+                                _solar_grid = render_solar_snapshot_grid(site_obj, motor_options[0])
+                            except Exception:
+                                pass
+                        new_pdf_bytes = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=updated_report,
+                            options=motor_options,
+                            option_images=all_option_images,
+                            visual_attachments=[],
+                            manual_sketch_images=sketch_views,
+                            site=site_obj,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_grid,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
                         )
+                        st.session_state.generated_ark_pdf = new_pdf_bytes
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_manuell.pdf"
 
-# -------------------------------------------------
-# 14) FOOTER
-# -------------------------------------------------
-render_html(
-    f"""
-    <div class="footer-block">
-        <div class="footer-copy">{lang['footer_copy']}</div>
-        <div class="footer-meta">{lang['footer_meta']}</div>
-    </div>
-    """
-)
+                        # Oppdater til brukerens rapport-dashboard
+                        try:
+                            from builtly_auth import save_report as _save_report_regen
+                            _save_report_regen(
+                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                                module="Mulighetsstudie",
+                                file_path=st.session_state.generated_ark_filename,
+                                pdf_bytes=new_pdf_bytes,
+                            )
+                        except ImportError:
+                            pass
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass  # Behold gammel PDF hvis regen feiler
 
-# Persist current language to localStorage (runs every render, survives page reload)
-st.components.v1.html(f"""<script>
-try {{ localStorage.setItem('builtly_lang', '{language_slug(st.session_state.app_lang)}'); }} catch(e) {{}}
-</script>""", height=0)
+                    # Oppdater analysis_results
+                    st.session_state.analysis_results["options"] = new_options
+                    st.session_state.analysis_results["option_images"] = all_option_images
+                    st.session_state.analysis_results["report_text"] = updated_report
+                    st.session_state.analysis_results["manual_override"] = manual_override_data
+                    st.session_state.analysis_results["manual_sketch_views"] = sketch_views
+                    st.rerun()
+
+                except json.JSONDecodeError:
+                    st.error("Ugyldig JSON. Trykk «Kopier skisse» i editoren og lim inn på nytt.")
+                except Exception as exc:
+                    st.error(f"Feil ved behandling av skisse: {exc}")
+            else:
+                st.warning("Lim inn skisse-data fra planediteren (JSON-format, starter med [).")
+
+    # --- AI-RAFFINERING OG ALTERNATIVGENERERING ---
+    with st.expander("AI-raffinering og alternative volumløsninger", expanded=False):
+        ai_available = bool(ANTHROPIC_API_KEY)
+        if not ai_available:
+            st.info("Claude API er ikke konfigurert. Sett ANTHROPIC_API_KEY for AI-raffinering. Deterministisk soloptimering er tilgjengelig.")
+
+        st.caption("Bruk skissen fra editoren som utgangspunkt. AI optimerer plassering, eller genererer alternativer innenfor samme bounding box.")
+
+        ai_sketch_json = st.text_area(
+            "Skisse-data for AI",
+            height=80,
+            key="ai_sketch_json",
+            placeholder='Lim inn fra «Kopier skisse»',
+        )
+
+        ai_col1, ai_col2 = st.columns(2)
+
+        # --- RAFFINER SKISSE ---
+        with ai_col1:
+            if st.button("Raffiner skisse med AI", type="primary", use_container_width=True, key="btn_refine_ai",
+                         disabled=not ai_sketch_json):
+                if ai_sketch_json and ai_sketch_json.strip().startswith("["):
+                    try:
+                        raw_buildings = json.loads(ai_sketch_json)
+                        site_poly_coords = flatten_coord_groups(best.geometry.get("site_polygon_coords", []))
+                        neighbor_data = best.geometry.get("neighbor_polygons", [])
+
+                        with st.spinner("Claude analyserer skissen og optimerer plassering..."):
+                            if ai_available:
+                                refined = refine_sketch_with_ai(
+                                    sketch_buildings=raw_buildings,
+                                    site_polygon_coords=site_poly_coords,
+                                    site_area_m2=site_result.get("site_area_m2", 2000),
+                                    latitude_deg=site_result.get("latitude_deg", 59.91),
+                                    max_bya_pct=site_result.get("max_bya_pct", 35),
+                                    max_floors=site_result.get("max_floors", 5),
+                                    max_height_m=site_result.get("max_height_m", 16),
+                                    floor_to_floor_m=site_result.get("floor_to_floor_m", 3.0),
+                                    neighbors=neighbor_data,
+                                    environment=result.get("environment", {}),
+                                )
+                            else:
+                                refined = None
+
+                            if refined is None:
+                                st.info("AI-kall feilet eller utilgjengelig — bruker deterministisk soloptimering.")
+                                refined = _deterministic_solar_refinement(raw_buildings, site_result.get("latitude_deg", 59.91))
+
+                        st.success(f"Raffinering fullført — {len(refined)} bygg optimert")
+
+                        # Vis endringer
+                        for bld in refined:
+                            reasoning = bld.get("reasoning", "")
+                            st.caption(f"**{bld.get('name', '?')}**: {bld.get('w', 0):.0f}×{bld.get('d', 0):.0f} m, "
+                                      f"{bld.get('floors', 4)} etg, vinkel {bld.get('angle_deg', 0):.0f}° — _{reasoning}_")
+
+                        # Lagre raffinert JSON for bruk i motor
+                        refined_json = json.dumps(refined, ensure_ascii=False, indent=2)
+                        st.text_area("Raffinert skisse (kopier til «Kjør motor fra skisse»)", value=refined_json, height=150, key="refined_output")
+
+                    except Exception as exc:
+                        st.error(f"Feil: {exc}")
+
+        # --- GENERER ALTERNATIVER ---
+        with ai_col2:
+            if st.button("Generer alternativer fra skisse", type="secondary", use_container_width=True, key="btn_variants",
+                         disabled=not ai_sketch_json or not ai_available):
+                if ai_sketch_json and ai_sketch_json.strip().startswith("["):
+                    try:
+                        raw_buildings = json.loads(ai_sketch_json)
+                        site_poly_coords = flatten_coord_groups(best.geometry.get("site_polygon_coords", []))
+
+                        with st.spinner("Claude genererer alternative volumløsninger..."):
+                            variants_result = generate_sketch_variants(
+                                sketch_buildings=raw_buildings,
+                                site_polygon_coords=site_poly_coords,
+                                site_area_m2=site_result.get("site_area_m2", 2000),
+                                latitude_deg=site_result.get("latitude_deg", 59.91),
+                                max_bya_pct=site_result.get("max_bya_pct", 35),
+                                max_floors=site_result.get("max_floors", 5),
+                                max_height_m=site_result.get("max_height_m", 16),
+                                floor_to_floor_m=site_result.get("floor_to_floor_m", 3.0),
+                                neighbors=best.geometry.get("neighbor_polygons", []),
+                            )
+
+                        if variants_result and variants_result.get("variants"):
+                            for var in variants_result["variants"]:
+                                var_name = var.get("name", "Variant")
+                                var_desc = var.get("description", "")
+                                var_buildings = var.get("buildings", [])
+                                total_bta = sum(b.get("w", 0) * b.get("d", 0) * b.get("floors", 4) for b in var_buildings)
+
+                                st.markdown(f"**{var_name}** — {var_desc}")
+                                st.caption(f"{len(var_buildings)} bygg, ~{total_bta:,.0f} m² BTA")
+
+                                var_json = json.dumps(var_buildings, ensure_ascii=False, indent=2)
+                                st.text_area(f"JSON for {var_name} (kopier til motor)", value=var_json, height=100, key=f"var_{var_name}")
+                        else:
+                            st.warning("Kunne ikke generere alternativer. Sjekk at Claude API er tilkoblet.")
+
+                    except Exception as exc:
+                        st.error(f"Feil: {exc}")
+
+    st.markdown("<div class='section-header'>Leilighetsmiks per alternativ</div>", unsafe_allow_html=True)
+    mix_rows = []
+    for option in options:
+        row = {"Alternativ": option.name}
+        row.update(option.mix_counts)
+        row["Totalt"] = option.unit_count
+        mix_rows.append(row)
+    mix_df = pd.DataFrame(mix_rows).fillna(0)
+    st.dataframe(mix_df, use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='section-header'>Sol, skygge og terreng</div>", unsafe_allow_html=True)
+    solar_df = pd.DataFrame(
+        {
+            option.name: {
+                "Solbelyst uteareal %": option.sunlit_open_space_pct,
+                "Vår/høst soltimer": option.estimated_equinox_sun_hours,
+                "Vinter soltimer": option.estimated_winter_sun_hours,
+                "Vinterskygge kl. 12 (m)": option.winter_noon_shadow_m,
+                "Sommerskygge kl. 15 (m)": option.summer_afternoon_shadow_m,
+                "Terrengfall %": option.terrain_slope_pct,
+                "Terreng relieff m": option.terrain_relief_m,
+            }
+            for option in options
+        }
+    ).T
+    st.dataframe(solar_df, use_container_width=True)
+
+    if geodata_token_ok and gdo is not None:
+        st.markdown("<div class='section-header'>3D Terrengscene</div>", unsafe_allow_html=True)
+        selected_name = st.selectbox('Velg volum for 3D-scene', [opt.name for opt in options], index=0)
+        selected_option = next((opt for opt in options if opt.name == selected_name), options[0])
+        try:
+            scene_config = gdo.fetch_scene_config()
+            render_geodata_scene(SiteInputs(**site_result), selected_option, scene_config, height_px=620)
+
+            # --- AUTO-CAPTURE: custom component fanger alle alternativer automatisk ---
+            _comp = _get_scene_capture_component()
+            # DEBUG: vis komponent-status
+            st.caption(f"🔧 Component: {'OK' if _comp else 'None'} | Dir: {_SCENE_CAPTURE_DIR.exists()} | Error: {_scene_capture_error or 'ingen'}")
+            if _comp is not None and not st.session_state.get("ark_scene_images"):
+                st.info("⏳ Fanger 3D-scener automatisk for alle alternativer — vennligst vent...")
+                captured = auto_capture_3d_scenes(
+                    SiteInputs(**site_result), options, scene_config,
+                    height_px=500, capture_width=1280, capture_height=720,
+                )
+                if captured:
+                    st.session_state.ark_scene_images = captured
+                    st.success(f"✓ {len(captured)} 3D-scener fanget og analysert — PDF oppdatert automatisk.")
+                    # Auto-regenerer PDF med 3D-bilder og AI-analyse
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+                        _site_obj_ac = SiteInputs(**site_result)
+                        pv_analyses_3d: List[str] = []
+                        if ANTHROPIC_API_KEY:
+                            with st.spinner("Claude analyserer 3D-scenene..."):
+                                try:
+                                    pv_analyses_3d = analyze_plan_views_with_ai(captured, motor_options, _site_obj_ac, result.get("environment"))
+                                except Exception:
+                                    pass
+                        _solar_ac = None
+                        try:
+                            _solar_ac = render_solar_snapshot_grid(_site_obj_ac, motor_options[0])
+                        except Exception:
+                            pass
+                        new_pdf = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=result.get("report_text", ""),
+                            options=motor_options,
+                            option_images=result.get("option_images", []),
+                            visual_attachments=result.get("visual_attachments", []),
+                            site=_site_obj_ac,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_ac,
+                            scene_images=captured,
+                            plan_view_analyses=pv_analyses_3d or None,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
+                    except Exception:
+                        pass
+                else:
+                    st.caption("Komponenten rendrer 3D-scener — bildene overføres ved neste sidelasting.")
+
+            # --- BATCH CAPTURE fallback: KUN når custom component IKKE er tilgjengelig ---
+            elif _comp is None and not st.session_state.get("ark_scene_images") and not st.session_state.get("_batch_auto_triggered"):
+                st.session_state._batch_auto_triggered = True
+                st.info("📸 3D-scener lastes ned automatisk. Dra bildene inn i opplasteren nedenfor for å inkludere i rapporten.")
+                all_payloads = []
+                for opt in options[:3]:
+                    p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
+                    all_payloads.append(p)
+                batch_json = json.dumps(all_payloads, ensure_ascii=False)
+                batch_html = _build_batch_capture_html(batch_json, height_px=480)
+                components.html(batch_html, height=520, scrolling=False)
+
+            # Manuell batch-capture knapp
+            if st.button("📸 Ta bilder av alle alternativer (manuell)", use_container_width=True, key="batch_capture_btn"):
+                all_payloads = []
+                for opt in options:
+                    p = build_geodata_scene_payload(SiteInputs(**site_result), opt, scene_config)
+                    all_payloads.append(p)
+                batch_json = json.dumps(all_payloads, ensure_ascii=False)
+                batch_html = _build_batch_capture_html(batch_json, height_px=620)
+                components.html(batch_html, height=660, scrolling=False)
+        except Exception as exc:
+            st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
+
+    # --- Interaktiv Three.js 3D-modell ---
+    st.markdown("<div class='section-header'>3D Volummodell (interaktiv)</div>", unsafe_allow_html=True)
+    sel3d_name = st.selectbox('Velg alternativ for 3D-visning', [opt.name for opt in options], index=0, key='sel3d')
+    sel3d_opt = next((opt for opt in options if opt.name == sel3d_name), options[0])
+    try:
+        render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
+    except Exception as exc:
+        st.caption(f'3D-modell kunne ikke rendres: {exc}')
+
+    # --- Utforsk utsikten (first-person fra bygget) ---
+    with st.expander("🔭 Utforsk utsikten — se fra en leilighet", expanded=False):
+        st.caption(
+            "Fotorealistisk utsikt fra balkongen, basert på Google Photorealistic 3D. "
+            "Dine foreslåtte volumer vises som fargede blokker oppå det faktiske terreng- "
+            "og bygningsdataet. Slik kan du vurdere hvilke nabobygg, trær og landskapsformer "
+            "som faktisk påvirker utsikten fra ulike etasjer og retninger."
+        )
+        mid_floor = max(1, int(sel3d_opt.floors) // 2)
+        top_floor = max(2, int(sel3d_opt.floors))
+        cv1, cv2 = st.columns(2)
+        with cv1:
+            view_floor_label = st.radio(
+                "Etasje",
+                options=[f"Midt ({mid_floor}. et.)", f"Topp ({top_floor}. et.)"],
+                key="view_floor_sel",
+                horizontal=True,
+            )
+            view_floor = mid_floor if "Midt" in view_floor_label else top_floor
+        with cv2:
+            view_direction = st.radio(
+                "Retning",
+                options=["N", "Ø", "S", "V"],
+                key="view_dir_sel",
+                horizontal=True,
+            )
+
+        try:
+            render_view_from_building(
+                SiteInputs(**site_result),
+                sel3d_opt,
+                floor=view_floor,
+                direction=view_direction,
+                height_px=520,
+                terrain_ctx=result.get('terrain_ctx'),
+            )
+        except Exception as exc:
+            st.caption(f"Utsiktsvisning kunne ikke rendres: {exc}")
+
+    # --- 3D-scene bilder til rapport ---
+    # Auto-expand when batch capture has run but images not yet in PDF
+    _expand_upload = bool(st.session_state.get("_batch_auto_triggered") and not st.session_state.get("ark_scene_images"))
+    with st.expander("Legg til 3D-scenebilder i rapporten", expanded=_expand_upload):
+        if _expand_upload:
+            st.warning("⬇️ 3D-scener er lastet ned til din nedlastingsmappe. Dra filene (terreng_*.png) hit for å inkludere dem i rapporten med AI-analyse.")
+        else:
+            st.caption("Bruk «📸 Last ned bilde» i 3D-terrengscenen for å ta bilder fra ønsket vinkel, "
+                       "og last dem opp her for å inkludere dem i PDF-rapporten.")
+        scene_uploads = st.file_uploader(
+            "Last opp 3D-scenebilder (PNG/JPG)",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key="scene_image_uploads",
+        )
+        if scene_uploads:
+            # v16.3: Umiddelbar validering + thumbnail-preview (løser forvirrende
+            # røde sirkler i Streamlit's default file-display)
+            st.markdown("**Forhåndsvisning:**")
+            scene_images_for_pdf, _upload_errors = _validated_upload_preview(
+                scene_uploads, max_thumbs=5, thumb_height=120
+            )
+            if _upload_errors:
+                for _err in _upload_errors:
+                    st.warning(f"⚠️ {_err}")
+            if scene_images_for_pdf:
+                st.session_state.ark_scene_images = scene_images_for_pdf
+                st.success(f"✓ {len(scene_images_for_pdf)} bilde(r) klare — klikk «Oppdater PDF» for å inkludere i rapporten.")
+                if st.button("Oppdater PDF med 3D-bilder", type="primary", use_container_width=True, key="regen_pdf_3d"):
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+                        manual_ov = result.get("manual_override")
+                        updated_report = result.get("report_text", "")
+                        manual_views = result.get("manual_sketch_views", [])
+                        all_images = result.get("option_images", [])
+                        _site_obj_3d = SiteInputs(**site_result) if site_result else None
+                        _solar_grid_3d = None
+                        if motor_options and _site_obj_3d is not None:
+                            try:
+                                _solar_grid_3d = render_solar_snapshot_grid(_site_obj_3d, motor_options[0])
+                            except Exception:
+                                pass
+                        # AI-analyse av opplastede 3D-scener (v13)
+                        pv_analyses_upload: List[str] = []
+                        if ANTHROPIC_API_KEY and _site_obj_3d:
+                            with st.spinner("Claude analyserer 3D-scenene..."):
+                                try:
+                                    pv_analyses_upload = analyze_plan_views_with_ai(
+                                        scene_images_for_pdf, motor_options, _site_obj_3d, result.get("environment")
+                                    )
+                                except Exception:
+                                    pass
+                        new_pdf_bytes = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=updated_report,
+                            options=motor_options,
+                            option_images=all_images,
+                            visual_attachments=result.get("visual_attachments", []),
+                            manual_sketch_images=manual_views if manual_views else None,
+                            site=_site_obj_3d,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_grid_3d,
+                            scene_images=scene_images_for_pdf,
+                            plan_view_analyses=pv_analyses_upload or None,
+                            cover_image=st.session_state.get("stability_render_image"),
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf_bytes
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_3D.pdf"
+
+                        # Oppdater til brukerens rapport-dashboard
+                        try:
+                            from builtly_auth import save_report as _save_report_3d
+                            _save_report_3d(
+                                project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                                report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                                module="Mulighetsstudie",
+                                file_path=st.session_state.generated_ark_filename,
+                                pdf_bytes=new_pdf_bytes,
+                            )
+                        except ImportError:
+                            pass
+                        except Exception:
+                            pass
+
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Feil ved PDF-oppdatering: {exc}")
+
+    st.markdown("<div class='section-header'>Rapport</div>", unsafe_allow_html=True)
+    st.markdown(result["report_text"])
+
+    # --- Sol/skygge 3D-snapshots til rapport (postMessage-basert, robust) ---
+    with st.expander("Sol/skygge fra 3D-scenen i rapporten", expanded=True):
+        _has_solar_3d = bool(st.session_state.get("solar_3d_snapshots"))
+
+        # Injiser en parent-level postMessage-listener som mottar frames fra
+        # 3D-iframen og lagrer i parent.sessionStorage. Dette kjører hver gang
+        # siden rendres; listeneren selv er idempotent (sjekker window-flag).
+        _listener_js = """
+        <script>
+        (function(){
+          try {
+            var P = window.parent;
+            if (P.__builtlySolarListenerReady) return;
+            P.__builtlySolarListenerReady = true;
+            // Initier tom state
+            P.sessionStorage.setItem('builtly_solar_state', 'idle');
+            P.sessionStorage.setItem('builtly_solar_count', '0');
+            P.addEventListener('message', function(ev){
+              var d = ev.data;
+              if (!d || d.source !== 'builtly_solar_capture') return;
+              try {
+                if (d.type === 'start') {
+                  P.sessionStorage.setItem('builtly_solar_state', 'running');
+                  P.sessionStorage.setItem('builtly_solar_count', String(d.count || 0));
+                  for (var i = 0; i < 10; i++) {
+                    P.sessionStorage.removeItem('builtly_solar_img_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_label_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_doy_' + i);
+                    P.sessionStorage.removeItem('builtly_solar_hour_' + i);
+                  }
+                } else if (d.type === 'frame') {
+                  try {
+                    P.sessionStorage.setItem('builtly_solar_img_' + d.index, d.dataUrl);
+                    P.sessionStorage.setItem('builtly_solar_label_' + d.index, d.label || '');
+                    P.sessionStorage.setItem('builtly_solar_doy_' + d.index, String(d.doy || 0));
+                    P.sessionStorage.setItem('builtly_solar_hour_' + d.index, String(d.hour || 0));
+                  } catch (e) {
+                    // quota — fallback: slipp frame, fortsett
+                    console.warn('Builtly solar capture: quota exceeded for frame', d.index, e);
+                  }
+                } else if (d.type === 'done') {
+                  P.sessionStorage.setItem('builtly_solar_state', 'ready');
+                }
+              } catch (e) {
+                console.warn('Builtly solar listener error:', e);
+              }
+            }, false);
+          } catch (e) {
+            // Hvis parent ikke er tilgjengelig (usannsynlig), loggfør kun
+            console.warn('Builtly solar listener: parent access denied', e);
+          }
+        })();
+        </script>
+        """
+        components.html(_listener_js, height=0)
+
+        if _has_solar_3d:
+            _n = len(st.session_state["solar_3d_snapshots"])
+            st.success(
+                f"✓ {_n} sol/skygge-bilder fra 3D-scenen er lastet inn og klare for rapporten. "
+                f"Klikk «Oppdater PDF med 3D-sol» under for å regenerere rapporten."
+            )
+            if st.button("🗑 Fjern sol/skygge-bilder og ta nye", key="clear_solar_3d"):
+                st.session_state.pop("solar_3d_snapshots", None)
+                st.session_state.pop("solar_3d_meta", None)
+                # Reset uploader-teller så file_uploader blir ny/tom
+                st.session_state._solar_uploader_counter = st.session_state.get("_solar_uploader_counter", 0) + 1
+                if _HAS_ST_JS:
+                    try:
+                        st_javascript("""
+                            (function(){
+                                var s = window.parent.sessionStorage;
+                                s.setItem('builtly_solar_state', 'idle');
+                                s.setItem('builtly_solar_count', '0');
+                                for (var i = 0; i < 10; i++) {
+                                    s.removeItem('builtly_solar_img_' + i);
+                                    s.removeItem('builtly_solar_label_' + i);
+                                    s.removeItem('builtly_solar_doy_' + i);
+                                    s.removeItem('builtly_solar_hour_' + i);
+                                }
+                                return 'cleared';
+                            })()
+                        """, key=f"clear_solar_js_{id(st.session_state)}")
+                    except Exception:
+                        pass
+                st.rerun()
+        else:
+            st.markdown(
+                "**Slik får du sol/skygge-bildene inn i rapporten:**  \n"
+                "1. Trykk **📥 Fang sol/skygge til PDF** i 3D-scenen over  \n"
+                "2. Klikk på hver av de 5 nedlastingslenkene som dukker opp  \n"
+                "3. Dra filene inn i boksen under (eller legg til egne vinkler du har lastet ned separat)  \n"
+                "4. Klikk **«Bruk disse bildene i rapporten»** → PDF regenereres automatisk"
+            )
+            st.caption(
+                "💡 Du kan laste opp 1–5 bilder. Trenger du flere vinkler enn standard-settet? "
+                "Dra inn dine egne bilder i tillegg — filnavn som starter med `solskygge_NN_...` "
+                "får automatisk metadata. Andre filnavn brukes som de er."
+            )
+
+            # Reset-counter brukes til å tvinge ny file_uploader-instans ved "fjern alt"
+            if "_solar_uploader_counter" not in st.session_state:
+                st.session_state._solar_uploader_counter = 0
+            _uploader_key = f"solar_3d_uploader_{st.session_state._solar_uploader_counter}"
+
+            uploaded_solar = st.file_uploader(
+                "Slipp sol/skygge-bildene her",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key=_uploader_key,
+                help="Dra inn 1–5 bilder. Ikonet for hver fil kan vises med rød sirkel — det er et kosmetisk Streamlit-problem og betyr ikke at filen er avvist. Faktisk status ser du i forhåndsvisningen som dukker opp under (grønn ✅ eller rød ❌).",
+            )
+
+            if uploaded_solar:
+                _n_files = len(uploaded_solar)
+                _col_info, _col_reset = st.columns([3, 1])
+                with _col_info:
+                    if _n_files == 1:
+                        st.caption(f"✓ 1 fil lastet opp")
+                    else:
+                        st.caption(f"✓ {_n_files} filer lastet opp")
+                with _col_reset:
+                    if st.button("🗑 Fjern alle", key="reset_solar_uploader", use_container_width=True):
+                        st.session_state._solar_uploader_counter += 1
+                        st.rerun()
+
+            if uploaded_solar and len(uploaded_solar) >= 1:
+                # Sorter på filnavn for å bevare rekkefølge (solskygge_01_... → solskygge_05_...)
+                _sorted = sorted(uploaded_solar, key=lambda f: f.name)
+                _solar_imgs: List[Image.Image] = []
+                _solar_meta: List[Dict[str, Any]] = []
+                _solar_statuses: List[Dict[str, Any]] = []
+
+                # Parse doy og hour fra filnavn: solskygge_01_doy80_kl120.jpg
+                _meta_defaults = [
+                    {"label": "Vårjevndøgn - 21. mars kl. 12:00", "doy": 80, "hour": 12.0},
+                    {"label": "Vårjevndøgn - 21. mars kl. 15:00", "doy": 80, "hour": 15.0},
+                    {"label": "Sommersolverv - 21. juni kl. 12:00", "doy": 172, "hour": 12.0},
+                    {"label": "Sommersolverv - 21. juni kl. 15:00", "doy": 172, "hour": 15.0},
+                    {"label": "Sommersolverv - 21. juni kl. 18:00", "doy": 172, "hour": 18.0},
+                ]
+                for idx, uf in enumerate(_sorted):
+                    try:
+                        uf.seek(0)
+                        img = Image.open(uf).convert("RGB")
+                        _thumb = img.copy()
+                        _thumb.thumbnail((260, 260))
+                        _solar_imgs.append(img)
+                        # Prøv å parse doy/hour fra filnavn
+                        _m = re.search(r"doy(\d+)_kl(\d+)", uf.name or "")
+                        if _m:
+                            _doy = int(_m.group(1))
+                            _hour_raw = _m.group(2)
+                            _hour = float(_hour_raw[:-1] + "." + _hour_raw[-1]) if len(_hour_raw) > 1 else float(_hour_raw)
+                            _match = next((md for md in _meta_defaults if md["doy"] == _doy and abs(md["hour"] - _hour) < 0.1), None)
+                            if _match:
+                                _solar_meta.append(_match.copy())
+                            else:
+                                _solar_meta.append({"label": uf.name, "doy": _doy, "hour": _hour})
+                        elif idx < len(_meta_defaults):
+                            _solar_meta.append(_meta_defaults[idx].copy())
+                        else:
+                            _solar_meta.append({"label": uf.name, "doy": 0, "hour": 0.0})
+                        _solar_statuses.append({"ok": True, "thumb": _thumb, "name": uf.name})
+                    except Exception as _ue:
+                        _solar_statuses.append({"ok": False, "name": uf.name, "error": str(_ue)[:60]})
+
+                # Preview — vis thumbnails så brukeren ser at rekkefølgen stemmer
+                # v16.3: Grønn/rød indikator per fil, umiddelbart etter opplasting
+                if _solar_statuses:
+                    st.caption("**Forhåndsvisning — slik kommer bildene inn i rapporten:**")
+                    _n_show = min(len(_solar_statuses), 5)
+                    _cols = st.columns(_n_show)
+                    _valid_idx = 0
+                    for _i, _status in enumerate(_solar_statuses[:5]):
+                        with _cols[_i]:
+                            if _status["ok"]:
+                                st.image(_status["thumb"], use_container_width=True)
+                                _lbl = _solar_meta[_valid_idx]["label"] if _valid_idx < len(_solar_meta) else _status["name"]
+                                st.caption(f"**{_i+1}.** ✅ {_lbl}")
+                                _valid_idx += 1
+                            else:
+                                st.error(f"❌ {_status['name'][:22]}")
+                                st.caption(_status.get("error", ""))
+                    if len(_solar_statuses) > 5:
+                        st.caption(f"_(+ {len(_solar_statuses) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
+                    if len(_solar_imgs) > 5:
+                        st.caption(f"_(+ {len(_solar_imgs) - 5} ekstra bilder — kun de første 5 brukes i rapporten)_")
+
+                if st.button(
+                    f"✓ Bruk {min(len(_solar_imgs), 5)} bilder i rapporten",
+                    type="primary",
+                    use_container_width=True,
+                    key="apply_uploaded_solar",
+                ):
+                    # Bruk kun de første 5 (PDF har bare plass til 5 snapshots)
+                    st.session_state["solar_3d_snapshots"] = _solar_imgs[:5]
+                    st.session_state["solar_3d_meta"] = _solar_meta[:5]
+                    st.success(f"✓ {min(len(_solar_imgs), 5)} bilder lastet inn. Trykk «Oppdater PDF med 3D-sol» under.")
+                    st.rerun()
+
+
+        # Oppdater PDF-knapp (hvis bildene er inne)
+        if _has_solar_3d:
+            if st.button("Oppdater PDF med 3D-sol", type="primary", use_container_width=True, key="regen_pdf_solar3d"):
+                try:
+                    pd_state = st.session_state.get("project_data", {})
+                    motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+                    updated_report = result.get("report_text", "")
+                    all_images = result.get("option_images", [])
+                    _site_obj_sr = SiteInputs(**site_result) if site_result else None
+                    _solar_sr = render_solar_snapshot_grid(_site_obj_sr, motor_options[0]) if _site_obj_sr and motor_options else None
+                    # Bevar eksisterende AI-cover og AI-analyser hvis de finnes
+                    _cached_cover = st.session_state.get("stability_render_image")
+                    _cached_pv = st.session_state.get("_cached_pv_analyses") or None
+                    new_pdf_bytes = create_full_report_pdf(
+                        name=pd_state.get("p_name", "Prosjekt"),
+                        client=pd_state.get("c_name", "Ukjent"),
+                        land=pd_state.get("land", "Norge"),
+                        report_text=updated_report,
+                        options=motor_options,
+                        option_images=all_images,
+                        visual_attachments=[],
+                        site=_site_obj_sr,
+                        environment_data=result.get("environment"),
+                        solar_grid_image=_solar_sr,
+                        scene_images=st.session_state.get("ark_scene_images"),
+                        plan_view_analyses=_cached_pv,
+                        cover_image=_cached_cover,
+                        solar_3d_snapshots=st.session_state["solar_3d_snapshots"],
+                        geodata_bundle=st.session_state.get("geodata_bundle"),
+                        historical_analysis=st.session_state.get("historical_analysis"),
+                        site_intelligence=result.get("site_intelligence"),
+                    )
+                    st.session_state.generated_ark_pdf = new_pdf_bytes
+                    _msg = "✓ PDF oppdatert med 3D-sol/skygge-bilder"
+                    if _cached_cover is not None:
+                        _msg += " (fotorealistisk forside beholdt)"
+                    st.success(_msg)
+
+                    # Oppdater til brukerens rapport-dashboard
+                    try:
+                        from builtly_auth import save_report as _save_report_solar
+                        _save_report_solar(
+                            project_name=st.session_state.get("project_data", {}).get("p_name", pd_state.get("p_name", "Prosjekt")),
+                            report_name=f"Mulighetsstudie — {pd_state.get('p_name', 'Prosjekt')}",
+                            module="Mulighetsstudie",
+                            file_path=st.session_state.get("generated_ark_filename", ""),
+                            pdf_bytes=new_pdf_bytes,
+                        )
+                    except ImportError:
+                        pass
+                    except Exception:
+                        pass
+
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Kunne ikke regenerere PDF: {e}")
+
+    # --- AI Visualisering (Gemini Nano Banana 2) ---
+    st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
+    gemini_key = os.environ.get("GOOGLE_API_KEY", "")
+    scene_imgs = st.session_state.get("ark_scene_images")
+    if scene_imgs and gemini_key and genai is not None:
+        motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
+        opt_names = [opt.name for opt in motor_options] if motor_options else []
+        sel_render_name = st.selectbox(
+            "Velg alternativ for visualisering",
+            opt_names,
+            index=0,
+            key="gemini_render_select",
+        ) if opt_names else None
+        if st.button("Generer fotorealistisk skisse", use_container_width=True, type="primary", key="gemini_render_btn"):
+            sel_idx = opt_names.index(sel_render_name) if sel_render_name and sel_render_name in opt_names else 0
+            base_img = scene_imgs[min(sel_idx, len(scene_imgs) - 1)]
+            selected_option = motor_options[sel_idx] if motor_options else None
+            if selected_option is not None:
+                with st.spinner("Genererer fotorealistisk skisse med Gemini — dette tar ca. 20–40 sekunder..."):
+                    rendered = generer_arkitekt_render(base_img, selected_option, gemini_key)
+                if rendered is not None:
+                    st.session_state["stability_render_image"] = rendered
+                    # Regenerer PDF med cover_image — gjenbruk cachet sol/AI-analyse
+                    try:
+                        pd_state = st.session_state.get("project_data", {})
+                        _site_obj_sr = SiteInputs(**site_result) if site_result else None
+                        # Gjenbruk cachet solar grid hvis tilgjengelig, ellers generer
+                        _solar_sr = st.session_state.get("_cached_solar_grid")
+                        if _solar_sr is None and motor_options and _site_obj_sr is not None:
+                            try:
+                                _solar_sr = render_solar_snapshot_grid(_site_obj_sr, motor_options[0])
+                                st.session_state["_cached_solar_grid"] = _solar_sr
+                            except Exception:
+                                pass
+                        # Gjenbruk cachet AI-analyser
+                        pv_analyses_sr: List[str] = st.session_state.get("_cached_pv_analyses", [])
+                        if not pv_analyses_sr and ANTHROPIC_API_KEY and scene_imgs and _site_obj_sr:
+                            try:
+                                pv_analyses_sr = analyze_plan_views_with_ai(scene_imgs, motor_options, _site_obj_sr, result.get("environment"))
+                                st.session_state["_cached_pv_analyses"] = pv_analyses_sr
+                            except Exception:
+                                pass
+                        new_pdf_sr = create_full_report_pdf(
+                            name=pd_state.get("p_name", "Prosjekt"),
+                            client=pd_state.get("c_name", "Ukjent"),
+                            land=pd_state.get("land", "Norge"),
+                            report_text=result.get("report_text", ""),
+                            options=motor_options,
+                            option_images=result.get("option_images", []),
+                            visual_attachments=result.get("visual_attachments", []),
+                            site=_site_obj_sr,
+                            environment_data=result.get("environment"),
+                            solar_grid_image=_solar_sr,
+                            scene_images=scene_imgs,
+                            plan_view_analyses=pv_analyses_sr or None,
+                            cover_image=rendered,
+                            solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
+                            geodata_bundle=st.session_state.get("geodata_bundle"),
+                            historical_analysis=st.session_state.get("historical_analysis"),
+                            site_intelligence=result.get("site_intelligence"),
+                        )
+                        st.session_state.generated_ark_pdf = new_pdf_sr
+                        st.session_state.generated_ark_filename = f"Builtly_ARK_{pd_state.get('p_name', 'Prosjekt')}_render.pdf"
+                        _msg2 = "PDF oppdatert med fotorealistisk forside."
+                        if st.session_state.get("solar_3d_snapshots"):
+                            _msg2 += " (3D-sol/skygge beholdt)"
+                        st.success(_msg2)
+                    except Exception as exc:
+                        st.warning(f"Skisse generert, men PDF-oppdatering feilet: {exc}")
+            else:
+                st.warning("Ingen alternativer tilgjengelig for visualisering.")
+    elif not gemini_key:
+        st.caption("Legg til GOOGLE_API_KEY i Render Secrets for å aktivere fotorealistisk visualisering.")
+    elif genai is None:
+        st.caption("google-generativeai-pakken er ikke installert. Legg til i requirements.txt.")
+    elif not scene_imgs:
+        st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
+
+    # Vis cachet render fra session (uten duplikat ved knapp-klikk)
+    # v16.1: Eksplisitt not-None sjekk — 'in session_state' alene er ikke nok
+    # siden verdien kan være None fra en feilet Gemini-kjøring tidligere.
+    _cached_render = st.session_state.get("stability_render_image")
+    if _cached_render is not None:
+        st.image(_cached_render, caption="Fotorealistisk skisse — generert fra volummodell", use_container_width=True)
+
+    st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
+    pdf_data = st.session_state.get("generated_ark_pdf")
+    pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+    _pdf_err = st.session_state.get("_pdf_generation_error")
+    if pdf_data:
+        st.download_button(
+            "Last ned mulighetsstudie (PDF)",
+            data=pdf_data,
+            file_name=pdf_name,
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+        )
+        if _pdf_err:
+            st.warning(
+                f"⚠ Siste PDF-oppdatering feilet: {_pdf_err}. "
+                "Du kan laste ned forrige vellykkede versjon ovenfor, eller kjøre tomtestudiet på nytt."
+            )
+    elif _pdf_err:
+        st.error(
+            f"PDF-generering feilet: {_pdf_err}. "
+            "Prøv å kjøre tomtestudiet på nytt, eller kontakt Builtly-support hvis feilen vedvarer."
+        )
+    else:
+        st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
