@@ -179,10 +179,11 @@ def clean_pdf_text(text: Any) -> str:
     text = text.replace("\u201c", '"').replace("\u201d", '"')
     text = text.replace("\u2018", "'").replace("\u2019", "'")
     text = text.replace("\u2026", "...")
-    # v16.1: NB: IKKE konverter \u2022 (•) til * globalt. PDF-rendereren bruker
+    # v16.2: NB: IKKE konverter \u2022 (•) til * globalt. PDF-rendereren bruker
     # \u2022 som bullet-marker for DejaVu og forventer at tegnet overlever.
-    # Tidligere konverterte vi alltid til *, som ga rapporter med "*"-bullets.
-    if HAS_DEJAVU:
+    # Men vi MÅ sjekke PDF_FONT (faktisk aktivt font), ikke HAS_DEJAVU (fontfilen
+    # på disk). Registrering kan feile selv om filen finnes.
+    if PDF_FONT == "DejaVu":
         return text
     # Fallback: latin-1 for Helvetica — \u2022 finnes ikke i latin-1, må konverteres
     text = text.replace("\u2022", "*")
@@ -8807,7 +8808,10 @@ def create_full_report_pdf(
             pdf.set_x(30)
             pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(*_BODY_BLACK)
-            bullet = "\u2022 " if HAS_DEJAVU else "* "
+            # v16.2: Bruk PDF_FONT (faktisk aktivt font) i stedet for HAS_DEJAVU
+            # (fontfilen på disk). Registrering kan feile selv om filen finnes,
+            # og da må vi fallbacke til * for å unngå FPDFUnicodeEncodingException.
+            bullet = "\u2022 " if PDF_FONT == "DejaVu" else "* "
             # Strip bullet-marker (ett tegn + minst ett mellomrom) før rendering
             content = re.sub(r"^[-\*•]\s+", "", line)
             pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + content))
