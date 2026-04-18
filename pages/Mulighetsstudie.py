@@ -3201,7 +3201,13 @@ MOTORENS ALTERNATIVER (referanse):
 {chr(10).join(motor_summary)}
 """
 
-    return _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
+    result = _call_claude_text(system_prompt, user_prompt, max_tokens=4000)
+    if result:
+        # Post-filter: samme rydding som i hoved-AI-rapport
+        result = _strip_hallucinated_preamble(result)
+        result = _strip_hallucinated_appendix(result)
+        result = _normalize_bullets(result)
+    return result
 
 
 def refine_sketch_with_ai(
@@ -5658,6 +5664,27 @@ def _build_geo_narrative_for_context(
                 f"Vurderingen erstatter ikke miljøteknisk grunnundersøkelse."
             )
 
+    # v16: Aktsomhet (radon/flom/kvikkleire/skred) — kort sammendrag
+    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
+    if aktsomhet.get("available"):
+        kategorier = aktsomhet.get("categories", {}) or {}
+        hits = [k for k, v in kategorier.items() if v.get("hit")]
+        if hits:
+            label_map = {
+                "radon": "radon", "flom": "flom", "kvikkleire": "kvikkleire",
+                "skred_snø": "snøskred", "skred_stein": "steinskred", "skred_jord": "jord-/flomskred",
+            }
+            hit_labels = [label_map.get(h, h) for h in hits]
+            parts.append(
+                f"Tomten ligger i registrert aktsomhetssone for {', '.join(hit_labels)} "
+                f"(Geodata Online DOK). Fagteknisk RIG-/geoteknisk vurdering er nødvendig — se risiko-seksjonen."
+            )
+        else:
+            parts.append(
+                "Tomten ligger utenfor registrerte aktsomhetssoner for radon, flom, kvikkleire og skred "
+                "(DOK Samfunnssikkerhet / DOK Geologi)."
+            )
+
     return " ".join(parts)
 
 
@@ -5709,6 +5736,42 @@ def _build_geo_narrative_for_risk(
                 "- Forurensningsrisiko (AI-screening av historisk flyfoto): Vurderingen er usikker — "
                 "manuell fagkontroll av historisk bruk anbefales."
             )
+
+    # v16: Aktsomhetskart-bullets (radon/flom/kvikkleire/skred fra DOK)
+    aktsomhet = geodata_bundle.get("aktsomhet", {}) or {}
+    if aktsomhet.get("available"):
+        kategorier = aktsomhet.get("categories", {}) or {}
+        # Tiltaksmapping per kategori
+        tiltak_map = {
+            "radon": "Radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5.",
+            "flom": "Flomvurdering må inkluderes i ROS-analyse. Tiltakskategori vurderes iht. TEK17 § 7-2.",
+            "kvikkleire": "Geoteknisk vurdering og prosedyre iht. NVE veileder 1/2019 er obligatorisk før byggesøknad.",
+            "skred_snø": "Skredfarevurdering iht. TEK17 § 7-3 kan være påkrevd.",
+            "skred_stein": "Steinsprangvurdering iht. TEK17 § 7-3 kan være påkrevd.",
+            "skred_jord": "Jord-/flomskredvurdering iht. TEK17 § 7-3 kan være påkrevd.",
+        }
+        label_map = {
+            "radon": "Radon",
+            "flom": "Flom",
+            "kvikkleire": "Kvikkleire",
+            "skred_snø": "Snøskred",
+            "skred_stein": "Steinskred",
+            "skred_jord": "Jord-/flomskred",
+        }
+        for cat_key, cat_data in kategorier.items():
+            if not cat_data.get("hit"):
+                continue
+            severity = cat_data.get("severity", "registrert")
+            detail = cat_data.get("detail", "")
+            label = label_map.get(cat_key, cat_key)
+            tiltak = tiltak_map.get(cat_key, "Fagteknisk vurdering anbefales.")
+            sev_text = {"høy": "høy aktsomhet", "moderat": "moderat aktsomhet",
+                        "lav": "lav aktsomhet", "registrert": "registrert sone"}.get(severity, severity)
+            line = f"- {label}: {sev_text}"
+            if detail and detail.lower() not in ("aktsomhetsområde", "aktsomhetssone"):
+                line += f" ({detail})"
+            line += f". {tiltak}"
+            bullets.append(line)
 
     return bullets
 
@@ -6914,6 +6977,176 @@ def _fetch_miljodir_grunnforurensning(x: float, y: float, radius_m: float = 500.
         return []
 
 
+def _classify_aktsomhet_feature(layer_name: str, attrs: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Klassifiser en DOK-feature i (kategori, alvorlighetsbeskrivelse) basert på
+    layer_name og attributter.
+
+    Returnerer (kategori, detalj) eller None hvis ikke relevant.
+
+    Kategorier: 'radon', 'flom', 'kvikkleire', 'skred_snø', 'skred_stein',
+                'skred_jord', 'skred_annet', 'samfunnssikkerhet_annet'.
+    """
+    ln = (layer_name or "").lower()
+
+    # Hjelpe: finn fare-/klasse-attributt fra ulike mulige feltnavn
+    def _fareverdi() -> str:
+        for key in ("faregrad", "fare", "klasse", "risikoklasse", "risikogruppe",
+                    "aktsomhetsnivaa", "aktsomhetsniva", "nivaa", "niva",
+                    "verdi", "type", "kategori", "beskrivelse", "navn"):
+            for k, v in (attrs or {}).items():
+                if k.lower() == key and v not in (None, "", 0):
+                    return str(v)
+        return ""
+
+    detalj = _fareverdi()
+
+    # Radon (NGU aktsomhetskart)
+    if "radon" in ln:
+        return ("radon", detalj or "Aktsomhetsområde")
+
+    # Flom
+    if "flom" in ln:
+        return ("flom", detalj or "Flomutsatt aktsomhetsområde")
+
+    # Kvikkleire
+    if "kvikkleire" in ln or "kvikk" in ln:
+        return ("kvikkleire", detalj or "Faregradssone kvikkleire")
+
+    # Skred (snø/jord/stein/flomskred)
+    if "snoskred" in ln or "snøskred" in ln or ("snø" in ln and "skred" in ln):
+        return ("skred_snø", detalj or "Aktsomhetsområde")
+    if "steinskred" in ln or "steinsprang" in ln or ("stein" in ln and "skred" in ln):
+        return ("skred_stein", detalj or "Aktsomhetsområde")
+    if "jordskred" in ln or "lossmasseskred" in ln or ("jord" in ln and "skred" in ln):
+        return ("skred_jord", detalj or "Aktsomhetsområde")
+    if "flomskred" in ln:
+        return ("skred_jord", detalj or "Flomskred aktsomhet")
+    if "skred" in ln:
+        return ("skred_annet", detalj or "Skredaktsomhet")
+
+    # Andre samfunnssikkerhetslag vi ikke gjenkjenner — ikke returner
+    return None
+
+
+def _fetch_aktsomhet_via_gdo(site_polygon, gdo_client) -> Dict[str, Any]:
+    """Hent strukturerte aktsomhetsdata (radon/flom/kvikkleire/skred) via
+    Geodata Online DOK Samfunnssikkerhet + DOK Geologi (radon).
+
+    Returnerer dict med per-kategori-status:
+        {
+            "available": True/False,
+            "categories": {
+                "radon": {"hit": True/False, "detail": "...", "features": N},
+                "flom": {...},
+                "kvikkleire": {...},
+                "skred_snø": {...},
+                "skred_stein": {...},
+                "skred_jord": {...},
+            },
+            "total_features": N,
+            "source": "Geodata Online DOK Samfunnssikkerhet",
+            "errors": [...],
+        }
+    """
+    result = {
+        "available": False,
+        "categories": {},
+        "total_features": 0,
+        "source": "Geodata Online DOK",
+        "errors": [],
+    }
+    if gdo_client is None or site_polygon is None:
+        result["errors"].append("Geodata Online client eller tomtepolygon mangler")
+        return result
+
+    # Initialiser alle kategoriene til "ikke treff" — vi fyller inn ved funn
+    categories = {
+        "radon": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "flom": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "kvikkleire": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_snø": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_stein": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+        "skred_jord": {"hit": False, "detail": "", "features": 0, "severity": "ukjent"},
+    }
+
+    # Kall DOK Samfunnssikkerhet (flom, kvikkleire, skred)
+    try:
+        from geodata_client import GEOMAP_DOKSAMFUNNSSIKKERHET_MS
+        sikkerhet = gdo_client.fetch_context_from_service(
+            GEOMAP_DOKSAMFUNNSSIKKERHET_MS,
+            site_polygon,
+            buffer_m=50.0,  # liten buffer — vi vil vite om tomten ligger i sone
+            source_label="Geodata Online DOK Samfunnssikkerhet",
+        )
+        for feat in sikkerhet.get("features") or []:
+            layer_name = feat.get("layer_name", "")
+            attrs = feat.get("attributes") or {}
+            cls = _classify_aktsomhet_feature(layer_name, attrs)
+            if cls is None:
+                continue
+            cat, detail = cls
+            if cat in categories:
+                categories[cat]["hit"] = True
+                categories[cat]["features"] += 1
+                # Behold mest informative detalj (ikke bare "Aktsomhetsområde")
+                if detail and detail != "Aktsomhetsområde" and not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                elif not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                result["total_features"] += 1
+        for err in (sikkerhet.get("errors") or [])[:3]:
+            result["errors"].append(f"Samfunnssikkerhet: {err[:100]}")
+    except Exception as exc:
+        result["errors"].append(f"DOK Samfunnssikkerhet: {str(exc)[:120]}")
+
+    # Kall DOK Geologi (radon og kvikkleire-faresoner)
+    try:
+        from geodata_client import GEOMAP_DOKGEOLOGI_MS
+        geologi = gdo_client.fetch_context_from_service(
+            GEOMAP_DOKGEOLOGI_MS,
+            site_polygon,
+            buffer_m=50.0,
+            source_label="Geodata Online DOK Geologi",
+        )
+        for feat in geologi.get("features") or []:
+            layer_name = feat.get("layer_name", "")
+            attrs = feat.get("attributes") or {}
+            cls = _classify_aktsomhet_feature(layer_name, attrs)
+            if cls is None:
+                continue
+            cat, detail = cls
+            if cat in categories:
+                categories[cat]["hit"] = True
+                categories[cat]["features"] += 1
+                if detail and not categories[cat]["detail"]:
+                    categories[cat]["detail"] = detail
+                result["total_features"] += 1
+        for err in (geologi.get("errors") or [])[:3]:
+            result["errors"].append(f"Geologi: {err[:100]}")
+    except Exception as exc:
+        result["errors"].append(f"DOK Geologi: {str(exc)[:120]}")
+
+    # Klassifiser severity basert på detail-strengen (NGU-konvensjon: klasse 1-3)
+    for cat, data in categories.items():
+        if not data["hit"]:
+            data["severity"] = "ingen"
+            continue
+        detail_lower = (data["detail"] or "").lower()
+        if any(word in detail_lower for word in ("høy", "hoy", "stor", "3", "høg")):
+            data["severity"] = "høy"
+        elif any(word in detail_lower for word in ("moderat", "middels", "2")):
+            data["severity"] = "moderat"
+        elif any(word in detail_lower for word in ("lav", "låg", "lite", "1", "liten")):
+            data["severity"] = "lav"
+        else:
+            # Treff uten klassifisert alvorlighet — markér som "registrert"
+            data["severity"] = "registrert"
+
+    result["categories"] = categories
+    result["available"] = True  # Vi har kalt API-et, selv om ingen treff
+    return result
+
+
 def build_geo_context_bundle(
     site_polygon,
     coords: Optional[Tuple[float, float]],
@@ -6943,6 +7176,7 @@ def build_geo_context_bundle(
         "historisk": None, "historisk_year": None, "historisk_source": "",
         "grunnforurensning": [],
         "radon": None, "flom": None, "kvikkleire": None, "skred": None,
+        "aktsomhet": {"available": False, "categories": {}},  # NY v16: strukturerte DOK-data
         "log": [], "errors": [],
     }
 
@@ -6993,16 +7227,34 @@ def build_geo_context_bundle(
     except Exception as exc:
         result["log"].append(f"Miljødirektoratet feilet: {str(exc)[:80]}")
 
-    # NGU Radon — kartbilde for visuell visning i PDF
+    # --- AKTSOMHETSDATA via Geodata Online DOK (v16: strukturerte data, ikke bare bilder) ---
+    # Dette gir oss faktisk klassifisering ("moderat radon", "flomsone", osv.)
+    # i stedet for bare "ingen data / utenfor kartlagt område".
+    try:
+        aktsomhet = _fetch_aktsomhet_via_gdo(site_polygon, gdo_client)
+        result["aktsomhet"] = aktsomhet
+        if aktsomhet.get("available"):
+            hits = [c for c, d in aktsomhet.get("categories", {}).items() if d.get("hit")]
+            if hits:
+                result["log"].append(f"DOK aktsomhet: treff i {len(hits)} kategorier: {', '.join(hits)}")
+            else:
+                result["log"].append("DOK aktsomhet: tomten ligger ikke i noen registrert aktsomhetssone")
+    except Exception as exc:
+        result["aktsomhet"] = {"available": False, "errors": [str(exc)[:120]]}
+        result["log"].append(f"DOK aktsomhet feilet: {str(exc)[:80]}")
+
+    # --- Gamle WMS-kall beholdes som fallback for kartbilder i PDF ---
+    # Kun brukt hvis noen vil vise kartbilder i tillegg til strukturerte data.
+    # (Dagens Saga Park-test viste at disse WMS-ene ofte returnerer tomme bilder,
+    # så de er nedprioritert men ikke fjernet.)
     try:
         img = _fetch_ngu_radon(bbox)
         if img is not None:
             result["radon"] = img
-            result["log"].append("NGU Radon aktsomhetskart hentet")
+            result["log"].append("NGU Radon aktsomhetskart (WMS-bilde) hentet")
     except Exception:
         pass
 
-    # NVE Flom / Kvikkleire / Skred — kartbilder
     for key, func, label in [
         ("flom", _fetch_nve_flom, "NVE Flom"),
         ("kvikkleire", _fetch_nve_kvikkleire, "NVE Kvikkleire"),
@@ -7012,7 +7264,7 @@ def build_geo_context_bundle(
             img = func(bbox)
             if img is not None:
                 result[key] = img
-                result["log"].append(f"{label} aktsomhetskart hentet")
+                result["log"].append(f"{label} aktsomhetskart (WMS-bilde) hentet")
         except Exception:
             pass
 
@@ -7024,6 +7276,7 @@ def build_geo_context_bundle(
         result["flom"] is not None,
         result["kvikkleire"] is not None,
         result["skred"] is not None,
+        bool(result.get("aktsomhet", {}).get("available")),
     ])
     result["available"] = has_any
     return result
@@ -7317,30 +7570,91 @@ def build_geo_context_pages(
             pdf.set_text_color(*_MUTED)
             pdf.cell(0, 4, clean_pdf_text(f"... og {len(contamination) - 6} ytterligere lokalitet(er) i omrdet."), 0, 1)
 
-    # --- Øvrige aktsomhetsdata (radon, flom, kvikkleire, skred) som kompakt liste ---
+    # --- Aktsomhetskart — strukturerte DOK-data fra Geodata Online (v16) ---
     pdf.ln(3)
     pdf.set_x(25)
     pdf.set_font(PDF_FONT, "B", 11)
     pdf.set_text_color(*_NAVY)
-    pdf.cell(0, 7, clean_pdf_text("AKTSOMHETSKART — TILGJENGELIG DATA"), 0, 1)
+    pdf.cell(0, 7, clean_pdf_text("AKTSOMHET — RADON, FLOM OG SKRED"), 0, 1)
     pdf.ln(1)
 
-    # Liten status-liste (4 linjer)
-    aktsomhet = [
-        ("NGU Radon aktsomhetskart", geodata_bundle.get("radon") is not None),
-        ("NVE Flom aktsomhetsområde", geodata_bundle.get("flom") is not None),
-        ("NVE Kvikkleire faresoner", geodata_bundle.get("kvikkleire") is not None),
-        ("NVE Skred aktsomhet (snø/jord)", geodata_bundle.get("skred") is not None),
+    aktsomhet_data = geodata_bundle.get("aktsomhet", {}) or {}
+    categories = aktsomhet_data.get("categories", {}) or {}
+    gdo_ok = aktsomhet_data.get("available", False)
+
+    # Kategorier i fast rekkefølge for konsekvent layout
+    akt_rows = [
+        ("radon", "Radon (NGU aktsomhetskart)"),
+        ("flom", "Flom (NVE aktsomhetsområde)"),
+        ("kvikkleire", "Kvikkleire (NVE faresoner)"),
+        ("skred_snø", "Snøskred (NVE aktsomhet)"),
+        ("skred_stein", "Steinskred / steinsprang"),
+        ("skred_jord", "Jord-/flomskred"),
     ]
+
     pdf.set_font(PDF_FONT, "", 9)
-    for label, hit in aktsomhet:
+    for key, label in akt_rows:
+        cat = categories.get(key, {}) or {}
+        hit = bool(cat.get("hit"))
+        severity = cat.get("severity", "ukjent")
+        detail = cat.get("detail", "")
+
+        # Fargekode indikator
+        if not gdo_ok:
+            color = _MUTED
+            status = "data ikke hentet"
+        elif not hit:
+            color = _SCORE_GREEN
+            status = "ingen registrert aktsomhetssone"
+        elif severity == "høy":
+            color = _SCORE_RED
+            status = f"høy aktsomhet — {detail}" if detail else "høy aktsomhet"
+        elif severity == "moderat":
+            color = _SCORE_AMBER
+            status = f"moderat aktsomhet — {detail}" if detail else "moderat aktsomhet"
+        elif severity == "lav":
+            color = _SCORE_AMBER  # gul for forsiktighet
+            status = f"lav aktsomhet — {detail}" if detail else "lav aktsomhet"
+        else:  # registrert, men ukjent grad
+            color = _SCORE_AMBER
+            status = f"registrert aktsomhet — {detail}" if detail else "registrert aktsomhetssone"
+
         pdf.set_x(25)
-        pdf.set_fill_color(*(_SCORE_GREEN if hit else _MUTED))
-        pdf.rect(25, pdf.get_y() + 1.5, 2, 2, 'F')
-        pdf.set_x(29)
+        pdf.set_fill_color(*color)
+        pdf.rect(25, pdf.get_y() + 1.5, 2.5, 2.5, 'F')
+        pdf.set_x(30)
         pdf.set_text_color(*_BODY_BLACK)
-        status_t = "data tilgjengelig" if hit else "ingen data / utenfor kartlagt område"
-        pdf.cell(0, 5, clean_pdf_text(f"{label}  —  {status_t}"), 0, 1)
+        pdf.cell(60, 5, clean_pdf_text(label), 0, 0)
+        pdf.set_text_color(*_MUTED) if not hit or not gdo_ok else pdf.set_text_color(*_BODY_BLACK)
+        pdf.cell(0, 5, clean_pdf_text(status), 0, 1)
+
+    # Hvis vi fikk noen treff totalt, legg til en sammendragsboks
+    total_hits = sum(1 for c in categories.values() if c.get("hit"))
+    if gdo_ok and total_hits > 0:
+        pdf.ln(2)
+        y_box = pdf.get_y()
+        pdf.set_fill_color(*_SCORE_AMBER)
+        pdf.rect(25, y_box, 3, 10, 'F')
+        pdf.set_fill_color(247, 249, 252)
+        pdf.set_draw_color(*_DIVIDER)
+        pdf.set_line_width(0.3)
+        pdf.rect(28, y_box, 157, 10, 'DF')
+        pdf.set_line_width(0.2)
+        pdf.set_xy(31, y_box + 1.5)
+        pdf.set_font(PDF_FONT, "B", 9)
+        pdf.set_text_color(*_NAVY)
+        pdf.cell(152, 4, clean_pdf_text(
+            f"Tomten er registrert i {total_hits} aktsomhetskategori" +
+            ("er" if total_hits != 1 else "")
+        ), 0, 1)
+        pdf.set_xy(31, y_box + 5.5)
+        pdf.set_font(PDF_FONT, "", 8)
+        pdf.set_text_color(100, 115, 135)
+        pdf.cell(152, 4, clean_pdf_text(
+            "Faglig RIG-/geotekniker-vurdering er nødvendig før byggesaksbehandling."
+        ), 0, 1)
+        pdf.set_y(y_box + 12)
+
     pdf.ln(1)
     pdf.set_font(PDF_FONT, "I", 8)
     pdf.set_text_color(*_MUTED)
@@ -7348,8 +7662,10 @@ def build_geo_context_pages(
     pdf.multi_cell(
         155, 4,
         clean_pdf_text(
-            "Aktsomhetskart er veiledende. Ved utbygging må fagfolk (RIG, miljøgeolog) "
-            "verifisere forholdene i felt og i relevante tilleggsregistre (f.eks. NGU GRANADA for grunnvann)."
+            f"Kilde: {aktsomhet_data.get('source', 'Geodata Online DOK')}. "
+            "Aktsomhetskart er veiledende. Ved utbygging må fagfolk (RIG, geotekniker, miljøgeolog) "
+            "verifisere forholdene i felt og i relevante tilleggsregistre (f.eks. NGU GRANADA for grunnvann, "
+            "NVE Temakart for detaljerte skredfaresoner)."
         )
     )
 
@@ -7493,6 +7809,72 @@ def build_geo_context_pages(
                 "som del av aktsom historisk kartlegging."
             )
         )
+
+
+# ================================================================
+# POST-FILTER HELPERS FOR AI-GENERERT RAPPORTTEKST
+# Claude ignorerer av og til FORBUDT-klausulene i prompten — disse
+# filtrene rydder ut hallusinasjonene før teksten sendes til PDF.
+# ================================================================
+
+def _strip_hallucinated_preamble(text: str) -> str:
+    """Fjern hallusinerte forside-blokker som Claude av og til legger FØR pkt. 1.
+    Eksempel: "MULIGHETSSTUDIE\n\nDato: [Dagens dato]\nProsjekt: ..."
+    Alt før første "# 1." (eller "1." som seksjonsstart) er preamble — kutt det.
+    """
+    if not text:
+        return text
+    # Finn starten av pkt. 1 — aksepterer både "# 1." og "1. OPPSUMMERING"
+    m = re.search(r"^#?\s*1\.\s+[A-ZÆØÅ]", text, re.MULTILINE)
+    if m and m.start() > 0:
+        # Det finnes tekst før pkt. 1 — sjekk om det ligner preamble
+        preamble = text[:m.start()].strip()
+        # Preamble er "suspekt" hvis den inneholder placeholder eller metadata-nøkler
+        suspect_patterns = [
+            r"\[[Dd]agens\s+dato\]", r"\[[Ss]ett\s+inn", r"\[[Pp]laceholder",
+            r"^MULIGHETSSTUDIE\s*$", r"^Dato\s*:", r"^Prosjekt\s*:",
+            r"^Tomteareal\s*:", r"^Oppdragsgiver\s*:", r"^Utarbeidet\s+av\s*:",
+        ]
+        is_suspect = any(re.search(p, preamble, re.MULTILINE) for p in suspect_patterns)
+        # Kort preamble (< 400 tegn) som ikke inneholder # headings er også mistenkelig
+        has_headings = bool(re.search(r"^#\s", preamble, re.MULTILINE))
+        if is_suspect or (len(preamble) < 400 and not has_headings):
+            return text[m.start():]
+    return text
+
+
+def _strip_hallucinated_appendix(text: str) -> str:
+    """Fjern hallusinert VEDLEGG/APPENDIKS-seksjon etter pkt. 10.
+    Geo-data og støy er allerede presentert i dedikerte PDF-seksjoner
+    og skal ikke dupliseres i vedlegg i rapportteksten.
+    """
+    if not text:
+        return text
+    # Finn starten av en vedleggs-seksjon etter pkt. 10
+    # Mønster: "VEDLEGG", "APPENDIKS", "APPENDIX", "TILLEGG" som overskrift
+    m = re.search(
+        r"^(?:#+\s*|\*\*)?(?:VEDLEGG|APPENDIKS|APPENDIX|TILLEGG)\b",
+        text, re.MULTILINE | re.IGNORECASE
+    )
+    if m:
+        # Kun fjern hvis vedlegget kommer ETTER pkt. 10
+        pkt10 = re.search(r"^#?\s*10\.\s+", text, re.MULTILINE)
+        if pkt10 and m.start() > pkt10.start():
+            return text[:m.start()].rstrip() + "\n"
+    return text
+
+
+def _normalize_bullets(text: str) -> str:
+    """Konverter '*' og '•' bullet-markere til '-' for konsistent rendering."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        # Match "* " eller "• " i starten (etter whitespace)
+        m = re.match(r"^(\s*)[\*•]\s+(.*)$", line)
+        if m:
+            lines[i] = f"{m.group(1)}- {m.group(2)}"
+    return "\n".join(lines)
 
 
 def create_full_report_pdf(
@@ -7653,16 +8035,26 @@ def create_full_report_pdf(
             toc_items.append((f"{toc_idx}.", "Historisk flyfoto og tidligere arealbruk"))
             toc_idx += 1
 
+    # TOC: kun fange OFFISIELLE # -headings (ikke underpunkter i narrativ tekst).
+    # Tidligere regex fanget også "1. Detaljert støyutredning..." fra pkt. 10-underpunkter.
+    # Nå aksepteres kun linjer som EKSPLISITT starter med "# " (hash + mellomrom).
+    narrativ_toc_count = 0
+    MAX_NARRATIV_TOC_ITEMS = 12  # safety cap — unngå TOC-spam ved hallusinasjoner
     for raw_line in report_text.split("\n"):
         line = raw_line.strip()
-        if re.match(r"^\d+\.\s[A-ZÆØÅ]", line):
-            # Strip existing number prefix: "1. OPPSUMMERING" → "Oppsummering"
-            title_clean = re.sub(r"^\d+\.\s*", "", line).strip()
-            toc_items.append((f"{toc_idx}.", title_clean))
+        if line.startswith("# ") and narrativ_toc_count < MAX_NARRATIV_TOC_ITEMS:
+            # Strip "# " og eventuell "#" og mellomrom
+            title = line.lstrip("#").strip()
+            # Filtrer bort støy-headings: for korte (<3 tegn) eller rene tall
+            if len(title) < 3 or title.isdigit():
+                continue
+            # Filtrer bort hallusinerte FORBUDT-headings som kan ha sneket seg gjennom
+            title_upper = title.upper()
+            if any(bad in title_upper for bad in ("VEDLEGG", "APPENDIKS", "APPENDIX", "MULIGHETSSTUDIE\n")):
+                continue
+            toc_items.append((f"{toc_idx}.", title))
             toc_idx += 1
-        elif line.startswith("# "):
-            toc_items.append((f"{toc_idx}.", line.replace("#", "").strip()))
-            toc_idx += 1
+            narrativ_toc_count += 1
 
     for num, title in toc_items:
         pdf.set_x(30)
@@ -8777,7 +9169,7 @@ with st.expander("2. Tomtegeometri og regulering", expanded=True):
     front_setback_m = s1.number_input("Byggegrense mot gate / front (m)", min_value=0.0, value=4.0, step=0.5)
     rear_setback_m = s2.number_input("Bakre byggegrense (m)", min_value=0.0, value=4.0, step=0.5)
     side_setback_m = s3.number_input("Sideavstand (m)", min_value=0.0, value=4.0, step=0.5)
-    polygon_setback_m = s4.number_input("Polygonbuffer / inntrekk (m)", min_value=0.0, value=4.0, step=0.5)
+    polygon_setback_m = s4.number_input("Ekstra inntrekk fra tomtegrense (m)", min_value=0.0, value=0.0, step=0.5, help="Bufferavstand FRA tomtegrensen — kommer i tillegg til byggegrensene over. La stå på 0 hvis byggegrensene (front/bak/side) allerede dekker alt. Bruk positivt tall hvis du vil modellere ekstra fri flate mot tomtegrense (f.eks. terrengtilpasning, snølagring) utover det byggegrensene sier.")
 
     r1, r2, r3, r4 = st.columns(4)
     max_bya_pct = r1.number_input("Maks BYA (%)", min_value=1.0, max_value=100.0, value=float(parsed.get("max_bya_pct", 35.0)), step=1.0)
@@ -8934,10 +9326,10 @@ with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
     mcols = st.columns(4)
     mix_inputs = []
     defaults = [
-        ("1-rom", 15.0, 38.0),
-        ("2-rom", 35.0, 52.0),
-        ("3-rom", 35.0, 72.0),
-        ("4-rom+", 15.0, 95.0),
+        ("1-rom", 15.0, 20.0),
+        ("2-rom", 35.0, 38.0),
+        ("3-rom", 35.0, 60.0),
+        ("4-rom+", 15.0, 85.0),
     ]
     for idx, (label, share_default, size_default) in enumerate(defaults):
         with mcols[idx]:
@@ -9372,7 +9764,7 @@ if run_analysis:
                         "lawson_class": wc_d.get("lawson_class"),
                         "overall": wc_d.get("overall"),
                     }
-            # Geo-bundle sammendrag for AI (v15 — gir AI-en grunnlag til å
+            # Geo-bundle sammendrag for AI (v15/v16 — gir AI-en grunnlag til å
             # kommentere forurensningsrisiko i pkt. 4 og pkt. 9)
             geo_summary = {}
             if geodata_bundle and geodata_bundle.get("available"):
@@ -9391,13 +9783,28 @@ if run_analysis:
                         }
                         for s in contamination[:5]
                     ],
-                    "aktsomhetskart_tilgjengelig": {
-                        "radon": geodata_bundle.get("radon") is not None,
-                        "flom": geodata_bundle.get("flom") is not None,
-                        "kvikkleire": geodata_bundle.get("kvikkleire") is not None,
-                        "skred": geodata_bundle.get("skred") is not None,
-                    },
                 }
+                # v16: Strukturerte aktsomhetsdata fra Geodata Online DOK
+                akt_bundle = geodata_bundle.get("aktsomhet", {}) or {}
+                if akt_bundle.get("available"):
+                    akt_cats = akt_bundle.get("categories", {}) or {}
+                    # Bygg kun et sammendrag med treff — tom hvis ingenting
+                    akt_hits = {}
+                    for cat_key, cat_data in akt_cats.items():
+                        if cat_data.get("hit"):
+                            akt_hits[cat_key] = {
+                                "severity": cat_data.get("severity", "registrert"),
+                                "detail": cat_data.get("detail", ""),
+                            }
+                    geo_summary["aktsomhet"] = {
+                        "data_hentet": True,
+                        "total_treff": sum(1 for c in akt_cats.values() if c.get("hit")),
+                        "kategorier_med_treff": akt_hits,
+                        "kilde": akt_bundle.get("source", "Geodata Online DOK"),
+                    }
+                else:
+                    geo_summary["aktsomhet"] = {"data_hentet": False}
+
                 if historical_analysis:
                     geo_summary["ai_historisk_analyse"] = {
                         "risiko_niva": historical_analysis.get("risiko_niva"),
@@ -9446,16 +9853,27 @@ KRAV:
 - Sol/skygge skal omtales som indikativ 2.5D, ikke full detaljsimulering.
 - Leilighetsmiks skal beskrives som kapasitetsestimat.
 - Ikke skriv om noe du ikke vet.
+- FORBUDT: Ikke skriv forside-blokker, meta-headers eller tittelavsnitt (eksempel: "MULIGHETSSTUDIE", "Dato: [Dagens dato]", "Prosjekt: Boligutvikling", "Tomteareal: X m²"). Start rapporten DIREKTE med "# 1. OPPSUMMERING" som første linje. Alle tittel- og metadata-elementer håndteres av PDF-layouten.
+- FORBUDT: Ikke bruk placeholder-verdier som "[Dagens dato]", "[Sett inn verdi]", eller tilsvarende — rapporten genereres automatisk og må være komplett.
+- FORBUDT: Ikke lag en "VEDLEGG"-seksjon, "APPENDIKS" eller tilsvarende etter pkt. 10. Siste seksjon i rapporten SKAL være "# 10. ANBEFALING / NESTE STEG". Geo-data, støydata og aktsomhetskart er allerede presentert i dedikerte seksjoner FØR rapportteksten — ikke dupliser dem i vedlegg.
+- BULLET-FORMAT: Bruk bindestrek "- " som bullet-marker, IKKE asterisk "*" eller punkt "•". Eksempel: "- Punkt 1" (ikke "* Punkt 1" eller "• Punkt 1").
 - OBLIGATORISK: Hvis støydata finnes i JSON (environment.noise), SKAL du kommentere støynivå i dB, kildetype og konsekvenser for planløsning (gjennomgående leiligheter, stille side, balkongplassering, fasadeløsninger). Ikke utelat støykommentar når data er oppgitt.
 - OBLIGATORISK — GEO-DATA: Hvis geo_context.available = true i JSON, SKAL du:
-  * I pkt. 4 (TOMT OG KONTEKST): Nevne kort at det er gjennomført automatisk uttrekk av stedskontekst- og geodata (Miljødirektoratet, NGU, NVE), og at detaljert gjennomgang finnes i dedikert seksjon "Stedskontekst og geodata" etter sol/skygge-analysen. Hvis grunnforurensning_antall_innen_500m > 0, nevn tallet og flagg at miljøteknisk undersøkelse bør vurderes. Hvis ai_historisk_analyse.risiko_niva finnes (Lav/Moderat/Høy), nevn samlet forurensningsrisiko-nivå i 1 setning.
-  * I pkt. 9 (RISIKO OG AVKLARINGSPUNKTER): Lag et eget risikopunkt om grunnforurensning med antall registrerte lokaliteter og tiltaksanbefaling. Hvis ai_historisk_analyse finnes, nevn AI-screening av historisk flyfoto og henvis til den dedikerte geo-seksjonen for full vurdering. Ikke reproduser hele AI-analyseteksten — oppsummer kort (1-2 setninger per punkt).
-  * Ikke dupliser innholdet fra den dedikerte geo-seksjonen — kort henvisning er tilstrekkelig i den narrative teksten.
+  - I pkt. 4 (TOMT OG KONTEKST): Nevne kort at det er gjennomført automatisk uttrekk av stedskontekst- og geodata (Miljødirektoratet, NGU, NVE), og at detaljert gjennomgang finnes i dedikert seksjon "Stedskontekst og geodata" etter sol/skygge-analysen. Hvis grunnforurensning_antall_innen_500m > 0, nevn tallet og flagg at miljøteknisk undersøkelse bør vurderes. Hvis ai_historisk_analyse.risiko_niva finnes (Lav/Moderat/Høy), nevn samlet forurensningsrisiko-nivå i 1 setning. Hvis geo_context.aktsomhet.total_treff > 0, nevn kort at tomten er registrert i X aktsomhetskategorier (radon/flom/skred/kvikkleire) og henvis til geo-seksjonen.
+  - I pkt. 9 (RISIKO OG AVKLARINGSPUNKTER): Lag et eget risikopunkt om grunnforurensning med antall registrerte lokaliteter og tiltaksanbefaling. Hvis ai_historisk_analyse finnes, nevn AI-screening av historisk flyfoto og henvis til den dedikerte geo-seksjonen for full vurdering. Hvis geo_context.aktsomhet.kategorier_med_treff inneholder noe, lag ETT eget risikopunkt per kategori (f.eks. "- Radon: moderat aktsomhet — radonsperre og tilrettelagt ventilasjon kreves jf. TEK17 § 13-5", "- Kvikkleire: registrert faresone — geoteknisk vurdering er obligatorisk før byggesøknad"). Vær konkret om hva utbygger må gjøre. Ikke reproduser hele AI-analyseteksten — oppsummer kort (1-2 setninger per punkt).
+  - Ikke dupliser innholdet fra den dedikerte geo-seksjonen — kort henvisning er tilstrekkelig i den narrative teksten.
 - Referer til visuelt materiale der det er relevant: «Se volumskisser», «Som vist i planvisningen», «Sol/skygge-analysen viser…». Rapporten inkluderer volumskisser, planvisninger, sol/skygge-diagrammer og (hvis tilgjengelig) historisk flyfoto med AI-vurdering.
-- Skriv sammenhengende norsk tekst, ikke bullet points (untatt i pkt. 9 som kan være bullets). Bruk riktig norsk (æ, ø, å).
+- Skriv sammenhengende norsk tekst. Bullets kan brukes i pkt. 9 (RISIKO) og pkt. 10 (ANBEFALING) hvis det gir leseflyt, ellers sammenhengende prosa. Bruk riktig norsk (æ, ø, å).
 """
             ai_report = _call_claude_text(_report_system, _report_user, max_tokens=6000)
             if ai_report:
+                # Post-filter: fjern eventuell hallusinert forside-blokk før pkt. 1
+                # (Claude ignorerer av og til FORBUDT-klausulen)
+                ai_report = _strip_hallucinated_preamble(ai_report)
+                # Post-filter: fjern eventuell hallusinert VEDLEGG-seksjon etter pkt. 10
+                ai_report = _strip_hallucinated_appendix(ai_report)
+                # Normaliser *-bullets til -
+                ai_report = _normalize_bullets(ai_report)
                 final_report_text = ai_report
         except Exception:
             final_report_text = deterministic_report
