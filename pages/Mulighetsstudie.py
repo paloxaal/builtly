@@ -9188,7 +9188,7 @@ if run_analysis:
         with st.spinner(
             f"Bygger masterplan: {_target_bra:,.0f} m² BRA i {_phase_count} byggetrinn{ai_label}{bra_label} ..."
         ):
-            _masterplan = masterplan_integration.run_masterplan_from_site_inputs(
+            _masterplan, _mp_error = masterplan_integration.run_masterplan_from_site_inputs(
                 site=site,
                 geodata_context=geodata_context,
                 phasing_config=_phasing_config,
@@ -9198,7 +9198,44 @@ if run_analysis:
                 byggesone=_byggesone,
             )
         if _masterplan is None:
-            st.error("Masterplan-generering feilet. Sjekk input-parametre, eller slå av masterplan-motor i seksjon 2C.")
+            err_detail = _mp_error or "Ukjent feil"
+            st.error(f"Masterplan-generering feilet: {err_detail}")
+
+            # Debug-info for feilsøking
+            with st.expander("🔍 Debug-info (inputs til masterplan-motoren)"):
+                _sp = geodata_context.get("site_polygon")
+                _bp = geodata_context.get("buildable_polygon")
+                _nb = geodata_context.get("neighbors", [])
+                st.code(
+                    f"site_polygon.area:     {float(_sp.area) if _sp else 'None':.1f} m²\n"
+                    f"buildable_polygon.area:{float(_bp.area) if _bp else 'None':.1f} m²\n"
+                    f"target_bra:            {_target_bra:.1f} m²\n"
+                    f"max_floors:            {site.max_floors}\n"
+                    f"max_height_m:          {site.max_height_m}\n"
+                    f"max_bya_pct:           {site.max_bya_pct}\n"
+                    f"neighbors:             {len(_nb)} bygg\n"
+                    f"phase_count_resolved:  {_phase_count}\n"
+                    f"phasing_mode:          {_phasing_config.phasing_mode}\n"
+                    f"parking_mode:          {_phasing_config.parking_mode}\n"
+                    f"include_barnehage:     {_include_barnehage}\n"
+                    f"include_naering:       {_include_naering}\n"
+                    f"byggesone:             {_byggesone}\n",
+                    language="text",
+                )
+                # Maks teoretisk BRA for sammenligning
+                _bp_area = float(_bp.area) if _bp else 0
+                _max_theo = _bp_area * (site.max_bya_pct / 100.0) * site.max_floors * 0.85
+                st.caption(
+                    f"Maks teoretisk BRA: {_max_theo:.0f} m² "
+                    f"(byggbart × BYA × etasjer × 0.85). "
+                    f"Mål-BRA er {_target_bra/_max_theo*100:.0f}% av dette."
+                    if _max_theo > 0 else "Maks teoretisk BRA: ikke beregnet"
+                )
+
+            st.info(
+                "Tips: Du kan slå av masterplan-motoren i seksjon 2C og bruke klassisk "
+                "A/B/C-flyt i stedet. Eller juster input og prøv igjen."
+            )
             options = []
             st.session_state["_current_masterplan"] = None
         else:
