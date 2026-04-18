@@ -8808,10 +8808,12 @@ def create_full_report_pdf(
             pdf.set_x(30)
             pdf.set_font(PDF_FONT, "", 10)
             pdf.set_text_color(*_BODY_BLACK)
-            # v16.2: Bruk PDF_FONT (faktisk aktivt font) i stedet for HAS_DEJAVU
-            # (fontfilen på disk). Registrering kan feile selv om filen finnes,
-            # og da må vi fallbacke til * for å unngå FPDFUnicodeEncodingException.
-            bullet = "\u2022 " if PDF_FONT == "DejaVu" else "* "
+            # v16.2.1: Sjekk faktisk aktivt font på PDF-objektet (ikke global PDF_FONT)
+            # for robusthet mot race conditions ved regenerering. FPDF lagrer aktivt
+            # font som pdf.font_family i lowercase. Hvis det ikke er "dejavu", faller
+            # vi trygt tilbake til "*" selv om PDF_FONT-globalen sier "DejaVu".
+            _pdf_current_font = str(getattr(pdf, "font_family", "") or "").lower()
+            bullet = "\u2022 " if _pdf_current_font == "dejavu" else "* "
             # Strip bullet-marker (ett tegn + minst ett mellomrom) før rendering
             content = re.sub(r"^[-\*•]\s+", "", line)
             pdf.multi_cell(150, 5.5, ironclad_text_formatter(bullet + content))
@@ -9909,6 +9911,12 @@ KRAV:
                 final_report_text = ai_report
         except Exception:
             final_report_text = deterministic_report
+
+    # v16.2.1: Safety net — normaliser bullets på final_report_text uansett codepath.
+    # Dette dekker den deterministiske fallback-teksten og site_intelligence-markdown
+    # som konkateneres inn. _normalize_bullets er idempotent så trygt å kalle flere ganger.
+    # Dette sikrer at ingen • eller * slipper gjennom til PDF selv om fontregistrering feiler.
+    final_report_text = _normalize_bullets(final_report_text)
 
     try:
         solar_grid_img = None
