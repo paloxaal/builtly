@@ -329,17 +329,65 @@ def run_pass1(
     documents: List[Dict[str, Any]],
     qa_level: str = "Standard",
     progress_callback=None,
+    max_workers: int = 4,
 ) -> List[Dict[str, Any]]:
-    """Run pass-1 extraction on all documents. progress_callback(i, total, filename)."""
-    results = []
+    """
+    Run pass-1 extraction on all documents in parallel.
+
+    Bruker ThreadPoolExecutor med max_workers=4 slik at opptil 4 Claude-kall
+    kjører samtidig. Dette gir 3-4x speedup på typiske anbudsbunker med
+    20-30 dokumenter.
+
+    progress_callback(i, total, filename) kalles når hvert dokument er ferdig.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     total = len(documents)
-    for i, doc in enumerate(documents):
+    if total == 0:
+        return []
+
+    # For små bunker — kjør sekvensielt (less overhead)
+    if total <= 3:
+        results = []
+        for i, doc in enumerate(documents):
+            if progress_callback:
+                progress_callback(i, total, doc.get("filename", ""))
+            result = pass1_extract(doc, qa_level=qa_level)
+            results.append(result)
         if progress_callback:
-            progress_callback(i, total, doc.get("filename", ""))
-        result = pass1_extract(doc, qa_level=qa_level)
-        results.append(result)
+            progress_callback(total, total, "ferdig")
+        return results
+
+    # Parallell-kjør større bunker. Bevar original rekkefølge.
+    results: List[Dict[str, Any]] = [None] * total  # type: ignore
+    completed = 0
+
+    # Rapporter første fil umiddelbart
     if progress_callback:
-        progress_callback(total, total, "ferdig")
+        progress_callback(0, total, documents[0].get("filename", ""))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(pass1_extract, doc, qa_level): idx
+            for idx, doc in enumerate(documents)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                results[idx] = {
+                    "filename": documents[idx].get("filename", "?"),
+                    "extraction": None,
+                    "meta": {"status": "error", "reason": f"{type(e).__name__}: {e}"},
+                }
+            completed += 1
+            if progress_callback:
+                progress_callback(
+                    completed, total,
+                    results[idx].get("filename", "?") if results[idx] else "?",
+                )
+
     return results
 
 
