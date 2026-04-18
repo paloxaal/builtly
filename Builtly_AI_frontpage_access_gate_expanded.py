@@ -3724,22 +3724,103 @@ def render_user_dashboard(lang_key: str) -> None:
                     </span>
                 </div>
             """)
-            for report in proj_reports:
-                exp_text = report.get("expires", "—")
-                render_html(f"""
-                    <div style="border:1px solid var(--card-border,rgba(56,189,248,0.10));border-radius:0.75rem;
-                                padding:1rem 1.5rem;margin-bottom:0.4rem;margin-left:1rem;
-                                background:var(--card-bg,rgba(6,17,26,0.55));
-                                display:flex;align-items:center;justify-content:space-between;">
-                        <div>
-                            <div style="color:var(--bright,#f1f5f9);font-weight:600;">{html.escape(report.get('name', 'Rapport'))}</div>
-                            <div style="color:var(--soft,#c8d3df);font-size:0.8rem;">
-                                {html.escape(report.get('module', ''))} · {dt['created']}: {html.escape(report.get('created', '—'))} · {dt['expires']}: {html.escape(exp_text)}
+            for r_idx, report in enumerate(proj_reports):
+                exp_text = report.get("expires", "—") or report.get("expires_at", "—")
+                created_text = report.get("created", "—") or report.get("created_at", "—")
+                storage_path = report.get("storage_path") or ""
+                legacy_download_url = report.get("download_url") or ""
+                report_name = report.get("name", "Rapport")
+                module_name = report.get("module", "")
+                file_size = report.get("file_size_bytes", 0)
+
+                # Formater filstørrelse om tilgjengelig
+                size_str = ""
+                if file_size:
+                    if file_size > 1024 * 1024:
+                        size_str = f" · {file_size / (1024*1024):.1f} MB"
+                    elif file_size > 1024:
+                        size_str = f" · {file_size / 1024:.0f} KB"
+
+                # Layout med Streamlit-kolonner for ekte knapper
+                with st.container(border=True):
+                    info_col, btn_col = st.columns([4, 1])
+                    with info_col:
+                        render_html(f"""
+                            <div style="color:var(--bright,#f1f5f9);font-weight:600;">
+                                {html.escape(report_name)}
                             </div>
-                        </div>
-                        <div style="color:#38bdf8;font-size:0.85rem;cursor:pointer;">{dt['download']} ↓</div>
-                    </div>
-                """)
+                            <div style="color:var(--soft,#c8d3df);font-size:0.8rem;margin-top:0.2rem;">
+                                {html.escape(module_name)} · {dt['created']}: {html.escape(str(created_text))} · {dt['expires']}: {html.escape(str(exp_text))}{html.escape(size_str)}
+                            </div>
+                        """)
+
+                    with btn_col:
+                        # Unik key per rapport
+                        btn_key = f"dl_report_{proj_name}_{r_idx}_{report.get('id', report_name)}"
+
+                        if storage_path:
+                            # Moderne flyt: last ned bytes fra Supabase Storage
+                            if st.button(f"↓ {dt['download']}",
+                                         key=f"fetch_{btn_key}",
+                                         use_container_width=True,
+                                         type="primary"):
+                                try:
+                                    pdf_bytes = builtly_auth.get_report_bytes(storage_path)
+                                    if pdf_bytes:
+                                        # Lagre i session state så download_button kan brukes
+                                        st.session_state[f"_pdf_ready_{btn_key}"] = pdf_bytes
+                                        st.rerun()
+                                    else:
+                                        st.error("Kunne ikke hente fil fra Storage")
+                                except Exception as e:
+                                    st.error(f"Feil: {e}")
+
+                            # Hvis bytes er klare, vis download-knapp
+                            pdf_ready = st.session_state.get(f"_pdf_ready_{btn_key}")
+                            if pdf_ready:
+                                # Bestem filnavn
+                                ext = "pdf"
+                                if storage_path.lower().endswith(".docx"):
+                                    ext = "docx"
+                                elif storage_path.lower().endswith(".zip"):
+                                    ext = "zip"
+                                safe_name = "".join(
+                                    c if c.isalnum() or c in "_-" else "_"
+                                    for c in report_name
+                                )[:80]
+                                download_fname = f"{safe_name}.{ext}"
+
+                                mime = "application/pdf"
+                                if ext == "docx":
+                                    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                elif ext == "zip":
+                                    mime = "application/zip"
+
+                                st.download_button(
+                                    label="✓ Lagre fil",
+                                    data=pdf_ready,
+                                    file_name=download_fname,
+                                    mime=mime,
+                                    key=f"save_{btn_key}",
+                                    use_container_width=True,
+                                )
+                        elif legacy_download_url:
+                            # Legacy: direkte lenke
+                            render_html(f"""
+                                <a href="{html.escape(legacy_download_url)}" target="_blank"
+                                   style="display:inline-block;width:100%;padding:0.4rem 0.8rem;
+                                          background:#38bdf8;color:#06111a;border-radius:6px;
+                                          text-align:center;text-decoration:none;font-weight:600;">
+                                    ↓ {dt['download']}
+                                </a>
+                            """)
+                        else:
+                            # Ingen fil tilgjengelig — vis disabled-knapp
+                            st.button(f"↓ {dt['download']}",
+                                      key=f"nofile_{btn_key}",
+                                      disabled=True,
+                                      use_container_width=True,
+                                      help="Fil ikke tilgjengelig (generert før Storage-integrasjon)")
 
     # -- Actions --
     st.markdown("<div style='margin-top:2rem;'></div>", unsafe_allow_html=True)
