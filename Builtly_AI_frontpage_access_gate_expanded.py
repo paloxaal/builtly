@@ -5646,14 +5646,14 @@ st.markdown(
             justify-content: flex-end !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
-            flex: 0 0 52px !important;
-            width: 52px !important;
-            max-width: 52px !important;
+            flex: 0 0 60px !important;
+            width: 60px !important;
+            max-width: 60px !important;
         }
         /* Each selectbox: compact pill */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] {
-            width: 52px !important;
-            max-width: 52px !important;
+            width: 60px !important;
+            max-width: 60px !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-testid="stSelectbox"] > div {
             padding: 0 !important;
@@ -5665,8 +5665,8 @@ st.markdown(
             height: 44px !important;
             min-height: 44px !important;
             max-height: 44px !important;
-            width: 50px !important;
-            max-width: 50px !important;
+            width: 58px !important;
+            max-width: 58px !important;
             padding: 0 !important;
             display: flex !important;
             align-items: center !important;
@@ -5674,31 +5674,38 @@ st.markdown(
             overflow: hidden !important;
             cursor: pointer !important;
         }
-        /* Inner value wrapper — keep original structure, just wider */
+        /* Inner value wrapper — must be wide enough to show emoji fully */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] > div > div {
-            width: 38px !important;
-            max-width: 38px !important;
+            width: 100% !important;
+            max-width: 100% !important;
             overflow: hidden !important;
             padding: 0 !important;
             margin: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] svg {
             display: none !important;
         }
-        /* Emoji — original approach, slightly larger to prevent clipping */
+        /* Emoji-pille — begrens span-bredden så kun emojien vises, teksten etter klippes.
+           Vi setter bredde mindre enn én emoji + space for å sikre at kun emojien rendres. */
         [data-testid="stHorizontalBlock"]:has(.brand-left) [data-baseweb="select"] span {
-            font-size: 20px !important;
+            font-size: 22px !important;
             line-height: 1 !important;
-            display: block !important;
-            width: 32px !important;
-            max-width: 32px !important;
-            height: 28px !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            width: 28px !important;
+            max-width: 28px !important;
+            height: 44px !important;
             overflow: hidden !important;
             text-overflow: clip !important;
             white-space: nowrap !important;
-            text-align: center !important;
+            text-align: left !important;
             padding: 0 !important;
             margin: 0 auto !important;
+            color: #f5f7fb !important;
         }
 
         /* Gi block-container nok høyre-padding slik at topbar-pillene ikke
