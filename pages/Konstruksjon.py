@@ -5580,6 +5580,21 @@ def finalize_rib_draft_to_pdf() -> bool:
         candidate_df=candidate_df,
         overlay_package=overlay_package,
     )
+
+    # Lagre til brukerens rapport-dashboard (Supabase Storage)
+    try:
+        import builtly_auth
+        builtly_auth.save_report(
+            project_name=pd_state.get("p_name", ""),
+            report_name=f"Konstruksjon — Builtly_RIB_{safe_name}.pdf",
+            module="RIB (Konstruksjon)",
+            pdf_bytes=pdf_data,
+        )
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
     return True
 
 
@@ -7001,6 +7016,21 @@ def finalize_rib_draft_to_pdf() -> bool:
         candidate_df=candidate_df,
         overlay_package=overlay_package,
     )
+
+    # Lagre til brukerens rapport-dashboard (Supabase Storage)
+    try:
+        import builtly_auth
+        builtly_auth.save_report(
+            project_name=pd_state.get("p_name", ""),
+            report_name=f"Konstruksjon — Builtly_RIB_{safe_name}.pdf",
+            module="RIB (Konstruksjon)",
+            pdf_bytes=pdf_data,
+        )
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
     return True
 
 
