@@ -11,6 +11,7 @@ Design language: Konstruksjon (RIB) / Builtly premium.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import uuid
@@ -53,6 +54,26 @@ from tender_quote_parser import (
 )
 from tender_portal_fetch import fetch_from_url
 from tender_report import build_pdf_report, build_markdown_report
+
+# Nye moduler for tilbudsgrunnlag og tilbudsbesvarelse
+from tender_company_profile import (
+    get_profile as get_company_profile,
+    save_profile as save_company_profile,
+    profile_is_complete,
+    EMPTY_PROFILE as EMPTY_COMPANY_PROFILE,
+    COMMON_CERTIFICATIONS,
+    COMMON_APPROVAL_AREAS,
+)
+from tender_packages import (
+    generate_all_packages,
+    package_module_selfcheck,
+)
+from tender_response import (
+    generate_all_response_sections,
+    build_response_zip,
+    response_module_selfcheck,
+    SECTION_PROMPTS as RESPONSE_SECTION_PROMPTS,
+)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -610,21 +631,55 @@ div[data-baseweb="select"] path {
 
 /* ═══ DROPDOWN-POPOVER (portal-rendered, utenfor app-rot!) ═══ */
 /* BaseWeb renderer popovers direkte på <body> via React Portal.
-   Derfor må vi bruke maximum-spesifisitet som treffer uansett hvor. */
+   Vi bruker maximum-spesifisitet og dekker alle kjente BaseWeb-varianter. */
+
+/* Alle portal-containere med hvit bakgrunn */
+body > div[data-baseweb],
+body > div[data-baseweb] *,
+body > div[class*="Popover"],
+body > div[class*="Popover"] *,
+body > div[class*="Menu"],
+body > div[class*="Menu"] * {
+    color: #f5f7fb !important;
+}
+
+/* Forsøk å treffe ALT som ser ut som en dropdown-container på body-nivå */
+body > div[role="tooltip"],
 body > div[data-baseweb="popover"],
-body > div[data-baseweb="popover"] > div,
-body div[data-baseweb="popover"],
+body > div[data-baseweb="popover"] *,
+body > div[data-baseweb="tooltip"],
+body > div[data-baseweb="layer"],
+body > div[data-baseweb="layer"] *,
 body div[data-baseweb="popover"] > div,
+body div[data-baseweb="popover"] > div > div {
+    background: #0a1623 !important;
+    background-color: #0a1623 !important;
+    color: #f5f7fb !important;
+}
+
+body div[data-baseweb="popover"],
+body [data-baseweb="menu"],
 body ul[data-baseweb="menu"],
-body [data-baseweb="menu"] {
+body div[role="listbox"],
+body ul[role="listbox"] {
     background: #0a1623 !important;
     background-color: #0a1623 !important;
     border: 1px solid rgba(120,145,170,0.35) !important;
     border-radius: 10px !important;
     box-shadow: 0 20px 50px rgba(0,0,0,0.5) !important;
+    color: #f5f7fb !important;
 }
 
-/* Alle list-items og options inne i popover */
+/* Alle children inne i popover — tvinger alt til mørkt tema */
+body div[data-baseweb="popover"] *,
+body [data-baseweb="menu"] *,
+body [role="listbox"] * {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #f5f7fb !important;
+}
+
+/* Spesifikk regel for li-elementer (options) */
 body div[data-baseweb="popover"] li,
 body div[data-baseweb="popover"] [role="option"],
 body [data-baseweb="menu"] li,
@@ -635,14 +690,14 @@ body [role="option"] {
     background: transparent !important;
     background-color: transparent !important;
     color: #f5f7fb !important;
+    padding: 0.5rem 1rem !important;
 }
 
-/* Tvinger tekst i options til hvit */
-body div[data-baseweb="popover"] li *,
-body div[data-baseweb="popover"] [role="option"] *,
-body [data-baseweb="menu"] li *,
-body [role="option"] *,
-body [role="listbox"] * {
+/* Tekst-innhold i options */
+body [role="option"] span,
+body [role="option"] div,
+body [role="option"] p,
+body li[role="option"] * {
     color: #f5f7fb !important;
     background: transparent !important;
     background-color: transparent !important;
@@ -660,7 +715,20 @@ body [data-baseweb="menu"] li:hover {
 }
 
 body [role="option"]:hover *,
-body [role="option"][aria-selected="true"] * {
+body [role="option"][aria-selected="true"] *,
+body li[aria-selected="true"] * {
+    color: #f5f7fb !important;
+}
+
+/* Fallback: HVIS BaseWeb setter hvit bakgrunn via inline style eller
+   class som vi ikke fanger opp, forsøk å overstyre alle white BG-regler
+   på dropdown-elementer direkte */
+body [data-baseweb] [style*="background: white"],
+body [data-baseweb] [style*="background: rgb(255"],
+body [data-baseweb] [style*="background-color: white"],
+body [data-baseweb] [style*="background-color: rgb(255"] {
+    background: #0a1623 !important;
+    background-color: #0a1623 !important;
     color: #f5f7fb !important;
 }
 
@@ -817,6 +885,71 @@ pre {
     color: #c8d3df !important;
 }
 </style>
+
+<script>
+// BaseWeb setter noen ganger farger via JavaScript runtime (theming-systemet).
+// MutationObserver lytter etter DOM-endringer og tvinger mørk tema når popovers åpnes.
+(function() {
+    if (window._builtlyDarkModeApplied) return;
+    window._builtlyDarkModeApplied = true;
+
+    const darkBg = '#0a1623';
+    const darkText = '#f5f7fb';
+
+    function applyDarkToPopover(el) {
+        if (!el || !el.style) return;
+        // Portal-containers som har hvit bakgrunn
+        const bg = el.style.backgroundColor || '';
+        if (bg.includes('255') || bg === 'white' || bg === 'rgb(255, 255, 255)') {
+            el.style.setProperty('background-color', darkBg, 'important');
+            el.style.setProperty('color', darkText, 'important');
+        }
+        // Sjekk attributter som tyder på popover
+        const baseweb = el.getAttribute && el.getAttribute('data-baseweb');
+        const role = el.getAttribute && el.getAttribute('role');
+        if (baseweb === 'popover' || baseweb === 'menu' || role === 'listbox' || role === 'tooltip') {
+            el.style.setProperty('background-color', darkBg, 'important');
+            el.style.setProperty('color', darkText, 'important');
+            el.style.setProperty('border', '1px solid rgba(120,145,170,0.35)', 'important');
+            el.style.setProperty('border-radius', '10px', 'important');
+            // Også alle children
+            el.querySelectorAll('*').forEach(child => {
+                if (child.style) {
+                    const cbg = child.style.backgroundColor || '';
+                    if (cbg.includes('255') || cbg === 'white') {
+                        child.style.setProperty('background-color', 'transparent', 'important');
+                    }
+                    child.style.setProperty('color', darkText, 'important');
+                }
+            });
+        }
+    }
+
+    function scanBody() {
+        document.body.querySelectorAll('[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"], [role="tooltip"]').forEach(applyDarkToPopover);
+    }
+
+    // Initial scan
+    scanBody();
+
+    // Observer fanger nye popovers når de åpnes
+    const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            m.addedNodes.forEach(node => {
+                if (node.nodeType === 1) {  // ELEMENT_NODE
+                    applyDarkToPopover(node);
+                    // Sjekk også children
+                    if (node.querySelectorAll) {
+                        node.querySelectorAll('[data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"], [role="tooltip"]').forEach(applyDarkToPopover);
+                    }
+                }
+            });
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
 """, unsafe_allow_html=True)
 
 
@@ -1443,6 +1576,8 @@ tab_names = [
     "RFI-kø",
     "Prisingspakker",
     "Tilbudsrespons",
+    "UE-pakker",
+    "Tilbudsbesvarelse",
     "Dokumenter",
     "Sjekkliste",
     "Krysskontroll",
@@ -2081,8 +2216,365 @@ with tabs[4]:
                 )
 
 
-# ── TAB 5: Dokumenter ────────────────────────────────────────────
+# ── TAB 5: UE-pakker (tilbudsgrunnlag til UE-er) ─────────────────
 with tabs[5]:
+    docs = st.session_state.tender_documents
+    analysis = st.session_state.tender_analysis
+    project = st.session_state.tender_project
+
+    if not analysis:
+        st.info("Kjør anbudskontroll for å kunne generere UE-tilbudsgrunnlag.")
+    else:
+        # Hent selskapsprofil
+        user_email = os.environ.get("BUILTLY_USER", "demo@builtly.ai")
+        company_profile = get_company_profile(user_email)
+
+        st.markdown("### Selskapsprofil")
+        st.caption(
+            "Profilen brukes som firmabrev-header og kontaktinfo i alle UE-tilbudsgrunnlag. "
+            "Fylles ut én gang og gjenbrukes på tvers av prosjekter."
+        )
+
+        profile_ok = profile_is_complete(company_profile)
+        with st.expander(
+            f"{'✓ Profil komplett' if profile_ok else '⚠ Profil ikke fullført — må fylles ut før generering'}",
+            expanded=not profile_ok,
+        ):
+            with st.form("company_profile_form"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    cp_name = st.text_input("Selskapsnavn *", value=company_profile.get("company_name", ""))
+                    cp_org = st.text_input("Organisasjonsnummer *", value=company_profile.get("company_org_no", ""))
+                    cp_addr = st.text_input("Adresse", value=company_profile.get("company_address", ""))
+                    cp_postcode = st.text_input("Postnummer", value=company_profile.get("company_postcode", ""))
+                    cp_city = st.text_input("Sted", value=company_profile.get("company_city", ""))
+                    cp_ceo = st.text_input("Daglig leder", value=company_profile.get("ceo_name", ""))
+                with c2:
+                    cp_contact = st.text_input("Tilbudsansvarlig (kontaktperson) *", value=company_profile.get("contact_person", ""))
+                    cp_title = st.text_input("Tittel", value=company_profile.get("contact_title", ""))
+                    cp_email = st.text_input("Kontakt-epost *", value=company_profile.get("contact_email", ""))
+                    cp_phone = st.text_input("Kontakttelefon", value=company_profile.get("contact_phone", ""))
+
+                cp_desc = st.text_area(
+                    "Selskapsbeskrivelse (2-4 setninger, brukes i tilbudsbesvarelse)",
+                    value=company_profile.get("company_description", ""),
+                    height=80,
+                )
+
+                cp_approvals = st.multiselect(
+                    "Sentral godkjenning / godkjenningsområder",
+                    options=COMMON_APPROVAL_AREAS,
+                    default=company_profile.get("approval_areas", []) if isinstance(company_profile.get("approval_areas"), list) else [],
+                )
+                cp_certs = st.multiselect(
+                    "Sertifiseringer",
+                    options=COMMON_CERTIFICATIONS,
+                    default=company_profile.get("certifications", []) if isinstance(company_profile.get("certifications"), list) else [],
+                )
+
+                cp_hms = st.text_area("HMS-politikk (stikkord)", value=company_profile.get("hms_policy", ""), height=60)
+                cp_quality = st.text_area("Kvalitetspolitikk (stikkord)", value=company_profile.get("quality_policy", ""), height=60)
+
+                # Referanseprosjekter
+                st.markdown("**Referanseprosjekter**")
+                existing_refs = company_profile.get("reference_projects") or []
+                if not isinstance(existing_refs, list):
+                    existing_refs = []
+                refs_text = st.text_area(
+                    "Én referanse per linje, format: 'Navn | År | Verdi MNOK | Rolle | Beskrivelse'",
+                    value="\n".join(
+                        f"{r.get('name', '')} | {r.get('year', '')} | {r.get('value_mnok', '')} | {r.get('role', '')} | {r.get('description', '')}"
+                        for r in existing_refs if isinstance(r, dict)
+                    ),
+                    height=140,
+                )
+
+                save_btn = st.form_submit_button("Lagre profil", type="primary")
+                if save_btn:
+                    refs = []
+                    for line in refs_text.split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        parts = [p.strip() for p in line.split("|")]
+                        refs.append({
+                            "name": parts[0] if len(parts) > 0 else "",
+                            "year": parts[1] if len(parts) > 1 else "",
+                            "value_mnok": parts[2] if len(parts) > 2 else "",
+                            "role": parts[3] if len(parts) > 3 else "",
+                            "description": parts[4] if len(parts) > 4 else "",
+                        })
+                    ok = save_company_profile(user_email, {
+                        "company_name": cp_name,
+                        "company_org_no": cp_org,
+                        "company_address": cp_addr,
+                        "company_postcode": cp_postcode,
+                        "company_city": cp_city,
+                        "ceo_name": cp_ceo,
+                        "contact_person": cp_contact,
+                        "contact_title": cp_title,
+                        "contact_email": cp_email,
+                        "contact_phone": cp_phone,
+                        "company_description": cp_desc,
+                        "approval_areas": cp_approvals,
+                        "certifications": cp_certs,
+                        "hms_policy": cp_hms,
+                        "quality_policy": cp_quality,
+                        "reference_projects": refs,
+                    })
+                    if ok:
+                        st.success("Profil lagret.")
+                        st.rerun()
+                    else:
+                        st.error("Lagring feilet. Sjekk Supabase-tilkobling.")
+
+        # Generer UE-pakker
+        st.markdown("---")
+        st.markdown("### Generer tilbudsgrunnlag til underentreprenører")
+
+        pkg_list = project.get("packages", [])
+        if not pkg_list:
+            st.warning("Ingen pakker definert i intake. Gå tilbake til intake-skjemaet og legg til pakker.")
+        elif not profile_ok:
+            st.warning("Fullfør selskapsprofilen over før du kan generere UE-grunnlag.")
+        else:
+            selected_pkgs = st.multiselect(
+                "Velg hvilke pakker du vil generere tilbudsgrunnlag for",
+                options=pkg_list,
+                default=pkg_list,
+            )
+
+            col_deadline, col_response = st.columns(2)
+            with col_deadline:
+                ue_deadline = st.text_input(
+                    "Ønsket oppstart / kontraktsdato (tekst)",
+                    value=project.get("deadline", ""),
+                    help="F.eks. 'Q3 2026' eller '15.08.2026'",
+                )
+            with col_response:
+                ue_response_dl = st.text_input(
+                    "Tilbudsfrist fra UE",
+                    value="",
+                    help="F.eks. '14.05.2026 kl. 12:00'",
+                )
+
+            st.caption(
+                f"Estimert AI-kost: ~{len(selected_pkgs) * 0.5:.1f} kr total "
+                f"({len(selected_pkgs)} pakker × ~0,5 kr/pakke med Sonnet 4.5)"
+            )
+
+            if st.button("Generer UE-tilbudsgrunnlag", type="primary", disabled=not selected_pkgs):
+                # Hent pass-data
+                pass1_data = analysis.get("pass1", {}).get("data") if isinstance(analysis.get("pass1"), dict) else []
+                if isinstance(pass1_data, dict):
+                    pass1_data = list(pass1_data.values()) if pass1_data else []
+                if not isinstance(pass1_data, list):
+                    pass1_data = docs  # Fallback til rå dokumenter
+                pass2_data = analysis.get("pass2", {}).get("data") if isinstance(analysis.get("pass2"), dict) else {}
+                if not isinstance(pass2_data, dict):
+                    pass2_data = {}
+
+                progress_ue = st.progress(0.0, text="Starter generering...")
+
+                def _ue_progress(i, total, name):
+                    progress_ue.progress(i / max(total, 1), text=f"Genererer {name} ({i}/{total})...")
+
+                try:
+                    results = generate_all_packages(
+                        packages=selected_pkgs,
+                        pass1_data=pass1_data,
+                        pass2_data=pass2_data,
+                        company_profile=company_profile,
+                        project_name=project.get("name", ""),
+                        tender_type=project.get("contract_form", "Totalentreprise"),
+                        buyer_name=project.get("buyer_name", ""),
+                        deadline=ue_deadline or None,
+                        response_deadline=ue_response_dl or None,
+                        progress_callback=_ue_progress,
+                    )
+                    progress_ue.empty()
+
+                    # Totalkost
+                    total_tokens_in = sum(r.get("extraction_metadata", {}).get("tokens_in", 0) for r in results)
+                    total_tokens_out = sum(r.get("extraction_metadata", {}).get("tokens_out", 0) for r in results)
+                    total_cost_usd = total_tokens_in / 1_000_000 * 3 + total_tokens_out / 1_000_000 * 15
+                    total_cost_nok = total_cost_usd * 10.8
+
+                    ok_count = sum(1 for r in results if r.get("bytes"))
+                    st.success(
+                        f"Generert {ok_count} av {len(results)} UE-tilbudsgrunnlag. "
+                        f"AI-kost: ~{total_cost_nok:.2f} kr ({total_tokens_in} in + {total_tokens_out} out tokens)."
+                    )
+
+                    # Vis per-pakke-resultat + individuelle download-knapper
+                    import zipfile as _zip
+                    zip_buf = io.BytesIO()
+                    with _zip.ZipFile(zip_buf, "w", _zip.ZIP_DEFLATED) as zf:
+                        for r in results:
+                            if r.get("bytes") and r.get("filename"):
+                                zf.writestr(r["filename"], r["bytes"])
+
+                    for r in results:
+                        if r.get("bytes"):
+                            cols = st.columns([4, 1])
+                            cols[0].caption(f"✓  **{r['package_name']}**  →  `{r['filename']}`")
+                            cols[1].download_button(
+                                "↓ DOCX",
+                                data=r["bytes"],
+                                file_name=r["filename"],
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"dl_pkg_{r['package_name']}",
+                            )
+                        else:
+                            st.caption(f"✗  **{r['package_name']}**  — feil: {r.get('error', 'ukjent')}")
+
+                    st.markdown("---")
+                    st.download_button(
+                        label="↓ Last ned alle UE-pakker som ZIP",
+                        data=zip_buf.getvalue(),
+                        file_name=f"UE-tilbudsgrunnlag_{project.get('name', 'anbud')[:30]}.zip",
+                        mime="application/zip",
+                        type="primary",
+                    )
+
+                except Exception as e:
+                    progress_ue.empty()
+                    st.error(f"Generering feilet: {type(e).__name__}: {e}")
+
+
+# ── TAB 6: Tilbudsbesvarelse (entreprenør → byggherre) ───────────
+with tabs[6]:
+    docs = st.session_state.tender_documents
+    analysis = st.session_state.tender_analysis
+    project = st.session_state.tender_project
+
+    if not analysis:
+        st.info("Kjør anbudskontroll før du genererer tilbudsbesvarelse.")
+    else:
+        user_email = os.environ.get("BUILTLY_USER", "demo@builtly.ai")
+        company_profile = get_company_profile(user_email)
+
+        st.markdown("### AI-utkast til tilbudsbesvarelse")
+        st.caption(
+            "Genererer utkast til 7 separate Word-filer (én per seksjon) "
+            "basert på konkurransegrunnlaget og selskapsprofilen. "
+            "Claude Opus brukes for dypere tekstgenerering."
+        )
+
+        if not profile_is_complete(company_profile):
+            st.warning(
+                "Selskapsprofilen er ikke fullført. Gå til 'UE-pakker'-fanen og fyll ut "
+                "profilen før du genererer tilbudsbesvarelse."
+            )
+        else:
+            # Vis seksjoner som kan genereres
+            st.markdown("#### Seksjoner som vil bli generert")
+            sections_info = [
+                (key, prompt["title"], prompt["filename"])
+                for key, prompt in RESPONSE_SECTION_PROMPTS.items()
+            ]
+            for i, (key, title, fname) in enumerate(sections_info, 1):
+                st.caption(f"{i:02d}.  **{title}**  →  `{fname}`")
+
+            st.markdown("---")
+            col_opus1, col_opus2 = st.columns(2)
+            with col_opus1:
+                use_opus = st.checkbox(
+                    "Bruk Claude Opus (dypere tekst, dyrere)",
+                    value=True,
+                    help="Opus gir bedre tekst men bruker mer tokens. Skru av for å bruke Sonnet 4.5 (60% billigere).",
+                )
+            with col_opus2:
+                cost_per_section = 5 if use_opus else 2
+                st.caption(
+                    f"Estimert AI-kost: ~{len(sections_info) * cost_per_section} kr total "
+                    f"({len(sections_info)} seksjoner × ~{cost_per_section} kr/seksjon)"
+                )
+
+            if st.button("Generer tilbudsbesvarelse", type="primary"):
+                pass1_data = analysis.get("pass1", {}).get("data") if isinstance(analysis.get("pass1"), dict) else []
+                if isinstance(pass1_data, dict):
+                    pass1_data = list(pass1_data.values()) if pass1_data else []
+                if not isinstance(pass1_data, list):
+                    pass1_data = docs
+                pass2_data = analysis.get("pass2", {}).get("data") if isinstance(analysis.get("pass2"), dict) else {}
+                if not isinstance(pass2_data, dict):
+                    pass2_data = {}
+
+                progress_resp = st.progress(0.0, text="Starter generering...")
+
+                def _resp_progress(i, total, title):
+                    progress_resp.progress(i / max(total, 1), text=f"Skriver {title} ({i}/{total})...")
+
+                try:
+                    results = generate_all_response_sections(
+                        company_profile=company_profile,
+                        project_name=project.get("name", ""),
+                        buyer_name=project.get("buyer_name", ""),
+                        tender_type=project.get("contract_form", "Totalentreprise"),
+                        pass1_data=pass1_data,
+                        pass2_data=pass2_data,
+                        packages=project.get("packages", []),
+                        deadline=project.get("deadline", ""),
+                        use_opus=use_opus,
+                        progress_callback=_resp_progress,
+                    )
+                    progress_resp.empty()
+
+                    # Kost
+                    total_in = sum(r.get("tokens_in", 0) for r in results)
+                    total_out = sum(r.get("tokens_out", 0) for r in results)
+                    if use_opus:
+                        cost_usd = total_in / 1_000_000 * 15 + total_out / 1_000_000 * 75
+                    else:
+                        cost_usd = total_in / 1_000_000 * 3 + total_out / 1_000_000 * 15
+                    cost_nok = cost_usd * 10.8
+
+                    ok_count = sum(1 for r in results if r.get("bytes"))
+                    st.success(
+                        f"Generert {ok_count} av {len(results)} seksjoner. "
+                        f"AI-kost: ~{cost_nok:.2f} kr ({total_in} in + {total_out} out tokens)."
+                    )
+
+                    # Individuelle download-knapper per seksjon
+                    for r in results:
+                        if r.get("bytes"):
+                            cols = st.columns([4, 1])
+                            cols[0].caption(f"✓  **{r['title']}**  →  `{r['filename']}`")
+                            cols[1].download_button(
+                                "↓ DOCX",
+                                data=r["bytes"],
+                                file_name=r["filename"],
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key=f"dl_resp_{r['section_key']}",
+                            )
+                        else:
+                            st.caption(f"✗  **{r['title']}**  — feil: {r.get('error', 'ukjent')}")
+
+                    # Samlet ZIP-nedlasting
+                    zip_bytes = build_response_zip(results, project.get("name", ""))
+                    st.markdown("---")
+                    st.download_button(
+                        label="↓ Last ned hele tilbudsbesvarelsen som ZIP",
+                        data=zip_bytes,
+                        file_name=f"Tilbudsbesvarelse_{project.get('name', 'anbud')[:30]}.zip",
+                        mime="application/zip",
+                        type="primary",
+                    )
+
+                    st.info(
+                        "ⓘ  Dette er AI-genererte utkast. Tilbudsansvarlig må gjennomgå, "
+                        "supplere og tilpasse hvert dokument før utsending. Alle steder hvor "
+                        "det står `[fyll inn: ...]` må manuelt fullføres."
+                    )
+
+                except Exception as e:
+                    progress_resp.empty()
+                    st.error(f"Generering feilet: {type(e).__name__}: {e}")
+
+
+# ── TAB 7: Dokumenter ────────────────────────────────────────────
+with tabs[7]:
     docs = st.session_state.tender_documents
     if not docs:
         st.info("Ingen dokumenter lastet opp ennå.")
@@ -2151,8 +2643,8 @@ with tabs[5]:
                 st.markdown("---")
 
 
-# ── TAB 6: Sjekkliste ────────────────────────────────────────────
-with tabs[6]:
+# ── TAB 8: Sjekkliste ────────────────────────────────────────────
+with tabs[8]:
     rf = st.session_state.tender_rule_findings
     if not rf:
         st.info("Kjør anbudskontroll for å generere sjekkliste.")
@@ -2178,8 +2670,8 @@ with tabs[6]:
             st.info("Ingen sjekkpunkter generert.")
 
 
-# ── TAB 7: Krysskontroll ─────────────────────────────────────────
-with tabs[7]:
+# ── TAB 9: Krysskontroll ─────────────────────────────────────────
+with tabs[9]:
     analysis = st.session_state.tender_analysis
     if not analysis:
         st.info("Kjør anbudskontroll for krysskontroll-resultater.")
@@ -2218,8 +2710,8 @@ with tabs[7]:
             st.caption("Ingen konsoliderte kontraktsvilkår identifisert.")
 
 
-# ── TAB 8: Audit trail ───────────────────────────────────────────
-with tabs[8]:
+# ── TAB 10: Audit trail ──────────────────────────────────────────
+with tabs[10]:
     history = load_run_history(pd_state.get("p_name", "-"))
 
     st.markdown("### Denne kjøringen")
