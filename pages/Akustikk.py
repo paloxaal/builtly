@@ -1541,7 +1541,8 @@ Regler for JSON:
                             project_name=pd_state.get("p_name", p_name),
                             report_name=f"Akustikk - Builtly_RIAku_{p_name}.pdf",
                             module="RIAku (Akustikk)",
-                            file_path=f"Builtly_RIAku_{p_name}.pdf")
+                            file_path=f"Builtly_RIAku_{p_name}.pdf",
+                            pdf_bytes=pdf_data)
                     except Exception:
                         pass
 
@@ -1648,7 +1649,8 @@ if "generated_aku_pdf" in st.session_state:
                             builtly_auth.save_report(project_name=pd_state.get("p_name", p_name),
                                                      report_name=f"Akustikk - Builtly_RIAku_{p_name}.pdf (revidert)",
                                                      module="RIAku (Akustikk)", 
-                                                     file_path=f"Builtly_RIAku_{p_name}.pdf")
+                                                     file_path=f"Builtly_RIAku_{p_name}.pdf",
+                                                     pdf_bytes=pdf_data)
                         except Exception: pass
                     
                     st.success("Markører oppdatert og PDF regenerert!")
