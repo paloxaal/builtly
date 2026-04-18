@@ -1616,6 +1616,7 @@ if submitted:
                 "session_state_files": st.session_state.get("tender_files_v9"),
             })
     else:
+      try:
         # Step 1: Parse documents (både opplastede og portal-hentede)
         with st.status("Leser og analyserer dokumenter...", expanded=True) as status:
             st.write(f"Fant {total_input_count} fil(er) totalt — starter parsing...")
@@ -1699,24 +1700,28 @@ if submitted:
         # ── Synkroniser tender_project fra intake + config ──
         # Dette gjør at UE-pakker og Tilbudsbesvarelse-tabs har tilgang
         # til alle nødvendige felt.
-        st.session_state.tender_project = {
-            "name": pd_state.get("p_name", ""),
-            "buyer_name": pd_state.get("buyer_name") or pd_state.get("byggherre", ""),
-            "deadline": pd_state.get("tilbudsfrist", "") or config.get("deadline", ""),
-            "contract_form": pd_state.get("contract_form") or config.get("tender_type", "Totalentreprise"),
-            "estimated_value_mnok": config.get("estimated_value_mnok") or pd_state.get("estimated_value_mnok"),
-            "description": pd_state.get("description", ""),
-            "packages": config.get("packages", []) or pd_state.get("packages", []),
-            "disciplines": config.get("disciplines", []),
-            "role": config.get("role", ""),
-            "notes": notes if "notes" in dir() else "",
-            # Lokasjons-felt fra Project SSOT
-            "b_type": pd_state.get("b_type", ""),
-            "adresse": pd_state.get("adresse", ""),
-            "kommune": pd_state.get("kommune", ""),
-            "etasjer": pd_state.get("etasjer", ""),
-            "bta": pd_state.get("bta", ""),
-        }
+        try:
+            st.session_state.tender_project = {
+                "name": pd_state.get("p_name", ""),
+                "buyer_name": pd_state.get("buyer_name") or pd_state.get("byggherre", ""),
+                "deadline": pd_state.get("tilbudsfrist", "") or config.get("deadline", ""),
+                "contract_form": pd_state.get("contract_form") or config.get("tender_type", "Totalentreprise"),
+                "estimated_value_mnok": config.get("estimated_value_mnok") or pd_state.get("estimated_value_mnok"),
+                "description": pd_state.get("description", ""),
+                "packages": config.get("packages", []) or pd_state.get("packages", []),
+                "disciplines": config.get("disciplines", []),
+                "role": config.get("role", ""),
+                "notes": config.get("notes", ""),  # Hentes fra config (som allerede har notes)
+                # Lokasjons-felt fra Project SSOT
+                "b_type": pd_state.get("b_type", ""),
+                "adresse": pd_state.get("adresse", ""),
+                "kommune": pd_state.get("kommune", ""),
+                "etasjer": pd_state.get("etasjer", ""),
+                "bta": pd_state.get("bta", ""),
+            }
+        except Exception as _sync_err:
+            st.warning(f"Kunne ikke synkronisere tender_project: {_sync_err}")
+            st.session_state.tender_project = {"name": pd_state.get("p_name", "Anbud")}
 
         # ── Auto-lagre til tender_projects hvis brukeren har et aktivt anbud ──
         _auto_active_id = get_active_tender_id()
@@ -1740,6 +1745,11 @@ if submitted:
                 "Opprett eller velg et anbud i prosjekt-velgeren øverst for å lagre og "
                 "komme tilbake senere."
             )
+      except Exception as _run_err:
+        import traceback
+        st.error(f"❌ Kjøring feilet: {type(_run_err).__name__}: {_run_err}")
+        with st.expander("Teknisk detalj (full traceback)"):
+            st.code(traceback.format_exc())
 
 
 # ═════════════════════════════════════════════════════════════════
