@@ -74,6 +74,19 @@ from tender_response import (
     response_module_selfcheck,
     SECTION_PROMPTS as RESPONSE_SECTION_PROMPTS,
 )
+from tender_projects import (
+    list_tender_projects,
+    get_tender_project,
+    create_tender_project,
+    rename_tender_project,
+    hard_delete_tender_project,
+    set_active_tender,
+    get_active_tender_id,
+    get_active_tender_name,
+    clear_active_tender,
+    save_current_state as save_tender_state,
+    load_into_session as load_tender_into_session,
+)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -975,6 +988,8 @@ if "project_data" not in st.session_state or not st.session_state.project_data.g
 pd_state = st.session_state.project_data
 
 # Session-level state for tender analysis
+if "tender_project" not in st.session_state:
+    st.session_state.tender_project = {}
 if "tender_documents" not in st.session_state:
     st.session_state.tender_documents = []
 if "tender_analysis" not in st.session_state:
@@ -985,6 +1000,8 @@ if "tender_readiness" not in st.session_state:
     st.session_state.tender_readiness = None
 if "tender_run_meta" not in st.session_state:
     st.session_state.tender_run_meta = None
+if "tender_rfi_queue" not in st.session_state:
+    st.session_state.tender_rfi_queue = []
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1050,6 +1067,159 @@ render_html(f"""
     <div style="margin-top: 0.8rem;">{backend_badge}</div>
 </div>
 """)
+
+
+# ═════════════════════════════════════════════════════════════════
+# 6b. PROSJEKT-VELGER (lagrede anbud)
+# ═════════════════════════════════════════════════════════════════
+_tp_user_email = (
+    st.session_state.get("user_email")
+    or st.session_state.get("current_user_email")
+    or os.environ.get("BUILTLY_USER", "demo@builtly.ai")
+)
+_tp_projects = list_tender_projects(user_email=_tp_user_email, include_archived=False, limit=50)
+_tp_active_id = get_active_tender_id()
+_tp_active_name = get_active_tender_name()
+
+render_html("""
+<div class="section-header" style="margin-top: 2rem;">
+    <span class="section-badge">Lagrede anbud</span>
+    <h3>Velg eller opprett anbudsprosjekt</h3>
+    <p>Lagre ditt arbeid for å kunne komme tilbake senere — eller jobb i scratch-modus (alt mistes ved refresh).</p>
+</div>
+""")
+
+# Aktivt-prosjekt-kort
+_active_status = ""
+if _tp_active_id:
+    _active_record = get_tender_project(_tp_active_id)
+    if _active_record:
+        _active_status = _active_record.get("status", "draft")
+
+render_html(f"""
+<div style="
+    background: {'linear-gradient(135deg, rgba(56,189,248,0.12), rgba(56,189,248,0.04))' if _tp_active_id else 'rgba(10,22,35,0.4)'};
+    border: 1px solid {'rgba(56,189,248,0.3)' if _tp_active_id else 'rgba(120,145,170,0.2)'};
+    border-radius: 12px; padding: 1.2rem 1.5rem; margin-bottom: 1.2rem;
+    display: flex; justify-content: space-between; align-items: center;
+">
+    <div>
+        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em;
+                    color:{'#38bdf8' if _tp_active_id else '#9fb0c3'};
+                    font-weight:600; margin-bottom: 0.3rem;">
+            Aktivt anbud
+        </div>
+        <div style="font-size:1.15rem; font-weight:700; color:#f5f7fb;">
+            {_tp_active_name if _tp_active_id else '— Scratch-modus (ikke lagret)'}
+        </div>
+        {f'<div style="font-size:0.8rem; color:#9fb0c3; margin-top:0.2rem;">Status: {_active_status}</div>' if _tp_active_id else ''}
+    </div>
+</div>
+""")
+
+_tp_c1, _tp_c2, _tp_c3 = st.columns([3, 1, 1])
+
+with _tp_c1:
+    _tp_options = ["— Scratch-modus (ikke lagre) —"] + [
+        f"{p['name']}  ·  {p.get('buyer_name') or '?'}  ·  {p.get('status', 'draft')}"
+        for p in _tp_projects
+    ]
+    _tp_ids = [""] + [p["tender_id"] for p in _tp_projects]
+    _tp_current_idx = 0
+    if _tp_active_id and _tp_active_id in _tp_ids:
+        _tp_current_idx = _tp_ids.index(_tp_active_id)
+
+    _tp_selected_idx = st.selectbox(
+        "Velg lagret anbud",
+        options=list(range(len(_tp_options))),
+        format_func=lambda i: _tp_options[i],
+        index=_tp_current_idx,
+        key="tender_project_selector",
+        label_visibility="collapsed",
+    )
+    _tp_selected_id = _tp_ids[_tp_selected_idx]
+
+with _tp_c2:
+    if st.button("Åpne", key="tp_load_btn", use_container_width=True,
+                 disabled=(not _tp_selected_id or _tp_selected_id == _tp_active_id)):
+        ok, err = load_tender_into_session(_tp_selected_id)
+        if ok:
+            st.success(f"Anbud lastet: {get_active_tender_name()}")
+            st.rerun()
+        else:
+            st.error(f"Kunne ikke laste: {err}")
+
+    if not _tp_selected_id and _tp_active_id:
+        if st.button("Gå til scratch", key="tp_clear_btn", use_container_width=True):
+            clear_active_tender()
+            # Rens session state
+            st.session_state.tender_project = {}
+            st.session_state.tender_documents = []
+            st.session_state.tender_analysis = None
+            st.session_state.tender_rule_findings = None
+            st.session_state.tender_readiness = None
+            st.session_state.tender_rfi_queue = []
+            st.rerun()
+
+with _tp_c3:
+    with st.popover("Nytt / admin", use_container_width=True):
+        st.markdown("**Opprett nytt tomt anbud**")
+        _tp_new_name = st.text_input("Navn", value="", key="tp_new_name",
+                                      placeholder="F.eks. 'Saga Park Q2 2026'")
+        if st.button("Opprett", key="tp_create_btn", type="primary",
+                     disabled=not _tp_new_name.strip()):
+            ok, new_id, err = create_tender_project(
+                user_email=_tp_user_email,
+                name=_tp_new_name.strip(),
+            )
+            if ok and new_id:
+                # Rens session state, sett som aktiv
+                st.session_state.tender_project = {"name": _tp_new_name.strip()}
+                st.session_state.tender_documents = []
+                st.session_state.tender_analysis = None
+                st.session_state.tender_rule_findings = None
+                st.session_state.tender_readiness = None
+                st.session_state.tender_rfi_queue = []
+                set_active_tender(new_id, name=_tp_new_name.strip())
+                st.success("Opprettet")
+                st.rerun()
+            else:
+                st.error(f"Feilet: {err}")
+
+        if _tp_active_id:
+            st.markdown("---")
+            st.markdown("**Omdøp aktivt anbud**")
+            _tp_rename = st.text_input("Nytt navn", value=_tp_active_name,
+                                        key="tp_rename_input")
+            if st.button("Lagre navn", key="tp_rename_btn",
+                         disabled=(_tp_rename == _tp_active_name or not _tp_rename.strip())):
+                ok, err = rename_tender_project(_tp_active_id, _tp_rename.strip())
+                if ok:
+                    set_active_tender(_tp_active_id, name=_tp_rename.strip())
+                    st.success("Omdøpt")
+                    st.rerun()
+                else:
+                    st.error(err)
+
+            st.markdown("---")
+            st.markdown("**Slett aktivt anbud**")
+            st.caption("Permanent sletting — kan ikke angres.")
+            _tp_confirm = st.checkbox("Bekreft sletting", key="tp_delete_confirm")
+            if st.button("Slett permanent", key="tp_delete_btn",
+                         disabled=not _tp_confirm):
+                ok, err = hard_delete_tender_project(_tp_active_id)
+                if ok:
+                    clear_active_tender()
+                    st.session_state.tender_project = {}
+                    st.session_state.tender_documents = []
+                    st.session_state.tender_analysis = None
+                    st.session_state.tender_rule_findings = None
+                    st.session_state.tender_readiness = None
+                    st.session_state.tender_rfi_queue = []
+                    st.success("Slettet")
+                    st.rerun()
+                else:
+                    st.error(err)
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1478,6 +1648,51 @@ if submitted:
             f"Analyse lagret (run_id: `{st.session_state.tender_run_meta['run_id'][:8]}`, "
             f"lagring: {st.session_state.tender_run_meta['stored_in']})"
         )
+
+        # ── Synkroniser tender_project fra intake + config ──
+        # Dette gjør at UE-pakker og Tilbudsbesvarelse-tabs har tilgang
+        # til alle nødvendige felt.
+        st.session_state.tender_project = {
+            "name": pd_state.get("p_name", ""),
+            "buyer_name": pd_state.get("buyer_name") or pd_state.get("byggherre", ""),
+            "deadline": pd_state.get("tilbudsfrist", "") or config.get("deadline", ""),
+            "contract_form": pd_state.get("contract_form") or config.get("tender_type", "Totalentreprise"),
+            "estimated_value_mnok": config.get("estimated_value_mnok") or pd_state.get("estimated_value_mnok"),
+            "description": pd_state.get("description", ""),
+            "packages": config.get("packages", []) or pd_state.get("packages", []),
+            "disciplines": config.get("disciplines", []),
+            "role": config.get("role", ""),
+            "notes": notes if "notes" in dir() else "",
+            # Lokasjons-felt fra Project SSOT
+            "b_type": pd_state.get("b_type", ""),
+            "adresse": pd_state.get("adresse", ""),
+            "kommune": pd_state.get("kommune", ""),
+            "etasjer": pd_state.get("etasjer", ""),
+            "bta": pd_state.get("bta", ""),
+        }
+
+        # ── Auto-lagre til tender_projects hvis brukeren har et aktivt anbud ──
+        _auto_active_id = get_active_tender_id()
+        if _auto_active_id:
+            _auto_ok, _auto_saved_id, _auto_err = save_tender_state(
+                project=st.session_state.tender_project,
+                documents=st.session_state.tender_documents,
+                analysis=st.session_state.tender_analysis,
+                readiness=st.session_state.tender_readiness,
+                rule_findings=st.session_state.tender_rule_findings or [],
+                rfi_queue=st.session_state.get("tender_rfi_queue") or [],
+                tender_id=_auto_active_id,
+            )
+            if _auto_ok:
+                st.caption(f"✓ Auto-lagret til anbud «{get_active_tender_name()}»")
+            else:
+                st.caption(f"⚠ Auto-lagring feilet: {_auto_err}")
+        else:
+            st.info(
+                "ⓘ  Du er i scratch-modus — analysen er ikke lagret under et anbud. "
+                "Opprett eller velg et anbud i prosjekt-velgeren øverst for å lagre og "
+                "komme tilbake senere."
+            )
 
 
 # ═════════════════════════════════════════════════════════════════
