@@ -5618,14 +5618,15 @@ st.markdown(
             flex: 1 1 0 !important;
             min-width: 0 !important;
         }
-        /* Controls wrapper - auto width, right-aligned */
+        /* Controls wrapper - auto width, right-aligned, keep away from edge */
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) {
             flex: 0 0 auto !important;
             width: auto !important;
             max-width: none !important;
+            margin-right: 12px !important;
+            padding-right: 4px !important;
         }
         /* Kill ALL backgrounds on wrapper divs so pills don't merge */
-        [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2),
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div,
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) > div > div,
         [data-testid="stHorizontalBlock"]:has(.brand-left) > [data-testid="stColumn"]:nth-child(2) [data-testid="stHorizontalBlock"],
@@ -5703,7 +5704,8 @@ st.markdown(
         /* Gi block-container nok høyre-padding slik at topbar-pillene ikke
            klippes av viewport-kanten */
         .block-container {
-            padding-right: 1rem !important;
+            padding-right: 1.25rem !important;
+            padding-left: 0.75rem !important;
         }
 
         .mini-stat-grid,
