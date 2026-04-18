@@ -1096,26 +1096,29 @@ if _tp_active_id:
     if _active_record:
         _active_status = _active_record.get("status", "draft")
 
-render_html(f"""
-<div style="
-    background: {'linear-gradient(135deg, rgba(56,189,248,0.12), rgba(56,189,248,0.04))' if _tp_active_id else 'rgba(10,22,35,0.4)'};
-    border: 1px solid {'rgba(56,189,248,0.3)' if _tp_active_id else 'rgba(120,145,170,0.2)'};
-    border-radius: 12px; padding: 1.2rem 1.5rem; margin-bottom: 1.2rem;
-    display: flex; justify-content: space-between; align-items: center;
-">
-    <div>
-        <div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em;
-                    color:{'#38bdf8' if _tp_active_id else '#9fb0c3'};
-                    font-weight:600; margin-bottom: 0.3rem;">
-            Aktivt anbud
-        </div>
-        <div style="font-size:1.15rem; font-weight:700; color:#f5f7fb;">
-            {_tp_active_name if _tp_active_id else '— Scratch-modus (ikke lagret)'}
-        </div>
-        {f'<div style="font-size:0.8rem; color:#9fb0c3; margin-top:0.2rem;">Status: {_active_status}</div>' if _tp_active_id else ''}
-    </div>
-</div>
-""")
+# Bygg HTML-deler separat for å unngå f-string-kompleksitet med render_html
+_tp_bg = (
+    "linear-gradient(135deg, rgba(56,189,248,0.12), rgba(56,189,248,0.04))"
+    if _tp_active_id else "rgba(10,22,35,0.4)"
+)
+_tp_border = "rgba(56,189,248,0.3)" if _tp_active_id else "rgba(120,145,170,0.2)"
+_tp_label_color = "#38bdf8" if _tp_active_id else "#9fb0c3"
+_tp_display_name = _tp_active_name if _tp_active_id else "— Scratch-modus (ikke lagret)"
+_tp_status_html = (
+    f'<div style="font-size:0.8rem; color:#9fb0c3; margin-top:0.2rem;">Status: {_active_status}</div>'
+    if _tp_active_id else ""
+)
+
+st.markdown(
+    f'<div style="background: {_tp_bg}; border: 1px solid {_tp_border}; '
+    f'border-radius: 12px; padding: 1.2rem 1.5rem; margin-bottom: 1.2rem;">'
+    f'<div style="font-size:0.7rem; text-transform:uppercase; letter-spacing:0.1em; '
+    f'color:{_tp_label_color}; font-weight:600; margin-bottom: 0.3rem;">Aktivt anbud</div>'
+    f'<div style="font-size:1.15rem; font-weight:700; color:#f5f7fb;">{_tp_display_name}</div>'
+    f'{_tp_status_html}'
+    f'</div>',
+    unsafe_allow_html=True,
+)
 
 _tp_c1, _tp_c2, _tp_c3 = st.columns([3, 1, 1])
 
@@ -1162,64 +1165,82 @@ with _tp_c2:
             st.rerun()
 
 with _tp_c3:
-    with st.popover("Nytt / admin", use_container_width=True):
+    _tp_show_admin = st.toggle("Admin", value=False, key="tp_show_admin", help="Opprett nytt / omdøp / slett")
+
+# Admin-panel under raden — bruker expander for å unngå popover-styling-problemer
+if _tp_show_admin:
+    with st.container(border=True):
         st.markdown("**Opprett nytt tomt anbud**")
-        _tp_new_name = st.text_input("Navn", value="", key="tp_new_name",
-                                      placeholder="F.eks. 'Saga Park Q2 2026'")
-        if st.button("Opprett", key="tp_create_btn", type="primary",
-                     disabled=not _tp_new_name.strip()):
-            ok, new_id, err = create_tender_project(
-                user_email=_tp_user_email,
-                name=_tp_new_name.strip(),
-            )
-            if ok and new_id:
-                # Rens session state, sett som aktiv
-                st.session_state.tender_project = {"name": _tp_new_name.strip()}
-                st.session_state.tender_documents = []
-                st.session_state.tender_analysis = None
-                st.session_state.tender_rule_findings = None
-                st.session_state.tender_readiness = None
-                st.session_state.tender_rfi_queue = []
-                set_active_tender(new_id, name=_tp_new_name.strip())
-                st.success("Opprettet")
-                st.rerun()
-            else:
-                st.error(f"Feilet: {err}")
-
-        if _tp_active_id:
-            st.markdown("---")
-            st.markdown("**Omdøp aktivt anbud**")
-            _tp_rename = st.text_input("Nytt navn", value=_tp_active_name,
-                                        key="tp_rename_input")
-            if st.button("Lagre navn", key="tp_rename_btn",
-                         disabled=(_tp_rename == _tp_active_name or not _tp_rename.strip())):
-                ok, err = rename_tender_project(_tp_active_id, _tp_rename.strip())
-                if ok:
-                    set_active_tender(_tp_active_id, name=_tp_rename.strip())
-                    st.success("Omdøpt")
-                    st.rerun()
-                else:
-                    st.error(err)
-
-            st.markdown("---")
-            st.markdown("**Slett aktivt anbud**")
-            st.caption("Permanent sletting — kan ikke angres.")
-            _tp_confirm = st.checkbox("Bekreft sletting", key="tp_delete_confirm")
-            if st.button("Slett permanent", key="tp_delete_btn",
-                         disabled=not _tp_confirm):
-                ok, err = hard_delete_tender_project(_tp_active_id)
-                if ok:
-                    clear_active_tender()
-                    st.session_state.tender_project = {}
+        _tp_nc1, _tp_nc2 = st.columns([3, 1])
+        with _tp_nc1:
+            _tp_new_name = st.text_input("Navn", value="", key="tp_new_name",
+                                          placeholder="F.eks. 'Saga Park Q2 2026'",
+                                          label_visibility="collapsed")
+        with _tp_nc2:
+            if st.button("Opprett", key="tp_create_btn", type="primary",
+                         disabled=not _tp_new_name.strip(),
+                         use_container_width=True):
+                ok, new_id, err = create_tender_project(
+                    user_email=_tp_user_email,
+                    name=_tp_new_name.strip(),
+                )
+                if ok and new_id:
+                    st.session_state.tender_project = {"name": _tp_new_name.strip()}
                     st.session_state.tender_documents = []
                     st.session_state.tender_analysis = None
                     st.session_state.tender_rule_findings = None
                     st.session_state.tender_readiness = None
                     st.session_state.tender_rfi_queue = []
-                    st.success("Slettet")
+                    set_active_tender(new_id, name=_tp_new_name.strip())
+                    st.success("Opprettet")
                     st.rerun()
                 else:
-                    st.error(err)
+                    st.error(f"Feilet: {err}")
+
+        if _tp_active_id:
+            st.markdown("---")
+            st.markdown(f"**Administrer aktivt anbud:** {_tp_active_name}")
+            _tp_rc1, _tp_rc2 = st.columns([3, 1])
+            with _tp_rc1:
+                _tp_rename = st.text_input("Nytt navn", value=_tp_active_name,
+                                            key="tp_rename_input",
+                                            label_visibility="collapsed")
+            with _tp_rc2:
+                if st.button("Omdøp", key="tp_rename_btn",
+                             disabled=(_tp_rename == _tp_active_name or not _tp_rename.strip()),
+                             use_container_width=True):
+                    ok, err = rename_tender_project(_tp_active_id, _tp_rename.strip())
+                    if ok:
+                        set_active_tender(_tp_active_id, name=_tp_rename.strip())
+                        st.success("Omdøpt")
+                        st.rerun()
+                    else:
+                        st.error(err)
+
+            st.markdown("---")
+            _tp_dc1, _tp_dc2 = st.columns([3, 1])
+            with _tp_dc1:
+                _tp_confirm = st.checkbox(
+                    "Bekreft permanent sletting av dette anbudet (kan ikke angres)",
+                    key="tp_delete_confirm",
+                )
+            with _tp_dc2:
+                if st.button("Slett", key="tp_delete_btn",
+                             disabled=not _tp_confirm,
+                             use_container_width=True):
+                    ok, err = hard_delete_tender_project(_tp_active_id)
+                    if ok:
+                        clear_active_tender()
+                        st.session_state.tender_project = {}
+                        st.session_state.tender_documents = []
+                        st.session_state.tender_analysis = None
+                        st.session_state.tender_rule_findings = None
+                        st.session_state.tender_readiness = None
+                        st.session_state.tender_rfi_queue = []
+                        st.success("Slettet")
+                        st.rerun()
+                    else:
+                        st.error(err)
 
 
 # ═════════════════════════════════════════════════════════════════
