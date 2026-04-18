@@ -183,11 +183,11 @@ def run_masterplan_from_site_inputs(
     include_barnehage: bool = False,
     include_naering: bool = False,
     byggesone: str = "2",
-) -> Optional[Masterplan]:
+) -> Tuple[Optional[Masterplan], Optional[str]]:
     """Bro mellom Mulighetsstudie-input og plan_masterplan().
 
     Leser ut relevante felt fra SiteInputs + geodata_context og kaller motoren.
-    Returnerer Masterplan (eller None ved feil).
+    Returnerer (Masterplan, None) ved suksess, eller (None, error_message) ved feil.
     """
     site_polygon = geodata_context.get("site_polygon")
     buildable_polygon = geodata_context.get("buildable_polygon")
@@ -195,9 +195,23 @@ def run_masterplan_from_site_inputs(
     terrain = geodata_context.get("terrain")
     site_intelligence = geodata_context.get("site_intelligence")
 
+    # Sanity-checks: fang vanlige inputs-feil før motoren kjøres
     if buildable_polygon is None or buildable_polygon.is_empty:
-        logger.warning("run_masterplan: buildable_polygon mangler")
-        return None
+        msg = "buildable_polygon mangler eller er tom. Last opp tomt eller juster setbacks."
+        logger.warning(f"run_masterplan: {msg}")
+        return None, msg
+
+    if target_bra_m2 <= 0:
+        msg = (
+            f"Mål-BRA er {target_bra_m2:.0f} m² — må være større enn 0. "
+            f"Aktiver %-BRA-override i seksjon 2A, eller sett maks BRA."
+        )
+        return None, msg
+
+    buildable_area = float(buildable_polygon.area)
+    if buildable_area < 100:
+        msg = f"Byggbart areal er kun {buildable_area:.0f} m² — for lite til en masterplan."
+        return None, msg
 
     # Avled max_floors fra site.max_height_m og floor_to_floor hvis fornuftig
     max_floors = int(getattr(site, "max_floors", 5))
@@ -205,10 +219,22 @@ def run_masterplan_from_site_inputs(
     max_bya_pct = float(getattr(site, "max_bya_pct", 35.0))
     floor_to_floor = float(getattr(site, "floor_to_floor_m", 3.2))
 
+    # Sjekk at vi har nok BYA-kapasitet til å realisere target_bra
+    max_footprint = buildable_area * (max_bya_pct / 100.0)
+    max_theoretical_bra = max_footprint * max_floors * 0.85
+    if target_bra_m2 > max_theoretical_bra * 1.1:
+        msg = (
+            f"Mål-BRA {target_bra_m2:.0f} m² er urealistisk høyt gitt "
+            f"byggbart areal ({buildable_area:.0f} m²), maks BYA {max_bya_pct:.0f}%, "
+            f"og maks {max_floors} etasjer. Teoretisk maks BRA er ca {max_theoretical_bra:.0f} m². "
+            f"Øk maks etasjer eller BYA, eller senk mål-BRA."
+        )
+        return None, msg
+
     site_inputs_dict = {
         "latitude_deg": float(getattr(site, "latitude_deg", 63.4)),
         "site_area_m2": float(getattr(site, "site_area_m2", 0.0)),
-        "avg_unit_bra": 70.0,  # kan overstyres senere
+        "avg_unit_bra": 70.0,
         "terrain": terrain,
         "site_intelligence": site_intelligence,
     }
@@ -231,10 +257,27 @@ def run_masterplan_from_site_inputs(
             include_naering=include_naering,
             byggesone=byggesone,
         )
-        return masterplan
+
+        # Post-sjekk: fikk vi faktisk volumer?
+        if not masterplan.volumes:
+            return None, (
+                "Motoren kjørte, men plasserte 0 volumer. "
+                "Sannsynlig årsak: byggbart polygon er for lite eller smalt for "
+                "den valgte typologien. Sjekk polygonbuffer og byggegrenser."
+            )
+        if not masterplan.building_phases:
+            return None, (
+                "Motoren plasserte volumer, men klarte ikke å danne byggetrinn. "
+                "Prøv å endre fase-valg i seksjon 2C."
+            )
+
+        return masterplan, None
+
     except Exception as exc:
-        logger.error(f"Masterplan-kjøring feilet: {exc}", exc_info=True)
-        return None
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Masterplan-kjøring feilet: {exc}\n{tb}")
+        return None, f"{type(exc).__name__}: {str(exc)[:400]}"
 
 
 # ─────────────────────────────────────────────────────────────────────
