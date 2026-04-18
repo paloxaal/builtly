@@ -699,30 +699,53 @@ def run_full_analysis(
     if progress_callback:
         progress_callback("pass1", 0.0, "Starter per-dokument-analyse")
     p1 = run_pass1(documents, qa_level=qa_level, progress_callback=_p1_cb)
+
+    # Bygg detaljert debug-info for pass1-feil
+    p1_failures = []
+    for r in p1:
+        if not r.get("extraction"):
+            meta = r.get("meta") or {}
+            p1_failures.append({
+                "filename": r.get("filename", "?"),
+                "status": meta.get("status", "unknown"),
+                "reason": meta.get("reason") or meta.get("error", ""),
+                "backend": meta.get("backend", "-"),
+                "raw_length": r.get("raw_length", 0),
+            })
+
     attempt_log.append({
         "stage": "pass1",
         "docs": len(p1),
         "succeeded": sum(1 for r in p1 if r.get("extraction")),
+        "failures": p1_failures,  # Viser detaljerte feil per dokument
     })
 
     # Pass 2
     if progress_callback:
         progress_callback("pass2", 0.65, "Krysskontroll mellom dokumenter")
     p2 = run_pass2(p1, config, qa_level=qa_level)
+    p2_meta = p2.get("meta", {}) or {}
     attempt_log.append({
         "stage": "pass2",
-        "status": p2.get("meta", {}).get("status", "?"),
+        "status": p2_meta.get("status", "?"),
         "has_data": bool(p2.get("data")),
+        "backend": p2_meta.get("backend", "-"),
+        "error": p2_meta.get("error", ""),
+        "raw_length": p2.get("raw_length", 0),
     })
 
     # Pass 3
     if progress_callback:
         progress_callback("pass3", 0.85, "Tilbudsstrategi og prisingspakker")
     p3 = run_pass3(p1, p2, config, qa_level=qa_level)
+    p3_meta = p3.get("meta", {}) or {}
     attempt_log.append({
         "stage": "pass3",
-        "status": p3.get("meta", {}).get("status", "?"),
+        "status": p3_meta.get("status", "?"),
         "has_data": bool(p3.get("data")),
+        "backend": p3_meta.get("backend", "-"),
+        "error": p3_meta.get("error", ""),
+        "raw_length": p3.get("raw_length", 0),
     })
 
     if progress_callback:
