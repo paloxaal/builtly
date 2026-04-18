@@ -1589,6 +1589,15 @@ if submitted:
     portal_fetched = st.session_state.get("tender_portal_fetch") or {}
     portal_files = portal_fetched.get("files") or []  # List[Tuple[str, bytes]]
 
+    # FALLBACK: Streamlit's st.form + file_uploader har en kjent quirk hvor
+    # `files`-variabelen noen ganger blir tom etter form-submit, selv om
+    # filene fortsatt finnes i session_state under widget-keyen.
+    # Les derfra hvis lokal variabel er tom.
+    if not files:
+        files_from_state = st.session_state.get("tender_files_v9")
+        if files_from_state:
+            files = files_from_state
+
     total_input_count = (len(files) if files else 0) + len(portal_files)
 
     if total_input_count == 0:
@@ -1596,11 +1605,16 @@ if submitted:
             "Last opp minst ett dokument — eller hent fra Doffin — før kjøring.\n\n"
             f"Debug: files={type(files).__name__ if files is not None else 'None'}, "
             f"len={len(files) if files else 0}, "
-            f"portal={len(portal_files)}"
+            f"portal={len(portal_files)}, "
+            f"session_state_key_present={'tender_files_v9' in st.session_state}"
         )
         # Vis råverdier for ytterligere debugging
         with st.expander("Teknisk debug"):
-            st.write({"files_raw": files, "portal_files_count": len(portal_files)})
+            st.write({
+                "files_raw": files,
+                "portal_files_count": len(portal_files),
+                "session_state_files": st.session_state.get("tender_files_v9"),
+            })
     else:
         # Step 1: Parse documents (både opplastede og portal-hentede)
         with st.status("Leser og analyserer dokumenter...", expanded=True) as status:
