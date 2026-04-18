@@ -54,9 +54,20 @@ if HAS_GEMINI:
 
 # ─── Model selection ─────────────────────────────────────────────
 def _claude_model_for_level(qa_level: str) -> str:
-    """Pick Claude model based on control depth."""
+    """Pick Claude model based on control depth.
+
+    Pass 1 (per-document extraction) drar nytte av Opus sin dype forståelse.
+    Pass 2/3 (syntese av ferdig-strukturert JSON) får mindre utbytte av Opus
+    og blir urimelig treige med store pass1-payloads. Bruk _claude_model_fast
+    direkte for pass2/pass3.
+    """
     if qa_level in ("Pre-bid review", "Dyp"):
         return os.environ.get("ANTHROPIC_MODEL_DEEP", "claude-opus-4-6")
+    return os.environ.get("ANTHROPIC_MODEL_FAST", "claude-sonnet-4-6")
+
+
+def _claude_model_fast() -> str:
+    """Alltid Sonnet — brukes for syntese-kall (pass2, pass3) uavhengig av qa_level."""
     return os.environ.get("ANTHROPIC_MODEL_FAST", "claude-sonnet-4-6")
 
 
@@ -97,7 +108,9 @@ def _call_claude(
     if not client:
         return "", {"backend": "claude", "status": "no_client"}
     try:
-        resp = client.messages.create(
+        # Eksplisitt timeout på 5 min — ellers kan SDK henge i default 60 sek
+        # og gi stille feil ved stor kontekst (pass2/pass3).
+        resp = client.with_options(timeout=300.0).messages.create(
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -125,7 +138,7 @@ def _call_openai(system: str, user: str, max_tokens: int = 4096, temperature: fl
         return "", {"backend": "openai", "status": "no_client"}
     try:
         model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-        resp = client.chat.completions.create(
+        resp = client.with_options(timeout=300.0).chat.completions.create(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -158,15 +171,21 @@ def call_ai(
     qa_level: str = "Standard",
     max_tokens: int = 4096,
     temperature: float = 0.1,
+    force_fast: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Call the best available AI backend with fallback chain.
     Claude → OpenAI → Gemini.
+
+    force_fast=True tvinger Sonnet (raskere) uavhengig av qa_level.
+    Brukes for syntese-kall (pass2/pass3) som får mindre utbytte av Opus
+    og blir urimelig treige med store pass1-payloads.
     """
     if HAS_CLAUDE:
+        model = _claude_model_fast() if force_fast else _claude_model_for_level(qa_level)
         text, meta = _call_claude(
             system, user,
-            model=_claude_model_for_level(qa_level),
+            model=model,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -507,6 +526,7 @@ Returner KUN JSON på dette skjemaet:
         qa_level=qa_level,
         max_tokens=8000,
         temperature=0.15,
+        force_fast=True,  # Syntese-kall — ikke verdt å kjøre Opus på
     )
 
     parsed = safe_json_loads(raw) if raw else None
@@ -626,6 +646,7 @@ Gi strategisk tilbudsvurdering. Returner KUN JSON på dette skjemaet:
         qa_level=qa_level,
         max_tokens=10000,
         temperature=0.2,
+        force_fast=True,  # Syntese-kall — ikke verdt å kjøre Opus på
     )
 
     parsed = safe_json_loads(raw) if raw else None
