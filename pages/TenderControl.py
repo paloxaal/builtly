@@ -1917,6 +1917,25 @@ with tabs[0]:
                     pdf_path.write_bytes(pdf_bytes)
                 except Exception:
                     pass
+
+                # Lagre til brukerens rapport-dashboard (Supabase Storage)
+                _tc_proj_name = (
+                    get_active_tender_name()
+                    or pd_state.get("p_name", "Uten prosjekt")
+                )
+                try:
+                    from builtly_auth import save_report as _save_report
+                    _save_report(
+                        project_name=_tc_proj_name,
+                        report_name=f"Anbudskontroll — {_tc_proj_name}",
+                        module="Anbudskontroll",
+                        pdf_bytes=pdf_bytes,
+                        content_type="application/pdf",
+                    )
+                except ImportError:
+                    pass  # Auth-modul ikke tilgjengelig
+                except Exception:
+                    pass  # Upload-feil skal ikke blokkere UI
             else:
                 st.info("ReportLab ikke tilgjengelig")
 
@@ -2665,13 +2684,33 @@ with tabs[5]:
                             st.caption(f"✗  **{r['package_name']}**  — feil: {r.get('error', 'ukjent')}")
 
                     st.markdown("---")
+                    _ue_zip_bytes = zip_buf.getvalue()
                     st.download_button(
                         label="↓ Last ned alle UE-pakker som ZIP",
-                        data=zip_buf.getvalue(),
+                        data=_ue_zip_bytes,
                         file_name=f"UE-tilbudsgrunnlag_{project.get('name', 'anbud')[:30]}.zip",
                         mime="application/zip",
                         type="primary",
                     )
+
+                    # Lagre til brukerens rapport-dashboard
+                    try:
+                        from builtly_auth import save_report as _save_report
+                        _ue_proj = (
+                            get_active_tender_name()
+                            or project.get("name", "Uten prosjekt")
+                        )
+                        _save_report(
+                            project_name=_ue_proj,
+                            report_name=f"UE-tilbudsgrunnlag — {_ue_proj}",
+                            module="Anbudskontroll",
+                            pdf_bytes=_ue_zip_bytes,
+                            content_type="application/zip",
+                        )
+                    except ImportError:
+                        pass
+                    except Exception:
+                        pass
 
                 except Exception as e:
                     progress_ue.empty()
@@ -2797,6 +2836,25 @@ with tabs[6]:
                         mime="application/zip",
                         type="primary",
                     )
+
+                    # Lagre til brukerens rapport-dashboard
+                    try:
+                        from builtly_auth import save_report as _save_report
+                        _resp_proj = (
+                            get_active_tender_name()
+                            or project.get("name", "Uten prosjekt")
+                        )
+                        _save_report(
+                            project_name=_resp_proj,
+                            report_name=f"Tilbudsbesvarelse — {_resp_proj}",
+                            module="Anbudskontroll",
+                            pdf_bytes=zip_bytes,
+                            content_type="application/zip",
+                        )
+                    except ImportError:
+                        pass
+                    except Exception:
+                        pass
 
                     st.info(
                         "ⓘ  Dette er AI-genererte utkast. Tilbudsansvarlig må gjennomgå, "
