@@ -806,26 +806,41 @@ TYPOLOGIER:
 - Podium + Tårn: lavere base med tårn over
 
 STRATEGI:
-1. Nedtrapping mot småhus (lav typologi, 2-4 et)
-2. Høyere typologi mot urbane kanter/veg
-3. Sentrum av tomt kan ha karré eller punkthus-klynge
-4. Barnehage skal i rolig hjørne med egen uteplass
-5. Bratt terreng (> 15% fall) → lavere typologi og nedtrapping langs koter
+1. **Foretrekk FÆRRE og STØRRE kvartaler** fremfor mange små. Et godt masterplan
+   har typisk 2-3 kvartaler med tydelig identitet (f.eks. "nord langs veg",
+   "midt m. gårdsrom", "syd m. barnehage"), ikke 5-6 fragmenter.
+2. Nedtrapping mot småhus (lav typologi, 2-4 et)
+3. Høyere typologi mot urbane kanter/veg
+4. Hvert kvartal bør kunne inneholde flere segmenter (komposisjon), ikke bare ett bygg
+5. Barnehage skal i rolig hjørne med egen uteplass
+6. Bratt terreng (> 15% fall) → lavere typologi og nedtrapping langs koter
 
 OPPGAVE:
-Del tomta i 2-5 soner. Hver sone har koordinater som BRØKDEL av bounding box
+Del tomta i 2-4 KVARTALER/soner. Hver sone har koordinater som BRØKDEL av bounding box
 (0-1). f.eks [0.0, 0.0, 0.5, 0.3] = nedre venstre 50%x30% av tomta.
+
+VIKTIG — SONESTØRRELSER:
+- For komponerte typologier (LamellSegmentert, HalvåpenKarré, Gårdsklynge) må
+  hver sone være MIN 60×60m for å ha plass til en hel kvartalsstruktur med
+  gårdsrom, setback, og flere segmenter. En sone på 40×40m får bare en
+  mini-komposisjon med 2-3 segmenter og er undermål.
+- PÅ STORE TOMTER (> 10 000 m² byggbart): lag 2-3 store kvartaler på
+  3 000-12 000 m² hver, ikke 5 små. Hvert kvartal bør kunne bære
+  8 000-15 000 m² BRA alene.
+- PÅ MINDRE TOMTER (< 5 000 m²): 1-2 soner er ofte riktig.
+- Tenk som LPO-arkitektene tegnet Tyholt Park: få store kvartaler med tydelig
+  identitet (nord/midt/syd), ikke mange små fragmenter.
 
 Svar KUN med JSON-array:
 [
   {{
-    "zone_name": "Vest — nedtrapping mot småhus",
-    "typology": "Rekke",
-    "bbox_fraction": [0.0, 0.0, 0.3, 1.0],
-    "floors_min": 2,
-    "floors_max": 3,
-    "target_bra_share": 0.15,
-    "rationale": "Skalerer ned mot enebolig-nabolag i vest"
+    "zone_name": "Nord — kvartal mot hovedveg",
+    "typology": "LamellSegmentert",
+    "bbox_fraction": [0.0, 0.55, 1.0, 1.0],
+    "floors_min": 4,
+    "floors_max": 5,
+    "target_bra_share": 0.40,
+    "rationale": "Langstrakt sone langs veg — flere lameller gir siktakser og skala"
   }},
   ...
 ]
@@ -1865,14 +1880,58 @@ def pass4_phasing(
         max_k_hard = max(1, int(actual_total_bra / phasing_config.MIN_PHASE_BRA))
         ideal_k = _clamp(ideal_k, min_k_hard, max_k_hard)
 
+        # v1.5: Respekter antall komposisjoner (zone_id-grupper) KUN hvis det
+        # finnes volumer fra komponerte typologier. Lamell/Karré/Punkthus-volumer
+        # plassert via grid er individuelle bygg, ikke komposisjoner, og skal
+        # ikke styre K.
+        composed_typologies = set(TYPOLOGY_COMPOSITIONS.keys())
+        composition_zones = set()
+        for v in volumes:
+            if v.typology in composed_typologies:
+                zid = getattr(v, "zone_id", None)
+                if zid:
+                    composition_zones.add(zid)
+        n_compositions = len(composition_zones)
+
         # Juster K: respekter brukerens valg i manual/single-modus, men veiled i auto
         if phasing_config.phasing_mode == "auto":
-            # I auto kan vi justere fritt
-            k = ideal_k
-            logger.info(
-                f"Pass 4: Re-kalibrerte K fra {target_phase_count} til {k} "
-                f"(faktisk BRA {actual_total_bra:.0f}, ideell snitt {actual_total_bra/k:.0f})"
-            )
+            # Hvis komposisjoner finnes: K skal matche antall komposisjoner.
+            # Unntak: hvis en enkelt komposisjon er så stor at den bryter
+            # MAX_PHASE_BRA, tillater vi at den splittes til flere trinn.
+            if n_compositions > 0:
+                # Regn ut eksakt antall "sub-trinn" per komposisjon
+                # (en komposisjon kan splittes i flere hvis BRA > MAX)
+                total_composition_trinn = 0
+                for zid in composition_zones:
+                    zone_bra = sum(v.bra_m2 for v in volumes
+                                   if getattr(v, "zone_id", None) == zid)
+                    if zone_bra > phasing_config.MAX_PHASE_BRA:
+                        n_splits = math.ceil(zone_bra / phasing_config.MAX_PHASE_BRA)
+                        total_composition_trinn += max(2, n_splits)
+                    else:
+                        total_composition_trinn += 1
+
+                # Inkluder eventuelle individuelle bygg som egne trinn
+                individual_count = sum(1 for v in volumes if v.typology not in composed_typologies)
+                if individual_count > 0:
+                    individual_bra = sum(v.bra_m2 for v in volumes if v.typology not in composed_typologies)
+                    ideal_individual_k = max(1, round(individual_bra / target_avg))
+                else:
+                    ideal_individual_k = 0
+
+                k = min(total_composition_trinn + ideal_individual_k, max_k_hard, len(volumes))
+                k = max(k, 1)
+                logger.info(
+                    f"Pass 4: K={k} trinn ({n_compositions} komposisjoner → "
+                    f"{total_composition_trinn} sub-trinn + {ideal_individual_k} individ-trinn; "
+                    f"BRA {actual_total_bra:.0f})"
+                )
+            else:
+                # Ingen komposisjoner — fall tilbake til BRA-basert K
+                k = ideal_k
+                logger.info(
+                    f"Pass 4: K={k} trinn (BRA-basert; ingen komposisjoner)"
+                )
         elif phasing_config.phasing_mode == "manual":
             # Manuelt er brukerens valg lov, men cap til hard-grensen
             k = _clamp(target_phase_count, min_k_hard, max_k_hard)
@@ -2005,6 +2064,155 @@ def _spatial_cluster_volumes(volumes: List[Volume], k: int,
                              min_phase_bra: float = 2500.0) -> List[List[Volume]]:
     """K-means-lignende clustering på volum-sentre for å lage K faser.
 
+    NYTT (v1.5): Volumer som tilhører en KOMPONERT typologi (LamellSegmentert,
+    HalvåpenKarré, Gårdsklynge) holdes sammen som atomic units — de er én
+    kvartalsstruktur og skal bygges som ett byggetrinn. Volumer fra
+    individuelle typologier (Lamell, Karré, Punkthus osv.) kan fordeles fritt
+    mellom trinn slik som før.
+    """
+    if not volumes:
+        return []
+    if k <= 1 or len(volumes) <= k:
+        if k <= 1:
+            return [list(volumes)]
+        return [[v] for v in volumes]
+
+    # Identifiser komposisjons-volumer (de som kommer fra komponerte typologier).
+    # Disse grupperes per zone_id og holdes sammen som én atomic unit.
+    composed_typologies = set(TYPOLOGY_COMPOSITIONS.keys())
+    composition_groups: Dict[str, List[Volume]] = {}
+    individual_volumes: List[Volume] = []
+
+    for v in volumes:
+        if v.typology in composed_typologies and getattr(v, "zone_id", None):
+            key = v.zone_id
+            if key not in composition_groups:
+                composition_groups[key] = []
+            composition_groups[key].append(v)
+        else:
+            individual_volumes.append(v)
+
+    n_compositions = len(composition_groups)
+    n_individuals = len(individual_volumes)
+
+    # CASE A: Alt er komposisjoner — hver komposisjon blir ett trinn (opp til k)
+    if n_individuals == 0 and n_compositions > 0:
+        clusters: List[List[Volume]] = []
+        for key, group in composition_groups.items():
+            group_bra = sum(v.bra_m2 for v in group)
+            # Splitt hvis komposisjonen overstiger MAX_PHASE_BRA.
+            if group_bra > max_phase_bra:
+                n_splits = math.ceil(group_bra / max_phase_bra)
+                n_splits = max(2, min(n_splits, len(group)))
+                # Sortér segmenter langs lengste akse
+                x_coords = [v.cx for v in group]
+                y_coords = [v.cy for v in group]
+                x_range = max(x_coords) - min(x_coords) if x_coords else 0
+                y_range = max(y_coords) - min(y_coords) if y_coords else 0
+                sort_key = (lambda v: v.cx) if x_range >= y_range else (lambda v: v.cy)
+                group_sorted = sorted(group, key=sort_key)
+
+                # Balansert fordeling: greedy fyll opp til MAX per sub-cluster,
+                # men forsøk å matche snitt-BRA per sub-cluster
+                target_bra_per_split = group_bra / n_splits
+                sub_clusters: List[List[Volume]] = [[] for _ in range(n_splits)]
+                sub_bra = [0.0] * n_splits
+                # Tildel volumer i rekkefølge til den sub-clusteren som har lavest BRA
+                for v in group_sorted:
+                    # Finn sub-cluster med lavest BRA som fortsatt ikke er full
+                    idx = min(range(n_splits), key=lambda i: sub_bra[i])
+                    sub_clusters[idx].append(v)
+                    sub_bra[idx] += v.bra_m2
+                # Filtrer tomme (skal ikke skje)
+                sub_clusters = [sc for sc in sub_clusters if sc]
+                clusters.extend(sub_clusters)
+            else:
+                clusters.append(group)
+        # Hvis vi nå har for mange clusters (> k), merge nærmeste naboer
+        while len(clusters) > k:
+            clusters = _merge_nearest_clusters(clusters)
+        logger.info(
+            f"Zone-aware clustering: {n_compositions} komposisjoner → {len(clusters)} trinn"
+        )
+        return clusters
+
+    # CASE B: Kun individuelle volumer — bruk gammel k-means
+    if n_compositions == 0 and n_individuals > 0:
+        return _spatial_cluster_volumes_legacy(
+            volumes, k, buildable_polygon, max_phase_bra, min_phase_bra,
+        )
+
+    # CASE C: Miks av komposisjoner og individuelle volumer.
+    # Strategi: hver komposisjon blir ett trinn. Resterende k-slots fylles med
+    # individuelle volumer via k-means.
+    clusters = []
+    slots_used = 0
+    for key, group in composition_groups.items():
+        clusters.append(group)
+        slots_used += 1
+
+    remaining_k = k - slots_used
+    if remaining_k > 0 and individual_volumes:
+        individual_clusters = _spatial_cluster_volumes_legacy(
+            individual_volumes, remaining_k, buildable_polygon,
+            max_phase_bra, min_phase_bra,
+        )
+        clusters.extend(individual_clusters)
+    elif individual_volumes:
+        # Ingen flere slots — legg individuelle volumer til nærmeste komposisjonsklynge
+        for iv in individual_volumes:
+            def cluster_dist(cl):
+                if not cl:
+                    return float("inf")
+                c_x = sum(v.cx for v in cl) / len(cl)
+                c_y = sum(v.cy for v in cl) / len(cl)
+                return math.hypot(iv.cx - c_x, iv.cy - c_y)
+            best_cluster = min(clusters, key=cluster_dist)
+            best_cluster.append(iv)
+
+    # Trim hvis vi har flere clusters enn k
+    while len(clusters) > k:
+        clusters = _merge_nearest_clusters(clusters)
+
+    logger.info(
+        f"Zone-aware clustering: {n_compositions} komposisjoner + "
+        f"{n_individuals} individ. → {len(clusters)} trinn"
+    )
+    return clusters
+
+
+def _merge_nearest_clusters(clusters: List[List[Volume]]) -> List[List[Volume]]:
+    """Hjelpefunksjon: finn de to nærmeste clustrene og slå dem sammen."""
+    if len(clusters) <= 1:
+        return clusters
+
+    def cluster_center(cl):
+        if not cl:
+            return 0, 0
+        return (sum(v.cx for v in cl) / len(cl),
+                sum(v.cy for v in cl) / len(cl))
+
+    best_i, best_j, best_dist = 0, 1, float("inf")
+    for i in range(len(clusters)):
+        for j in range(i + 1, len(clusters)):
+            ci_x, ci_y = cluster_center(clusters[i])
+            cj_x, cj_y = cluster_center(clusters[j])
+            dist = math.hypot(ci_x - cj_x, ci_y - cj_y)
+            if dist < best_dist:
+                best_dist = dist
+                best_i, best_j = i, j
+
+    merged = clusters[:best_i] + [clusters[best_i] + clusters[best_j]] + \
+             clusters[best_i+1:best_j] + clusters[best_j+1:]
+    return merged
+
+
+def _spatial_cluster_volumes_legacy(volumes: List[Volume], k: int,
+                             buildable_polygon,
+                             max_phase_bra: float = 6500.0,
+                             min_phase_bra: float = 2500.0) -> List[List[Volume]]:
+    """Legacy K-means-lignende clustering (brukes for individuelle volumer).
+
     Bruker enkel greedy-algoritme: start med K seed-volumer som er lengst fra
     hverandre, så tildel hvert resterende volum til nærmeste cluster.
     Etter første runde: balansér BRA per cluster.
@@ -2049,8 +2257,7 @@ def _spatial_cluster_volumes(volumes: List[Volume], k: int,
     # Vi kjører flere iterasjoner og prøver å få alle clusters under hard-grensen
     total_bra = sum(v.bra_m2 for v in volumes)
     theoretical_avg = total_bra / k if k > 0 else 0
-    # Hvis selv det teoretiske snittet overgår max, kan vi ikke hjelpe — da er K for lavt
-    # og brukeren vil ha fått en advarsel fra PhasingConfig.validate_manual_choice()
+    # Hvis selv det teoretiske snittet overgår max, kan vi ikke hjelpe
     can_respect_max = theoretical_avg <= max_phase_bra
 
     for iteration in range(50):  # økt til 50 iterasjoner
