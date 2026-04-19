@@ -79,10 +79,14 @@ class TypologyZone:
     - nærhet til småhus → lavere typologi (Rekke, Lamell 3-4 et)
     - nærhet til hovedveg/urbane kanter → høyere (Punkthus, Tårn)
     - gårdsrom-kandidater → Karré
+
+    v1.7: Kan være et "kvartal rundt et designet gårdsrom". Hvis
+    courtyard_polygon er satt, er sonen et kvartal som skal ha bygninger
+    som vegger rundt dette gårdsrommet.
     """
     zone_id: str
     typology: TypologyKind
-    polygon: Any                       # shapely Polygon
+    polygon: Any                       # shapely Polygon — kvartalsomrisset
     floors_min: int = 3
     floors_max: int = 5
     target_bra: float = 0.0            # hvor mye BRA som forventes i denne sonen
@@ -91,6 +95,12 @@ class TypologyZone:
     # Valgfrie føringer
     sun_orientation_priority: Literal["S", "SV", "SØ", "Ø", "V"] = "S"
     distance_to_nearest_smallhouse_m: Optional[float] = None
+
+    # v1.7 — gårdsrom som designdriver (LPO-inspirert)
+    courtyard_polygon: Optional[Any] = None      # inner yard polygon
+    courtyard_name: str = ""                     # "Hovedgård", "Barnehagegård", "Lekeplass"
+    courtyard_function: str = ""                 # "felles_bolig" | "barnehage_ute" | "lek_gront"
+    courtyard_program: str = ""                  # f.eks. "trær, felles grill, blomster"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -396,6 +406,9 @@ class Masterplan:
     concept_narrative: str = ""
     warnings: List[str] = field(default_factory=list)
     source: str = "Builtly Masterplan v1"
+    # v1.6: Diagnostisk info om hvert pass — surfaces til UI-et så brukeren
+    # kan se hva Claude faktisk gjorde (f.eks. hvor mange soner Pass 2 lagde)
+    diag_info: Dict[str, str] = field(default_factory=dict)
 
     # ---------------------------------------------------------------
     # Convenience lookups

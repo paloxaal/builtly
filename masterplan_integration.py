@@ -615,6 +615,13 @@ def masterplan_to_option_results(
                 "masterplan_ref": masterplan,
             },
         )
+        # v1.6: Pin-flagg for å holde Totalt øverst i UI uansett score.
+        # Brukes setattr for å være bakoverkompatibel med OptionResult-varianter
+        # som ikke har feltet i dataclass-definisjonen (f.eks. i tester).
+        try:
+            setattr(total_result, "is_total_plan", True)
+        except Exception:
+            pass
         # Totalt-alternativet settes først slik at det er default
         results.insert(0, total_result)
 

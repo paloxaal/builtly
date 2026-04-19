@@ -652,6 +652,24 @@ def pass2_typology_zoning(
             fmax = _clamp(int(spec.get("floors_max", fmin + 1)),
                           fmin, min(max_floors, dims["f_max"]))
 
+            # v1.7: Les gårdsrom-spesifikasjon hvis Claude ga oss det
+            courtyard_poly = None
+            court_frac = spec.get("courtyard_bbox_fraction")
+            if court_frac and len(court_frac) == 4:
+                cp_raw = _polygon_from_bbox_fraction(bounds, court_frac)
+                if cp_raw is not None:
+                    # Gårdsrommet må ligge innenfor kvartalet (clipped)
+                    cp_clipped = cp_raw.intersection(clipped).buffer(0)
+                    if not cp_clipped.is_empty and cp_clipped.area >= 150:
+                        if isinstance(cp_clipped, MultiPolygon):
+                            cp_clipped = max(cp_clipped.geoms, key=lambda g: g.area)
+                        # Sjekk at gårdsrom har sunn geometri (min 12m bredde)
+                        cb = cp_clipped.bounds
+                        cw = cb[2] - cb[0]
+                        ch = cb[3] - cb[1]
+                        if cw >= 12 and ch >= 12:
+                            courtyard_poly = cp_clipped
+
             zones.append(TypologyZone(
                 zone_id=_next_id(),
                 typology=typology,
@@ -660,6 +678,10 @@ def pass2_typology_zoning(
                 floors_max=fmax,
                 target_bra=float(spec.get("target_bra_share", 0.0)) * program.total_bra,
                 rationale=str(spec.get("rationale", "")),
+                courtyard_polygon=courtyard_poly,
+                courtyard_name=str(spec.get("courtyard_name", "")),
+                courtyard_function=str(spec.get("courtyard_function", "")),
+                courtyard_program=str(spec.get("courtyard_program", "")),
             ))
 
     # Fallback: regelbasert sonering hvis Claude feilet eller ikke ga resultat
@@ -815,21 +837,25 @@ STRATEGI:
 5. Barnehage skal i rolig hjørne med egen uteplass
 6. Bratt terreng (> 15% fall) → lavere typologi og nedtrapping langs koter
 
-OPPGAVE:
-Del tomta i 2-4 KVARTALER/soner. Hver sone har koordinater som BRØKDEL av bounding box
-(0-1). f.eks [0.0, 0.0, 0.5, 0.3] = nedre venstre 50%x30% av tomta.
+OPPGAVE (viktig — arkitektfaglig metode):
+Du tegner tomten som et sett av 2-4 KVARTALER, der hvert kvartal er definert
+av SITT gårdsrom. Dette er hvordan LPO tegnet Tyholt Park — de definerte først
+tre gårdsrom (nord: "blomster/plantekasser", midt: "trær/grill/blomster",
+syd: "lek/uteområde barnehage") og plasserte så bygningene som VEGGEN RUNDT
+HVER gårdsrom. Du gjør det samme.
 
-VIKTIG — SONESTØRRELSER:
-- For komponerte typologier (LamellSegmentert, HalvåpenKarré, Gårdsklynge) må
-  hver sone være MIN 60×60m for å ha plass til en hel kvartalsstruktur med
-  gårdsrom, setback, og flere segmenter. En sone på 40×40m får bare en
-  mini-komposisjon med 2-3 segmenter og er undermål.
-- PÅ STORE TOMTER (> 10 000 m² byggbart): lag 2-3 store kvartaler på
-  3 000-12 000 m² hver, ikke 5 små. Hvert kvartal bør kunne bære
-  8 000-15 000 m² BRA alene.
-- PÅ MINDRE TOMTER (< 5 000 m²): 1-2 soner er ofte riktig.
-- Tenk som LPO-arkitektene tegnet Tyholt Park: få store kvartaler med tydelig
-  identitet (nord/midt/syd), ikke mange små fragmenter.
+Hver sone har:
+  - en YTTERRAMME (bbox_fraction, 0-1) som definerer hele kvartalet
+  - et GÅRDSROM inni (courtyard_bbox_fraction) som er sentralt i kvartalet.
+    Gårdsrommet må være MIN 15×15m (helst 20×30m eller større).
+    Gårdsrommet skal ligge med minst 12m buffer (for bygningsdybde) fra
+    kvartalsgrensen på alle sider.
+
+Gårdsrom-funksjoner (velg én per sone):
+  - "felles_bolig" → trær, benker, grill, felles utearealer
+  - "barnehage_ute" → lekestativer, sandkasser (krever sol; plasser sørvendt)
+  - "lek_gront" → vill natur, naturlek, grønt område
+  - "plantekasser" → dyrkingsbed, felleshager
 
 Svar KUN med JSON-array:
 [
@@ -837,15 +863,20 @@ Svar KUN med JSON-array:
     "zone_name": "Nord — kvartal mot hovedveg",
     "typology": "LamellSegmentert",
     "bbox_fraction": [0.0, 0.55, 1.0, 1.0],
+    "courtyard_bbox_fraction": [0.15, 0.65, 0.85, 0.90],
+    "courtyard_name": "Nordgården",
+    "courtyard_function": "plantekasser",
+    "courtyard_program": "plantekasser, trær, lekeplass",
     "floors_min": 4,
     "floors_max": 5,
     "target_bra_share": 0.40,
-    "rationale": "Langstrakt sone langs veg — flere lameller gir siktakser og skala"
+    "rationale": "Langstrakt kvartal langs veg — lameller danner vegger rundt felles gårdsrom"
   }},
   ...
 ]
 
-Sum av target_bra_share skal være ~1.0."""
+Sum av target_bra_share skal være ~1.0. Gårdsrom må ligge INNI sin sones
+bbox_fraction — ikke utenfor."""
 
     raw = _call_claude(prompt, api_key, temperature=0.3, max_tokens=2500)
     parsed = _parse_json(raw)
@@ -1010,34 +1041,79 @@ def pass3_place_volumes(
         zone_volumes: List[Volume] = []
         zone_result = None
 
-        # Strategi 1: AI-drevet plassering hvis tilgjengelig
-        if HAS_LEGACY and legacy_planner and is_available():
-            try:
-                zone_result = legacy_planner.plan_site(
-                    site_polygon=site_polygon,
-                    buildable_polygon=zone_buildable,
-                    typology=zone.typology,
-                    neighbors=neighbors,
-                    terrain=site_inputs.get("terrain"),
-                    target_bta_m2=zone_bta_target,
-                    max_floors=zone.floors_max,
-                    max_height_m=max_height_m,
-                    max_bya_pct=zone_bya_pct_local,
-                    floor_to_floor_m=floor_to_floor_m,
+        # v1.7: Hvis sonen har et DESIGNET gårdsrom, plasserer vi bygninger
+        # som vegger rundt det (LPO Tyholt-metoden). Hopp over AI-plannerens
+        # rute helt, fordi den vet ikke om gårdsrommet og kan plassere bygg
+        # midt i det.
+        if zone.courtyard_polygon is not None and not zone.courtyard_polygon.is_empty:
+            ring_volumes, volume_counter = _place_ring_around_courtyard(
+                zone=zone,
+                zone_buildable=zone_buildable,
+                zone_bta_target=zone_bta_target,
+                max_floors=max_floors,
+                max_height_m=max_height_m,
+                max_fp_remaining=max_fp_total - max_fp_used,
+                floor_to_floor_m=floor_to_floor_m,
+                existing_polys=[v.polygon for v in all_volumes],
+                volume_counter=volume_counter,
+            )
+            zone_volumes.extend(ring_volumes)
+            # Hvis ringen ga få volumer, suppler med komposisjonsplassering
+            # i restarealet utenfor gårdsrommet (fortsatt innen kvartalsgrensa).
+            # Men kun hvis vi er vesentlig under målet.
+            current_bta = sum(v.footprint_m2 * v.floors for v in zone_volumes)
+            if current_bta < zone_bta_target * 0.7 and zone.typology in TYPOLOGY_COMPOSITIONS:
+                logger.info(
+                    f"Zone {zone.zone_id}: ring ga bare {current_bta:.0f} BTA "
+                    f"av {zone_bta_target:.0f}, supplerer med komposisjon"
                 )
-            except Exception as exc:
-                logger.warning(f"Pass 3: legacy plan_site failed for zone {zone.zone_id}: {exc}")
-                zone_result = None
-
-            if zone_result and zone_result.get("buildings"):
-                for b in zone_result["buildings"]:
-                    volume_counter += 1
-                    vol = _volume_from_legacy_building(
-                        b, volume_counter, zone, floor_to_floor_m
+                # Lag en redusert zone-geometri som ekskluderer selve gårdsrommet
+                zone_minus_courtyard = zone_buildable.difference(
+                    zone.courtyard_polygon.buffer(2.0)
+                )
+                if not zone_minus_courtyard.is_empty:
+                    extra_volumes, volume_counter = _composition_placement(
+                        zone=zone,
+                        zone_buildable=zone_minus_courtyard,
+                        zone_bta_target=zone_bta_target - current_bta,
+                        max_floors=max_floors,
+                        max_height_m=max_height_m,
+                        max_fp_remaining=max_fp_total - max_fp_used - sum(v.footprint_m2 for v in zone_volumes),
+                        floor_to_floor_m=floor_to_floor_m,
+                        existing_polys=[v.polygon for v in all_volumes + zone_volumes],
+                        volume_counter=volume_counter,
                     )
-                    if vol is None:
-                        continue
-                    zone_volumes.append(vol)
+                    zone_volumes.extend(extra_volumes)
+        else:
+            # Strategi 1: AI-drevet plassering hvis tilgjengelig og ingen
+            # designet gårdsrom å respektere
+            if HAS_LEGACY and legacy_planner and is_available():
+                try:
+                    zone_result = legacy_planner.plan_site(
+                        site_polygon=site_polygon,
+                        buildable_polygon=zone_buildable,
+                        typology=zone.typology,
+                        neighbors=neighbors,
+                        terrain=site_inputs.get("terrain"),
+                        target_bta_m2=zone_bta_target,
+                        max_floors=zone.floors_max,
+                        max_height_m=max_height_m,
+                        max_bya_pct=zone_bya_pct_local,
+                        floor_to_floor_m=floor_to_floor_m,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Pass 3: legacy plan_site failed for zone {zone.zone_id}: {exc}")
+                    zone_result = None
+
+                if zone_result and zone_result.get("buildings"):
+                    for b in zone_result["buildings"]:
+                        volume_counter += 1
+                        vol = _volume_from_legacy_building(
+                            b, volume_counter, zone, floor_to_floor_m
+                        )
+                        if vol is None:
+                            continue
+                        zone_volumes.append(vol)
 
         # Strategi 2: Deterministisk fallback hvis AI ga lite eller ingenting
         # (vi vil ha noe som fyller sonen, ikke 0 volumer ved API-feil)
@@ -1835,6 +1911,192 @@ def _compose_cluster(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# v1.7: RINGPLASSERING RUNDT DESIGNET GÅRDSROM (LPO Tyholt-metoden)
+# ─────────────────────────────────────────────────────────────────────
+
+def _place_ring_around_courtyard(
+    zone,
+    zone_buildable,
+    zone_bta_target: float,
+    max_floors: int,
+    max_height_m: float,
+    max_fp_remaining: float,
+    floor_to_floor_m: float,
+    existing_polys: List[Any],
+    volume_counter: int,
+) -> Tuple[List[Volume], int]:
+    """Plasser bygninger som EN RING rundt et designet gårdsromspolygon.
+
+    Dette er grepet LPO gjorde på Tyholt Park: de tegnet gårdsrommet først
+    (som "blomsterhage", "felles grill", "barnehage-uteareal"), og bygde
+    så bygningene som vegger rundt det. Resultatet er et tydelig kvartal
+    der uterommet IKKE er restareal, men designdriver.
+
+    Strategi:
+      1. Finn de fire hovedkantene av gårdsrommet (N, S, Ø, V)
+      2. Plasser ett eller flere bygningssegmenter langs hver kant,
+         med korrekt bygningsdybde (12-16m) utover fra gårdsrommet
+      3. La hjørner ha gap (6-8m) slik at gårdsrommet får lys og innsyn
+      4. Skaler segmentlengder slik at total BRA treffer zone_bta_target
+    """
+    if zone.courtyard_polygon is None or zone.courtyard_polygon.is_empty:
+        return [], volume_counter
+    if zone_buildable is None or zone_buildable.is_empty or max_fp_remaining <= 0:
+        return [], volume_counter
+
+    # Velg bygningsdybde og etasjeantall fra typologiens dimensjonsramme
+    typology = zone.typology if zone.typology in TYPOLOGY_DIMS else "Lamell"
+    dims = TYPOLOGY_DIMS[typology]
+    # Komponerte typologier har smalere dybde (12-14m); Lamell/Karré bredere
+    if typology in TYPOLOGY_COMPOSITIONS:
+        d = (dims["d_min"] + dims["d_max"]) / 2.0
+    else:
+        d = min(14.0, (dims["d_min"] + dims["d_max"]) / 2.0)
+
+    target_floors = _clamp(
+        int(math.ceil((zone.floors_min + zone.floors_max) / 2.0)),
+        dims["f_min"], min(max_floors, dims["f_max"]),
+    )
+    ftf = dims.get("ftf", floor_to_floor_m)
+    height_m = target_floors * ftf
+    if height_m > max_height_m:
+        target_floors = max(1, int(max_height_m / ftf))
+        height_m = target_floors * ftf
+
+    # Gårdsrommets bounds
+    cb = zone.courtyard_polygon.bounds
+    ccx = (cb[0] + cb[2]) / 2.0
+    ccy = (cb[1] + cb[3]) / 2.0
+    court_w = cb[2] - cb[0]
+    court_h = cb[3] - cb[1]
+
+    # Hjørne-gap for lys og innsyn i gårdsrommet
+    corner_gap = 6.0 if typology in TYPOLOGY_COMPOSITIONS else 4.0
+
+    # Fire bygningskanter, hver sentrert på sin kant av gårdsrommet
+    # Segment-senter ligger (court_half + d/2) utover fra gårdsromssenter
+    # Lengden er redusert med 2×corner_gap så hjørnene får åpninger.
+    wall_specs = [
+        # (name, cx, cy, width_along_wall, depth, angle_deg)
+        # NORD-vegg: parallell med x-aksen, over gårdsrommet
+        ("N", ccx, cb[3] + d / 2.0, court_w - 2 * corner_gap, d, 0.0),
+        # SYD-vegg
+        ("S", ccx, cb[1] - d / 2.0, court_w - 2 * corner_gap, d, 0.0),
+        # ØST-vegg: rotert 90°, høyre for gårdsrommet
+        ("Ø", cb[2] + d / 2.0, ccy, court_h - 2 * corner_gap, d, 90.0),
+        # VEST-vegg
+        ("V", cb[0] - d / 2.0, ccy, court_h - 2 * corner_gap, d, 90.0),
+    ]
+
+    # Først lagrer vi foreslåtte vegger, så beregner vi skalering
+    proposed = []
+    for name, wx, wy, w_len, w_d, angle in wall_specs:
+        if w_len < 15:  # for kort vegg — drop
+            continue
+        proposed.append((name, wx, wy, w_len, w_d, angle))
+
+    if not proposed:
+        return [], volume_counter
+
+    # Hvis BTA-målet krever flere etasjer enn vi allerede valgte, øk etasjer.
+    # Totalt fotavtrykk = sum(w_len × d)
+    total_fp = sum(w_len * w_d for _, _, _, w_len, w_d, _ in proposed)
+    if total_fp < 50:
+        return [], volume_counter
+
+    # Målt BTA = fp × floors. Hvis underslått, kan vi ikke gjøre mer her —
+    # Pass 2 burde lagt gårdsrommet større.
+    # Logging for diagnostikk:
+    expected_bta = total_fp * target_floors
+    logger.info(
+        f"Ring for {zone.zone_id}: gårdsrom {court_w:.0f}×{court_h:.0f}, "
+        f"4 vegger à d={w_d:.0f}m, target_floors={target_floors}, "
+        f"expected_bta={expected_bta:.0f} (mål {zone_bta_target:.0f})"
+    )
+
+    # Fotavtrykk-budsjett
+    max_walls_by_fp = max_fp_remaining / max(total_fp / max(len(proposed), 1), 1)
+
+    volumes: List[Volume] = []
+    placed = 0
+    for name, wx, wy, w_len, w_d, angle in proposed:
+        if placed >= max_walls_by_fp:
+            break
+        poly = _make_building_polygon(wx, wy, w_len, w_d, angle)
+        if poly is None:
+            continue
+        clipped = poly.intersection(zone_buildable).buffer(0)
+        if clipped.is_empty:
+            continue
+        if isinstance(clipped, MultiPolygon):
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+
+        # Krev at minst 60% av veggens fotavtrykk ligger innenfor zone_buildable
+        original_fp = w_len * w_d
+        if clipped.area < original_fp * 0.5:
+            # Vi kan prøve å krympe veggen — reduser w_len iterativt
+            shrink_factor = clipped.area / original_fp
+            if shrink_factor > 0.3:
+                new_len = w_len * shrink_factor * 1.1  # litt kompensert
+                if new_len >= 15:
+                    poly2 = _make_building_polygon(wx, wy, new_len, w_d, angle)
+                    clipped2 = poly2.intersection(zone_buildable).buffer(0) if poly2 else None
+                    if clipped2 and not clipped2.is_empty and clipped2.area >= original_fp * 0.4:
+                        if isinstance(clipped2, MultiPolygon):
+                            clipped2 = max(clipped2.geoms, key=lambda g: g.area)
+                        clipped = clipped2
+                        w_len = new_len
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                continue
+
+        # Brannsjekk kun mot eksisterende polygoner utenfor dette kvartalet
+        too_close = False
+        for ep in existing_polys:
+            if ep is not None and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.5:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        # Ikke kollider med gårdsrommet (sjekk at veggen faktisk ligger utenfor)
+        if clipped.intersection(zone.courtyard_polygon).area > original_fp * 0.1:
+            continue
+
+        volume_counter += 1
+        vol = Volume(
+            volume_id=f"V{volume_counter:02d}",
+            name=f"{typology} {name} ({zone.courtyard_name or zone.zone_id})",
+            polygon=clipped,
+            typology=typology,
+            floors=target_floors,
+            height_m=round(height_m, 1),
+            width_m=round(w_len, 1),
+            depth_m=round(w_d, 1),
+            angle_deg=round(angle, 1),
+            cx=round(wx, 1), cy=round(wy, 1),
+            footprint_m2=round(float(clipped.area), 1),
+            zone_id=zone.zone_id,
+            program="bolig",
+        )
+        # bra_m2 er en property — beregnes automatisk
+        vol.units_estimate = int(round(dims["units_per_floor"] * vol.floors))
+        vol.oppganger = max(1, int(math.ceil(w_len / 25.0)))
+        volumes.append(vol)
+        placed += 1
+
+    logger.info(
+        f"Ring for {zone.zone_id}: {len(volumes)} vegger plassert rundt "
+        f"'{zone.courtyard_name or 'gårdsrom'}', total BRA "
+        f"{sum(v.bra_m2 for v in volumes):.0f} (mål {zone_bta_target:.0f})"
+    )
+    return volumes, volume_counter
+
+
+# ─────────────────────────────────────────────────────────────────────
 # PASS 4: Phasing (Building + Parking)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -2491,6 +2753,7 @@ def pass5_outdoor_system(
     building_phases: List[BuildingPhase],
     program: ProgramAllocation,
     site_inputs: Dict[str, Any],
+    typology_zones: Optional[List[Any]] = None,  # v1.7: TypologyZone-liste
 ) -> OutdoorSystem:
     """Bygg uterom-systemet: diagonal, tun, MUA-flater, gangnett.
 
@@ -2499,6 +2762,9 @@ def pass5_outdoor_system(
     - Mellomrom mellom volumer blir tun (lokale MUA-soner)
     - Tak-arealer markeres som MUA på tak
     - Hver byggefase får sin dedikerte standalone-uterom
+    - v1.7: DESIGNETE gårdsrom fra Pass 2 registreres først med sin definerte
+      funksjon (felles_bolig / barnehage_ute / lek_gront), før restareal
+      tildeles som tun/diagonal.
     """
     system = OutdoorSystem()
     if not HAS_SHAPELY or buildable_polygon is None or buildable_polygon.is_empty:
@@ -2519,9 +2785,77 @@ def pass5_outdoor_system(
     if ground_outdoor.is_empty:
         return system
 
+    # v1.7: Registrer designete gårdsrom først med eksplisitt funksjon
+    designed_courtyard_union = None
+    if typology_zones:
+        for zone in typology_zones:
+            cp = getattr(zone, "courtyard_polygon", None)
+            if cp is None or cp.is_empty:
+                continue
+            # Gårdsrommet er allerede innenfor zone.polygon, som er innenfor
+            # buildable_polygon. Trekk fra volumene som faktisk ligger rundt
+            # (ringen bør ikke overlappe gårdsrommet, men robusthet: buffer 0.5m)
+            court_geom = cp.difference(volumes_union.buffer(0.5)).buffer(0)
+            if court_geom.is_empty or court_geom.area < 50:
+                continue
+            if isinstance(court_geom, MultiPolygon):
+                court_geom = max(court_geom.geoms, key=lambda g: g.area)
+
+            function_name = getattr(zone, "courtyard_function", "") or "felles_bolig"
+            # Map til OutdoorKind
+            outdoor_kind: OutdoorKind = "tun"
+            requires_sun = 4.0
+            if function_name == "barnehage_ute":
+                outdoor_kind = "barnehage_ute"
+                requires_sun = 5.0  # strengere sol-krav for barnehage
+            elif function_name == "lek_gront":
+                outdoor_kind = "lek"
+                requires_sun = 4.0
+            elif function_name in ("felles_bolig", "plantekasser"):
+                outdoor_kind = "tun"
+                requires_sun = 4.0
+
+            zone_name = getattr(zone, "courtyard_name", "") or getattr(zone, "zone_id", "")
+            zone_program = getattr(zone, "courtyard_program", "") or ""
+            notes_parts = [f"Designet gårdsrom: {zone_name}"]
+            if zone_program:
+                notes_parts.append(f"Program: {zone_program}")
+
+            system.zones.append(OutdoorZone(
+                zone_id=f"OD-court-{getattr(zone, 'zone_id', '?')}",
+                kind=outdoor_kind,
+                geometry=court_geom,
+                area_m2=float(court_geom.area),
+                counts_toward_mua=True,
+                is_felles=True,
+                on_ground=True,
+                serves_building_phases=[],  # fylles ut senere
+                requires_sun_hours=requires_sun,
+                notes=". ".join(notes_parts),
+            ))
+
+        # Union av alle designete gårdsrom — brukes for å trekke fra
+        # ground_outdoor slik at de ikke dobbeltelles som tun
+        court_polys = [
+            z.geometry for z in system.zones
+            if z.kind in ("tun", "barnehage_ute", "lek") and "OD-court-" in z.zone_id
+        ]
+        if court_polys:
+            designed_courtyard_union = unary_union(court_polys)
+
     # 3. Generer diagonal: fra ett hjørne til motsatt, så bred som mulig innenfor ground_outdoor
+    # Hvis designete gårdsrom finnes, går diagonalen UTENOM dem
+    diagonal_search_space = ground_outdoor
+    if designed_courtyard_union is not None and not designed_courtyard_union.is_empty:
+        try:
+            diagonal_search_space = ground_outdoor.difference(
+                designed_courtyard_union.buffer(1.0)
+            ).buffer(0)
+        except Exception:
+            diagonal_search_space = ground_outdoor
+
     diagonal_zone, diagonal_line = _generate_diagonal(
-        buildable_polygon, volumes_union, ground_outdoor,
+        buildable_polygon, volumes_union, diagonal_search_space,
     )
     if diagonal_zone and not diagonal_zone.is_empty:
         system.zones.append(OutdoorZone(
@@ -2541,6 +2875,14 @@ def pass5_outdoor_system(
     # 4. Tun — resterende uterom mellom volumer, delt per fase
     zone_counter = 1
     remaining_outdoor = ground_outdoor.difference(diagonal_zone) if diagonal_zone else ground_outdoor
+    # v1.7: Trekk også fra designete gårdsrom slik at de ikke dobbelttelles som tun
+    if designed_courtyard_union is not None and not designed_courtyard_union.is_empty:
+        try:
+            remaining_outdoor = remaining_outdoor.difference(
+                designed_courtyard_union.buffer(0.5)
+            ).buffer(0)
+        except Exception:
+            pass
 
     if isinstance(remaining_outdoor, (Polygon, MultiPolygon)):
         if isinstance(remaining_outdoor, MultiPolygon):
@@ -3140,6 +3482,24 @@ def plan_masterplan(
         max_bya_pct=max_bya_pct,
     )
 
+    # v1.6 diag: skriv hva Pass 2 faktisk produserte. Dette hjelper oss å debugge
+    # når produksjonen viser færre trinn enn testene våre forventer.
+    pass2_diag_lines = [f"Pass 2 produserte {len(zones)} soner:"]
+    for z in zones:
+        try:
+            z_area = float(z.polygon.area) if z.polygon else 0.0
+            zb = z.polygon.bounds if z.polygon else (0, 0, 0, 0)
+            zw = zb[2] - zb[0]
+            zh = zb[3] - zb[1]
+        except Exception:
+            z_area, zw, zh = 0.0, 0.0, 0.0
+        pass2_diag_lines.append(
+            f"  {z.zone_id} ({z.typology}, {z.floors_min}-{z.floors_max}et): "
+            f"{z_area:.0f} m² ({zw:.0f}×{zh:.0f}), mål BRA {z.target_bra:.0f}"
+        )
+    pass2_diag_text = "\n".join(pass2_diag_lines)
+    logger.info(pass2_diag_text)
+
     # --- PASS 3: Volume placement ---
     logger.info(f"Masterplan Pass 3: Volume placement in {len(zones)} zones")
     volumes = pass3_place_volumes(
@@ -3174,6 +3534,7 @@ def plan_masterplan(
         building_phases=building_phases,
         program=program,
         site_inputs=site_inputs,
+        typology_zones=zones,  # v1.7: gir tilgang til designete gårdsrom
     )
 
     # Bygg masterplan
@@ -3191,6 +3552,11 @@ def plan_masterplan(
         concept_narrative=phase_rec.get("reasoning", ""),
         warnings=[],
         source=f"Builtly Masterplan v1 ({model})",
+        diag_info={
+            "pass2": pass2_diag_text,
+            "pass3": f"Pass 3 plasserte {len(volumes)} volumer totalt",
+            "pass4": f"Pass 4 grupperte til {len(building_phases)} byggetrinn",
+        },
     )
 
     # --- PASS 6: Validate ---
