@@ -66,7 +66,7 @@ class ProgramAllocation:
             + self.service_bra + self.felleshus_bra
         )
 
-    def unit_estimate(self, avg_unit_bra: float = 70.0) -> int:
+    def unit_estimate(self, avg_unit_bra: float = 55.0) -> int:
         if avg_unit_bra <= 0:
             return 0
         return max(0, int(round(self.bolig_bra / avg_unit_bra)))
