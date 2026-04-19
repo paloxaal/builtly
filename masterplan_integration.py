@@ -866,3 +866,230 @@ def build_phase_legend_html(masterplan: Masterplan) -> str:
         + "".join(items)
         + "</div>"
     )
+
+# =====================================================================
+# Builtly patch v2 — bedre BRA-treff, konsistent effektivitet og strengere
+# masterplan-rapportering for store tomter / flerfaseprosjekter.
+# =====================================================================
+
+_ORIG_RUN_MASTERPLAN_FROM_SITE_INPUTS = run_masterplan_from_site_inputs
+_ORIG_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+_ORIG_RENDER_PHASING_REPORT_MARKDOWN = render_phasing_report_markdown
+
+
+def _site_efficiency_ratio_v2(site: Any) -> float:
+    try:
+        eff = float(getattr(site, "efficiency_ratio", 0.85) or 0.85)
+    except Exception:
+        eff = 0.85
+    return max(0.65, min(0.95, eff))
+
+
+def run_masterplan_from_site_inputs(
+    site: Any,
+    geodata_context: Dict[str, Any],
+    phasing_config: PhasingConfig,
+    target_bra_m2: float,
+    include_barnehage: bool = False,
+    include_naering: bool = False,
+    byggesone: str = "2",
+) -> Tuple[Optional[Masterplan], Optional[str]]:
+    """Patch: send faktisk efficiency_ratio inn i motoren og bruk samme faktor
+    i sanity-checks som i resten av appen."""
+    site_polygon = geodata_context.get("site_polygon")
+    buildable_polygon = geodata_context.get("buildable_polygon")
+    neighbors = geodata_context.get("neighbors", [])
+    terrain = geodata_context.get("terrain")
+    site_intelligence = geodata_context.get("site_intelligence")
+
+    if buildable_polygon is None or buildable_polygon.is_empty:
+        msg = "buildable_polygon mangler eller er tom. Last opp tomt eller juster setbacks."
+        logger.warning(f"run_masterplan: {msg}")
+        return None, msg
+
+    if target_bra_m2 <= 0:
+        msg = (
+            f"Mål-BRA er {target_bra_m2:.0f} m² — må være større enn 0. "
+            f"Aktiver %-BRA-override i seksjon 2A, eller sett maks BRA."
+        )
+        return None, msg
+
+    buildable_area = float(buildable_polygon.area)
+    if buildable_area < 100:
+        msg = f"Byggbart areal er kun {buildable_area:.0f} m² — for lite til en masterplan."
+        return None, msg
+
+    max_floors = int(getattr(site, "max_floors", 5))
+    max_height_m = float(getattr(site, "max_height_m", 16.0))
+    max_bya_pct = float(getattr(site, "max_bya_pct", 35.0))
+    floor_to_floor = float(getattr(site, "floor_to_floor_m", 3.2))
+    efficiency_ratio = _site_efficiency_ratio_v2(site)
+    avg_unit_bra = float(getattr(site, "avg_unit_bra", 70.0) or 70.0)
+
+    max_footprint = buildable_area * (max_bya_pct / 100.0)
+    max_theoretical_bra = max_footprint * max_floors * efficiency_ratio
+    if target_bra_m2 > max_theoretical_bra * 1.1:
+        msg = (
+            f"Mål-BRA {target_bra_m2:.0f} m² er urealistisk høyt gitt "
+            f"byggbart areal ({buildable_area:.0f} m²), maks BYA {max_bya_pct:.0f}%, "
+            f"maks {max_floors} etasjer og effektivitet {efficiency_ratio:.2f}. "
+            f"Teoretisk maks BRA er ca {max_theoretical_bra:.0f} m². "
+            f"Øk maks etasjer eller BYA, eller senk mål-BRA."
+        )
+        return None, msg
+
+    site_inputs_dict = {
+        "latitude_deg": float(getattr(site, "latitude_deg", 63.4)),
+        "site_area_m2": float(getattr(site, "site_area_m2", 0.0)),
+        "avg_unit_bra": avg_unit_bra,
+        "efficiency_ratio": efficiency_ratio,
+        "terrain": terrain,
+        "site_intelligence": site_intelligence,
+    }
+
+    try:
+        masterplan = masterplan_engine.plan_masterplan(
+            site_polygon=site_polygon,
+            buildable_polygon=buildable_polygon,
+            neighbors=neighbors,
+            terrain=terrain,
+            site_intelligence=site_intelligence,
+            site_inputs=site_inputs_dict,
+            target_bra_m2=target_bra_m2,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            max_bya_pct=max_bya_pct,
+            floor_to_floor_m=floor_to_floor,
+            phasing_config=phasing_config,
+            include_barnehage=include_barnehage,
+            include_naering=include_naering,
+            byggesone=byggesone,
+        )
+
+        if not masterplan.volumes:
+            return None, (
+                "Motoren kjørte, men plasserte 0 volumer. "
+                "Sannsynlig årsak: byggbart polygon er for lite eller smalt for "
+                "den valgte typologien. Sjekk polygonbuffer og byggegrenser."
+            )
+        if not masterplan.building_phases:
+            return None, (
+                "Motoren plasserte volumer, men klarte ikke å danne byggetrinn. "
+                "Prøv å endre fase-valg i seksjon 2C."
+            )
+
+        return masterplan, None
+
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Masterplan-kjøring feilet: {exc}\n{tb}")
+        return None, f"{type(exc).__name__}: {str(exc)[:400]}"
+
+
+def _phase_efficiency_ratio_v2(phase, masterplan: Masterplan, fallback: float) -> float:
+    vids = set(getattr(phase, "volume_ids", []) or [])
+    vols = [v for v in masterplan.volumes if v.volume_id in vids]
+    bta = sum(float(v.footprint_m2) * float(v.floors) for v in vols)
+    bra = sum(float(v.bra_m2) for v in vols)
+    if bta <= 0:
+        return fallback
+    return max(0.65, min(0.95, bra / bta))
+
+
+
+def _phase_target_fit_pct_v2(phase) -> float:
+    tgt = float(getattr(phase, "target_bra", 0.0) or 0.0)
+    act = float(getattr(phase, "actual_bra", 0.0) or 0.0)
+    if tgt <= 0:
+        return 100.0
+    return max(0.0, min(130.0, act / tgt * 100.0))
+
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    """Patch: skriv tilbake reell efficiency_ratio og target-fit til OptionResults
+    slik at rapport og dashboard viser konsistente BRA/BTA-tall."""
+    results = _ORIG_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    site_eff = _site_efficiency_ratio_v2(site)
+
+    total_bta = float(getattr(masterplan.metrics, "total_bta", 0.0) or 0.0)
+    total_bra = float(getattr(masterplan.metrics, "total_bra", 0.0) or 0.0)
+    total_eff = (total_bra / total_bta) if total_bta > 0 else site_eff
+    total_target_fit = float(getattr(masterplan.metrics, "target_fit_pct", 0.0) or 0.0)
+    if total_target_fit <= 0:
+        prog_target = float(getattr(masterplan.program, "total_bra", 0.0) or 0.0)
+        total_target_fit = (total_bra / prog_target * 100.0) if prog_target > 0 else 100.0
+
+    for res in results:
+        geom = getattr(res, "geometry", {}) or {}
+        is_total = bool(geom.get("is_total_plan") or getattr(res, "typology", "") == "Masterplan")
+        if is_total:
+            eff = total_eff
+            target_fit = total_target_fit
+            score = float(getattr(masterplan.metrics, "overall_score", getattr(res, "score", 0.0)) or 0.0)
+            extra_notes = [
+                f"Måloppnåelse BRA: {target_fit:.0f}%",
+                f"BRA/BTA-effektivitet: {eff:.2f}",
+            ]
+        else:
+            phase_n = geom.get("phase_number")
+            phase = masterplan.phase_by_number(int(phase_n)) if phase_n is not None else None
+            eff = _phase_efficiency_ratio_v2(phase, masterplan, site_eff) if phase is not None else site_eff
+            target_fit = _phase_target_fit_pct_v2(phase) if phase is not None else 100.0
+            score = float(getattr(res, "score", 0.0) or 0.0)
+            extra_notes = [
+                f"Måloppnåelse BRA: {target_fit:.0f}%",
+                f"BRA/BTA-effektivitet: {eff:.2f}",
+            ]
+
+        try:
+            setattr(res, "efficiency_ratio", eff)
+        except Exception:
+            pass
+        try:
+            setattr(res, "target_fit_pct", target_fit)
+        except Exception:
+            pass
+        try:
+            setattr(res, "score", score)
+        except Exception:
+            pass
+
+        notes = list(getattr(res, "notes", []) or [])
+        existing = {str(n) for n in notes}
+        for note in extra_notes:
+            if note not in existing:
+                notes.append(note)
+        try:
+            setattr(res, "notes", notes)
+        except Exception:
+            pass
+
+    return results
+
+
+
+def render_phasing_report_markdown(masterplan: Masterplan) -> str:
+    text = _ORIG_RENDER_PHASING_REPORT_MARKDOWN(masterplan)
+    m = masterplan.metrics
+    target_fit = float(getattr(m, "target_fit_pct", 0.0) or 0.0)
+    if target_fit <= 0:
+        prog_target = float(getattr(masterplan.program, "total_bra", 0.0) or 0.0)
+        target_fit = (float(getattr(m, "total_bra", 0.0) or 0.0) / prog_target * 100.0) if prog_target > 0 else 100.0
+
+    addon = [
+        "",
+        "### Måloppnåelse",
+        "",
+        f"- Oppnådd BRA mot mål: **{target_fit:.0f}%**",
+        f"- BRA/BTA-effektivitet: **{(float(getattr(m, 'total_bra', 0.0) or 0.0) / max(float(getattr(m, 'total_bta', 0.0) or 1.0), 1.0)):.2f}**",
+    ]
+    if target_fit < 90.0:
+        addon.append("- Planen bør densifiseres videre før den presenteres som anbefalt alternativ.")
+    return text + "\n" + "\n".join(addon) + "\n"

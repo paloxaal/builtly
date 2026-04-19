@@ -3583,3 +3583,546 @@ def plan_site_via_masterplan(*args, **kwargs) -> Dict[str, Any]:
     model = kwargs.pop("model", DEFAULT_MODEL)
     mp = plan_masterplan(*args, model=model, **kwargs)
     return mp.to_legacy_result()
+
+
+# ====================================================================
+# V2 PATCHES — tetthet, fasering og BRA-konsistens for større tomter
+# ====================================================================
+# Disse override-funksjonene legges nederst i filen slik at Python bruker
+# dem i stedet for de tidligere definisjonene. Målet er å beholde mest mulig
+# av den eksisterende motoren, men rette de viktigste svakhetene:
+#   1) hardkodet BRA/BTA-effektivitet 0.85
+#   2) underfylling av store tomter med komposisjonstyper
+#   3) auto-fasering som kollapser K når Pass 3 underleverer
+#   4) for svak score-straff når BRA-målet ikke nås
+#   5) skjev uteromsallokering der fase 1 får "alt" og resten rester
+
+_ORIG_COMPOSE_LINEAR = _compose_linear
+_ORIG_COMPOSE_COURTYARD = _compose_courtyard
+_ORIG_PLACE_RING = _place_ring_around_courtyard
+_ORIG_PASS3_PLACE_VOLUMES = pass3_place_volumes
+_ORIG_PASS4_PHASING = pass4_phasing
+_ORIG_PASS5_OUTDOOR_SYSTEM = pass5_outdoor_system
+_ORIG_PASS6_VALIDATE = pass6_validate
+
+
+def _get_efficiency_ratio_v2(site_inputs: Optional[Dict[str, Any]] = None) -> float:
+    site_inputs = site_inputs or {}
+    try:
+        eff = float(site_inputs.get("efficiency_ratio", 0.85) or 0.85)
+    except Exception:
+        eff = 0.85
+    return _clamp(eff, 0.60, 0.95)
+
+
+def _apply_efficiency_ratio_to_volumes_v2(volumes: List[Volume], efficiency_ratio: float) -> List[Volume]:
+    for v in volumes:
+        try:
+            v.bra_efficiency_ratio = efficiency_ratio
+        except Exception:
+            pass
+    return volumes
+
+
+def _max_zone_floors_v2(typology: str, zone: Optional[TypologyZone], max_floors: int,
+                        max_height_m: float, floor_to_floor_m: float) -> Tuple[int, float]:
+    dims = TYPOLOGY_DIMS.get(typology, TYPOLOGY_DIMS["Lamell"])
+    ftf = float(dims.get("ftf", floor_to_floor_m) or floor_to_floor_m)
+    zone_fmax = int(getattr(zone, "floors_max", max_floors) or max_floors) if zone is not None else max_floors
+    height_cap = max(1, int(max_height_m / max(ftf, 0.1)))
+    return max(1, min(zone_fmax, max_floors, int(dims["f_max"]), height_cap)), ftf
+
+
+def _raise_zone_volumes_to_target_v2(volumes: List[Volume], zone: TypologyZone,
+                                     zone_bta_target: float, max_floors: int,
+                                     max_height_m: float,
+                                     floor_to_floor_m: float) -> List[Volume]:
+    if not volumes:
+        return volumes
+
+    current_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    if current_bta >= zone_bta_target * 0.98:
+        return volumes
+
+    remaining_bta = zone_bta_target - current_bta
+    progress = True
+    ordered = sorted(volumes, key=lambda v: v.footprint_m2, reverse=True)
+    while remaining_bta > 1.0 and progress:
+        progress = False
+        for v in ordered:
+            max_allowed, ftf = _max_zone_floors_v2(v.typology, zone, max_floors, max_height_m, floor_to_floor_m)
+            if v.floors >= max_allowed:
+                continue
+            v.floors += 1
+            v.height_m = round(v.floors * ftf, 1)
+            remaining_bta -= v.footprint_m2
+            progress = True
+            if remaining_bta <= 1.0:
+                break
+    return volumes
+
+
+def _zone_target_bta_map_v2(zones: List[TypologyZone], program: ProgramAllocation,
+                            efficiency_ratio: float) -> Dict[str, float]:
+    total_zone_target = sum(z.target_bra for z in zones) or 1.0
+    total_target_bta = program.total_bra / max(efficiency_ratio, 1e-6)
+    return {
+        z.zone_id: (z.target_bra / total_zone_target) * total_target_bta
+        for z in zones
+    }
+
+
+def _densify_volumes_to_target_v2(zones: List[TypologyZone],
+                                  volumes: List[Volume],
+                                  program: ProgramAllocation,
+                                  max_floors: int,
+                                  max_height_m: float,
+                                  max_bya_pct: float,
+                                  floor_to_floor_m: float,
+                                  buildable_polygon,
+                                  site_inputs: Dict[str, Any]) -> List[Volume]:
+    if not volumes or not zones or buildable_polygon is None or buildable_polygon.is_empty:
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+
+    target_total_bta = program.total_bra / max(efficiency_ratio, 1e-6)
+    actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    if actual_total_bta >= target_total_bta * 0.97:
+        return volumes
+
+    zone_targets_bta = _zone_target_bta_map_v2(zones, program, efficiency_ratio)
+    zone_by_id = {z.zone_id: z for z in zones}
+
+    # Trinn 1: løft etasjeantall på eksisterende volumer der sonen har underskudd.
+    for _ in range(20):
+        actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+        if actual_total_bta >= target_total_bta * 0.97:
+            break
+
+        zone_actual_bta: Dict[str, float] = {z.zone_id: 0.0 for z in zones}
+        for v in volumes:
+            if v.zone_id in zone_actual_bta:
+                zone_actual_bta[v.zone_id] += v.footprint_m2 * v.floors
+
+        candidates = []
+        for v in volumes:
+            zone = zone_by_id.get(v.zone_id)
+            if zone is None:
+                continue
+            deficit = zone_targets_bta.get(v.zone_id, 0.0) - zone_actual_bta.get(v.zone_id, 0.0)
+            if deficit <= 0:
+                continue
+            max_allowed, ftf = _max_zone_floors_v2(v.typology, zone, max_floors, max_height_m, floor_to_floor_m)
+            if v.floors < max_allowed:
+                candidates.append((deficit, v.footprint_m2, v, max_allowed, ftf))
+
+        if not candidates:
+            break
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        progress = False
+        for _, _, v, max_allowed, ftf in candidates:
+            if actual_total_bta >= target_total_bta * 0.97:
+                break
+            if v.floors >= max_allowed:
+                continue
+            v.floors += 1
+            v.height_m = round(v.floors * ftf, 1)
+            actual_total_bta += v.footprint_m2
+            progress = True
+
+        if not progress:
+            break
+
+    # Trinn 2: legg inn infill-volumer i restareal for soner som fortsatt mangler kapasitet.
+    actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(v.footprint_m2 for v in volumes)
+    if actual_total_bta < target_total_bta * 0.97 and fp_used < max_fp_total * 0.95:
+        existing_ids = []
+        for v in volumes:
+            try:
+                if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                    existing_ids.append(int(v.volume_id[1:]))
+            except Exception:
+                pass
+        volume_counter = max(existing_ids, default=0)
+
+        def zone_actual_bta(zid: str) -> float:
+            return sum(v.footprint_m2 * v.floors for v in volumes if v.zone_id == zid)
+
+        zone_order = sorted(
+            zones,
+            key=lambda z: zone_targets_bta.get(z.zone_id, 0.0) - zone_actual_bta(z.zone_id),
+            reverse=True,
+        )
+
+        for zone in zone_order:
+            actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+            fp_used = sum(v.footprint_m2 for v in volumes)
+            if actual_total_bta >= target_total_bta * 0.97 or fp_used >= max_fp_total * 0.95:
+                break
+
+            deficit = zone_targets_bta.get(zone.zone_id, 0.0) - zone_actual_bta(zone.zone_id)
+            if deficit <= 250.0:
+                continue
+
+            zone_existing = [v.polygon for v in volumes if v.zone_id == zone.zone_id and v.polygon is not None]
+            remaining_poly = zone.polygon.buffer(0)
+            if zone_existing:
+                try:
+                    remaining_poly = remaining_poly.difference(
+                        unary_union(zone_existing).buffer(MIN_BUILDING_SPACING / 2.0)
+                    ).buffer(0)
+                except Exception:
+                    remaining_poly = remaining_poly.buffer(0)
+
+            if remaining_poly.is_empty or float(remaining_poly.area) < 150.0:
+                continue
+
+            infill_typology = zone.typology if zone.typology not in TYPOLOGY_COMPOSITIONS else "Lamell"
+            infill_zone = TypologyZone(
+                zone_id=zone.zone_id,
+                typology=infill_typology,
+                polygon=remaining_poly,
+                floors_min=max(3, zone.floors_min),
+                floors_max=zone.floors_max,
+                target_bra=0.0,
+                rationale=f"v2 infill for {zone.zone_id}",
+            )
+
+            extra_vols, volume_counter = _fallback_grid_placement(
+                zone=infill_zone,
+                zone_buildable=remaining_poly,
+                zone_bta_target=deficit,
+                max_floors=max_floors,
+                max_height_m=max_height_m,
+                max_fp_remaining=max_fp_total - fp_used,
+                floor_to_floor_m=floor_to_floor_m,
+                existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+                volume_counter=volume_counter,
+            )
+
+            if not extra_vols and infill_typology != "Lamell":
+                infill_zone.typology = "Lamell"
+                extra_vols, volume_counter = _fallback_grid_placement(
+                    zone=infill_zone,
+                    zone_buildable=remaining_poly,
+                    zone_bta_target=deficit,
+                    max_floors=max_floors,
+                    max_height_m=max_height_m,
+                    max_fp_remaining=max_fp_total - fp_used,
+                    floor_to_floor_m=floor_to_floor_m,
+                    existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+                    volume_counter=volume_counter,
+                )
+
+            for ev in extra_vols:
+                ev.zone_id = zone.zone_id
+                ev.notes = (ev.notes + " (v2 densifisering)").strip()
+                ev.bra_efficiency_ratio = efficiency_ratio
+
+            if extra_vols:
+                volumes.extend(extra_vols)
+
+    return volumes
+
+
+def _compose_linear(zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+                    max_fp_remaining, floor_to_floor_m, existing_polys,
+                    volume_counter, comp) -> Tuple[List[Volume], int]:
+    volumes, volume_counter = _ORIG_COMPOSE_LINEAR(
+        zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+        max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+    )
+    volumes = _raise_zone_volumes_to_target_v2(
+        volumes, zone, zone_bta_target, max_floors, max_height_m, floor_to_floor_m,
+    )
+    return volumes, volume_counter
+
+
+def _compose_courtyard(zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+                       max_fp_remaining, floor_to_floor_m, existing_polys,
+                       volume_counter, comp) -> Tuple[List[Volume], int]:
+    volumes, volume_counter = _ORIG_COMPOSE_COURTYARD(
+        zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+        max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+    )
+    volumes = _raise_zone_volumes_to_target_v2(
+        volumes, zone, zone_bta_target, max_floors, max_height_m, floor_to_floor_m,
+    )
+    return volumes, volume_counter
+
+
+def _place_ring_around_courtyard(zone, zone_buildable, zone_bta_target, max_floors,
+                                 max_height_m, max_fp_remaining, floor_to_floor_m,
+                                 existing_polys, volume_counter) -> Tuple[List[Volume], int]:
+    volumes, volume_counter = _ORIG_PLACE_RING(
+        zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+        max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter,
+    )
+    volumes = _raise_zone_volumes_to_target_v2(
+        volumes, zone, zone_bta_target, max_floors, max_height_m, floor_to_floor_m,
+    )
+    return volumes, volume_counter
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    volumes = _densify_volumes_to_target_v2(
+        zones=zones,
+        volumes=volumes,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    return volumes
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    if not volumes:
+        return [], []
+
+    actual_total_bra = sum(v.bra_m2 for v in volumes)
+    target_total_bra = max(float(program.total_bra), 1.0)
+    target_attainment = actual_total_bra / target_total_bra
+
+    if phasing_config.phasing_mode == "auto" and target_attainment < 0.85:
+        min_k_hard = max(1, math.ceil(actual_total_bra / phasing_config.MAX_PHASE_BRA))
+        max_k_hard = max(1, int(actual_total_bra / phasing_config.MIN_PHASE_BRA)) if actual_total_bra >= phasing_config.MIN_PHASE_BRA else 1
+        desired_k = int(_clamp(target_phase_count, min_k_hard, max_k_hard))
+        logger.warning(
+            "Pass 4 v2: Pass 3 leverte bare %.0f%% av BRA-målet; beholder target-basert faseantall %s i stedet for å kollapse til færre trinn.",
+            target_attainment * 100.0,
+            desired_k,
+        )
+        patched_cfg = PhasingConfig(
+            phasing_mode="manual",
+            manual_phase_count=desired_k,
+            parking_mode=phasing_config.parking_mode,
+            manual_parking_phase_count=phasing_config.manual_parking_phase_count,
+            MIN_PHASE_BRA=phasing_config.MIN_PHASE_BRA,
+            MAX_PHASE_BRA=phasing_config.MAX_PHASE_BRA,
+            TARGET_PHASE_BRA_LOW=phasing_config.TARGET_PHASE_BRA_LOW,
+            TARGET_PHASE_BRA_HIGH=phasing_config.TARGET_PHASE_BRA_HIGH,
+            SINGLE_PHASE_MAX_BRA=phasing_config.SINGLE_PHASE_MAX_BRA,
+        )
+        return _ORIG_PASS4_PHASING(volumes, buildable_polygon, patched_cfg, desired_k, program, site_polygon)
+
+    return _ORIG_PASS4_PHASING(volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon)
+
+
+def pass5_outdoor_system(buildable_polygon, volumes: List[Volume],
+                         building_phases: List[BuildingPhase],
+                         program: ProgramAllocation, site_inputs: Dict[str, Any],
+                         typology_zones: Optional[List[Any]] = None) -> OutdoorSystem:
+    system = _ORIG_PASS5_OUTDOOR_SYSTEM(
+        buildable_polygon=buildable_polygon,
+        volumes=volumes,
+        building_phases=building_phases,
+        program=program,
+        site_inputs=site_inputs,
+        typology_zones=typology_zones,
+    )
+    if not building_phases or not system.zones:
+        return system
+
+    phase_unions: Dict[int, Any] = {}
+    for phase in building_phases:
+        phase_vols = [v.polygon for v in volumes if v.volume_id in phase.volume_ids and v.polygon is not None]
+        phase_unions[phase.phase_number] = unary_union(phase_vols) if phase_vols else None
+
+    for z in system.zones:
+        geom = getattr(z, "geometry", None)
+        if geom is None or getattr(geom, "is_empty", True):
+            continue
+        if not z.on_ground or not z.is_felles:
+            continue
+        if z.kind not in ("diagonal", "park", "tun", "lek"):
+            continue
+
+        served = []
+        threshold = 25.0 if z.kind == "diagonal" or z.area_m2 >= 600.0 else 12.0
+        for phase_num, phase_union in phase_unions.items():
+            if phase_union is None:
+                continue
+            try:
+                if geom.distance(phase_union) <= threshold:
+                    served.append(phase_num)
+            except Exception:
+                continue
+        if served:
+            z.serves_building_phases = served
+
+    for phase in building_phases:
+        phase_zones = [
+            z for z in system.zones
+            if phase.phase_number in z.serves_building_phases and z.is_felles and z.on_ground
+        ]
+        phase.standalone_outdoor_zone_ids = [z.zone_id for z in phase_zones]
+        phase.standalone_outdoor_m2 = sum(z.area_m2 for z in phase_zones)
+        phase.standalone_outdoor_has_sun = True
+
+    return system
+
+
+def _evaluate_phase_standalone(phase: BuildingPhase, all_volumes: List[Volume],
+                               all_phases: List[BuildingPhase],
+                               outdoor_system: OutdoorSystem,
+                               parking_phases: List[ParkingPhase]) -> Tuple[float, List[str]]:
+    score = 0.0
+    issues = []
+    phase_volumes = [v for v in all_volumes if v.volume_id in phase.volume_ids]
+
+    total_oppganger = sum(v.oppganger for v in phase_volumes)
+    if total_oppganger >= len(phase_volumes):
+        score += 30
+    else:
+        score += 15
+        issues.append("Antall oppganger per volum er for lavt")
+
+    zone_count = len(phase.standalone_outdoor_zone_ids or [])
+    full_req = max(800.0, float(phase.units_estimate) * 12.0)
+    partial_req = max(400.0, float(phase.units_estimate) * 8.0)
+    if phase.standalone_outdoor_m2 >= full_req and zone_count >= 1:
+        score += 25
+    elif phase.standalone_outdoor_m2 >= partial_req:
+        score += 14
+        issues.append(
+            f"Standalone-uterom ({phase.standalone_outdoor_m2:.0f} m²) er på minimumssiden for {phase.units_estimate} boliger"
+        )
+    else:
+        score += 3
+        issues.append(
+            f"Standalone-uterom ({phase.standalone_outdoor_m2:.0f} m²) er for lite for {phase.units_estimate} boliger"
+        )
+    if zone_count == 0:
+        issues.append("Ingen dedikerte uteromssoner er koblet til byggetrinnet")
+
+    if phase.parking_served_by:
+        required_p = [p for p in parking_phases if p.phase_number in phase.parking_served_by]
+        if any(p.must_complete_before_building_phase is None or p.must_complete_before_building_phase <= phase.phase_number for p in required_p):
+            score += 20
+        else:
+            score += 10
+            issues.append("P-fase ferdigstilles etter byggefasens innflytting")
+    else:
+        issues.append("Ingen parkering tilknyttet")
+
+    if phase.neighboring_construction_risk < 0.3:
+        score += 15
+    elif phase.neighboring_construction_risk < 0.6:
+        score += 8
+        issues.append("Moderat byggeplass-risiko fra senere faser")
+    else:
+        issues.append("Høy byggeplass-risiko fra senere faser")
+
+    if "barnehage" in phase.programs_included and phase.phase_number <= max(1, len(all_phases) // 2):
+        score += 10
+    elif not any(p in phase.programs_included for p in ["barnehage", "naering"]):
+        score += 10
+    else:
+        score += 5
+
+    return score, issues
+
+
+def pass6_validate(masterplan: Masterplan, max_bya_pct: float,
+                   max_floors: int, max_height_m: float) -> Masterplan:
+    masterplan = _ORIG_PASS6_VALIDATE(masterplan, max_bya_pct, max_floors, max_height_m)
+    m = masterplan.metrics
+    warnings = list(masterplan.warnings)
+
+    target_total_bra = float(masterplan.program.total_bra or 0.0)
+    target_fit_pct = (m.total_bra / target_total_bra * 100.0) if target_total_bra > 0 else 100.0
+    m.target_fit_pct = target_fit_pct
+
+    if target_fit_pct < 90.0:
+        warnings.append(
+            f"BRA-mål nås ikke: {m.total_bra:,.0f} m² oppnådd av {target_total_bra:,.0f} m² mål ({target_fit_pct:.0f}%)."
+        )
+    if target_fit_pct < 90.0 and m.bya_percent < max_bya_pct * 0.75:
+        warnings.append(
+            f"Planen underutnytter tomta: BYA {m.bya_percent:.1f}% av tillatt {max_bya_pct:.1f}% samtidig som BRA-målet ikke nås."
+        )
+
+    score_target_fit = 100.0 * (min(max(target_fit_pct, 0.0), 100.0) / 100.0) ** 1.5
+    score_habitability = m.standalone_habitability_score
+    score_mua = 100.0 if m.mua_compliant else 55.0
+    score_bya = 100.0 if m.bya_percent <= max_bya_pct else max(0.0, 100.0 - (m.bya_percent - max_bya_pct) * 6.0)
+
+    fire_violations = 0
+    for i, v1 in enumerate(masterplan.volumes):
+        for v2 in masterplan.volumes[i + 1:]:
+            if v1.polygon and v2.polygon and v1.polygon.distance(v2.polygon) < MIN_BUILDING_SPACING - 0.1:
+                fire_violations += 1
+    score_fire = 100.0 if fire_violations == 0 else max(0.0, 100.0 - fire_violations * 15.0)
+
+    if masterplan.building_phases:
+        target_center = 4000.0
+        soft_min = 3500.0
+        soft_max = 4500.0
+        deviations = []
+        for p in masterplan.building_phases:
+            bra = p.actual_bra
+            if soft_min <= bra <= soft_max:
+                dev = 0.0
+            elif bra < soft_min:
+                dev = (soft_min - bra) / soft_min
+            else:
+                dev = (bra - soft_max) / target_center
+            deviations.append(min(dev, 1.0))
+        avg_deviation = sum(deviations) / len(deviations)
+        score_balance = max(40.0, 100.0 - avg_deviation * 60.0)
+        risks = [p.neighboring_construction_risk for p in masterplan.building_phases]
+        avg_risk = sum(risks) / len(risks)
+        score_construction_risk = max(40.0, 100.0 - avg_risk * 60.0)
+    else:
+        score_balance = 0.0
+        score_construction_risk = 100.0
+
+    m.overall_score = (
+        0.25 * score_target_fit
+        + 0.30 * score_habitability
+        + 0.15 * score_mua
+        + 0.10 * score_bya
+        + 0.10 * score_fire
+        + 0.05 * score_balance
+        + 0.05 * score_construction_risk
+    )
+
+    # Dedup warnings med stabil rekkefølge
+    seen = set()
+    deduped = []
+    for w in warnings:
+        if w not in seen:
+            deduped.append(w)
+            seen.add(w)
+    masterplan.warnings = deduped
+    return masterplan

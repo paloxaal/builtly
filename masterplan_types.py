@@ -173,6 +173,7 @@ class Volume:
     cx: float
     cy: float
     footprint_m2: float
+    bra_efficiency_ratio: float = 0.85    # kan overstyres fra SiteInputs (f.eks. 0.78)
     program: ProgramKind = "bolig"     # hoved-program i volumet
     ground_floor_program: Optional[ProgramKind] = None  # kan skille 1. etg fra resten
     has_courtyard: bool = False
@@ -188,7 +189,8 @@ class Volume:
 
     @property
     def bra_m2(self) -> float:
-        return self.footprint_m2 * self.floors * 0.85  # grov BRA-faktor
+        eff = self.bra_efficiency_ratio if self.bra_efficiency_ratio > 0 else 0.85
+        return self.footprint_m2 * self.floors * eff
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -384,6 +386,7 @@ class MasterplanMetrics:
     min_phase_bra: float = 0.0
     max_phase_bra: float = 0.0
     standalone_habitability_score: float = 0.0  # 0-100: andel av faser som er standalone OK
+    target_fit_pct: float = 0.0
     overall_score: float = 0.0
 
 
