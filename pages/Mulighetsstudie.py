@@ -4472,6 +4472,478 @@ def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[I
     return views
 
 
+# =====================================================================
+# V6 — 2D konsept- og MUA-kart for masterplan-presentasjon
+# =====================================================================
+
+def _extract_rings_v6(obj: Any) -> List[List[List[float]]]:
+    rings: List[List[List[float]]] = []
+
+    def _walk(value: Any) -> None:
+        if not isinstance(value, list) or not value:
+            return
+        if all(
+            isinstance(p, (list, tuple)) and len(p) >= 2
+            and isinstance(p[0], (int, float)) and isinstance(p[1], (int, float))
+            for p in value
+        ):
+            ring = [[float(p[0]), float(p[1])] for p in value]
+            if len(ring) >= 3:
+                rings.append(ring)
+            return
+        for item in value:
+            _walk(item)
+
+    _walk(obj)
+    return rings
+
+
+def _all_points_v6(*items: Any) -> List[Tuple[float, float]]:
+    pts: List[Tuple[float, float]] = []
+    for item in items:
+        for ring in _extract_rings_v6(item):
+            for p in ring:
+                pts.append((float(p[0]), float(p[1])))
+    return pts
+
+
+def _plan_bounds_v6(geometry: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    pts = _all_points_v6(
+        geometry.get('site_polygon_coords') or [],
+        geometry.get('buildable_polygon_coords') or [],
+        [n.get('coords') for n in geometry.get('neighbor_polygons', []) or []],
+        [f.get('polygon_coords') for f in geometry.get('development_fields', []) or []],
+        [f.get('courtyard_coords') for f in geometry.get('development_fields', []) or []],
+        [z.get('coords') for z in geometry.get('outdoor_zones', []) or []],
+        [b.get('coords') for b in geometry.get('building_roster', []) or []],
+        [m.get('coords') for m in geometry.get('massing_parts', []) or []],
+    )
+    if not pts:
+        return (0.0, 0.0, 100.0, 100.0)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    pad = max(maxx - minx, maxy - miny, 1.0) * 0.08
+    return (minx - pad, miny - pad, maxx + pad, maxy + pad)
+
+
+def _make_projector_v6(bounds: Tuple[float, float, float, float], x0: int, y0: int, w: int, h: int):
+    minx, miny, maxx, maxy = bounds
+    spanx = max(maxx - minx, 1.0)
+    spany = max(maxy - miny, 1.0)
+    scale = min(w / spanx, h / spany)
+    ox = x0 + (w - spanx * scale) / 2.0
+    oy = y0 + (h - spany * scale) / 2.0
+
+    def _project(pt: List[float]) -> Tuple[float, float]:
+        return (
+            ox + (float(pt[0]) - minx) * scale,
+            oy + (maxy - float(pt[1])) * scale,
+        )
+
+    return _project, scale
+
+
+def _draw_rings_v6(draw: ImageDraw.ImageDraw, rings_like: Any, project, fill=None, outline=None, width: int = 1) -> None:
+    for ring in _extract_rings_v6(rings_like):
+        pts = [project(p) for p in ring]
+        if len(pts) < 3:
+            continue
+        if fill is not None:
+            draw.polygon(pts, fill=fill)
+        if outline is not None:
+            draw.line(pts + [pts[0]], fill=outline, width=width, joint='curve')
+
+
+def _centroid_v6(rings_like: Any) -> Tuple[float, float]:
+    pts = _all_points_v6(rings_like)
+    if not pts:
+        return (0.0, 0.0)
+    return (
+        sum(p[0] for p in pts) / len(pts),
+        sum(p[1] for p in pts) / len(pts),
+    )
+
+
+def _text_box_v6(draw: ImageDraw.ImageDraw, xy: Tuple[float, float], text: str, font, fill, bg=None, pad: int = 5, anchor: str = 'mm') -> None:
+    if not text:
+        return
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+    except Exception:
+        tw = int(len(text) * 7)
+        th = 14
+    x, y = xy
+    if anchor == 'mm':
+        rx0 = x - tw / 2 - pad
+        ry0 = y - th / 2 - pad
+    elif anchor == 'lm':
+        rx0 = x - pad
+        ry0 = y - th / 2 - pad
+    else:
+        rx0 = x - pad
+        ry0 = y - pad
+    rx1 = rx0 + tw + 2 * pad
+    ry1 = ry0 + th + 2 * pad
+    if bg is not None:
+        try:
+            draw.rounded_rectangle((rx0, ry0, rx1, ry1), radius=6, fill=bg)
+        except Exception:
+            draw.rectangle((rx0, ry0, rx1, ry1), fill=bg)
+    text_xy = (x, y)
+    if anchor == 'lm':
+        text_xy = (rx0 + pad, y)
+    draw.text(text_xy, text, font=font, fill=fill, anchor=anchor)
+
+
+def _wrap_lines_v6(text: str, max_chars: int = 38) -> List[str]:
+    words = [w for w in str(text or '').split() if w]
+    if not words:
+        return []
+    lines: List[str] = []
+    cur = ''
+    for w in words:
+        proposal = f"{cur} {w}".strip()
+        if len(proposal) > max_chars and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = proposal
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _field_summary_lines_v6(fields: List[Dict[str, Any]], outdoor_zones: List[Dict[str, Any]]) -> List[str]:
+    lines: List[str] = []
+    if fields:
+        lines.append(f"{len(fields)} delfelt organiserer utbyggingen rundt tydelige uterom og lesbare kvartaler.")
+    if any((z.get('kind') or '').lower() in {'diagonal', 'gangforbindelse'} for z in outdoor_zones):
+        lines.append("En sammenhengende diagonal og et finmasket gangnett binder delfeltene sammen.")
+    for field in fields[:4]:
+        nm = str(field.get('name') or field.get('field_id') or 'Delfelt')
+        prog = str(field.get('primary_outdoor_program') or field.get('primary_outdoor_name') or field.get('context') or '').strip()
+        if prog:
+            lines.append(f"{nm}: {prog}.")
+        else:
+            lines.append(f"{nm}: kvartal med egen gårdsromsidentitet og tydelig rand mot nabolaget.")
+    return lines[:6]
+
+
+def _outdoor_display_v6(zone: Dict[str, Any]) -> Tuple[str, str, Tuple[int, int, int, int]]:
+    kind = str(zone.get('kind') or '').lower()
+    notes = str(zone.get('notes') or '').strip()
+    if 'barnehage' in kind or 'barnehage' in notes.lower():
+        return ('Barnehagetun', notes or 'lek, opphold, rolig sørside', (150, 110, 82, 220))
+    if kind in {'lek'} or 'lek' in notes.lower():
+        return ('Lekeplass', notes or 'lek, aktivitet, møteplass', (237, 149, 100, 220))
+    if kind in {'diagonal', 'gangforbindelse'}:
+        return ('Diagonal', notes or 'gang, sykkel, møteplasser', (227, 194, 95, 210))
+    if kind in {'tun', 'park'}:
+        return ('Felleshage', notes or 'trær, opphold, felles grill', (129, 178, 112, 220))
+    return ('Grønnlomme', notes or 'grønt, planting, opphold', (206, 198, 121, 210))
+
+
+def _find_masterplan_option_v6(options: List["OptionResult"], fallback: Optional["OptionResult"] = None) -> Optional["OptionResult"]:
+    for opt in options or []:
+        geom = getattr(opt, 'geometry', {}) or {}
+        if geom.get('is_total_plan') or getattr(opt, 'typology', '') == 'Masterplan':
+            return opt
+    return fallback or (options[0] if options else None)
+
+
+def _render_masterplan_concept_map_v6(site: Optional[SiteInputs], option: OptionResult, width: int = 1700, height: int = 980) -> Image.Image:
+    geometry = getattr(option, 'geometry', {}) or {}
+    fields = list(geometry.get('development_fields', []) or [])
+    outdoor_zones = list(geometry.get('outdoor_zones', []) or [])
+    buildings = list(geometry.get('building_roster', []) or [])
+    neighbors = list(geometry.get('neighbor_polygons', []) or [])
+    bounds = _plan_bounds_v6(geometry)
+
+    img = Image.new('RGBA', (width, height), (243, 244, 246, 255))
+    draw = ImageDraw.Draw(img)
+    left_w = int(width * 0.33)
+    plan_x0 = left_w + 22
+    plan_y0 = 42
+    plan_w = width - plan_x0 - 36
+    plan_h = height - 84
+    draw.rectangle((0, 0, left_w, height), fill=(248, 249, 251, 255))
+    draw.rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), fill=(235, 237, 239, 255))
+    project, _ = _make_projector_v6(bounds, plan_x0 + 16, plan_y0 + 16, plan_w - 32, plan_h - 32)
+
+    font_cap = _pil_font(18, bold=False)
+    font_title = _pil_font(44, bold=True)
+    font_body = _pil_font(17, bold=False)
+    font_small = _pil_font(14, bold=False)
+    font_field = _pil_font(18, bold=True)
+    font_prog = _pil_font(13, bold=False)
+
+    draw.text((58, 58), 'KONSEPT', font=font_cap, fill=(68, 68, 68, 255))
+    draw.text((58, 98), 'KVARTALSTRUKTUR', font=font_title, fill=(20, 20, 20, 255))
+    concept_lines = _field_summary_lines_v6(fields, outdoor_zones)
+    y = 200
+    for line in concept_lines:
+        for wrapped in _wrap_lines_v6(line, max_chars=36):
+            draw.text((72, y), '•', font=font_body, fill=(45, 45, 45, 255))
+            draw.text((96, y), wrapped, font=font_body, fill=(45, 45, 45, 255))
+            y += 28
+        y += 8
+
+    draw.text((58, height - 70), 'Rapportklar konseptskisse med delfelt, gårdsrom og tydelig byggestruktur.', font=font_small, fill=(95, 95, 95, 255))
+
+    # Nabolag i gråtoner
+    for nb in neighbors[:120]:
+        _draw_rings_v6(draw, nb.get('coords') or [], project, fill=(214, 216, 220, 255), outline=(196, 198, 202, 255), width=1)
+
+    # Byggbart areal og tomt
+    _draw_rings_v6(draw, geometry.get('buildable_polygon_coords') or [], project, fill=(224, 228, 220, 255), outline=None, width=1)
+    _draw_rings_v6(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(221, 58, 58, 255), width=3)
+
+    # Delfelt
+    for field in fields:
+        _draw_rings_v6(draw, field.get('polygon_coords') or [], project, fill=(239, 232, 213, 120), outline=(28, 28, 28, 255), width=3)
+
+    # Uterom / gårdsrom
+    label_items: List[Tuple[Tuple[float, float], str, str, Tuple[int, int, int, int]]] = []
+    for field in fields:
+        courtyard = field.get('courtyard_coords') or []
+        if courtyard:
+            nm = str(field.get('primary_outdoor_name') or f"{field.get('name', 'Felt')}gården")
+            prog = str(field.get('primary_outdoor_program') or field.get('context') or 'trær, opphold, møteplass')
+            color = (129, 178, 112, 220)
+            prog_l = prog.lower()
+            if 'barnehage' in prog_l:
+                color = (150, 110, 82, 220)
+            elif 'lek' in prog_l:
+                color = (237, 149, 100, 220)
+            elif 'diagonal' in prog_l or 'gang' in prog_l:
+                color = (227, 194, 95, 220)
+            _draw_rings_v6(draw, courtyard, project, fill=color, outline=(255, 255, 255, 220), width=2)
+            label_items.append((_centroid_v6(courtyard), nm, prog, color))
+
+    for zone in outdoor_zones:
+        kind = str(zone.get('kind') or '').lower()
+        if kind in {'gangforbindelse'}:
+            continue
+        name, program, color = _outdoor_display_v6(zone)
+        if zone.get('area_m2', 0) >= 120:
+            _draw_rings_v6(draw, zone.get('coords') or [], project, fill=color, outline=(255, 255, 255, 180), width=2)
+            label_items.append((_centroid_v6(zone.get('coords') or []), name, program, color))
+
+    # Bygg
+    for b in buildings:
+        _draw_rings_v6(draw, b.get('coords') or [], project, fill=(252, 252, 252, 255), outline=(126, 126, 126, 255), width=2)
+
+    # Delfeltnavn
+    for field in fields:
+        cx, cy = _centroid_v6(field.get('polygon_coords') or [])
+        sx, sy = project([cx, cy])
+        _text_box_v6(draw, (sx, sy), str(field.get('name') or field.get('field_id') or 'Delfelt'), font_field, (15, 15, 15, 255), (255, 255, 255, 210), pad=6, anchor='mm')
+
+    # Gårdsrom-programmer
+    placed = []
+    for (cx, cy), name, program, color in label_items[:18]:
+        sx, sy = project([cx, cy])
+        # flytt label litt hvis svært nær en eksisterende label
+        for px, py in placed:
+            if abs(px - sx) < 90 and abs(py - sy) < 45:
+                sy += 28
+        placed.append((sx, sy))
+        draw.ellipse((sx - 15, sy - 15, sx + 15, sy + 15), fill=color, outline=(255, 255, 255, 220), width=2)
+        try:
+            initial = (name or 'G')[0].upper()
+        except Exception:
+            initial = 'G'
+        draw.text((sx, sy - 1), initial, font=_pil_font(18, bold=True), fill=(255, 255, 255, 255), anchor='mm')
+        _text_box_v6(draw, (sx + 24, sy - 8), name, _pil_font(14, bold=True), (25, 25, 25, 255), (255, 255, 255, 210), pad=4, anchor='lm')
+        _text_box_v6(draw, (sx + 24, sy + 10), ' · '.join(_wrap_lines_v6(program, max_chars=24)[:1]) or program[:28], _pil_font(12, bold=False), (55, 55, 55, 255), (255, 255, 255, 205), pad=3, anchor='lm')
+
+    return img.convert('RGB')
+
+
+def _render_masterplan_mua_map_v6(site: Optional[SiteInputs], option: OptionResult, width: int = 1800, height: int = 980) -> Image.Image:
+    geometry = getattr(option, 'geometry', {}) or {}
+    outdoor_zones = list(geometry.get('outdoor_zones', []) or [])
+    buildings = list(geometry.get('building_roster', []) or [])
+    neighbors = list(geometry.get('neighbor_polygons', []) or [])
+    fields = list(geometry.get('development_fields', []) or [])
+    summary = dict(geometry.get('mua_summary', {}) or {})
+    bounds = _plan_bounds_v6(geometry)
+
+    img = Image.new('RGBA', (width, height), (245, 246, 248, 255))
+    draw = ImageDraw.Draw(img)
+    left_w = int(width * 0.28)
+    right_w = int(width * 0.20)
+    plan_x0 = left_w + 22
+    plan_y0 = 42
+    plan_w = width - left_w - right_w - 56
+    plan_h = height - 84
+    legend_x0 = plan_x0 + plan_w + 14
+    draw.rectangle((0, 0, left_w, height), fill=(249, 250, 251, 255))
+    draw.rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), fill=(236, 238, 241, 255))
+    draw.rounded_rectangle((legend_x0, 54, width - 24, height - 54), radius=12, fill=(255, 255, 255, 245), outline=(220, 224, 230, 255), width=1)
+    project, _ = _make_projector_v6(bounds, plan_x0 + 16, plan_y0 + 16, plan_w - 32, plan_h - 32)
+
+    font_cap = _pil_font(18, bold=False)
+    font_title = _pil_font(44, bold=True)
+    font_body = _pil_font(16, bold=False)
+    font_small = _pil_font(14, bold=False)
+    font_build = _pil_font(16, bold=True)
+
+    total_bra = float(summary.get('total_mua_m2', 0.0) or 0.0)
+    total_bra = float(getattr(option, 'gross_bta_m2', 0.0) or 0.0) * float(getattr(option, 'efficiency_ratio', 0.0) or 0.0)
+    bolig_bra = sum(float(b.get('bra_m2', 0.0) or 0.0) for b in buildings if str(b.get('program') or '').lower() == 'bolig')
+    unit_count = int(getattr(option, 'unit_count', 0) or 0)
+    site_area = float(getattr(site, 'site_area_m2', 0.0) or 0.0) if site is not None else 0.0
+    required = float(summary.get('required_m2', 0.0) or unit_count * 40.0)
+    ground_common = float(summary.get('ground_common_m2', 0.0) or 0.0)
+    roof_mua = float(summary.get('roof_m2', 0.0) or 0.0)
+    private_mua = float(summary.get('private_m2', 0.0) or 0.0)
+    total_mua = float(summary.get('total_mua_m2', 0.0) or (ground_common + roof_mua + private_mua))
+    bra_pct = (total_bra / max(site_area, 1.0) * 100.0) if site_area else 0.0
+
+    draw.text((58, 58), 'BESTEMMELSER', font=font_cap, fill=(68, 68, 68, 255))
+    draw.text((58, 98), 'BESTEMMELSER MUA', font=font_title, fill=(20, 20, 20, 255))
+
+    rows = [
+        ('Tomteareal', f"{site_area:,.0f} m²".replace(',', ' ')),
+        ('Utnyttelse BRA', f"{bra_pct:.0f}%"),
+        ('Total BRA', f"{total_bra:,.0f} m²".replace(',', ' ')),
+        ('Total BRA bolig', f"{bolig_bra:,.0f} m²".replace(',', ' ')),
+        ('Antall boligenheter', f"{unit_count}"),
+        ('MUA-krav', f"{required:,.0f} m²".replace(',', ' ')),
+        ('Min. 50% felles', f"{required * 0.5:,.0f} m²".replace(',', ' ')),
+        ('Min. felles på bakke', f"{required * 0.25:,.0f} m²".replace(',', ' ')),
+    ]
+    y = 200
+    for label, value in rows:
+        draw.text((58, y), label, font=font_body, fill=(60, 60, 60, 255))
+        draw.text((250, y), value, font=_pil_font(16, bold=True), fill=(15, 15, 15, 255), anchor='ra')
+        y += 30
+
+    draw.text((58, y + 10), 'Byggesone 2', font=_pil_font(16, bold=True), fill=(22, 22, 22, 255))
+    rules = [
+        '• 40 m² MUA per bolig',
+        '• Min. 50% felles uteoppholdsareal',
+        '• Min. 50% av felles MUA på bakkeplan',
+        '• Takflater kan medregnes der de er egnet og tilgjengelige',
+    ]
+    y += 40
+    for rule in rules:
+        draw.text((72, y), rule, font=font_small, fill=(65, 65, 65, 255))
+        y += 24
+
+    # Planbase
+    for nb in neighbors[:120]:
+        _draw_rings_v6(draw, nb.get('coords') or [], project, fill=(222, 224, 227, 255), outline=(205, 207, 210, 255), width=1)
+    _draw_rings_v6(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(221, 58, 58, 255), width=3)
+    for field in fields:
+        _draw_rings_v6(draw, field.get('polygon_coords') or [], project, fill=None, outline=(40, 40, 40, 255), width=2)
+
+    # MUA-soner
+    color_ground = (233, 153, 77, 195)
+    color_roof = (44, 86, 125, 180)
+    outline_private = (190, 50, 50, 255)
+    for z in outdoor_zones:
+        if not bool(z.get('counts_toward_mua', False)):
+            continue
+        rings = z.get('coords') or []
+        if bool(z.get('on_ground', False)) and bool(z.get('is_felles', False)):
+            _draw_rings_v6(draw, rings, project, fill=color_ground, outline=(255, 255, 255, 180), width=2)
+        elif not bool(z.get('on_ground', False)):
+            _draw_rings_v6(draw, rings, project, fill=color_roof, outline=(255, 255, 255, 160), width=2)
+        else:
+            _draw_rings_v6(draw, rings, project, fill=(255, 255, 255, 0), outline=outline_private, width=3)
+
+    # Bygg med etasjer
+    for b in buildings:
+        rings = b.get('coords') or []
+        _draw_rings_v6(draw, rings, project, fill=(252, 252, 252, 255), outline=(120, 120, 120, 255), width=2)
+        cx, cy = _centroid_v6(rings)
+        sx, sy = project([cx, cy])
+        _text_box_v6(draw, (sx, sy), f"{int(b.get('floors', 0) or 0)} et", font_build, (25, 25, 25, 255), (255, 255, 255, 210), pad=4, anchor='mm')
+
+    # Legende høyre
+    lx = legend_x0 + 18
+    ly = 84
+    draw.text((lx, ly), 'LEGENDE', font=_pil_font(18, bold=True), fill=(18, 18, 18, 255))
+    ly += 38
+    legend_items = [
+        ('Felles MUA på bakken', color_ground, ground_common),
+        ('MUA på takflater', color_roof, roof_mua),
+        ('Privat MUA', outline_private, private_mua),
+        ('Total MUA', (80, 80, 80, 255), total_mua),
+    ]
+    for label, color, area in legend_items:
+        if label == 'Privat MUA':
+            draw.rectangle((lx, ly, lx + 22, ly + 22), outline=color, width=3)
+        else:
+            draw.rectangle((lx, ly, lx + 22, ly + 22), fill=color)
+        draw.text((lx + 34, ly + 2), label, font=font_small, fill=(35, 35, 35, 255))
+        draw.text((width - 34, ly + 2), f"{area:,.0f} m²".replace(',', ' '), font=_pil_font(14, bold=True), fill=(18, 18, 18, 255), anchor='ra')
+        ly += 34
+
+    ly += 20
+    draw.text((lx, ly), 'Kontrollregler', font=_pil_font(18, bold=True), fill=(18, 18, 18, 255))
+    ly += 30
+    rules2 = [
+        f"Krav oppfylt: {'Ja' if total_mua >= required else 'Nei'}",
+        f"Fellesandel oppfylt: {'Ja' if ground_common + roof_mua >= required * 0.5 else 'Nei'}",
+        f"Bakkeandel oppfylt: {'Ja' if ground_common >= required * 0.25 else 'Nei'}",
+    ]
+    for rule in rules2:
+        draw.text((lx, ly), '• ' + rule, font=font_small, fill=(70, 70, 70, 255))
+        ly += 22
+
+    return img.convert('RGB')
+
+
+
+
+def _pdf_image_page_v6(pdf: Any, image: Image.Image, title: str = '', caption: str = '') -> None:
+    pdf.add_page()
+    top_y = 22.0
+    if title:
+        try:
+            pdf.section_title(title, 14)
+        except Exception:
+            pdf.set_font(PDF_FONT, 'B', 14)
+            pdf.cell(0, 8, clean_pdf_text(title), 0, 1, 'L')
+        top_y = max(top_y, pdf.get_y() + 2.0)
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+            tmp_path = tmp.name
+        image.convert('RGB').save(tmp_path, format='JPEG', quality=92)
+        max_w = 170.0
+        max_h = 240.0 - (top_y - 20.0)
+        img_w, img_h = image.size
+        if img_w <= 0 or img_h <= 0:
+            return
+        scale = min(max_w / float(img_w), max_h / float(img_h))
+        w = img_w * scale
+        h = img_h * scale
+        x = (210.0 - w) / 2.0
+        pdf.image(tmp_path, x=x, y=top_y, w=w, h=h)
+        if caption:
+            pdf.set_xy(25, min(278, top_y + h + 4))
+            pdf.set_font(PDF_FONT, 'I', 8)
+            pdf.set_text_color(*_MUTED)
+            pdf.multi_cell(0, 4, clean_pdf_text(caption))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+
+
 def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
     geometry = option.geometry or {}
     src_crs = site.polygon_crs or 'EPSG:25833'
@@ -4988,8 +5460,25 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
         "buildable_rings": to_local(flatten_coord_groups(buildable_coords) and [flatten_coord_groups(buildable_coords)] or []),
         "volumes": [],
         "neighbors": [],
+        "fields": [],
         "terrain": None,
     }
+
+    field_payload = geometry.get('development_fields', []) or []
+    phase_field_names = geometry.get('phase_field_names', []) or []
+    if field_payload:
+        for fld in field_payload:
+            rings = fld.get('polygon_coords') or []
+            flat_ring = flatten_coord_groups(rings)
+            if not flat_ring:
+                continue
+            scene_data['fields'].append({
+                'name': fld.get('name', ''),
+                'rings': to_local([flat_ring]),
+                'outdoor_name': fld.get('primary_outdoor_name', ''),
+            })
+    elif phase_field_names:
+        scene_data['fields'] = [{'name': ' + '.join(phase_field_names), 'rings': [], 'outdoor_name': ''}]
 
     # Terrengdata
     if terrain_ctx and terrain_ctx.get('sample_points'):
@@ -5025,6 +5514,11 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
                 "phase": part.get('phase'),
                 "typology": part.get('typology', option.typology),
                 "program": part.get('program', 'bolig'),
+                "house_id": part.get('house_id', part.get('name', '')),
+                "display_name": part.get('display_name', part.get('name', '')),
+                "internal_name": part.get('internal_name', part.get('name', '')),
+                "field_name": part.get('field_name', ''),
+                "bra_m2": float(part.get('bra_m2', 0.0) or 0.0),
             })
     else:
         fc = flatten_coord_groups(footprint_coords)
@@ -5038,6 +5532,11 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
                 "phase": None,
                 "typology": option.typology,
                 "program": "bolig",
+                "house_id": option.name,
+                "display_name": option.name,
+                "internal_name": option.name,
+                "field_name": '',
+                "bra_m2": float(option.saleable_area_m2 or 0.0),
             })
 
     view_r = site_span * 0.7
@@ -5071,10 +5570,18 @@ def render_interactive_3d(site: SiteInputs, option: OptionResult, height_px: int
     font: 10px/1.3 -apple-system, sans-serif; pointer-events: none;
     text-align: right;
   }
+  #volTooltip {
+    position:absolute; display:none; z-index:12; pointer-events:none;
+    background:rgba(6,17,26,0.94); border:1px solid rgba(56,189,248,0.45);
+    border-radius:8px; padding:8px 10px; color:#f5f7fb;
+    font:12px/1.35 -apple-system,sans-serif; max-width:260px;
+    box-shadow:0 10px 28px rgba(0,0,0,0.35);
+  }
 </style></head><body>
 <div id="info">__INFO__</div>
 __PHASE_LEGEND__
 <div id="help">Venstre mus: roter | Scroll: zoom | Shift+dra: panorer</div>
+<div id="volTooltip"></div>
 <div id="sunControls" style="position:absolute;bottom:40px;left:14px;right:14px;background:rgba(6,17,26,0.88);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:10px 16px;display:flex;gap:16px;align-items:center;font:12px -apple-system,sans-serif;">
   <span style="color:#38bdf8;font-weight:700;white-space:nowrap;">☀ Sol/skygge</span>
   <label style="color:#9fb0c3;white-space:nowrap;">Kl:
@@ -5443,13 +5950,45 @@ function addFlatPoly(rings, color, opacity, y) {
   });
 }
 
-function addVolume(rings, height, color, opacity, castShadow, baseY) {
+const interactiveMeshes = [];
+const tooltipEl = document.getElementById('volTooltip');
+let stickyMesh = null;
+
+function setTooltip(html, x, y, visible) {
+  if (!tooltipEl) return;
+  if (!visible) { tooltipEl.style.display = 'none'; return; }
+  tooltipEl.innerHTML = html;
+  tooltipEl.style.display = 'block';
+  tooltipEl.style.left = (x + 16) + 'px';
+  tooltipEl.style.top = (y + 12) + 'px';
+}
+
+function addTextSprite(text, x, y, z, widthFactor, fontSize, fillColor, bgColor) {
+  const lc = document.createElement('canvas');
+  lc.width = 512; lc.height = 96;
+  const lx = lc.getContext('2d');
+  lx.fillStyle = bgColor || 'rgba(6,17,26,0.72)';
+  lx.fillRect(0, 0, 512, 96);
+  lx.fillStyle = fillColor || '#f5f7fb';
+  lx.font = 'bold ' + (fontSize || 26) + 'px sans-serif';
+  lx.textAlign = 'center';
+  lx.textBaseline = 'middle';
+  lx.fillText(text, 256, 48);
+  const lt = new THREE.CanvasTexture(lc);
+  const lm = new THREE.SpriteMaterial({ map: lt, transparent: true, depthTest: false, opacity: 0.95 });
+  const ls = new THREE.Sprite(lm);
+  ls.position.set(x, z, y);
+  ls.scale.set(D.site_span * (widthFactor || 0.18), D.site_span * 0.045, 1);
+  scene.add(ls);
+  return ls;
+}
+
+function addVolume(rings, height, color, opacity, castShadow, baseY, meta) {
+  const meshes = [];
   (rings || []).forEach(ring => {
     if (ring.length < 3) return;
     const shape = shapeFromRing(ring);
-    const geo = new THREE.ExtrudeGeometry(shape, {
-      depth: height, bevelEnabled: false
-    });
+    const geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
     const mat = new THREE.MeshStandardMaterial({
       color: color, roughness: 0.50, metalness: 0.06,
       transparent: opacity < 1.0, opacity: opacity
@@ -5459,7 +5998,10 @@ function addVolume(rings, height, color, opacity, castShadow, baseY) {
     mesh.position.y = baseY || 0;
     mesh.castShadow = castShadow;
     mesh.receiveShadow = true;
+    mesh.userData = meta || {};
     scene.add(mesh);
+    meshes.push(mesh);
+    if (meta && meta.house_id) interactiveMeshes.push(mesh);
 
     const edges = new THREE.EdgesGeometry(geo);
     const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12 });
@@ -5468,6 +6010,7 @@ function addVolume(rings, height, color, opacity, castShadow, baseY) {
     line.position.y = baseY || 0;
     scene.add(line);
   });
+  return meshes;
 }
 
 // Tomtegrense
@@ -5505,25 +6048,65 @@ D.volumes.forEach(v => {
   const cx = v.rings[0] ? v.rings[0].reduce((s,p) => s + p[0], 0) / v.rings[0].length : 0;
   const cy = v.rings[0] ? v.rings[0].reduce((s,p) => s + p[1], 0) / v.rings[0].length : 0;
   const baseY = D.terrain ? getTerrainY(cx, cy) : 0;
-  addVolume(v.rings, v.height, c, 0.92, true, baseY);
+  addVolume(v.rings, v.height, c, 0.92, true, baseY, {
+    house_id: v.house_id || v.name || '',
+    display_name: v.display_name || v.name || '',
+    internal_name: v.internal_name || v.name || '',
+    field_name: v.field_name || '',
+    phase: v.phase || '',
+    floors: v.floors || 0,
+    typology: v.typology || '',
+    bra_m2: v.bra_m2 || 0,
+  });
+});
 
-  // 3D-label
-  const canvas2 = document.createElement('canvas');
-  canvas2.width = 256; canvas2.height = 64;
-  const ctx = canvas2.getContext('2d');
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
-  ctx.fillRect(0, 0, 256, 64);
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 18px sans-serif';
-  ctx.fillText(v.name + '  ' + v.floors + 'et / ' + v.height.toFixed(0) + 'm', 8, 24);
-  ctx.font = '14px sans-serif';
-  ctx.fillStyle = '#aabbcc';
-  const tex = new THREE.CanvasTexture(canvas2);
-  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.9 });
-  const sprite = new THREE.Sprite(spriteMat);
-  sprite.position.set(cx, baseY + v.height + D.site_span * 0.04, cy);
-  sprite.scale.set(D.site_span * 0.22, D.site_span * 0.055, 1);
-  scene.add(sprite);
+// Store, lesbare delfeltlabels i stedet for labels på hvert bygg
+if ((D.fields || []).length) {
+  D.fields.forEach(f => {
+    let ring = (f.rings && f.rings.length && f.rings[0]) ? f.rings[0] : null;
+    if (!ring || ring.length < 3) return;
+    let cx = 0, cy = 0;
+    ring.forEach(pt => { cx += pt[0]; cy += pt[1]; });
+    cx /= ring.length; cy /= ring.length;
+    const baseY = D.terrain ? getTerrainY(cx, cy) : 0;
+    addTextSprite(f.name || 'Kvartal', cx, cy, baseY + D.site_span * 0.03, 0.18, 22, '#f5f7fb', 'rgba(6,17,26,0.58)');
+  });
+}
+
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+function meshFromPointer(evt) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObjects(interactiveMeshes, false);
+  return hits.length ? hits[0].object : null;
+}
+function tooltipHtml(data) {
+  return '<div style="font-weight:700;margin-bottom:3px;">' + (data.house_id || '') + '</div>' +
+         '<div style="color:#9fd0d5;margin-bottom:2px;">' + (data.typology || '') + ' · ' + (data.floors || '?') + ' et · ' + Math.round(data.bra_m2 || 0) + ' m² BRA</div>' +
+         '<div style="color:#c8d3df;">' + (data.field_name || 'Delfelt') + (data.phase ? ' · Trinn ' + data.phase : '') + '</div>';
+}
+renderer.domElement.addEventListener('mousemove', evt => {
+  if (stickyMesh) return;
+  const mesh = meshFromPointer(evt);
+  if (!mesh) { setTooltip('', 0, 0, false); return; }
+  setTooltip(tooltipHtml(mesh.userData || {}), evt.clientX, evt.clientY, true);
+});
+renderer.domElement.addEventListener('click', evt => {
+  const mesh = meshFromPointer(evt);
+  if (!mesh) { stickyMesh = null; setTooltip('', 0, 0, false); return; }
+  if (stickyMesh === mesh) {
+    stickyMesh = null;
+    setTooltip('', 0, 0, false);
+    return;
+  }
+  stickyMesh = mesh;
+  setTooltip(tooltipHtml(mesh.userData || {}), evt.clientX, evt.clientY, true);
+});
+renderer.domElement.addEventListener('mouseleave', () => {
+  if (!stickyMesh) setTooltip('', 0, 0, false);
 });
 
 // --- ORBIT CONTROLS ---
@@ -7075,9 +7658,10 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
     pdf.cell(0, 5, clean_pdf_text("Byggetrinn — oversikt"), 0, 2, "L")
     pdf.ln(1)
 
-    headers = ["Trinn", "BRA m²", "Boliger", "Programmer", "P-fase", "Uterom m²", "Status"]
-    widths = [18, 22, 18, 40, 16, 22, 24]
-    pdf.set_font(PDF_FONT, "B", 8.5)
+    vol_map = {getattr(v, 'volume_id', ''): v for v in getattr(masterplan, 'volumes', []) or []}
+    headers = ["Trinn", "BTA m²", "BRA m²", "Fotavtrykk", "Boliger", "Segmenter", "Etg", "Varighet"]
+    widths = [46, 19, 19, 22, 15, 16, 12, 16]
+    pdf.set_font(PDF_FONT, "B", 8.0)
     pdf.set_fill_color(31, 43, 61)
     pdf.set_text_color(255, 255, 255)
     x_start = 25
@@ -7086,22 +7670,30 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
         pdf.cell(w, 6, clean_pdf_text(h), 1, 0, "L", fill=True)
     pdf.ln(6)
 
-    pdf.set_font(PDF_FONT, "", 8)
+    pdf.set_font(PDF_FONT, "", 7.7)
     pdf.set_text_color(30, 30, 30)
     for phase in masterplan.building_phases:
-        progs = ", ".join(phase.programs_included) if phase.programs_included else "bolig"
-        if len(progs) > 22:
-            progs = progs[:20] + "…"
-        p_fase = ",".join(str(p) for p in phase.parking_served_by) or "-"
-        status = "OK" if phase.standalone_habitable else "Merknad"
+        phase_vols = [vol_map[vid] for vid in (phase.volume_ids or []) if vid in vol_map]
+        phase_bta = sum(float(getattr(v, 'footprint_m2', 0.0) or 0.0) * float(getattr(v, 'floors', 0.0) or 0.0) for v in phase_vols)
+        phase_fp = sum(float(getattr(v, 'footprint_m2', 0.0) or 0.0) for v in phase_vols)
+        phase_units = sum(int(getattr(v, 'units_estimate', 0) or 0) for v in phase_vols)
+        phase_segments = len(phase_vols)
+        phase_min_f = min((int(getattr(v, 'floors', 0) or 0) for v in phase_vols), default=0)
+        phase_max_f = max((int(getattr(v, 'floors', 0) or 0) for v in phase_vols), default=0)
+        floor_text = f"{phase_min_f}-{phase_max_f}" if phase_min_f and phase_min_f != phase_max_f else str(phase_max_f or phase_min_f or 0)
+        duration = int(getattr(phase, 'estimated_duration_months', 0) or max(6, math.ceil(float(getattr(phase, 'actual_bra', 0.0) or 0.0) / 550.0)))
+        label = getattr(phase, 'label', '') or f"Trinn {phase.phase_number}"
+        if len(label) > 26:
+            label = label[:24] + '…'
         row = [
-            f"T{phase.phase_number}",
-            f"{phase.actual_bra:,.0f}".replace(",", " "),
-            f"{phase.units_estimate}",
-            progs,
-            f"P{p_fase}",
-            f"{phase.standalone_outdoor_m2:,.0f}".replace(",", " "),
-            status,
+            label,
+            f"{phase_bta:,.0f}".replace(",", " "),
+            f"{float(getattr(phase, 'actual_bra', 0.0) or 0.0):,.0f}".replace(",", " "),
+            f"{phase_fp:,.0f}".replace(",", " "),
+            str(phase_units),
+            str(phase_segments),
+            floor_text,
+            f"{duration} mnd",
         ]
         pdf.set_x(x_start)
         fill = phase.phase_number % 2 == 0
@@ -7113,6 +7705,7 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
     pdf.ln(3)
 
     # Tidslinje-visualisering (forenklet Gantt-stripe)
+
     pdf.set_font(PDF_FONT, "B", 10)
     pdf.set_text_color(31, 43, 61)
     pdf.cell(0, 5, clean_pdf_text("Tidsplan (estimert)"), 0, 2, "L")
@@ -8187,6 +8780,27 @@ def create_full_report_pdf(
         except Exception as _e:
             # PDF skal ikke feile hvis masterplan-rendering går galt
             pass
+
+    # ================================================================
+    # KONSEPT / MUA-KART (rapportklare 2D-illustrasjoner)
+    # ================================================================
+    try:
+        concept_opt = _find_masterplan_option_v6(options)
+        if concept_opt is not None and ((concept_opt.geometry or {}).get('development_fields') or (concept_opt.geometry or {}).get('outdoor_zones')):
+            concept_img = _render_masterplan_concept_map_v6(site, concept_opt)
+            mua_img = _render_masterplan_mua_map_v6(site, concept_opt)
+            _pdf_image_page_v6(
+                pdf, concept_img,
+                title='KONSEPT',
+                caption='Kvartalstruktur, delfelt og gårdsrom fremstilt som rapportklar 2D-illustrasjon.'
+            )
+            _pdf_image_page_v6(
+                pdf, mua_img,
+                title='BESTEMMELSER MUA',
+                caption='MUA-kart med felles uteoppholdsareal på bakke, takflater og privat MUA.'
+            )
+    except Exception:
+        pass
 
     # ================================================================
     # RAPPORT TEKST (v13: tabeller for ALTERNATIVER)
@@ -10079,11 +10693,20 @@ if "analysis_results" in st.session_state:
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
   <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
+  <button onclick="duplicateSelected()" style="background:linear-gradient(135deg,rgba(125,211,252,0.9),rgba(59,130,246,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🧩 Kopier valgt</button>
   <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
   <select id="floorSelect" onchange="setFloors()" style="background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;">
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
+  <label style="color:#9fb0c3;font-size:12px;display:flex;align-items:center;gap:6px;">Bredde
+    <input id="widthInput" type="number" min="8" max="120" step="0.5" onchange="applyDimensionInputs()" style="width:76px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:6px 8px;border-radius:8px;font-size:12px;">
+    <span style="color:#6b879f;">m</span>
+  </label>
+  <label style="color:#9fb0c3;font-size:12px;display:flex;align-items:center;gap:6px;">Lengde
+    <input id="depthInput" type="number" min="8" max="120" step="0.5" onchange="applyDimensionInputs()" style="width:76px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:6px 8px;border-radius:8px;font-size:12px;">
+    <span style="color:#6b879f;">m</span>
+  </label>
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
@@ -10297,7 +10920,9 @@ function render() {
   ctx.fillStyle = '#9fb0c3'; ctx.font = '10px Inter'; ctx.textAlign = 'left';
   ctx.fillRect(14, H - 20, barPx, 3); ctx.fillText(barM + ' m', 14, H - 26);
   computeStats();
+  updateDimensionInputs();
 }
+
 
 window.addBuilding = function() {
   const cx = (minX + maxX) / 2 + (Math.random() - 0.5) * spanX * 0.3;
@@ -10312,6 +10937,48 @@ window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
 window.setFloors = function() {
   defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
   if (selectedIdx >= 0) { buildings[selectedIdx].floors = defaultFloors; render(); }
+};
+
+function updateDimensionInputs() {
+  const wEl = document.getElementById('widthInput');
+  const dEl = document.getElementById('depthInput');
+  if (!wEl || !dEl) return;
+  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    wEl.value = Number(buildings[selectedIdx].w || 0).toFixed(1);
+    dEl.value = Number(buildings[selectedIdx].d || 0).toFixed(1);
+  } else {
+    wEl.value = '';
+    dEl.value = '';
+  }
+}
+
+window.applyDimensionInputs = function() {
+  if (selectedIdx < 0 || selectedIdx >= buildings.length) return;
+  const wEl = document.getElementById('widthInput');
+  const dEl = document.getElementById('depthInput');
+  const w = Math.max(8, parseFloat(wEl && wEl.value ? wEl.value : buildings[selectedIdx].w) || buildings[selectedIdx].w);
+  const d = Math.max(8, parseFloat(dEl && dEl.value ? dEl.value : buildings[selectedIdx].d) || buildings[selectedIdx].d);
+  buildings[selectedIdx].w = w;
+  buildings[selectedIdx].d = d;
+  render();
+};
+
+window.duplicateSelected = function() {
+  if (selectedIdx < 0 || selectedIdx >= buildings.length) { alert('Velg et bygg først.'); return; }
+  const src = buildings[selectedIdx];
+  const offset = Math.max(10, src.w * 0.35);
+  const clone = {
+    cx: src.cx + offset,
+    cy: src.cy - offset * 0.25,
+    w: src.w,
+    d: src.d,
+    angle: src.angle,
+    floors: src.floors,
+    name: 'Bygg ' + String.fromCharCode(65 + buildings.length),
+  };
+  buildings.push(clone);
+  selectedIdx = buildings.length - 1;
+  render();
 };
 
 window.exportSketch = function() {
@@ -10940,15 +11607,66 @@ render();
                 components.html(batch_html, height=660, scrolling=False)
         except Exception as exc:
             st.caption(f'3D-scene kunne ikke rendres akkurat nå: {exc}')
-
     # --- Interaktiv Three.js 3D-modell ---
     st.markdown("<div class='section-header'>3D Volummodell (interaktiv)</div>", unsafe_allow_html=True)
     sel3d_name = st.selectbox('Velg alternativ for 3D-visning', [opt.name for opt in options], index=0, key='sel3d')
     sel3d_opt = next((opt for opt in options if opt.name == sel3d_name), options[0])
-    try:
-        render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
-    except Exception as exc:
-        st.caption(f'3D-modell kunne ikke rendres: {exc}')
+    geom3d = sel3d_opt.geometry or {}
+    roster_rows = list(geom3d.get('building_roster', []) or [])
+    phase_rows_payload = list(geom3d.get('phase_summary_rows', []) or [])
+    if not phase_rows_payload and geom3d.get('phase_summary_row'):
+        phase_rows_payload = [geom3d.get('phase_summary_row')]
+
+    c3d_left, c3d_right = st.columns([1.8, 1.0], gap='large')
+    with c3d_left:
+        try:
+            render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
+        except Exception as exc:
+            st.caption(f'3D-modell kunne ikke rendres: {exc}')
+    with c3d_right:
+        st.markdown('#### Husoversikt')
+        if roster_rows:
+            phase_options = ['Alle'] + [str(p) for p in sorted({int(r.get('phase_number', 0) or 0) for r in roster_rows if int(r.get('phase_number', 0) or 0) > 0})]
+            phase_filter = st.selectbox('Filter trinn', phase_options, index=0, key='roster_phase_filter')
+            visible_rows = roster_rows if phase_filter == 'Alle' else [r for r in roster_rows if str(int(r.get('phase_number', 0) or 0)) == phase_filter]
+            roster_df = pd.DataFrame(visible_rows)
+            if not roster_df.empty:
+                roster_df = roster_df.rename(columns={
+                    'house_id': 'HUS', 'floors': 'Etg', 'typology': 'Typologi',
+                    'bra_m2': 'BRA m²', 'phase_number': 'Trinn', 'field_name': 'Delfelt', 'name': 'Navn'
+                })
+                show_cols = [c for c in ['HUS', 'Etg', 'Typologi', 'BRA m²', 'Trinn', 'Delfelt'] if c in roster_df.columns]
+                st.dataframe(roster_df[show_cols], use_container_width=True, hide_index=True, height=330)
+        else:
+            st.caption('Ingen husoversikt tilgjengelig for dette alternativet.')
+
+        st.markdown('#### Byggetrinn')
+        if phase_rows_payload:
+            phase_df = pd.DataFrame(phase_rows_payload).rename(columns={
+                'label': 'Trinn', 'bta_m2': 'BTA m²', 'bra_m2': 'BRA m²', 'footprint_m2': 'Fotavtrykk m²',
+                'units': 'Boliger', 'segments': 'Segmenter', 'floors_text': 'Etasjer', 'duration_months': 'Varighet mnd'
+            })
+            show_cols = [c for c in ['Trinn', 'BTA m²', 'BRA m²', 'Fotavtrykk m²', 'Boliger', 'Segmenter', 'Etasjer', 'Varighet mnd'] if c in phase_df.columns]
+            st.dataframe(phase_df[show_cols], use_container_width=True, hide_index=True, height=220)
+        else:
+            st.caption('Ingen byggetrinn-tabell tilgjengelig for dette alternativet.')
+
+    st.markdown("<div class='section-header'>Konsept og bestemmelser</div>", unsafe_allow_html=True)
+    concept_opt = _find_masterplan_option_v6(options, sel3d_opt)
+    if concept_opt is not None and ((concept_opt.geometry or {}).get('development_fields') or (concept_opt.geometry or {}).get('outdoor_zones')):
+        try:
+            _site_obj_concept = SiteInputs(**site_result)
+            concept_img = _render_masterplan_concept_map_v6(_site_obj_concept, concept_opt)
+            mua_img = _render_masterplan_mua_map_v6(_site_obj_concept, concept_opt)
+            ck1, ck2 = st.columns(2)
+            with ck1:
+                st.markdown('#### Kvartalstruktur')
+                st.image(concept_img, use_container_width=True)
+            with ck2:
+                st.markdown('#### Bestemmelser MUA')
+                st.image(mua_img, use_container_width=True)
+        except Exception as exc:
+            st.caption(f'Konseptkart kunne ikke genereres: {exc}')
 
     # --- Utforsk utsikten (first-person fra bygget) ---
     with st.expander("🔭 Utforsk utsikten — se fra en leilighet", expanded=False):
