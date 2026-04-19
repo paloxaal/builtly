@@ -4471,3 +4471,419 @@ def plan_masterplan(*args, **kwargs) -> Masterplan:
     except Exception:
         pass
     return mp
+
+
+# ====================================================================
+# V4 PATCHES — strukturert delfelt-logikk, diagonal-først og konsistent
+# boligantall fra faktisk BRA og valgt leilighetsstørrelse.
+# ====================================================================
+
+_ORIG_V4_PLAN_MASTERPLAN = plan_masterplan
+_ORIG_V4_PASS2_TYPOLOGY_ZONING = pass2_typology_zoning
+_ORIG_V4_PASS4_PHASING = pass4_phasing
+_ORIG_V4_PASS5_OUTDOOR_SYSTEM = pass5_outdoor_system
+
+_CURRENT_AVG_UNIT_BRA_V4 = 55.0
+_CURRENT_DIAGONAL_ZONE_V4 = None
+_CURRENT_DIAGONAL_LINE_V4 = None
+_CURRENT_MAJOR_AXIS_ANGLE_V4 = 0.0
+_CURRENT_MAJOR_AXIS_ORIGIN_V4 = (0.0, 0.0)
+_CURRENT_STRUCTURED_ZONE_IDS_V4 = []
+
+
+def _get_avg_unit_bra_v4(site_inputs: Optional[Dict[str, Any]] = None) -> float:
+    site_inputs = site_inputs or {}
+    try:
+        value = float(site_inputs.get("avg_unit_bra", site_inputs.get("avg_unit_m2", 55.0)) or 55.0)
+    except Exception:
+        value = 55.0
+    return _clamp(value, 35.0, 120.0)
+
+
+def _set_runtime_context_v4(buildable_polygon, site_inputs: Optional[Dict[str, Any]] = None) -> None:
+    global _CURRENT_AVG_UNIT_BRA_V4, _CURRENT_DIAGONAL_ZONE_V4, _CURRENT_DIAGONAL_LINE_V4
+    global _CURRENT_MAJOR_AXIS_ANGLE_V4, _CURRENT_MAJOR_AXIS_ORIGIN_V4, _CURRENT_STRUCTURED_ZONE_IDS_V4
+
+    _CURRENT_AVG_UNIT_BRA_V4 = _get_avg_unit_bra_v4(site_inputs)
+    _CURRENT_DIAGONAL_ZONE_V4 = None
+    _CURRENT_DIAGONAL_LINE_V4 = None
+    _CURRENT_STRUCTURED_ZONE_IDS_V4 = []
+
+    if buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _CURRENT_MAJOR_AXIS_ANGLE_V4 = 0.0
+        _CURRENT_MAJOR_AXIS_ORIGIN_V4 = (0.0, 0.0)
+        return
+
+    try:
+        rect = buildable_polygon.minimum_rotated_rectangle
+        coords = list(rect.exterior.coords)[:4]
+        edges = []
+        for i in range(4):
+            x1, y1 = coords[i]
+            x2, y2 = coords[(i + 1) % 4]
+            length = math.hypot(x2 - x1, y2 - y1)
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+            edges.append((length, angle))
+        edges.sort(key=lambda item: item[0], reverse=True)
+        _CURRENT_MAJOR_AXIS_ANGLE_V4 = float(edges[0][1])
+    except Exception:
+        _CURRENT_MAJOR_AXIS_ANGLE_V4 = 0.0
+
+    c = buildable_polygon.centroid
+    _CURRENT_MAJOR_AXIS_ORIGIN_V4 = (float(c.x), float(c.y))
+
+
+def _rotate_to_local_v4(geom):
+    if geom is None:
+        return None
+    ox, oy = _CURRENT_MAJOR_AXIS_ORIGIN_V4
+    return affinity.rotate(geom, -_CURRENT_MAJOR_AXIS_ANGLE_V4, origin=(ox, oy))
+
+
+def _rotate_to_world_v4(geom):
+    if geom is None:
+        return None
+    ox, oy = _CURRENT_MAJOR_AXIS_ORIGIN_V4
+    return affinity.rotate(geom, _CURRENT_MAJOR_AXIS_ANGLE_V4, origin=(ox, oy))
+
+
+def _largest_polygon_v4(geom, min_area: float = 250.0):
+    if geom is None or getattr(geom, "is_empty", True):
+        return None
+    if isinstance(geom, Polygon):
+        return geom.buffer(0) if geom.area >= min_area else None
+    if isinstance(geom, MultiPolygon):
+        parts = [g.buffer(0) for g in geom.geoms if not g.is_empty and g.area >= min_area]
+        if not parts:
+            return None
+        return max(parts, key=lambda g: g.area)
+    try:
+        geom = geom.buffer(0)
+        if isinstance(geom, Polygon):
+            return geom if geom.area >= min_area else None
+        if isinstance(geom, MultiPolygon):
+            parts = [g for g in geom.geoms if g.area >= min_area]
+            return max(parts, key=lambda g: g.area) if parts else None
+    except Exception:
+        return None
+    return None
+
+
+def _structured_fields_applicable_v4(buildable_polygon, program: ProgramAllocation,
+                                     target_bra_m2: float, max_bya_pct: float,
+                                     max_floors: int) -> bool:
+    if buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        return False
+    buildable_area = float(buildable_polygon.area)
+    req_avg = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+    return (
+        buildable_area >= 16000.0
+        and max_floors >= 4
+        and float(program.total_bra or 0.0) >= 15000.0
+        and req_avg >= 2.6
+    )
+
+
+def _make_courtyard_polygon_v4(local_zone_poly, openness: str = "S"):
+    if local_zone_poly is None or getattr(local_zone_poly, "is_empty", True):
+        return None
+    bounds = local_zone_poly.bounds
+    zw = bounds[2] - bounds[0]
+    zh = bounds[3] - bounds[1]
+    if zw < 32 or zh < 32:
+        return None
+    inset_x = max(8.0, zw * 0.18)
+    inset_y = max(8.0, zh * 0.18)
+    inner = shapely_box(bounds[0] + inset_x, bounds[1] + inset_y,
+                        bounds[2] - inset_x, bounds[3] - inset_y)
+    shrunken = local_zone_poly.buffer(-6.0)
+    if shrunken is None or getattr(shrunken, "is_empty", True):
+        return None
+    cp = inner.intersection(shrunken).buffer(0)
+    cp = _largest_polygon_v4(cp, min_area=220.0)
+    if cp is None:
+        return None
+    return cp
+
+
+def _make_structured_field_zones_v4(buildable_polygon, program: ProgramAllocation,
+                                    target_bra_m2: float, max_floors: int,
+                                    max_height_m: float, max_bya_pct: float) -> List[TypologyZone]:
+    global _CURRENT_DIAGONAL_ZONE_V4, _CURRENT_DIAGONAL_LINE_V4, _CURRENT_STRUCTURED_ZONE_IDS_V4
+
+    local_poly = _rotate_to_local_v4(buildable_polygon)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return []
+
+    xmin, ymin, xmax, ymax = local_poly.bounds
+    w = xmax - xmin
+    h = ymax - ymin
+    if w < 80 or h < 80:
+        return []
+
+    req_avg = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+
+    diag_line_local = LineString([
+        (xmin + 0.08 * w, ymin + 0.15 * h),
+        (xmax - 0.06 * w, ymax - 0.12 * h),
+    ])
+    diag_width = _clamp(min(w, h) * 0.09, 9.0, 14.0)
+    diag_poly_local = diag_line_local.buffer(diag_width, cap_style=2, join_style=2).intersection(local_poly).buffer(0)
+
+    west_strip_type = "Rekke" if req_avg < 3.9 else "LamellSegmentert"
+    west_strip_floors = (2, 3) if west_strip_type == "Rekke" else (3, 4)
+
+    envelopes = [
+        {
+            "zone_id": "QV4-F0",
+            "name": "Vestkant",
+            "typology": west_strip_type,
+            "floors": west_strip_floors,
+            "mult": 0.55,
+            "bbox": shapely_box(xmin, ymin, xmin + 0.16 * w, ymax),
+            "courtyard": False,
+            "courtyard_name": "Vesttun",
+            "courtyard_function": "felles_bolig",
+            "courtyard_program": "forhager, lav vegetasjon, benker",
+        },
+        {
+            "zone_id": "QV4-F1",
+            "name": "Sørvest kvartal",
+            "typology": "HalvåpenKarré",
+            "floors": (4, min(max_floors, 5)),
+            "mult": 0.95,
+            "bbox": shapely_box(xmin + 0.16 * w, ymin, xmin + 0.54 * w, ymin + 0.44 * h),
+            "courtyard": True,
+            "courtyard_name": "Sørgård",
+            "courtyard_function": "felles_bolig",
+            "courtyard_program": "trær, lek, felles grill",
+        },
+        {
+            "zone_id": "QV4-F2",
+            "name": "Nordvest kvartal",
+            "typology": "HalvåpenKarré",
+            "floors": (4, min(max_floors, 5)),
+            "mult": 1.00,
+            "bbox": shapely_box(xmin + 0.16 * w, ymin + 0.42 * h, xmin + 0.56 * w, ymax),
+            "courtyard": True,
+            "courtyard_name": "Nabolagsgård",
+            "courtyard_function": "felles_bolig",
+            "courtyard_program": "trær, plantekasser, benker",
+        },
+        {
+            "zone_id": "QV4-F3",
+            "name": "Nordøst kvartal",
+            "typology": "HalvåpenKarré",
+            "floors": (5 if max_floors >= 5 else 4, min(max_floors, 6)),
+            "mult": 1.18,
+            "bbox": shapely_box(xmin + 0.48 * w, ymin + 0.42 * h, xmax, ymax),
+            "courtyard": True,
+            "courtyard_name": "Bypark-gård",
+            "courtyard_function": "lek_gront",
+            "courtyard_program": "grønt lek, møteplass, fontene",
+        },
+        {
+            "zone_id": "QV4-F4",
+            "name": "Sørøst felt",
+            "typology": "LamellSegmentert",
+            "floors": (4, min(max_floors, 5)),
+            "mult": 1.02,
+            "bbox": shapely_box(xmin + 0.42 * w, ymin, xmax, ymin + 0.60 * h),
+            "courtyard": True,
+            "courtyard_name": "Sørøst tun",
+            "courtyard_function": "felles_bolig",
+            "courtyard_program": "lek, grønt, sykkelparkering",
+        },
+    ]
+
+    used_local = diag_poly_local.buffer(0.8)
+    raw_zones = []
+    for spec in envelopes:
+        zone_local = local_poly.intersection(spec["bbox"]).difference(diag_poly_local.buffer(0.6)).difference(used_local).buffer(0)
+        zone_local = _largest_polygon_v4(zone_local, min_area=320.0)
+        if zone_local is None:
+            continue
+        used_local = unary_union([used_local, zone_local]).buffer(0)
+        raw_zones.append((spec, zone_local))
+
+    if len(raw_zones) < 3:
+        return []
+
+    weights = []
+    for spec, zone_local in raw_zones:
+        weights.append(max(1.0, float(zone_local.area)) * float(spec["mult"]))
+    weight_sum = sum(weights) or 1.0
+
+    zones: List[TypologyZone] = []
+    _CURRENT_STRUCTURED_ZONE_IDS_V4 = []
+    for (spec, zone_local), weight in zip(raw_zones, weights):
+        zone_world = _rotate_to_world_v4(zone_local)
+        courtyard_world = None
+        if spec.get("courtyard"):
+            courtyard_local = _make_courtyard_polygon_v4(zone_local)
+            if courtyard_local is not None:
+                courtyard_world = _rotate_to_world_v4(courtyard_local)
+        target_bra = float(program.total_bra) * (weight / weight_sum)
+        floors_min, floors_max = spec["floors"]
+        zone = TypologyZone(
+            zone_id=spec["zone_id"],
+            typology=spec["typology"],
+            polygon=zone_world,
+            floors_min=int(max(2, floors_min)),
+            floors_max=int(max(floors_min, floors_max)),
+            target_bra=target_bra,
+            rationale=f"v4 strukturert delfelt: {spec['name']} rundt diagonal og gårdsrom",
+        )
+        zone.courtyard_polygon = courtyard_world
+        zone.courtyard_name = spec.get("courtyard_name", "")
+        zone.courtyard_function = spec.get("courtyard_function", "")
+        zone.courtyard_program = spec.get("courtyard_program", "")
+        zones.append(zone)
+        _CURRENT_STRUCTURED_ZONE_IDS_V4.append(zone.zone_id)
+
+    _CURRENT_DIAGONAL_ZONE_V4 = _rotate_to_world_v4(diag_poly_local)
+    _CURRENT_DIAGONAL_LINE_V4 = _rotate_to_world_v4(diag_line_local)
+    return zones
+
+
+def _residential_bra_for_volume_v4(v: Volume) -> float:
+    eff = float(getattr(v, "bra_efficiency_ratio", 0.85) or 0.85)
+    if getattr(v, "program", "bolig") != "bolig":
+        return 0.0
+    residential_floors = float(getattr(v, "floors", 0) or 0)
+    gf_prog = getattr(v, "ground_floor_program", None)
+    if gf_prog and gf_prog != "bolig":
+        residential_floors = max(0.0, residential_floors - 1.0)
+    return float(getattr(v, "footprint_m2", 0.0) or 0.0) * residential_floors * eff
+
+
+def _reestimate_units_v4(volumes: List[Volume], avg_unit_bra: float) -> None:
+    avg_unit_bra = max(avg_unit_bra, 1.0)
+    for v in volumes:
+        res_bra = _residential_bra_for_volume_v4(v)
+        if res_bra <= 0.0:
+            v.units_estimate = 0
+        else:
+            v.units_estimate = max(1, int(round(res_bra / avg_unit_bra)))
+
+
+def pass2_typology_zoning(
+    buildable_polygon,
+    neighbor_summary: str,
+    nb_polys: List[Dict[str, Any]],
+    program: ProgramAllocation,
+    max_floors: int,
+    max_height_m: float,
+    terrain: Optional[Dict[str, Any]] = None,
+    target_bra_m2: float = 0.0,
+    max_bya_pct: float = 35.0,
+) -> List[TypologyZone]:
+    fallback = _ORIG_V4_PASS2_TYPOLOGY_ZONING(
+        buildable_polygon=buildable_polygon,
+        neighbor_summary=neighbor_summary,
+        nb_polys=nb_polys,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        terrain=terrain,
+        target_bra_m2=target_bra_m2,
+        max_bya_pct=max_bya_pct,
+    )
+    if not _structured_fields_applicable_v4(buildable_polygon, program, target_bra_m2, max_bya_pct, max_floors):
+        return fallback
+    structured = _make_structured_field_zones_v4(
+        buildable_polygon=buildable_polygon,
+        program=program,
+        target_bra_m2=target_bra_m2,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+    )
+    if structured:
+        return structured
+    return fallback
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    building_phases, parking_phases = _ORIG_V4_PASS4_PHASING(
+        volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon
+    )
+    for phase in building_phases:
+        phase_volumes = [v for v in volumes if v.volume_id in phase.volume_ids]
+        phase.actual_bra = sum(v.bra_m2 for v in phase_volumes)
+        phase.units_estimate = sum(v.units_estimate for v in phase_volumes)
+    return building_phases, parking_phases
+
+
+def pass5_outdoor_system(buildable_polygon, volumes: List[Volume],
+                         building_phases: List[BuildingPhase],
+                         program: ProgramAllocation, site_inputs: Dict[str, Any],
+                         typology_zones: Optional[List[Any]] = None) -> OutdoorSystem:
+    system = _ORIG_V4_PASS5_OUTDOOR_SYSTEM(
+        buildable_polygon=buildable_polygon,
+        volumes=volumes,
+        building_phases=building_phases,
+        program=program,
+        site_inputs=site_inputs,
+        typology_zones=typology_zones,
+    )
+    if _CURRENT_DIAGONAL_ZONE_V4 is None or getattr(_CURRENT_DIAGONAL_ZONE_V4, "is_empty", True):
+        return system
+
+    cleaned_zones = []
+    for z in system.zones:
+        if getattr(z, "zone_id", "") == "OD-diagonal":
+            continue
+        geom = getattr(z, "geometry", None)
+        if geom is None or getattr(geom, "is_empty", True):
+            continue
+        if geom.intersects(_CURRENT_DIAGONAL_ZONE_V4) and float(geom.intersection(_CURRENT_DIAGONAL_ZONE_V4).area) > 0.65 * float(getattr(z, "area_m2", 0.0) or 0.0):
+            continue
+        cleaned_zones.append(z)
+
+    cleaned_zones.insert(0, OutdoorZone(
+        zone_id="OD-diagonal",
+        kind="diagonal",
+        geometry=_CURRENT_DIAGONAL_ZONE_V4,
+        area_m2=float(_CURRENT_DIAGONAL_ZONE_V4.area),
+        counts_toward_mua=True,
+        is_felles=True,
+        on_ground=True,
+        serves_building_phases=[bp.phase_number for bp in building_phases],
+        requires_sun_hours=4.0,
+        notes="v4 strukturert diagonal: primært grønt/gangforløp og sosialt uterom",
+    ))
+    system.zones = cleaned_zones
+    system.diagonal_linestring = _CURRENT_DIAGONAL_LINE_V4
+
+    # Realloker standalone-uterom etter at diagonalen er overstyrt.
+    for phase in building_phases:
+        phase_zones = [
+            z for z in system.zones
+            if phase.phase_number in (z.serves_building_phases or []) and z.is_felles and z.on_ground
+        ]
+        phase.standalone_outdoor_zone_ids = [z.zone_id for z in phase_zones]
+        phase.standalone_outdoor_m2 = sum(float(z.area_m2 or 0.0) for z in phase_zones)
+        phase.standalone_outdoor_has_sun = True
+    return system
+
+
+def plan_masterplan(*args, **kwargs) -> Masterplan:
+    site_inputs = kwargs.get("site_inputs") or {}
+    buildable_polygon = kwargs.get("buildable_polygon") if "buildable_polygon" in kwargs else (args[1] if len(args) > 1 else None)
+    _set_runtime_context_v4(buildable_polygon, site_inputs)
+    mp = _ORIG_V4_PLAN_MASTERPLAN(*args, **kwargs)
+    try:
+        mp.source = (getattr(mp, "source", "Builtly Masterplan") + " + v4 structured-fields").strip()
+        if isinstance(getattr(mp, "diag_info", None), dict):
+            mp.diag_info["v4"] = (
+                f"v4: strukturert delfelt-grep {'aktiv' if _CURRENT_STRUCTURED_ZONE_IDS_V4 else 'ikke aktiv'}, "
+                f"avg_unit_bra={_CURRENT_AVG_UNIT_BRA_V4:.1f}, "
+                f"diagonal={'ja' if _CURRENT_DIAGONAL_ZONE_V4 is not None else 'nei'}"
+            )
+    except Exception:
+        pass
+    return mp

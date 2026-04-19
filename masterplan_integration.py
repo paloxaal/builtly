@@ -1160,3 +1160,71 @@ def render_phasing_report_markdown(masterplan: Masterplan) -> str:
     if not added:
         return text
     return text + "\n" + "\n".join(lines) + "\n"
+
+
+# =====================================================================
+# V4 PATCHES — bruk valgt gjennomsnittlig boligstørrelse i OptionResults.
+# =====================================================================
+
+_ORIG_V4_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+
+
+def _avg_unit_bra_from_site_v4(site: Any) -> float:
+    try:
+        val = float(getattr(site, "avg_unit_bra", 55.0) or 55.0)
+    except Exception:
+        val = 55.0
+    return max(35.0, min(120.0, val))
+
+
+def _residential_bra_from_phase_geometry_v4(phase_volumes: List[Any]) -> float:
+    total = 0.0
+    for v in phase_volumes or []:
+        try:
+            if getattr(v, "program", "bolig") != "bolig":
+                continue
+            floors = float(getattr(v, "floors", 0) or 0)
+            gf = getattr(v, "ground_floor_program", None)
+            if gf and gf != "bolig":
+                floors = max(0.0, floors - 1.0)
+            eff = float(getattr(v, "bra_efficiency_ratio", 0.85) or 0.85)
+            total += float(getattr(v, "footprint_m2", 0.0) or 0.0) * floors * eff
+        except Exception:
+            continue
+    return total
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    results = _ORIG_V4_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    avg_unit_bra = _avg_unit_bra_from_site_v4(site)
+    total_res_bra = _residential_bra_from_phase_geometry_v4(masterplan.volumes)
+    total_units = int(round(total_res_bra / avg_unit_bra)) if total_res_bra > 0 else 0
+
+    for res in results:
+        geom = getattr(res, "geometry", {}) or {}
+        is_total = bool(geom.get("is_total_plan") or getattr(res, "typology", "") == "Masterplan")
+        if is_total:
+            new_units = total_units
+        else:
+            phase_volumes = geom.get("phase_volumes", []) or []
+            res_bra = _residential_bra_from_phase_geometry_v4(phase_volumes)
+            new_units = int(round(res_bra / avg_unit_bra)) if res_bra > 0 else int(getattr(res, "unit_count", 0) or 0)
+        if new_units > 0:
+            try:
+                setattr(res, "unit_count", new_units)
+            except Exception:
+                pass
+            notes = list(getattr(res, "notes", []) or [])
+            note = f"Boligantall v4: ca. {new_units} boliger ved {avg_unit_bra:.1f} m² snitt"
+            if note not in notes:
+                notes.append(note)
+            try:
+                setattr(res, "notes", notes)
+            except Exception:
+                pass
+    return results
