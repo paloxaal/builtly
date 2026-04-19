@@ -26,6 +26,7 @@ INTEGRASJON I Mulighetsstudie.py:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1509,4 +1510,327 @@ def masterplan_to_option_results(
         except Exception:
             pass
 
+    return results
+
+# =====================================================================
+# V7 PATCH — Builtly presentasjonslag: færre, renere husformer i UI/rapport,
+# korrekt MUA-oppsummering og leilighetsmiks per alternativ.
+# =====================================================================
+
+_ORIG_V7_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+
+
+def _mix_specs_from_site_v7(site: Any) -> List[Tuple[str, float, float]]:
+    raw = list(getattr(site, 'mix_specs', []) or [])
+    specs: List[Tuple[str, float, float]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get('name', '') or '').strip()
+            share = float(item.get('share_pct', 0.0) or 0.0)
+            size = float(item.get('avg_size_m2', 0.0) or 0.0)
+        else:
+            name = str(getattr(item, 'name', '') or '').strip()
+            share = float(getattr(item, 'share_pct', 0.0) or 0.0)
+            size = float(getattr(item, 'avg_size_m2', 0.0) or 0.0)
+        if name and size > 0 and share >= 0:
+            specs.append((name, share, size))
+    if not specs:
+        specs = [('1-rom', 15.0, 38.0), ('2-rom', 35.0, 52.0), ('3-rom', 35.0, 72.0), ('4-rom+', 15.0, 95.0)]
+    total = sum(s[1] for s in specs) or 1.0
+    return [(name, share / total * 100.0, size) for name, share, size in specs]
+
+
+def _allocate_mix_counts_v7(saleable_area_m2: float, specs: List[Tuple[str, float, float]]) -> Dict[str, int]:
+    counts = {name: 0 for name, _, _ in specs}
+    if saleable_area_m2 <= 0:
+        return counts
+    target_areas = [saleable_area_m2 * (share / 100.0) for _, share, _ in specs]
+    count_list = [max(0, int(area // max(size, 1.0))) for area, (_, _, size) in zip(target_areas, specs)]
+    used = sum(count * size for count, (_, _, size) in zip(count_list, specs))
+    remainder = max(0.0, saleable_area_m2 - used)
+    # Fyll restareal på mest arealeffektive enhetstyper først.
+    order = sorted(range(len(specs)), key=lambda i: specs[i][2])
+    while order and remainder >= min(specs[i][2] for i in order):
+        placed = False
+        for i in order:
+            size = specs[i][2]
+            if remainder + 1e-6 >= size * 0.92:
+                count_list[i] += 1
+                remainder -= size
+                placed = True
+                break
+        if not placed:
+            break
+    for (name, _, _), cnt in zip(specs, count_list):
+        counts[name] = int(cnt)
+    return counts
+
+
+def _component_groups_v7(volumes: List[Volume], gap_m: float = 5.0) -> List[List[Volume]]:
+    from shapely.geometry import MultiPolygon as _MP
+    from shapely.ops import unary_union as _uu
+    if not volumes:
+        return []
+    buffered = [v.polygon.buffer(gap_m / 2.0) for v in volumes if getattr(v, 'polygon', None) is not None]
+    if not buffered:
+        return []
+    merged = _uu(buffered).buffer(0)
+    comps = list(merged.geoms) if isinstance(merged, _MP) else [merged]
+    groups: List[List[Volume]] = []
+    remaining = list(volumes)
+    for comp in comps:
+        members = [v for v in remaining if getattr(v, 'polygon', None) is not None and v.polygon.buffer(gap_m / 2.0).intersects(comp)]
+        if members:
+            groups.append(members)
+            remaining = [v for v in remaining if v not in members]
+    for v in remaining:
+        groups.append([v])
+    return groups
+
+
+def _clean_presentation_polygon_v7(polys: List[Any], typology: str, field_poly: Any = None):
+    from shapely import affinity as _aff
+    from shapely.ops import unary_union as _uu
+    if not polys:
+        return None
+    geom = _uu([p for p in polys if p is not None]).buffer(0)
+    if getattr(geom, 'is_empty', True):
+        return None
+    typ = str(typology or '')
+    clean = geom
+    try:
+        if typ in {'Lamell', 'LamellSegmentert', 'Rekke', 'Punkthus'}:
+            rect = geom.minimum_rotated_rectangle
+            if float(getattr(rect, 'area', 0.0) or 0.0) > 1.0:
+                scale = math.sqrt(max(float(geom.area), 1.0) / max(float(rect.area), 1.0))
+                clean = _aff.scale(rect, xfact=scale, yfact=scale, origin='center').buffer(0)
+        elif typ in {'Karré', 'HalvåpenKarré'}:
+            clean = geom.buffer(0.8).buffer(-0.8).simplify(0.6, preserve_topology=True).buffer(0)
+        else:
+            clean = geom.simplify(0.6, preserve_topology=True).buffer(0)
+        if field_poly is not None and not getattr(field_poly, 'is_empty', True):
+            clean = clean.intersection(field_poly.buffer(0.5)).buffer(0)
+        if getattr(clean, 'is_empty', True):
+            clean = geom.buffer(0)
+    except Exception:
+        clean = geom.buffer(0)
+    return clean
+
+
+def _presentation_buildings_v7(masterplan: Masterplan) -> List[Dict[str, Any]]:
+    from shapely.ops import unary_union as _uu
+    phase_by_vid: Dict[str, int] = {}
+    for p in getattr(masterplan, 'building_phases', []) or []:
+        for vid in getattr(p, 'volume_ids', []) or []:
+            phase_by_vid[vid] = int(getattr(p, 'phase_number', 0) or 0)
+    field_polys = {f.field_id: getattr(f, 'polygon', None) for f in getattr(masterplan, 'development_fields', []) or []}
+
+    buckets: Dict[Tuple[int, str, str, int], List[Volume]] = {}
+    for v in getattr(masterplan, 'volumes', []) or []:
+        if getattr(v, 'polygon', None) is None:
+            continue
+        phase = int(phase_by_vid.get(getattr(v, 'volume_id', ''), getattr(v, 'assigned_phase', 0) or 0))
+        field_id = str(getattr(v, 'field_id', '') or '')
+        typology = str(getattr(v, 'typology', '') or '')
+        angle_bucket = int(round((float(getattr(v, 'angle_deg', 0.0) or 0.0) % 180.0) / 15.0))
+        buckets.setdefault((phase, field_id, typology, angle_bucket), []).append(v)
+
+    houses: List[Dict[str, Any]] = []
+    for (phase, field_id, typology, _), vols in buckets.items():
+        field_poly = field_polys.get(field_id)
+        comps = _component_groups_v7(vols, gap_m=5.0)
+        for comp in comps:
+            poly = _clean_presentation_polygon_v7([v.polygon for v in comp], typology, field_poly=field_poly)
+            if poly is None or getattr(poly, 'is_empty', True):
+                continue
+            bra = sum(float(getattr(v, 'bra_m2', 0.0) or 0.0) for v in comp)
+            footprint = float(getattr(poly, 'area', 0.0) or 0.0)
+            floors_vals = [int(getattr(v, 'floors', 0) or 0) for v in comp]
+            floors = max(floors_vals or [0])
+            height = max(float(getattr(v, 'height_m', 0.0) or 0.0) for v in comp)
+            cx = float(getattr(poly.centroid, 'x', 0.0) or 0.0)
+            cy = float(getattr(poly.centroid, 'y', 0.0) or 0.0)
+            field_name = next((str(getattr(v, 'field_name', '') or '') for v in comp if getattr(v, 'field_name', '')), '')
+            internal_name = ', '.join([str(getattr(v, 'internal_name', '') or getattr(v, 'volume_id', '') or '') for v in comp[:4]])
+            program = next((str(getattr(v, 'program', '') or '') for v in comp if getattr(v, 'program', '')), 'bolig')
+            houses.append({
+                'phase_number': int(phase),
+                'field_id': field_id,
+                'field_name': field_name,
+                'typology': typology,
+                'program': program,
+                'floors': int(floors),
+                'height_m': round(height, 1),
+                'footprint_m2': round(footprint, 1),
+                'bra_m2': round(bra, 1),
+                'units_estimate': int(sum(int(getattr(v, 'units_estimate', 0) or 0) for v in comp)),
+                'cx': round(cx, 1),
+                'cy': round(cy, 1),
+                'internal_name': internal_name,
+                'source_volume_ids': [getattr(v, 'volume_id', '') for v in comp],
+                'polygon': poly,
+                'coords': _polygon_to_coords_groups(poly),
+            })
+
+    houses.sort(key=lambda r: (-float(r.get('cy', 0.0) or 0.0), float(r.get('cx', 0.0) or 0.0), str(r.get('field_name', '') or '')))
+    for idx, row in enumerate(houses):
+        row['house_id'] = f"HUS {chr(65 + (idx % 26))}" if idx < 26 else f"HUS {chr(65 + (idx // 26) - 1)}{chr(65 + (idx % 26))}"
+        role = 'Bygg'
+        typ = str(row.get('typology', '') or '')
+        if typ in {'Lamell', 'LamellSegmentert'}:
+            role = 'Lamell'
+        elif typ in {'Punkthus', 'Tårn'}:
+            role = 'Punkthus'
+        elif typ in {'Karré', 'HalvåpenKarré'}:
+            role = 'Kvartalhus'
+        elif typ == 'Rekke':
+            role = 'Rekkehus'
+        elif typ == 'Gårdsklynge':
+            role = 'Tunhus'
+        field_name = str(row.get('field_name', '') or '').strip()
+        row['name'] = f"{field_name} – {role}".strip(' –') if field_name else role
+    return houses
+
+
+def _massing_from_houses_v7(houses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for h in houses:
+        out.append({
+            'name': h.get('house_id', h.get('name', '')),
+            'house_id': h.get('house_id', ''),
+            'display_name': h.get('name', ''),
+            'internal_name': h.get('internal_name', ''),
+            'height_m': float(h.get('height_m', 0.0) or 0.0),
+            'floors': int(h.get('floors', 0) or 0),
+            'coords': h.get('coords', []),
+            'phase': int(h.get('phase_number', 0) or 0),
+            'typology': h.get('typology', ''),
+            'program': h.get('program', 'bolig'),
+            'field_name': h.get('field_name', ''),
+            'bra_m2': float(h.get('bra_m2', 0.0) or 0.0),
+            'color': phase_color_rgba(int(h.get('phase_number', 0) or 0), alpha=220),
+        })
+    return out
+
+
+def _phase_summary_rows_from_houses_v7(masterplan: Masterplan, houses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    by_phase: Dict[int, List[Dict[str, Any]]] = {}
+    for h in houses:
+        by_phase.setdefault(int(h.get('phase_number', 0) or 0), []).append(h)
+    rows: List[Dict[str, Any]] = []
+    for phase in getattr(masterplan, 'building_phases', []) or []:
+        phase_num = int(getattr(phase, 'phase_number', 0) or 0)
+        ph_houses = by_phase.get(phase_num, [])
+        if ph_houses:
+            bta = sum(float(h.get('footprint_m2', 0.0) or 0.0) * float(h.get('floors', 0) or 0.0) for h in ph_houses)
+            bra = sum(float(h.get('bra_m2', 0.0) or 0.0) for h in ph_houses)
+            footprint = sum(float(h.get('footprint_m2', 0.0) or 0.0) for h in ph_houses)
+            floors = [int(h.get('floors', 0) or 0) for h in ph_houses]
+            floor_text = f"{min(floors)}-{max(floors)}" if floors and min(floors) != max(floors) else str(max(floors or [0]))
+            rows.append({
+                'phase_number': phase_num,
+                'label': getattr(phase, 'label', '') or f"Trinn {phase_num}",
+                'field_ids': list(getattr(phase, 'field_ids', []) or []),
+                'field_names': list(getattr(phase, 'field_names', []) or []),
+                'bta_m2': round(bta, 1),
+                'bra_m2': round(bra, 1),
+                'footprint_m2': round(footprint, 1),
+                'units': int(sum(int(h.get('units_estimate', 0) or 0) for h in ph_houses)),
+                'segments': len(ph_houses),
+                'floors_text': floor_text,
+                'max_floors': max(floors or [0]),
+                'duration_months': int(getattr(phase, 'estimated_duration_months', 0) or 0),
+                'programs': list(dict.fromkeys(str(h.get('program', '') or '') for h in ph_houses if h.get('program'))),
+            })
+        else:
+            rows.append(_phase_summary_row_v6(phase, [v for v in masterplan.volumes if v.volume_id in (phase.volume_ids or [])]))
+    return rows
+
+
+def _mua_summary_from_outdoor_v7(masterplan: Masterplan, outdoor_payload: List[Dict[str, Any]], units: int, avg_unit_bra: float) -> Dict[str, Any]:
+    ground_common = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_payload if z.get('counts_toward_mua') and z.get('is_felles') and z.get('on_ground'))
+    roof_mua = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_payload if z.get('counts_toward_mua') and not z.get('on_ground'))
+    private_mua = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_payload if z.get('counts_toward_mua') and not z.get('is_felles'))
+    total_mua = ground_common + roof_mua + private_mua
+    required = float(getattr(getattr(masterplan, 'metrics', None), 'mua_required_m2', 0.0) or units * 40.0)
+    compliant = total_mua >= required and ground_common >= required * 0.25 and (ground_common + roof_mua) >= required * 0.5
+    return {
+        'ground_common_m2': round(ground_common, 1),
+        'ground_felles_m2': round(ground_common, 1),
+        'roof_m2': round(roof_mua, 1),
+        'private_m2': round(private_mua, 1),
+        'total_mua_m2': round(total_mua, 1),
+        'total_m2': round(total_mua, 1),
+        'required_m2': round(required, 1),
+        'compliant': bool(compliant),
+        'avg_unit_bra': round(avg_unit_bra, 1),
+        'units': int(units),
+        'diagnostic_status': 'ok' if ground_common > 0 else 'missing_ground_mua',
+        'diagnostic_message': '' if ground_common > 0 else 'Bakke-MUA kunne ikke beregnes sikkert fra uteromssonene.',
+    }
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    results = _ORIG_V7_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    avg_unit_bra = _avg_unit_bra_from_site_v6(site)
+    mix_specs = _mix_specs_from_site_v7(site)
+    field_payload = _development_fields_payload_v5(masterplan)
+    field_payload_map = {f.get('field_id'): f for f in field_payload}
+    outdoor_payload = _outdoor_payload_v6(masterplan)
+    presentation_houses = _presentation_buildings_v7(masterplan)
+    houses_by_phase: Dict[int, List[Dict[str, Any]]] = {}
+    for h in presentation_houses:
+        houses_by_phase.setdefault(int(h.get('phase_number', 0) or 0), []).append(h)
+    phase_rows = _phase_summary_rows_from_houses_v7(masterplan, presentation_houses)
+    phase_row_map = {int(r.get('phase_number', 0) or 0): r for r in phase_rows}
+
+    for res in results:
+        geom = getattr(res, 'geometry', {}) or {}
+        is_total = bool(geom.get('is_total_plan') or getattr(res, 'typology', '') == 'Masterplan')
+        try:
+            mix_counts = _allocate_mix_counts_v7(float(getattr(res, 'saleable_area_m2', 0.0) or 0.0), mix_specs)
+            setattr(res, 'mix_counts', mix_counts)
+            if sum(mix_counts.values()) > 0:
+                setattr(res, 'unit_count', int(sum(mix_counts.values())))
+        except Exception:
+            pass
+        notes = list(getattr(res, 'notes', []) or [])
+
+        if is_total:
+            total_units = int(getattr(res, 'unit_count', 0) or 0)
+            mua_summary = _mua_summary_from_outdoor_v7(masterplan, outdoor_payload, total_units, avg_unit_bra)
+            geom['development_fields'] = field_payload
+            geom['development_field_count'] = len(field_payload)
+            geom['building_roster'] = presentation_houses
+            geom['phase_summary_rows'] = phase_rows
+            geom['outdoor_zones'] = outdoor_payload
+            geom['mua_summary'] = mua_summary
+            geom['massing_parts'] = _massing_from_houses_v7(presentation_houses)
+            geom['buildings'] = []
+            if mua_summary.get('diagnostic_status') != 'ok':
+                notes.append(mua_summary.get('diagnostic_message', ''))
+        else:
+            phase_num = int(geom.get('phase_number') or 0)
+            phase_houses = houses_by_phase.get(phase_num, [])
+            geom['building_roster'] = phase_houses
+            geom['massing_parts'] = _massing_from_houses_v7(phase_houses)
+            geom['phase_summary_row'] = phase_row_map.get(phase_num, geom.get('phase_summary_row'))
+            phase = masterplan.phase_by_number(phase_num) if phase_num else None
+            if phase is not None:
+                field_ids = list(getattr(phase, 'field_ids', []) or [])
+                geom['phase_field_polygons'] = [field_payload_map[fid].get('polygon_coords') for fid in field_ids if fid in field_payload_map]
+            if phase_houses:
+                note = f"Presentasjonshus: {len(phase_houses)} bygg — " + ', '.join(h.get('house_id', '') for h in phase_houses[:8])
+                if note not in notes:
+                    notes.append(note)
+        try:
+            setattr(res, 'geometry', geom)
+            setattr(res, 'notes', notes)
+        except Exception:
+            pass
     return results
