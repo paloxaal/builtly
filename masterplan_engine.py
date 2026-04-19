@@ -82,6 +82,47 @@ TYPOLOGY_DIMS = {
     "Tun":            {"w_min": 25, "w_max": 50, "d_min": 10, "d_max": 14, "f_min": 3, "f_max": 6,  "ftf": 3.0, "units_per_floor": 3},
     "Tårn":           {"w_min": 18, "w_max": 26, "d_min": 18, "d_max": 26, "f_min": 6, "f_max": 16, "ftf": 3.0, "units_per_floor": 4},
     "Podium + Tårn":  {"w_min": 35, "w_max": 55, "d_min": 18, "d_max": 28, "f_min": 2, "f_max": 4,  "ftf": 3.5, "units_per_floor": 0},
+    # Komponerte typologier — flere segmenter som sammen danner en komposisjon
+    "LamellSegmentert": {"w_min": 15, "w_max": 25, "d_min": 12, "d_max": 16, "f_min": 3, "f_max": 6,  "ftf": 3.2, "units_per_floor": 2},
+    "HalvåpenKarré":    {"w_min": 25, "w_max": 45, "d_min": 12, "d_max": 14, "f_min": 3, "f_max": 6,  "ftf": 3.2, "units_per_floor": 3},
+    "Gårdsklynge":      {"w_min": 18, "w_max": 28, "d_min": 12, "d_max": 14, "f_min": 3, "f_max": 5,  "ftf": 3.2, "units_per_floor": 2},
+}
+
+# Komposisjons-metadata for sammensatte typologier. Definerer hvordan
+# segmenter skal arrangeres rundt et sentralt uterom (gårdsrom).
+#
+# "layout" kan være:
+#   - "linear":     segmenter i rad med gap mellom (~8m) — som LPO nordblokk
+#   - "u_shape":    U-form rundt gårdsrom åpent mot én retning
+#   - "o_shape":    O-form (halvåpen karré) med små gap i hjørnene
+#   - "cluster":    fri klynge av 4-6 segmenter rundt et felles uterom
+TYPOLOGY_COMPOSITIONS = {
+    "LamellSegmentert": {
+        "layout": "linear",
+        "min_segments": 3,
+        "max_segments": 6,
+        "segment_gap_m": 8.0,
+        "gap_rhythm_m": 10.0,      # bredde på siktakser mellom segmenter
+        "orientation": "long_axis", # parallelt med sonens lengste akse
+        "description": "Kortere lameller i rad med siktakser mellom — LPO Tyholt nordblokk-stil",
+    },
+    "HalvåpenKarré": {
+        "layout": "o_shape",
+        "min_segments": 3,
+        "max_segments": 4,
+        "segment_gap_m": 6.0,       # små åpninger mellom L-segmenter
+        "courtyard_min_dim_m": 18.0, # minimum gårdsrom-dimensjon
+        "courtyard_target_ratio": 0.35, # gårdsrom = 35% av komposisjonens totalareal
+        "description": "L-segmenter rundt gårdsrom med gap i hjørnene — Tyholt midtblokk-stil",
+    },
+    "Gårdsklynge": {
+        "layout": "cluster",
+        "min_segments": 4,
+        "max_segments": 6,
+        "segment_gap_m": 8.0,
+        "courtyard_min_dim_m": 15.0,
+        "description": "Klynge av kortere segmenter rundt delt uterom — Tyholt sørblokk-stil",
+    },
 }
 
 # TEK17 / KPA-konstanter
@@ -708,25 +749,27 @@ def _pass2_claude_zones(buildable_polygon, bounds, bw, bh, neighbor_summary,
             density_tier = "VELDIG HØY"
             density_rec = (
                 "UTELUKKENDE høye typologier: Punkthus 5-7 et, Lamell 5-6 et, Karré 5-6 et, "
-                "eller Tårn. UNNGÅ Tun, Rekke og andre småskala-typologier — de har for "
-                "lavt fotavtrykk-til-BRA-forhold til å bære BRA-målet."
+                "HalvåpenKarré 5-6 et, eller Tårn. UNNGÅ Tun, Rekke og andre småskala-typologier — "
+                "de har for lavt fotavtrykk-til-BRA-forhold til å bære BRA-målet."
             )
         elif required_avg_floors >= 3.5:
             density_tier = "HØY"
             density_rec = (
-                "Bruk høye urbane typologier: Lamell 4-5 et, Punkthus 5-6 et, Karré 4-5 et. "
-                "Tun og Rekke er kun OK i små perifer-soner for kontekst-mykning."
+                "Bruk høye urbane typologier: LamellSegmentert 4-5 et (for langstrakte kvartaler), "
+                "HalvåpenKarré 4-5 et (for urbane gårdsrom som Tyholt Park), Punkthus 5-6 et, "
+                "eller Gårdsklynge 4-5 et. Tun og Rekke er kun OK i små perifer-soner. "
+                "UNNGÅ enkle Lamell-monolitter over 50m lange."
             )
         elif required_avg_floors >= 2.5:
             density_tier = "MIDDELS"
             density_rec = (
-                "Bruk balansert miks: Lamell 3-4 et som hovedtypologi. Tun, Rekke, Karré "
-                "OK som supplement."
+                "Bruk balansert miks: LamellSegmentert eller HalvåpenKarré 3-4 et som hovedtypologi. "
+                "Gårdsklynge og Tun OK som supplement."
             )
         else:
             density_tier = "LAV"
             density_rec = (
-                "Alle typologier OK. Tun, Rekke, Lamell 2-3 et passer fint."
+                "Alle typologier OK. Tun, Rekke, Lamell 2-3 et, LamellSegmentert 2-3 et passer fint."
             )
         density_text = (
             f"\n\nTETTHETSKRAV (KRITISK):"
@@ -751,9 +794,12 @@ PROGRAM: {prog_text}
 SMÅHUS-NÆRHET (krever nedtrapping): {low_text}
 
 TYPOLOGIER:
-- Lamell: lange bygg 30-60m, 3-7 et (fleksibel)
+- Lamell: lange bygg 30-60m, 3-7 et (fleksibel, én monolitt)
+- LamellSegmentert: 3-6 kortere lameller à 15-25m i rad med siktakser mellom — perfekt for lange kvartaler som trenger mykere skala
 - Punkthus: 18-26x18-26m, 4-12 et (urban, best lys)
-- Karré: 38-55m firkant med gårdsrom, 3-7 et (tett, bymessig)
+- Karré: 38-55m firkant med gårdsrom, 3-7 et (tett, bymessig, sluttet)
+- HalvåpenKarré: 3-4 L-segmenter rundt gårdsrom med gap i hjørnene — LPO Tyholt-stil, kombinerer karré-romlighet med gjennomsiktighet
+- Gårdsklynge: 4-6 kortere segmenter i løs klynge rundt delt uterom — god for større prosjekter som trenger flere mindre gårdsrom
 - Rekke: 35-60x8-12m, 2-3 et (småhus-skala)
 - Tun: 25-50x10-14m, 3-6 et (klynge rundt uterom)
 - Tårn: 18-26x18-26m, 6-16 et (landemerke)
@@ -983,17 +1029,31 @@ def pass3_place_volumes(
         if not zone_volumes or sum(v.footprint_m2 for v in zone_volumes) < zone_bta_target * 0.15 / 0.85:
             if not zone_volumes:
                 logger.info(f"Pass 3: Using deterministic fallback for zone {zone.zone_id}")
-            fallback_volumes, volume_counter = _fallback_grid_placement(
-                zone=zone,
-                zone_buildable=zone_buildable,
-                zone_bta_target=zone_bta_target,
-                max_floors=max_floors,
-                max_height_m=max_height_m,
-                max_fp_remaining=max_fp_total - max_fp_used - sum(v.footprint_m2 for v in zone_volumes),
-                floor_to_floor_m=floor_to_floor_m,
-                existing_polys=[v.polygon for v in all_volumes + zone_volumes],
-                volume_counter=volume_counter,
-            )
+            # Komponerte typologier får spesialbehandling — segmenter rundt gårdsrom
+            if zone.typology in TYPOLOGY_COMPOSITIONS:
+                fallback_volumes, volume_counter = _composition_placement(
+                    zone=zone,
+                    zone_buildable=zone_buildable,
+                    zone_bta_target=zone_bta_target,
+                    max_floors=max_floors,
+                    max_height_m=max_height_m,
+                    max_fp_remaining=max_fp_total - max_fp_used - sum(v.footprint_m2 for v in zone_volumes),
+                    floor_to_floor_m=floor_to_floor_m,
+                    existing_polys=[v.polygon for v in all_volumes + zone_volumes],
+                    volume_counter=volume_counter,
+                )
+            else:
+                fallback_volumes, volume_counter = _fallback_grid_placement(
+                    zone=zone,
+                    zone_buildable=zone_buildable,
+                    zone_bta_target=zone_bta_target,
+                    max_floors=max_floors,
+                    max_height_m=max_height_m,
+                    max_fp_remaining=max_fp_total - max_fp_used - sum(v.footprint_m2 for v in zone_volumes),
+                    floor_to_floor_m=floor_to_floor_m,
+                    existing_polys=[v.polygon for v in all_volumes + zone_volumes],
+                    volume_counter=volume_counter,
+                )
             zone_volumes.extend(fallback_volumes)
 
         # Legg zone_volumes til all_volumes
@@ -1255,6 +1315,508 @@ def _make_building_polygon(cx: float, cy: float, width: float, depth: float,
         return b if b.is_valid and not b.is_empty else None
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# KOMPONERTE TYPOLOGIER — segmenter rundt gårdsrom
+# ─────────────────────────────────────────────────────────────────────
+# Disse funksjonene plasserer flere segmenter i bestemte geometriske
+# komposisjoner (linear rekke, halvåpen karré, klynge) i stedet for
+# ett enkelt rektangel. Dette gjør det mulig å modellere urbane
+# gårdsrom-strukturer som LPO Tyholt Park (flere korte lameller rundt
+# et felles uterom).
+
+def _composition_placement(
+    zone: TypologyZone,
+    zone_buildable,
+    zone_bta_target: float,
+    max_floors: int,
+    max_height_m: float,
+    max_fp_remaining: float,
+    floor_to_floor_m: float,
+    existing_polys: List[Any],
+    volume_counter: int,
+) -> Tuple[List[Volume], int]:
+    """Orchestrator for komponerte typologier. Dispatcher til layout-spesifikke
+    funksjoner basert på TYPOLOGY_COMPOSITIONS.
+    """
+    if zone_buildable is None or zone_buildable.is_empty or max_fp_remaining <= 0:
+        return [], volume_counter
+
+    comp = TYPOLOGY_COMPOSITIONS.get(zone.typology)
+    if not comp:
+        logger.warning(f"Ingen komposisjon definert for {zone.typology}, fallback til grid")
+        return _fallback_grid_placement(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter,
+        )
+
+    layout = comp.get("layout", "linear")
+    if layout == "linear":
+        return _compose_linear(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+        )
+    elif layout in ("o_shape", "u_shape"):
+        return _compose_courtyard(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+        )
+    elif layout == "cluster":
+        return _compose_cluster(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+        )
+    else:
+        logger.warning(f"Ukjent layout {layout}, fallback til grid")
+        return _fallback_grid_placement(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter,
+        )
+
+
+def _compose_linear(
+    zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+    max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+) -> Tuple[List[Volume], int]:
+    """LamellSegmentert — flere kortere segmenter i rad langs sonens lengste akse.
+
+    Eksempel LPO Tyholt nordblokk: 4 segmenter à 18m × 14m, 5 etasjer,
+    med 8m gap mellom hvert for siktakser.
+    """
+    volumes: List[Volume] = []
+    dims = TYPOLOGY_DIMS.get(zone.typology, TYPOLOGY_DIMS["Lamell"])
+    d = (dims["d_min"] + dims["d_max"]) / 2.0   # segmentdybde
+    gap = comp.get("segment_gap_m", 8.0)
+
+    # Velg etasjer fra sonens rekkevidde, cap til max_height
+    target_floors = _clamp(
+        int(math.ceil((zone.floors_min + zone.floors_max) / 2.0)),
+        dims["f_min"], min(max_floors, dims["f_max"]),
+    )
+    ftf = dims.get("ftf", floor_to_floor_m)
+    height_m = target_floors * ftf
+    if height_m > max_height_m:
+        target_floors = max(1, int(max_height_m / ftf))
+        height_m = target_floors * ftf
+
+    # Finn bounds og velg orientering langs lengste akse
+    bounds = zone_buildable.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    if bw >= bh:
+        axis_len = bw - 2 * MIN_BOUNDARY_SETBACK
+        across_len = bh - 2 * MIN_BOUNDARY_SETBACK
+        segment_axis = 0
+        angle_deg = 0.0
+    else:
+        axis_len = bh - 2 * MIN_BOUNDARY_SETBACK
+        across_len = bw - 2 * MIN_BOUNDARY_SETBACK
+        segment_axis = 1
+        angle_deg = 90.0
+
+    # Støtt dobbel rad (parallele lameller) hvis tomten er bred nok
+    # Dobbel rad trenger: 2×d + gap across_len
+    n_rows = 1
+    if across_len >= 2 * d + gap + 4:
+        n_rows = 2
+
+    min_segments = comp.get("min_segments", 3)
+    max_segments = comp.get("max_segments", 6)
+
+    # Dynamisk valg av antall segmenter og bredde:
+    # 1. Start med maksimalt antall som får plass med w=w_min
+    # 2. Beregn ideell bredde slik at totalsum BTA treffer målet
+    # 3. Cap bredden til w_max
+    n_by_space_max = max(1, int((axis_len + gap) / (dims["w_min"] + gap)))
+    n_segments_per_row = _clamp(n_by_space_max, min_segments, max_segments)
+
+    # Total segmenter = rader × per-rad
+    total_n = n_rows * n_segments_per_row
+
+    # Hvor bredt må hvert segment være for å treffe BTA-målet?
+    # total_n × w × d × floors = zone_bta_target  =>  w = target / (total_n × d × floors)
+    w_ideal = zone_bta_target / max(total_n * d * target_floors, 1.0)
+    w = _clamp(w_ideal, dims["w_min"], dims["w_max"])
+
+    # Sjekk at segmenter per rad med denne bredden faktisk får plass
+    while n_segments_per_row > min_segments and n_segments_per_row * w + (n_segments_per_row - 1) * gap > axis_len:
+        n_segments_per_row -= 1
+        total_n = n_rows * n_segments_per_row
+        w_ideal = zone_bta_target / max(total_n * d * target_floors, 1.0)
+        w = _clamp(w_ideal, dims["w_min"], dims["w_max"])
+
+    while n_segments_per_row > 1 and n_segments_per_row * w + (n_segments_per_row - 1) * gap > axis_len:
+        n_segments_per_row -= 1
+        total_n = n_rows * n_segments_per_row
+        w_ideal = zone_bta_target / max(total_n * d * target_floors, 1.0)
+        w = _clamp(w_ideal, dims["w_min"], dims["w_max"])
+
+    # Fotavtrykk-budsjett
+    fp_per_seg = w * d
+    total_n = n_rows * n_segments_per_row
+    max_total_by_fp = int(max_fp_remaining / max(fp_per_seg, 1))
+    if total_n > max_total_by_fp:
+        total_n = max_total_by_fp
+        # Krymp rader først hvis vi må
+        if total_n < n_segments_per_row * 2 and n_rows == 2:
+            n_rows = 1
+            n_segments_per_row = min(n_segments_per_row, total_n)
+        else:
+            n_segments_per_row = total_n // n_rows
+
+    if total_n < 1 or n_segments_per_row < 1:
+        return volumes, volume_counter
+
+    # Sentrer segmentradene
+    total_axis_len = n_segments_per_row * w + (n_segments_per_row - 1) * gap
+    start_along = bounds[segment_axis] + (
+        (bw if segment_axis == 0 else bh) - total_axis_len
+    ) / 2.0 + w / 2.0
+
+    # For 2 rader: row_offset fra senter
+    if n_rows == 2:
+        across_start = bounds[1 - segment_axis] + (
+            (bh if segment_axis == 0 else bw) - (2 * d + gap)
+        ) / 2.0 + d / 2.0
+    else:
+        across_start = bounds[1 - segment_axis] + (
+            (bh if segment_axis == 0 else bw)
+        ) / 2.0
+
+    for row_idx in range(n_rows):
+        if n_rows == 2:
+            across = across_start + row_idx * (d + gap)
+        else:
+            across = across_start
+
+        for i in range(n_segments_per_row):
+            along = start_along + i * (w + gap)
+            if segment_axis == 0:
+                cx, cy = along, across
+            else:
+                cx, cy = across, along
+
+            poly = _make_building_polygon(cx, cy, w, d, angle_deg)
+            if poly is None:
+                continue
+            clipped = poly.intersection(zone_buildable).buffer(0)
+            min_area = max(80.0, fp_per_seg * 0.5)
+            if clipped.is_empty or clipped.area < min_area:
+                continue
+            if isinstance(clipped, MultiPolygon):
+                clipped = max(clipped.geoms, key=lambda g: g.area)
+                if clipped.area < min_area:
+                    continue
+
+            # Brannavstandsjekk — KUN mot eksisterende polygoner utenfor komposisjonen
+            too_close = False
+            for ep in existing_polys:
+                if ep is not None and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.5:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+
+            volume_counter += 1
+            seg_name = f"S{i+1}" if n_rows == 1 else f"R{row_idx+1}S{i+1}"
+            vol = Volume(
+                volume_id=f"V{volume_counter:02d}",
+                name=f"{zone.typology} {seg_name}",
+                polygon=clipped,
+                typology=zone.typology,
+                floors=target_floors,
+                height_m=round(height_m, 1),
+                width_m=round(w, 1),
+                depth_m=round(d, 1),
+                angle_deg=round(angle_deg, 1),
+                cx=round(cx, 1), cy=round(cy, 1),
+                footprint_m2=round(float(clipped.area), 1),
+                zone_id=zone.zone_id,
+                program="bolig",
+            )
+            vol.units_estimate = int(round(dims["units_per_floor"] * vol.floors))
+            vol.oppganger = max(1, int(math.ceil(vol.width_m / 25.0)))
+            volumes.append(vol)
+
+    logger.info(
+        f"Komposisjon LINEAR for {zone.zone_id}: {len(volumes)} segmenter "
+        f"({n_rows} rader × {n_segments_per_row}), à {w:.0f}×{d:.0f}×{target_floors}et, "
+        f"total BRA {sum(v.bra_m2 for v in volumes):.0f} (mål {zone_bta_target:.0f})"
+    )
+    return volumes, volume_counter
+
+
+def _compose_courtyard(
+    zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+    max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+) -> Tuple[List[Volume], int]:
+    """HalvåpenKarré — 3-4 L-formede eller I-formede segmenter rundt gårdsrom.
+
+    Plasserer segmenter som nord-/sør-/øst-/vest-flanker med gap i hjørnene.
+    Gårdsrommet blir et indre rektangel minst 18m bredt.
+    """
+    volumes: List[Volume] = []
+    dims = TYPOLOGY_DIMS.get(zone.typology, TYPOLOGY_DIMS["Lamell"])
+    d = (dims["d_min"] + dims["d_max"]) / 2.0   # segmentdybde (tilsvarende "tykkelsen")
+    gap = comp.get("segment_gap_m", 6.0)
+    courtyard_min = comp.get("courtyard_min_dim_m", 18.0)
+
+    target_floors = _clamp(
+        int(math.ceil((zone.floors_min + zone.floors_max) / 2.0)),
+        dims["f_min"], min(max_floors, dims["f_max"]),
+    )
+    ftf = dims.get("ftf", floor_to_floor_m)
+    height_m = target_floors * ftf
+    if height_m > max_height_m:
+        target_floors = max(1, int(max_height_m / ftf))
+        height_m = target_floors * ftf
+
+    # Bestem kvartals-dimensjoner i sonen — sentrert, så stor som mulig innenfor setback
+    bounds = zone_buildable.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    kw = bw - 2 * MIN_BOUNDARY_SETBACK
+    kh = bh - 2 * MIN_BOUNDARY_SETBACK
+
+    # Gårdsrommet får courtyard_target_ratio av kvartalet, men minst courtyard_min
+    court_w = max(courtyard_min, kw - 2 * d - 2 * gap)
+    court_h = max(courtyard_min, kh - 2 * d - 2 * gap)
+    if court_w < courtyard_min or court_h < courtyard_min:
+        logger.info(f"Komposisjon COURTYARD: sone {zone.zone_id} for liten, fallback til linear")
+        return _compose_linear(
+            zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+            max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+        )
+
+    # Beregn segment-geometri
+    cx_k = bounds[0] + bw / 2.0
+    cy_k = bounds[1] + bh / 2.0
+
+    # Fire segmenter: nord, sør, øst, vest — hver er en L som dekker én side
+    # Vi forenkler til rektangler for nå; gap i hjørner = ikke møtte
+    outer_w = court_w + 2 * d
+    outer_h = court_h + 2 * d
+
+    # Nord-segment: dekker øvre kant, litt kortere enn kvartal for gap i hjørner
+    seg_long_w = outer_w - 2 * gap   # trukket inn i hjørnene
+    seg_short_h = outer_h - 2 * gap
+
+    # Fire segmenter, fire sentrum
+    segment_specs = [
+        # (name, cx, cy, width, depth, angle)
+        ("N", cx_k, cy_k + (court_h / 2.0 + d / 2.0), seg_long_w, d, 0.0),
+        ("S", cx_k, cy_k - (court_h / 2.0 + d / 2.0), seg_long_w, d, 0.0),
+        ("Ø", cx_k + (court_w / 2.0 + d / 2.0), cy_k, seg_short_h, d, 90.0),
+        ("V", cx_k - (court_w / 2.0 + d / 2.0), cy_k, seg_short_h, d, 90.0),
+    ]
+
+    fp_per_seg = seg_long_w * d  # approx
+    max_segments_by_fp = int(max_fp_remaining / max(fp_per_seg, 1))
+
+    placed = 0
+    for seg_name, sx, sy, sw, sd, sang in segment_specs:
+        if placed >= max_segments_by_fp:
+            break
+        poly = _make_building_polygon(sx, sy, sw, sd, sang)
+        if poly is None:
+            continue
+        clipped = poly.intersection(zone_buildable).buffer(0)
+        min_area = max(100.0, sw * sd * 0.5)
+        if clipped.is_empty or clipped.area < min_area:
+            continue
+        if isinstance(clipped, MultiPolygon):
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+            if clipped.area < min_area:
+                continue
+
+        # Brannsjekk kun mot eksisterende polygoner utenfor komposisjonen.
+        # Komposisjons-segmenter er designet med gap mellom seg og bør ikke
+        # ekskludere hverandre.
+        too_close = False
+        for ep in existing_polys:
+            if ep is not None and clipped.distance(ep) < gap - 0.5:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        volume_counter += 1
+        vol = Volume(
+            volume_id=f"V{volume_counter:02d}",
+            name=f"{zone.typology} {seg_name}",
+            polygon=clipped,
+            typology=zone.typology,
+            floors=target_floors,
+            height_m=round(height_m, 1),
+            width_m=round(sw, 1),
+            depth_m=round(sd, 1),
+            angle_deg=round(sang, 1),
+            cx=round(sx, 1), cy=round(sy, 1),
+            footprint_m2=round(float(clipped.area), 1),
+            zone_id=zone.zone_id,
+            program="bolig",
+        )
+        # bra_m2 er en property på Volume — beregnes automatisk fra footprint × floors × 0.85
+        vol.units_estimate = int(round(dims["units_per_floor"] * vol.floors))
+        vol.oppganger = max(1, int(math.ceil(sw / 25.0)))
+        volumes.append(vol)
+        placed += 1
+
+    logger.info(
+        f"Komposisjon COURTYARD for {zone.zone_id}: {len(volumes)} segmenter "
+        f"(gårdsrom {court_w:.0f}×{court_h:.0f}m), total BRA {sum(v.bra_m2 for v in volumes):.0f}"
+    )
+    return volumes, volume_counter
+
+
+def _compose_cluster(
+    zone, zone_buildable, zone_bta_target, max_floors, max_height_m,
+    max_fp_remaining, floor_to_floor_m, existing_polys, volume_counter, comp,
+) -> Tuple[List[Volume], int]:
+    """Gårdsklynge — 4-6 kortere segmenter i fri klynge rundt et felles uterom.
+
+    Bruker samme geometri som halvåpen karré men med flere, kortere segmenter
+    — LPO Tyholt sørblokk-stil.
+    """
+    volumes: List[Volume] = []
+    dims = TYPOLOGY_DIMS.get(zone.typology, TYPOLOGY_DIMS["Lamell"])
+    w = (dims["w_min"] + dims["w_max"]) / 2.0
+    d = (dims["d_min"] + dims["d_max"]) / 2.0
+    gap = comp.get("segment_gap_m", 8.0)
+    courtyard_min = comp.get("courtyard_min_dim_m", 15.0)
+
+    target_floors = _clamp(
+        int(math.ceil((zone.floors_min + zone.floors_max) / 2.0)),
+        dims["f_min"], min(max_floors, dims["f_max"]),
+    )
+    ftf = dims.get("ftf", floor_to_floor_m)
+    height_m = target_floors * ftf
+    if height_m > max_height_m:
+        target_floors = max(1, int(max_height_m / ftf))
+        height_m = target_floors * ftf
+
+    bounds = zone_buildable.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    inner_w = bw - 2 * MIN_BOUNDARY_SETBACK
+    inner_h = bh - 2 * MIN_BOUNDARY_SETBACK
+
+    # Klyngens strategi: 2×2 eller 2×3 grid med gap, felt i midten for gårdsrom
+    fp_per_seg = w * d
+    bta_per_seg = fp_per_seg * target_floors
+    max_segments = comp.get("max_segments", 6)
+    needed_segments = max(4, int(math.ceil(zone_bta_target / max(bta_per_seg, 1))))
+    n_segments = min(needed_segments, max_segments,
+                      int(max_fp_remaining / max(fp_per_seg, 1)))
+    n_segments = max(comp.get("min_segments", 4), n_segments) if n_segments > 0 else 0
+    if n_segments < 1:
+        return volumes, volume_counter
+
+    # Velg rader/kolonner
+    cols = 2 if n_segments <= 4 else 3
+    rows = 2 if n_segments <= 4 else int(math.ceil(n_segments / cols))
+
+    # Skaler segmentbredde/-dybde ned hvis klyngen ikke passer i tomten
+    cluster_w = cols * w + (cols - 1) * gap
+    cluster_h = rows * d + (rows - 1) * gap
+    if cluster_w > inner_w or cluster_h > inner_h:
+        # Prøv 90°-rotering først
+        if cluster_h <= inner_w and cluster_w <= inner_h:
+            angle_deg = 90.0
+            cluster_w, cluster_h = cluster_h, cluster_w
+        else:
+            # Må skalere ned w og d
+            scale_w = (inner_w - (cols - 1) * gap) / (cols * w) if cols * w > 0 else 1
+            scale_h = (inner_h - (rows - 1) * gap) / (rows * d) if rows * d > 0 else 1
+            scale = min(scale_w, scale_h, 1.0)
+            scale = max(scale, 0.6)  # ikke mindre enn 60% av opprinnelig
+            w = w * scale
+            d = d * scale
+            # Respekt min-grenser
+            w = max(w, dims["w_min"])
+            d = max(d, dims["d_min"])
+            cluster_w = cols * w + (cols - 1) * gap
+            cluster_h = rows * d + (rows - 1) * gap
+            angle_deg = 0.0
+            # Hvis selv med skalering ikke passer, reduser antall kolonner/rader
+            while (cluster_w > inner_w or cluster_h > inner_h) and (cols > 1 or rows > 1):
+                if cluster_w > inner_w and cols > 1:
+                    cols -= 1
+                elif cluster_h > inner_h and rows > 1:
+                    rows -= 1
+                else:
+                    break
+                cluster_w = cols * w + (cols - 1) * gap
+                cluster_h = rows * d + (rows - 1) * gap
+            n_segments = min(n_segments, cols * rows)
+    else:
+        angle_deg = 0.0
+
+    fp_per_seg = w * d  # oppdatert hvis skalert
+
+    # Sentrer klyngen
+    cx_c = bounds[0] + bw / 2.0
+    cy_c = bounds[1] + bh / 2.0
+    start_x = cx_c - cluster_w / 2.0 + w / 2.0
+    start_y = cy_c - cluster_h / 2.0 + d / 2.0
+
+    placed = 0
+    for r in range(rows):
+        for c in range(cols):
+            if placed >= n_segments:
+                break
+            sx = start_x + c * (w + gap)
+            sy = start_y + r * (d + gap)
+
+            poly = _make_building_polygon(sx, sy, w, d, angle_deg)
+            if poly is None:
+                continue
+            clipped = poly.intersection(zone_buildable).buffer(0)
+            min_area = max(80.0, fp_per_seg * 0.5)
+            if clipped.is_empty or clipped.area < min_area:
+                continue
+            if isinstance(clipped, MultiPolygon):
+                clipped = max(clipped.geoms, key=lambda g: g.area)
+                if clipped.area < min_area:
+                    continue
+
+            # Brannsjekk kun mot eksisterende polygoner utenfor komposisjonen.
+            too_close = False
+            for ep in existing_polys:
+                if ep is not None and clipped.distance(ep) < gap - 0.5:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+
+            volume_counter += 1
+            vol = Volume(
+                volume_id=f"V{volume_counter:02d}",
+                name=f"{zone.typology} C{placed+1}",
+                polygon=clipped,
+                typology=zone.typology,
+                floors=target_floors,
+                height_m=round(height_m, 1),
+                width_m=round(w, 1),
+                depth_m=round(d, 1),
+                angle_deg=round(angle_deg, 1),
+                cx=round(sx, 1), cy=round(sy, 1),
+                footprint_m2=round(float(clipped.area), 1),
+                zone_id=zone.zone_id,
+                program="bolig",
+            )
+            # bra_m2 er en property på Volume — beregnes automatisk
+            vol.units_estimate = int(round(dims["units_per_floor"] * vol.floors))
+            vol.oppganger = max(1, int(math.ceil(w / 25.0)))
+            volumes.append(vol)
+            placed += 1
+
+    logger.info(
+        f"Komposisjon CLUSTER for {zone.zone_id}: {len(volumes)} segmenter "
+        f"({cols}×{rows}), total BRA {sum(v.bra_m2 for v in volumes):.0f}"
+    )
+    return volumes, volume_counter
 
 
 # ─────────────────────────────────────────────────────────────────────
