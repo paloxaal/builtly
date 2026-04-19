@@ -4887,3 +4887,1832 @@ def plan_masterplan(*args, **kwargs) -> Masterplan:
     except Exception:
         pass
     return mp
+
+
+# ====================================================================
+# V4.1 PATCH — aggressiv strukturbevarende backfill for store felt.
+# Legger inn flere korte lameller langs feltkanter før motoren gir opp BRA.
+# ====================================================================
+
+_ORIG_V41_PASS3_PLACE_VOLUMES = pass3_place_volumes
+
+
+def _compact_bar_spec_v41(zone: TypologyZone) -> Tuple[float, float, int]:
+    typ = getattr(zone, "typology", "Lamell")
+    if typ == "Rekke":
+        return 16.0, 8.5, max(2, min(zone.floors_max, 3))
+    if typ == "LamellSegmentert":
+        return 24.0, 11.5, max(zone.floors_min, min(zone.floors_max, 5))
+    return 26.0, 12.5, max(zone.floors_min, min(zone.floors_max, 5))
+
+
+def _local_to_world_point_v41(x: float, y: float) -> Tuple[float, float]:
+    p = _rotate_to_world_v4(Point(float(x), float(y)))
+    return float(p.x), float(p.y)
+
+
+def _place_compact_bars_v41(zone: TypologyZone, remaining_poly, deficit_bta: float,
+                            max_floors: int, max_height_m: float, floor_to_floor_m: float,
+                            existing_polys: List[Any], volume_counter: int,
+                            max_fp_remaining: float) -> Tuple[List[Volume], int]:
+    vols: List[Volume] = []
+    if remaining_poly is None or getattr(remaining_poly, "is_empty", True):
+        return vols, volume_counter
+    if max_fp_remaining <= 50.0 or deficit_bta <= 250.0:
+        return vols, volume_counter
+
+    local_poly = _rotate_to_local_v4(remaining_poly)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return vols, volume_counter
+
+    bar_long, bar_depth, target_floors = _compact_bar_spec_v41(zone)
+    dims = TYPOLOGY_DIMS.get("Lamell", TYPOLOGY_DIMS["Lamell"])
+    ftf = float(dims.get("ftf", floor_to_floor_m) or floor_to_floor_m)
+    target_floors = int(_clamp(target_floors, 2, max_floors))
+    if target_floors * ftf > max_height_m:
+        target_floors = max(1, int(max_height_m / max(ftf, 0.1)))
+
+    bounds = local_poly.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    angle_local = 0.0 if bw >= bh else 90.0
+    spacing = 8.0 if getattr(zone, "typology", "") != "Rekke" else 6.0
+    max_bars = 10
+
+    xs = []
+    ys = []
+    x = bounds[0] + bar_long / 2.0
+    while x <= bounds[2] - bar_long / 2.0 + 0.5:
+        xs.append(x)
+        x += bar_long + spacing
+    y = bounds[1] + bar_depth / 2.0
+    while y <= bounds[3] - bar_depth / 2.0 + 0.5:
+        ys.append(y)
+        y += bar_depth + spacing
+
+    if not xs or not ys:
+        return vols, volume_counter
+
+    target_fp = min(max_fp_remaining, deficit_bta / max(target_floors, 1))
+    fp_added = 0.0
+    bars_added = 0
+
+    # Prioriter kantnære posisjoner først for ryddigere kvartalsstruktur.
+    candidates = []
+    for yy in ys:
+        for xx in xs:
+            edge_pref = min(xx - bounds[0], bounds[2] - xx, yy - bounds[1], bounds[3] - yy)
+            candidates.append((edge_pref, xx, yy))
+    candidates.sort(key=lambda item: item[0])
+
+    for _, xx, yy in candidates:
+        if bars_added >= max_bars or fp_added >= target_fp * 0.98:
+            break
+
+        local_bar = _make_building_polygon(xx, yy, bar_long, bar_depth, angle_local)
+        if local_bar is None or getattr(local_bar, "is_empty", True):
+            continue
+        world_bar = _rotate_to_world_v4(local_bar)
+        clipped = world_bar.intersection(remaining_poly).buffer(0)
+        min_area = max(110.0, bar_long * bar_depth * 0.60)
+        clipped = _largest_polygon_v4(clipped, min_area=min_area)
+        if clipped is None:
+            continue
+
+        too_close = False
+        for ep in existing_polys:
+            if ep is not None and not getattr(ep, "is_empty", True) and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.4:
+                too_close = True
+                break
+        if too_close:
+            continue
+
+        volume_counter += 1
+        cxw, cyw = _local_to_world_point_v41(xx, yy)
+        world_angle = (_CURRENT_MAJOR_AXIS_ANGLE_V4 + angle_local) % 180.0
+        vol_typ = "Rekke" if getattr(zone, "typology", "") == "Rekke" else "Lamell"
+        vol = Volume(
+            volume_id=f"V{volume_counter:02d}",
+            name=f"{zone.zone_id} backfill {bars_added+1}",
+            polygon=clipped,
+            typology=vol_typ,
+            floors=target_floors,
+            height_m=round(target_floors * ftf, 1),
+            width_m=round(bar_long, 1),
+            depth_m=round(bar_depth, 1),
+            angle_deg=round(world_angle, 1),
+            cx=round(cxw, 1),
+            cy=round(cyw, 1),
+            footprint_m2=round(float(clipped.area), 1),
+            zone_id=zone.zone_id,
+            program="bolig",
+            notes="v4.1 strukturbevarende backfill",
+        )
+        vols.append(vol)
+        existing_polys.append(clipped)
+        fp_added += float(vol.footprint_m2)
+        bars_added += 1
+    return vols, volume_counter
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V41_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    structured_zones = [z for z in zones if str(getattr(z, "zone_id", "")).startswith("QV4-")]
+    if not structured_zones or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+    zone_targets_bta = _zone_target_bta_map_v2(structured_zones, program, efficiency_ratio)
+
+    existing_ids = []
+    for v in volumes:
+        try:
+            if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                existing_ids.append(int(v.volume_id[1:]))
+        except Exception:
+            pass
+    volume_counter = max(existing_ids, default=0)
+
+    zone_order = sorted(
+        structured_zones,
+        key=lambda z: zone_targets_bta.get(z.zone_id, 0.0) - sum(v.footprint_m2 * v.floors for v in volumes if v.zone_id == z.zone_id),
+        reverse=True,
+    )
+
+    for zone in zone_order:
+        if fp_used >= max_fp_total * 0.95:
+            break
+        zone_existing = [v.polygon for v in volumes if v.zone_id == zone.zone_id and v.polygon is not None]
+        zone_bta = sum(v.footprint_m2 * v.floors for v in volumes if v.zone_id == zone.zone_id)
+        deficit = zone_targets_bta.get(zone.zone_id, 0.0) - zone_bta
+        if deficit <= 600.0:
+            continue
+        remaining = zone.polygon.buffer(0)
+        if zone_existing:
+            try:
+                remaining = remaining.difference(unary_union(zone_existing).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+            except Exception:
+                remaining = remaining.buffer(0)
+        extra, volume_counter = _place_compact_bars_v41(
+            zone=zone,
+            remaining_poly=remaining,
+            deficit_bta=deficit,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        if extra:
+            for ev in extra:
+                ev.bra_efficiency_ratio = efficiency_ratio
+            volumes.extend(extra)
+            fp_used += sum(float(v.footprint_m2 or 0.0) for v in extra)
+
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+# ====================================================================
+# V4.2 PATCH — tettere og mer fleksibel backfill rundt gårdsrom.
+# ====================================================================
+
+_ORIG_V42_PASS3_PLACE_VOLUMES = pass3_place_volumes
+
+
+def _compact_bar_spec_v42(zone: TypologyZone) -> Tuple[float, float, int]:
+    typ = getattr(zone, "typology", "Lamell")
+    if typ == "Rekke":
+        return 14.0, 8.0, max(2, min(zone.floors_max, 3))
+    if typ == "LamellSegmentert":
+        return 20.0, 10.5, max(zone.floors_min, min(zone.floors_max, 5))
+    return 20.0, 10.5, max(zone.floors_min, min(zone.floors_max, 5))
+
+
+def _place_compact_bars_v42(zone: TypologyZone, remaining_poly, deficit_bta: float,
+                            max_floors: int, max_height_m: float, floor_to_floor_m: float,
+                            existing_polys: List[Any], volume_counter: int,
+                            max_fp_remaining: float) -> Tuple[List[Volume], int]:
+    vols: List[Volume] = []
+    if remaining_poly is None or getattr(remaining_poly, "is_empty", True):
+        return vols, volume_counter
+    if max_fp_remaining <= 50.0 or deficit_bta <= 250.0:
+        return vols, volume_counter
+
+    local_poly = _rotate_to_local_v4(remaining_poly)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return vols, volume_counter
+
+    bar_long, bar_depth, target_floors = _compact_bar_spec_v42(zone)
+    dims = TYPOLOGY_DIMS.get("Lamell", TYPOLOGY_DIMS["Lamell"])
+    ftf = float(dims.get("ftf", floor_to_floor_m) or floor_to_floor_m)
+    target_floors = int(_clamp(target_floors, 2, max_floors))
+    if target_floors * ftf > max_height_m:
+        target_floors = max(1, int(max_height_m / max(ftf, 0.1)))
+
+    bounds = local_poly.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    spacing = 6.5 if getattr(zone, "typology", "") != "Rekke" else 5.5
+    max_bars = 24
+    target_fp = min(max_fp_remaining, deficit_bta / max(target_floors, 1))
+    fp_added = 0.0
+
+    orientations = [0.0, 90.0] if bw > 26 and bh > 26 else ([0.0] if bw >= bh else [90.0])
+    candidates = []
+    for angle_local in orientations:
+        long_dim = bar_long if angle_local == 0.0 else bar_depth
+        short_dim = bar_depth if angle_local == 0.0 else bar_long
+        x_starts = [bounds[0] + long_dim / 2.0, bounds[0] + long_dim / 2.0 + (long_dim + spacing) / 2.0]
+        y_starts = [bounds[1] + short_dim / 2.0, bounds[1] + short_dim / 2.0 + (short_dim + spacing) / 2.0]
+        for x0 in x_starts:
+            x = x0
+            while x <= bounds[2] - long_dim / 2.0 + 0.5:
+                for y0 in y_starts:
+                    y = y0
+                    while y <= bounds[3] - short_dim / 2.0 + 0.5:
+                        edge_pref = min(x - bounds[0], bounds[2] - x, y - bounds[1], bounds[3] - y)
+                        candidates.append((edge_pref, angle_local, x, y, long_dim, short_dim))
+                        y += short_dim + spacing
+                x += long_dim + spacing
+    candidates.sort(key=lambda item: item[0])
+
+    bars_added = 0
+    used_local = []
+    for _, angle_local, xx, yy, long_dim, short_dim in candidates:
+        if bars_added >= max_bars or fp_added >= target_fp * 0.98:
+            break
+        local_bar = _make_building_polygon(xx, yy, long_dim, short_dim, angle_local)
+        if local_bar is None or getattr(local_bar, "is_empty", True):
+            continue
+        if any(local_bar.distance(lb) < MIN_BUILDING_SPACING - 0.4 for lb in used_local):
+            continue
+        world_bar = _rotate_to_world_v4(local_bar)
+        clipped = world_bar.intersection(remaining_poly).buffer(0)
+        min_area = max(85.0, long_dim * short_dim * 0.45)
+        clipped = _largest_polygon_v4(clipped, min_area=min_area)
+        if clipped is None:
+            continue
+        too_close = False
+        for ep in existing_polys:
+            if ep is not None and not getattr(ep, "is_empty", True) and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.4:
+                too_close = True
+                break
+        if too_close:
+            continue
+        volume_counter += 1
+        cxw, cyw = _local_to_world_point_v41(xx, yy)
+        world_angle = (_CURRENT_MAJOR_AXIS_ANGLE_V4 + angle_local) % 180.0
+        vol_typ = "Rekke" if getattr(zone, "typology", "") == "Rekke" else "Lamell"
+        vol = Volume(
+            volume_id=f"V{volume_counter:02d}",
+            name=f"{zone.zone_id} backfill {bars_added+1}",
+            polygon=clipped,
+            typology=vol_typ,
+            floors=target_floors,
+            height_m=round(target_floors * ftf, 1),
+            width_m=round(long_dim, 1),
+            depth_m=round(short_dim, 1),
+            angle_deg=round(world_angle, 1),
+            cx=round(cxw, 1),
+            cy=round(cyw, 1),
+            footprint_m2=round(float(clipped.area), 1),
+            zone_id=zone.zone_id,
+            program="bolig",
+            notes="v4.2 strukturbevarende backfill",
+        )
+        vols.append(vol)
+        existing_polys.append(clipped)
+        used_local.append(local_bar)
+        fp_added += float(vol.footprint_m2 or 0.0)
+        bars_added += 1
+    return vols, volume_counter
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V42_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    structured_zones = [z for z in zones if str(getattr(z, "zone_id", "")).startswith("QV4-")]
+    if not structured_zones or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+    zone_targets_bta = _zone_target_bta_map_v2(structured_zones, program, efficiency_ratio)
+
+    existing_ids = []
+    for v in volumes:
+        try:
+            if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                existing_ids.append(int(v.volume_id[1:]))
+        except Exception:
+            pass
+    volume_counter = max(existing_ids, default=0)
+
+    zone_order = sorted(
+        structured_zones,
+        key=lambda z: zone_targets_bta.get(z.zone_id, 0.0) - sum(v.footprint_m2 * v.floors for v in volumes if v.zone_id == z.zone_id),
+        reverse=True,
+    )
+
+    for zone in zone_order:
+        if fp_used >= max_fp_total * 0.98:
+            break
+        zone_existing = [v.polygon for v in volumes if v.zone_id == zone.zone_id and v.polygon is not None]
+        zone_bta = sum(v.footprint_m2 * v.floors for v in volumes if v.zone_id == zone.zone_id)
+        deficit = zone_targets_bta.get(zone.zone_id, 0.0) - zone_bta
+        if deficit <= 350.0:
+            continue
+        remaining = zone.polygon.buffer(0)
+        if zone_existing:
+            try:
+                remaining = remaining.difference(unary_union(zone_existing).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+            except Exception:
+                remaining = remaining.buffer(0)
+        extra, volume_counter = _place_compact_bars_v42(
+            zone=zone,
+            remaining_poly=remaining,
+            deficit_bta=deficit,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        if extra:
+            for ev in extra:
+                ev.bra_efficiency_ratio = efficiency_ratio
+            volumes.extend(extra)
+            fp_used += sum(float(v.footprint_m2 or 0.0) for v in extra)
+
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+# ====================================================================
+# V4.3 PATCH — siste perimeter-fill for å bruke tilgjengelig BYA når målet
+# fortsatt er langt unna etter feltvis backfill.
+# ====================================================================
+
+_ORIG_V43_PASS3_PLACE_VOLUMES = pass3_place_volumes
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V43_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    structured_zones = [z for z in zones if str(getattr(z, "zone_id", "")).startswith("QV4-")]
+    if not structured_zones or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    target_total_bta = float(program.total_bra) / max(efficiency_ratio, 1e-6)
+    actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+
+    if actual_total_bta < target_total_bta * 0.88 and fp_used < max_fp_total * 0.95:
+        existing_ids = []
+        for v in volumes:
+            try:
+                if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                    existing_ids.append(int(v.volume_id[1:]))
+            except Exception:
+                pass
+        volume_counter = max(existing_ids, default=0)
+        remaining = buildable_polygon.buffer(0)
+        try:
+            remaining = remaining.difference(unary_union([v.polygon for v in volumes if v.polygon is not None]).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+        except Exception:
+            remaining = remaining.buffer(0)
+        if _CURRENT_DIAGONAL_ZONE_V4 is not None and not getattr(_CURRENT_DIAGONAL_ZONE_V4, "is_empty", True):
+            try:
+                remaining = remaining.difference(_CURRENT_DIAGONAL_ZONE_V4.buffer(1.0)).buffer(0)
+            except Exception:
+                pass
+        perimeter_zone = TypologyZone(
+            zone_id="QV4-PERIM",
+            typology="LamellSegmentert",
+            polygon=remaining,
+            floors_min=max(4, min(max_floors, 4)),
+            floors_max=max(4, min(max_floors, 5)),
+            target_bra=0.0,
+            rationale="v4.3 perimeter-fill",
+        )
+        extra, volume_counter = _place_compact_bars_v42(
+            zone=perimeter_zone,
+            remaining_poly=remaining,
+            deficit_bta=target_total_bta - actual_total_bta,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        if extra:
+            for ev in extra:
+                ev.bra_efficiency_ratio = efficiency_ratio
+                ev.zone_id = "QV4-PERIM"
+            volumes.extend(extra)
+
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+# ====================================================================
+# V4.4 PATCH — mikrolameller i siste perimeter-fill for å nå realistisk
+# kapasitet uten å hoppe til tårn eller brutale bygningskropper.
+# ====================================================================
+
+_ORIG_V44_PASS3_PLACE_VOLUMES = pass3_place_volumes
+
+
+def _place_microbars_v44(remaining_poly, deficit_bta: float,
+                         max_height_m: float, floor_to_floor_m: float,
+                         existing_polys: List[Any], volume_counter: int,
+                         max_fp_remaining: float) -> Tuple[List[Volume], int]:
+    vols: List[Volume] = []
+    if remaining_poly is None or getattr(remaining_poly, "is_empty", True):
+        return vols, volume_counter
+    if max_fp_remaining <= 60.0 or deficit_bta <= 250.0:
+        return vols, volume_counter
+
+    local_poly = _rotate_to_local_v4(remaining_poly)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return vols, volume_counter
+
+    bar_long = 16.0
+    bar_depth = 9.0
+    ftf = max(float(floor_to_floor_m or 3.2), 2.8)
+    floors = max(3, min(5, int(max_height_m / max(ftf, 0.1))))
+    spacing = 5.5
+    target_fp = min(max_fp_remaining, deficit_bta / max(floors, 1))
+    fp_added = 0.0
+
+    bounds = local_poly.bounds
+    candidates = []
+    for angle_local in (0.0, 90.0):
+        long_dim = bar_long if angle_local == 0.0 else bar_depth
+        short_dim = bar_depth if angle_local == 0.0 else bar_long
+        for x0 in (bounds[0] + long_dim / 2.0, bounds[0] + long_dim / 2.0 + 0.5 * (long_dim + spacing)):
+            x = x0
+            while x <= bounds[2] - long_dim / 2.0 + 0.5:
+                for y0 in (bounds[1] + short_dim / 2.0, bounds[1] + short_dim / 2.0 + 0.5 * (short_dim + spacing)):
+                    y = y0
+                    while y <= bounds[3] - short_dim / 2.0 + 0.5:
+                        edge_pref = min(x - bounds[0], bounds[2] - x, y - bounds[1], bounds[3] - y)
+                        candidates.append((edge_pref, angle_local, x, y, long_dim, short_dim))
+                        y += short_dim + spacing
+                x += long_dim + spacing
+    candidates.sort(key=lambda item: item[0])
+
+    used_local = []
+    for _, angle_local, xx, yy, long_dim, short_dim in candidates:
+        if fp_added >= target_fp * 0.98:
+            break
+        local_bar = _make_building_polygon(xx, yy, long_dim, short_dim, angle_local)
+        if local_bar is None or getattr(local_bar, "is_empty", True):
+            continue
+        if any(local_bar.distance(lb) < MIN_BUILDING_SPACING - 0.4 for lb in used_local):
+            continue
+        world_bar = _rotate_to_world_v4(local_bar)
+        clipped = world_bar.intersection(remaining_poly).buffer(0)
+        clipped = _largest_polygon_v4(clipped, min_area=55.0)
+        if clipped is None:
+            continue
+        if any(ep is not None and not getattr(ep, "is_empty", True) and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.4 for ep in existing_polys):
+            continue
+        volume_counter += 1
+        cxw, cyw = _local_to_world_point_v41(xx, yy)
+        world_angle = (_CURRENT_MAJOR_AXIS_ANGLE_V4 + angle_local) % 180.0
+        vol = Volume(
+            volume_id=f"V{volume_counter:02d}",
+            name=f"QV4 perimeter {len(vols)+1}",
+            polygon=clipped,
+            typology="Lamell",
+            floors=floors,
+            height_m=round(floors * ftf, 1),
+            width_m=round(long_dim, 1),
+            depth_m=round(short_dim, 1),
+            angle_deg=round(world_angle, 1),
+            cx=round(cxw, 1),
+            cy=round(cyw, 1),
+            footprint_m2=round(float(clipped.area), 1),
+            zone_id="QV4-PERIM",
+            program="bolig",
+            notes="v4.4 perimeter microbar",
+        )
+        vols.append(vol)
+        existing_polys.append(clipped)
+        used_local.append(local_bar)
+        fp_added += float(vol.footprint_m2 or 0.0)
+    return vols, volume_counter
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V44_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    structured_zones = [z for z in zones if str(getattr(z, "zone_id", "")).startswith("QV4-")]
+    if not structured_zones or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    target_total_bta = float(program.total_bra) / max(efficiency_ratio, 1e-6)
+    actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+
+    if actual_total_bta < target_total_bta * 0.92 and fp_used < max_fp_total * 0.95:
+        existing_ids = []
+        for v in volumes:
+            try:
+                if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                    existing_ids.append(int(v.volume_id[1:]))
+            except Exception:
+                pass
+        volume_counter = max(existing_ids, default=0)
+        remaining = buildable_polygon.buffer(0)
+        try:
+            remaining = remaining.difference(unary_union([v.polygon for v in volumes if v.polygon is not None]).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+        except Exception:
+            remaining = remaining.buffer(0)
+        if _CURRENT_DIAGONAL_ZONE_V4 is not None and not getattr(_CURRENT_DIAGONAL_ZONE_V4, "is_empty", True):
+            try:
+                remaining = remaining.difference(_CURRENT_DIAGONAL_ZONE_V4.buffer(1.0)).buffer(0)
+            except Exception:
+                pass
+        extra, volume_counter = _place_microbars_v44(
+            remaining_poly=remaining,
+            deficit_bta=target_total_bta - actual_total_bta,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        if extra:
+            for ev in extra:
+                ev.bra_efficiency_ratio = efficiency_ratio
+            volumes.extend(extra)
+
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+# ====================================================================
+# V4.5 PATCH — komponentvis microbar-fill med lokal orientering.
+# ====================================================================
+
+_ORIG_V45_PASS3_PLACE_VOLUMES = pass3_place_volumes
+
+
+def _component_axis_v45(poly) -> Tuple[float, Tuple[float, float]]:
+    c = poly.centroid
+    origin = (float(c.x), float(c.y))
+    try:
+        rect = poly.minimum_rotated_rectangle
+        coords = list(rect.exterior.coords)[:4]
+        best_len = -1.0
+        best_angle = 0.0
+        for i in range(4):
+            x1, y1 = coords[i]
+            x2, y2 = coords[(i + 1) % 4]
+            length = math.hypot(x2 - x1, y2 - y1)
+            if length > best_len:
+                best_len = length
+                best_angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        return best_angle, origin
+    except Exception:
+        return 0.0, origin
+
+
+def _place_microbars_v45(remaining_poly, deficit_bta: float,
+                         max_height_m: float, floor_to_floor_m: float,
+                         existing_polys: List[Any], volume_counter: int,
+                         max_fp_remaining: float) -> Tuple[List[Volume], int]:
+    vols: List[Volume] = []
+    if remaining_poly is None or getattr(remaining_poly, "is_empty", True):
+        return vols, volume_counter
+    if max_fp_remaining <= 60.0 or deficit_bta <= 250.0:
+        return vols, volume_counter
+
+    components = list(remaining_poly.geoms) if isinstance(remaining_poly, MultiPolygon) else [remaining_poly]
+    components = [c.buffer(0) for c in components if c is not None and not c.is_empty and c.area >= 140.0]
+    components.sort(key=lambda g: g.area, reverse=True)
+    if not components:
+        return vols, volume_counter
+
+    ftf = max(float(floor_to_floor_m or 3.2), 2.8)
+    floors = max(3, min(5, int(max_height_m / max(ftf, 0.1))))
+    bar_long = 14.0
+    bar_depth = 8.5
+    spacing = 4.5
+    target_fp = min(max_fp_remaining, deficit_bta / max(floors, 1))
+    fp_added = 0.0
+
+    for comp in components:
+        if fp_added >= target_fp * 0.98:
+            break
+        angle, origin = _component_axis_v45(comp)
+        local_comp = affinity.rotate(comp, -angle, origin=origin)
+        bounds = local_comp.bounds
+        candidates = []
+        for angle_local in (0.0, 90.0):
+            long_dim = bar_long if angle_local == 0.0 else bar_depth
+            short_dim = bar_depth if angle_local == 0.0 else bar_long
+            for x0 in (bounds[0] + long_dim / 2.0, bounds[0] + long_dim / 2.0 + 0.5 * (long_dim + spacing)):
+                x = x0
+                while x <= bounds[2] - long_dim / 2.0 + 0.5:
+                    for y0 in (bounds[1] + short_dim / 2.0, bounds[1] + short_dim / 2.0 + 0.5 * (short_dim + spacing)):
+                        y = y0
+                        while y <= bounds[3] - short_dim / 2.0 + 0.5:
+                            edge_pref = min(x - bounds[0], bounds[2] - x, y - bounds[1], bounds[3] - y)
+                            candidates.append((edge_pref, angle_local, x, y, long_dim, short_dim))
+                            y += short_dim + spacing
+                    x += long_dim + spacing
+        candidates.sort(key=lambda item: item[0])
+        used_local = []
+        for _, angle_local, xx, yy, long_dim, short_dim in candidates:
+            if fp_added >= target_fp * 0.98:
+                break
+            local_bar = _make_building_polygon(xx, yy, long_dim, short_dim, angle_local)
+            if local_bar is None or getattr(local_bar, "is_empty", True):
+                continue
+            if any(local_bar.distance(lb) < MIN_BUILDING_SPACING - 0.4 for lb in used_local):
+                continue
+            world_bar = affinity.rotate(local_bar, angle, origin=origin)
+            clipped = world_bar.intersection(comp).buffer(0)
+            clipped = _largest_polygon_v4(clipped, min_area=45.0)
+            if clipped is None:
+                continue
+            if any(ep is not None and not getattr(ep, "is_empty", True) and clipped.distance(ep) < MIN_BUILDING_SPACING - 0.4 for ep in existing_polys):
+                continue
+            volume_counter += 1
+            c = clipped.centroid
+            world_angle = (angle + angle_local) % 180.0
+            vol = Volume(
+                volume_id=f"V{volume_counter:02d}",
+                name=f"QV4 microbar {len(vols)+1}",
+                polygon=clipped,
+                typology="Lamell",
+                floors=floors,
+                height_m=round(floors * ftf, 1),
+                width_m=round(long_dim, 1),
+                depth_m=round(short_dim, 1),
+                angle_deg=round(world_angle, 1),
+                cx=round(float(c.x), 1),
+                cy=round(float(c.y), 1),
+                footprint_m2=round(float(clipped.area), 1),
+                zone_id="QV4-PERIM",
+                program="bolig",
+                notes="v4.5 perimeter microbar",
+            )
+            vols.append(vol)
+            existing_polys.append(clipped)
+            used_local.append(local_bar)
+            fp_added += float(vol.footprint_m2 or 0.0)
+    return vols, volume_counter
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V45_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    structured_zones = [z for z in zones if str(getattr(z, "zone_id", "")).startswith("QV4-")]
+    if not structured_zones or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    target_total_bta = float(program.total_bra) / max(efficiency_ratio, 1e-6)
+    actual_total_bta = sum(v.footprint_m2 * v.floors for v in volumes)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+
+    if actual_total_bta < target_total_bta * 0.95 and fp_used < max_fp_total * 0.98:
+        existing_ids = []
+        for v in volumes:
+            try:
+                if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                    existing_ids.append(int(v.volume_id[1:]))
+            except Exception:
+                pass
+        volume_counter = max(existing_ids, default=0)
+        remaining = buildable_polygon.buffer(0)
+        try:
+            remaining = remaining.difference(unary_union([v.polygon for v in volumes if v.polygon is not None]).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+        except Exception:
+            remaining = remaining.buffer(0)
+        if _CURRENT_DIAGONAL_ZONE_V4 is not None and not getattr(_CURRENT_DIAGONAL_ZONE_V4, "is_empty", True):
+            try:
+                remaining = remaining.difference(_CURRENT_DIAGONAL_ZONE_V4.buffer(1.0)).buffer(0)
+            except Exception:
+                pass
+        extra, volume_counter = _place_microbars_v45(
+            remaining_poly=remaining,
+            deficit_bta=target_total_bta - actual_total_bta,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        if extra:
+            for ev in extra:
+                ev.bra_efficiency_ratio = efficiency_ratio
+            volumes.extend(extra)
+
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+# ====================================================================
+# V5 PATCHES — delfelt som primær struktur, fasegruppe per delfelt,
+# og tydeligere feltvis arkitektur for store tomter.
+# ====================================================================
+from copy import deepcopy
+from masterplan_types import DevelopmentField
+
+_ORIG_V5_PASS2_TYPOLOGY_ZONING = pass2_typology_zoning
+_ORIG_V5_PASS3_PLACE_VOLUMES = pass3_place_volumes
+_ORIG_V5_PASS4_PHASING = pass4_phasing
+_ORIG_V5_PASS5_OUTDOOR_SYSTEM = pass5_outdoor_system
+_ORIG_V5_PLAN_MASTERPLAN = plan_masterplan
+_ORIG_V5_PASS6_VALIDATE = pass6_validate
+
+_CURRENT_DEVELOPMENT_FIELDS_V5: List[DevelopmentField] = []
+_CURRENT_FIELD_ZONE_MAP_V5: Dict[str, DevelopmentField] = {}
+_CURRENT_FIELD_DIAG_TEXT_V5: str = ""
+
+_COMPASS_TO_VEC_V5 = {
+    "N": (0.0, 1.0), "NØ": (0.707, 0.707), "Ø": (1.0, 0.0), "SØ": (0.707, -0.707),
+    "S": (0.0, -1.0), "SV": (-0.707, -0.707), "V": (-1.0, 0.0), "NV": (-0.707, 0.707),
+}
+
+
+def _rotate_vector_to_local_v5(dx: float, dy: float) -> Tuple[float, float]:
+    ang = math.radians(-float(_CURRENT_MAJOR_AXIS_ANGLE_V4 or 0.0))
+    return (
+        dx * math.cos(ang) - dy * math.sin(ang),
+        dx * math.sin(ang) + dy * math.cos(ang),
+    )
+
+
+
+def _relative_side_name_v5(poly, site_poly) -> str:
+    try:
+        sc = site_poly.centroid
+        c = poly.centroid
+        dx = float(c.x - sc.x)
+        dy = float(c.y - sc.y)
+    except Exception:
+        return "midt"
+    if abs(dx) > abs(dy) * 1.35:
+        return "øst" if dx > 0 else "vest"
+    if abs(dy) > abs(dx) * 1.35:
+        return "nord" if dy > 0 else "sør"
+    if dx >= 0 and dy >= 0:
+        return "nordøst"
+    if dx >= 0 and dy < 0:
+        return "sørøst"
+    if dx < 0 and dy >= 0:
+        return "nordvest"
+    return "sørvest"
+
+
+
+def _contextual_field_name_v5(context: str, poly, site_poly) -> str:
+    side = _relative_side_name_v5(poly, site_poly)
+    if context == "sensitive_edge":
+        return f"Småhuskant {side}"
+    if context == "urban_edge":
+        return f"Bykant {side}"
+    if context == "green_edge":
+        return f"Parkkant {side}"
+    if context == "barnehage_edge":
+        return f"Rolig {side}"
+    if context == "active_diagonal":
+        return f"Diagonalrom {side}"
+    if context == "mixed_edge":
+        return f"Koblingsfelt {side}"
+    return f"Nabolagstun {side}"
+
+
+
+def _dominant_smallhouse_compass_v5(nb_polys: List[Dict[str, Any]]) -> Optional[str]:
+    smallhouse_dist = _classify_smallhouse_proximity(nb_polys)
+    if not smallhouse_dist:
+        return None
+    best_compass, best_dist = min(smallhouse_dist.items(), key=lambda item: item[1])
+    if best_dist > 85.0:
+        return None
+    return best_compass
+
+
+
+def _dominant_urban_compass_v5(nb_polys: List[Dict[str, Any]]) -> Optional[str]:
+    if not nb_polys:
+        return None
+    scores: Dict[str, float] = {}
+    for item in nb_polys:
+        compass = str(item.get("compass", ""))
+        if not compass:
+            continue
+        dist = max(float(item.get("dist", 30.0) or 30.0), 5.0)
+        height = float(item.get("height_m", 9.0) or 9.0)
+        scores[compass] = scores.get(compass, 0.0) + max(height - 8.0, 0.0) / dist
+    if not scores:
+        return None
+    return max(scores.items(), key=lambda item: item[1])[0]
+
+
+
+def _compass_to_local_side_v5(compass: Optional[str]) -> str:
+    if not compass:
+        return "west"
+    dx, dy = _COMPASS_TO_VEC_V5.get(compass, (-1.0, 0.0))
+    lx, ly = _rotate_vector_to_local_v5(dx, dy)
+    if abs(lx) >= abs(ly):
+        return "east" if lx > 0 else "west"
+    return "north" if ly > 0 else "south"
+
+
+
+def _recommended_field_count_v5(buildable_polygon, target_bra_m2: float,
+                                 max_bya_pct: float, max_floors: int) -> int:
+    area = float(getattr(buildable_polygon, "area", 0.0) or 0.0)
+    if area <= 0:
+        return 1
+    bounds = getattr(buildable_polygon, "bounds", (0.0, 0.0, 0.0, 0.0))
+    bw = float(bounds[2] - bounds[0])
+    bh = float(bounds[3] - bounds[1])
+    aspect = max(bw, bh) / max(min(bw, bh), 1.0)
+    req_avg = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+    if area < 10000.0:
+        return 1
+    if area < 20000.0:
+        return 2
+    if area < 30000.0:
+        return 4 if (aspect >= 1.45 or req_avg >= 3.6 or area >= 25000.0) else 3
+    return 5 if (area >= 38000.0 or aspect >= 1.60 or req_avg >= 3.30 or target_bra_m2 >= 24000.0 or max_floors >= 7) else 4
+
+
+
+def _local_side_bbox_v5(bounds, side: str, frac: float):
+    xmin, ymin, xmax, ymax = bounds
+    w = xmax - xmin
+    h = ymax - ymin
+    frac = _clamp(float(frac), 0.08, 0.40)
+    if side == "west":
+        return shapely_box(xmin, ymin, xmin + frac * w, ymax)
+    if side == "east":
+        return shapely_box(xmax - frac * w, ymin, xmax, ymax)
+    if side == "south":
+        return shapely_box(xmin, ymin, xmax, ymin + frac * h)
+    return shapely_box(xmin, ymax - frac * h, xmax, ymax)
+
+
+
+def _core_bounds_after_strip_v5(bounds, side: str, frac: float):
+    xmin, ymin, xmax, ymax = bounds
+    w = xmax - xmin
+    h = ymax - ymin
+    if side == "west":
+        return (xmin + frac * w, ymin, xmax, ymax)
+    if side == "east":
+        return (xmin, ymin, xmax - frac * w, ymax)
+    if side == "south":
+        return (xmin, ymin + frac * h, xmax, ymax)
+    return (xmin, ymin, xmax, ymax - frac * h)
+
+
+
+def _field_context_defaults_v5(context: str, max_floors: int) -> Tuple[List[str], Tuple[int, int], str, str, int]:
+    if context == "sensitive_edge":
+        return (["Rekke", "LamellSegmentert"], (2, min(max_floors, 4)), "Forhage", "små trær, forhager, benker", 1)
+    if context == "urban_edge":
+        return (["HalvåpenKarré", "LamellSegmentert"], (4, min(max_floors, 6)), "Bytun", "sykkel, møteplass, aktive hjørner", 3)
+    if context == "barnehage_edge":
+        return (["Gårdsklynge", "LamellSegmentert"], (3, min(max_floors, 5)), "Barnehagetun", "lek, trær, sand, rolige soner", 1)
+    if context == "green_edge":
+        return (["LamellSegmentert", "Gårdsklynge"], (3, min(max_floors, 5)), "Parktun", "grønt lek, plantekasser, benker", 2)
+    if context == "mixed_edge":
+        return (["HalvåpenKarré", "LamellSegmentert"], (4, min(max_floors, 5)), "Koblingstun", "grønt opphold, sykkel, lek", 2)
+    return (["HalvåpenKarré", "LamellSegmentert"], (4, min(max_floors, 5)), "Nabolagstun", "trær, lek, felles opphold", 2)
+
+
+
+def _make_field_object_v5(field_id: str, poly_local, site_poly, context: str,
+                          target_weight: float, max_floors: int) -> Optional[DevelopmentField]:
+    poly_local = _largest_polygon_v4(poly_local, min_area=420.0)
+    if poly_local is None:
+        return None
+    poly_world = _rotate_to_world_v4(poly_local)
+    courtyard_local = None if context == "sensitive_edge" else _make_courtyard_polygon_v4(poly_local)
+    courtyard_world = _rotate_to_world_v4(courtyard_local) if courtyard_local is not None else None
+    typ_mix, floors_range, outdoor_name, outdoor_program, phase_hint = _field_context_defaults_v5(context, max_floors)
+    name = _contextual_field_name_v5(context, poly_world, site_poly)
+    return DevelopmentField(
+        field_id=field_id,
+        name=name,
+        polygon=poly_world,
+        context=context,  # type: ignore[arg-type]
+        side_hint=_relative_side_name_v5(poly_world, site_poly),
+        target_bra=max(0.0, target_weight),
+        target_phase_count=1,
+        typology_mix=typ_mix,
+        preferred_floors_min=floors_range[0],
+        preferred_floors_max=floors_range[1],
+        primary_outdoor_name=outdoor_name,
+        primary_outdoor_program=outdoor_program,
+        courtyard_polygon=courtyard_world,
+        phase_order_hint=phase_hint,
+        notes=f"v5 delfelt, kontekst={context}",
+    )
+
+
+
+def _make_base_fields_v5(buildable_polygon, nb_polys: List[Dict[str, Any]],
+                         program: ProgramAllocation, target_bra_m2: float,
+                         max_floors: int, max_bya_pct: float) -> Tuple[List[DevelopmentField], Any, Any]:
+    global _CURRENT_DIAGONAL_ZONE_V4, _CURRENT_DIAGONAL_LINE_V4
+
+    local_poly = _rotate_to_local_v4(buildable_polygon)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return [], None, None
+    bounds = local_poly.bounds
+    xmin, ymin, xmax, ymax = bounds
+    w = xmax - xmin
+    h = ymax - ymin
+    if w < 45.0 or h < 45.0:
+        return [], None, None
+
+    field_count = _recommended_field_count_v5(buildable_polygon, target_bra_m2, max_bya_pct, max_floors)
+    smallhouse_compass = _dominant_smallhouse_compass_v5(nb_polys)
+    urban_compass = _dominant_urban_compass_v5(nb_polys)
+    sensitive_side = _compass_to_local_side_v5(smallhouse_compass) if smallhouse_compass else "west"
+    urban_side = _compass_to_local_side_v5(urban_compass) if urban_compass else ("east" if sensitive_side != "east" else "west")
+
+    diag_line_local = LineString([
+        (xmin + 0.10 * w, ymin + 0.12 * h),
+        (xmax - 0.08 * w, ymax - 0.10 * h),
+    ])
+    diag_width = _clamp(min(w, h) * 0.085, 8.0, 14.0)
+    diag_poly_local = diag_line_local.buffer(diag_width, cap_style=2, join_style=2).intersection(local_poly).buffer(0)
+    _CURRENT_DIAGONAL_ZONE_V4 = _rotate_to_world_v4(diag_poly_local)
+    _CURRENT_DIAGONAL_LINE_V4 = _rotate_to_world_v4(diag_line_local)
+
+    fields: List[Tuple[DevelopmentField, float]] = []
+    field_specs: List[Tuple[str, Any, str, float]] = []
+
+    if field_count == 1:
+        field_specs.append(("DF1", local_poly, "mixed_edge", 1.0))
+    else:
+        strip_frac = 0.16 if field_count >= 4 else 0.14
+        use_strip = field_count >= 3
+        core_bounds = bounds
+        if use_strip:
+            strip_box = _local_side_bbox_v5(bounds, sensitive_side, strip_frac)
+            strip_poly = local_poly.intersection(strip_box).difference(diag_poly_local.buffer(0.8)).buffer(0)
+            field_specs.append(("DF1", strip_poly, "sensitive_edge", 0.62))
+            core_bounds = _core_bounds_after_strip_v5(bounds, sensitive_side, strip_frac)
+
+        cx0, cy0, cx1, cy1 = core_bounds
+        cw = cx1 - cx0
+        ch = cy1 - cy0
+        if cw <= 20 or ch <= 20:
+            field_specs.append((f"DF{len(field_specs)+1}", local_poly.difference(diag_poly_local.buffer(0.8)).buffer(0), "mixed_edge", 1.0))
+        else:
+            if field_count == 2:
+                if sensitive_side in ("south", "north"):
+                    west_box = shapely_box(cx0, cy0, cx0 + 0.48 * cw, cy1)
+                    east_box = shapely_box(cx0 + 0.48 * cw, cy0, cx1, cy1)
+                    field_specs.extend([
+                        ("DF2", local_poly.intersection(west_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "barnehage_edge" if program.barnehage_bra > 0 else "calm_inner", 0.95),
+                        ("DF3", local_poly.intersection(east_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "urban_edge", 1.15),
+                    ])
+                else:
+                    south_box = shapely_box(cx0, cy0, cx1, cy0 + 0.48 * ch)
+                    north_box = shapely_box(cx0, cy0 + 0.48 * ch, cx1, cy1)
+                    field_specs.extend([
+                        ("DF2", local_poly.intersection(south_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "barnehage_edge" if program.barnehage_bra > 0 else "calm_inner", 0.95),
+                        ("DF3", local_poly.intersection(north_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "urban_edge", 1.15),
+                    ])
+            elif field_count == 3:
+                south_box = shapely_box(cx0, cy0, cx0 + 0.55 * cw, cy0 + 0.48 * ch)
+                north_box = shapely_box(cx0, cy0 + 0.44 * ch, cx0 + 0.58 * cw, cy1)
+                east_box = shapely_box(cx0 + 0.46 * cw, cy0, cx1, cy1)
+                field_specs.extend([
+                    (f"DF{len(field_specs)+1}", local_poly.intersection(south_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "barnehage_edge" if program.barnehage_bra > 0 else "calm_inner", 0.92),
+                    (f"DF{len(field_specs)+2}", local_poly.intersection(north_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "green_edge", 1.00),
+                    (f"DF{len(field_specs)+3}", local_poly.intersection(east_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "urban_edge", 1.18),
+                ])
+            elif field_count == 4:
+                south_box = shapely_box(cx0, cy0, cx0 + 0.54 * cw, cy0 + 0.50 * ch)
+                north_box = shapely_box(cx0, cy0 + 0.46 * ch, cx0 + 0.58 * cw, cy1)
+                east_box = shapely_box(cx0 + 0.46 * cw, cy0, cx1, cy1)
+                field_specs.extend([
+                    (f"DF{len(field_specs)+1}", local_poly.intersection(south_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "barnehage_edge" if program.barnehage_bra > 0 else "calm_inner", 0.90),
+                    (f"DF{len(field_specs)+2}", local_poly.intersection(north_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "green_edge", 0.98),
+                    (f"DF{len(field_specs)+3}", local_poly.intersection(east_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "urban_edge", 1.18),
+                ])
+            else:
+                sw_box = shapely_box(cx0, cy0, cx0 + 0.50 * cw, cy0 + 0.48 * ch)
+                nw_box = shapely_box(cx0, cy0 + 0.44 * ch, cx0 + 0.50 * cw, cy1)
+                se_box = shapely_box(cx0 + 0.44 * cw, cy0, cx1, cy0 + 0.52 * ch)
+                ne_box = shapely_box(cx0 + 0.42 * cw, cy0 + 0.46 * ch, cx1, cy1)
+                field_specs.extend([
+                    (f"DF{len(field_specs)+1}", local_poly.intersection(sw_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "barnehage_edge" if program.barnehage_bra > 0 else "calm_inner", 0.88),
+                    (f"DF{len(field_specs)+2}", local_poly.intersection(nw_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "green_edge", 0.96),
+                    (f"DF{len(field_specs)+3}", local_poly.intersection(se_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "mixed_edge", 1.08),
+                    (f"DF{len(field_specs)+4}", local_poly.intersection(ne_box).difference(diag_poly_local.buffer(0.8)).buffer(0), "urban_edge", 1.18),
+                ])
+
+    for fid, poly_local, context, wt in field_specs:
+        field_obj = _make_field_object_v5(fid, poly_local, buildable_polygon, context, wt, max_floors)
+        if field_obj is not None:
+            fields.append((field_obj, wt))
+
+    if len(fields) < field_count:
+        return [], _CURRENT_DIAGONAL_ZONE_V4, _CURRENT_DIAGONAL_LINE_V4
+
+    weight_sum = sum(w for _, w in fields) or 1.0
+    out_fields: List[DevelopmentField] = []
+    total_target = float(program.total_bra or target_bra_m2 or 0.0)
+    for field_obj, wt in fields:
+        field_obj.target_bra = total_target * (wt / weight_sum)
+        out_fields.append(field_obj)
+    return out_fields, _CURRENT_DIAGONAL_ZONE_V4, _CURRENT_DIAGONAL_LINE_V4
+
+
+
+def _carve_strip_and_main_v5(field_poly, side: str, frac: float) -> Tuple[Optional[Any], Optional[Any]]:
+    local_poly = _rotate_to_local_v4(field_poly)
+    if local_poly is None or getattr(local_poly, "is_empty", True):
+        return None, None
+    bounds = local_poly.bounds
+    strip_box = _local_side_bbox_v5(bounds, side, frac)
+    strip = _largest_polygon_v4(local_poly.intersection(strip_box).buffer(0), min_area=220.0)
+    if strip is None:
+        return None, _rotate_to_world_v4(local_poly)
+    main = _largest_polygon_v4(local_poly.difference(strip.buffer(0.4)).buffer(0), min_area=320.0)
+    return (_rotate_to_world_v4(strip) if strip is not None else None,
+            _rotate_to_world_v4(main) if main is not None else None)
+
+
+
+def _field_primary_secondary_v5(field_obj: DevelopmentField) -> Tuple[str, str, float]:
+    mix = list(field_obj.typology_mix or [])
+    if not mix:
+        mix = ["HalvåpenKarré", "LamellSegmentert"]
+    primary = mix[0]
+    secondary = mix[1] if len(mix) > 1 else mix[0]
+    share = 0.72
+    if field_obj.context == "sensitive_edge":
+        primary, secondary, share = ("LamellSegmentert" if field_obj.preferred_floors_max >= 4 else "Rekke"), "Rekke", 0.58
+    elif field_obj.context == "urban_edge":
+        primary, secondary, share = "HalvåpenKarré", "LamellSegmentert", 0.74
+    elif field_obj.context == "barnehage_edge":
+        primary, secondary, share = "Gårdsklynge", "LamellSegmentert", 0.68
+    elif field_obj.context == "green_edge":
+        primary, secondary, share = "HalvåpenKarré", "Gårdsklynge", 0.70
+    elif field_obj.context == "mixed_edge":
+        primary, secondary, share = "HalvåpenKarré", "LamellSegmentert", 0.70
+    return primary, secondary, share
+
+
+
+def _make_field_zones_v5(fields: List[DevelopmentField], max_floors: int) -> List[TypologyZone]:
+    zones: List[TypologyZone] = []
+    zone_counter = 0
+    for field_obj in fields:
+        side = "east"
+        local_cent = _rotate_to_local_v4(field_obj.polygon).centroid
+        site_local_cent = _rotate_to_local_v4(_CURRENT_DIAGONAL_ZONE_V4 if _CURRENT_DIAGONAL_ZONE_V4 is not None else field_obj.polygon).centroid
+        # centroid relativt tomt-senter gir hovedside for sekundær stripe
+        try:
+            site_cent = _rotate_to_local_v4(field_obj.polygon.envelope).centroid
+            dx = local_cent.x - site_cent.x
+            dy = local_cent.y - site_cent.y
+            if abs(dx) >= abs(dy):
+                side = "east" if dx >= 0 else "west"
+            else:
+                side = "north" if dy >= 0 else "south"
+        except Exception:
+            pass
+
+        primary_typ, secondary_typ, primary_share = _field_primary_secondary_v5(field_obj)
+        strip_frac = 0.24 if field_obj.context != "sensitive_edge" else 0.38
+        secondary_poly, primary_poly = _carve_strip_and_main_v5(field_obj.polygon, side, strip_frac)
+        if primary_poly is None:
+            primary_poly = field_obj.polygon
+            secondary_poly = None
+
+        zone_counter += 1
+        z_main = TypologyZone(
+            zone_id=f"QV4-{field_obj.field_id}-A",
+            typology=primary_typ,  # type: ignore[arg-type]
+            polygon=primary_poly,
+            floors_min=max(2, field_obj.preferred_floors_min),
+            floors_max=max(field_obj.preferred_floors_min, field_obj.preferred_floors_max),
+            target_bra=field_obj.target_bra * primary_share,
+            rationale=f"v5 delfeltstruktur: {field_obj.name} hovedstruktur",
+            courtyard_polygon=field_obj.courtyard_polygon,
+            courtyard_name=field_obj.primary_outdoor_name,
+            courtyard_function="barnehage_ute" if field_obj.context == "barnehage_edge" and field_obj.courtyard_polygon is not None else "felles_bolig",
+            courtyard_program=field_obj.primary_outdoor_program,
+            field_id=field_obj.field_id,
+            field_name=field_obj.name,
+            zone_role="primary",
+            target_share_within_field=primary_share,
+        )
+        zones.append(z_main)
+        field_obj.zone_ids.append(z_main.zone_id)
+
+        if secondary_poly is not None and getattr(secondary_poly, "area", 0.0) >= 240.0:
+            zone_counter += 1
+            sec_fmin = 2 if secondary_typ == "Rekke" else max(3, field_obj.preferred_floors_min)
+            sec_fmax = min(field_obj.preferred_floors_max, 3 if secondary_typ == "Rekke" else field_obj.preferred_floors_max)
+            z_sec = TypologyZone(
+                zone_id=f"QV4-{field_obj.field_id}-B",
+                typology=secondary_typ,  # type: ignore[arg-type]
+                polygon=secondary_poly,
+                floors_min=sec_fmin,
+                floors_max=max(sec_fmin, sec_fmax),
+                target_bra=field_obj.target_bra * (1.0 - primary_share),
+                rationale=f"v5 delfeltstruktur: {field_obj.name} kant-/sekundærstruktur",
+                field_id=field_obj.field_id,
+                field_name=field_obj.name,
+                zone_role="secondary",
+                target_share_within_field=(1.0 - primary_share),
+            )
+            zones.append(z_sec)
+            field_obj.zone_ids.append(z_sec.zone_id)
+    return zones
+
+
+
+def _phase_order_overrides_v5(fields: List[DevelopmentField]) -> None:
+    # prioriter rolige/barnehagefelt tidlig, deretter småhuskant, så blandet/grønt,
+    # og urbane kanter senere når diagonal og første uterom er etablert.
+    for field_obj in fields:
+        if field_obj.context == "barnehage_edge":
+            field_obj.phase_order_hint = 1
+        elif field_obj.context == "sensitive_edge":
+            field_obj.phase_order_hint = min(field_obj.phase_order_hint, 2)
+        elif field_obj.context in ("green_edge", "calm_inner"):
+            field_obj.phase_order_hint = max(2, field_obj.phase_order_hint)
+        elif field_obj.context == "urban_edge":
+            field_obj.phase_order_hint = max(3, field_obj.phase_order_hint)
+
+
+
+def pass2_typology_zoning(
+    buildable_polygon,
+    neighbor_summary: str,
+    nb_polys: List[Dict[str, Any]],
+    program: ProgramAllocation,
+    max_floors: int,
+    max_height_m: float,
+    terrain: Optional[Dict[str, Any]] = None,
+    target_bra_m2: float = 0.0,
+    max_bya_pct: float = 35.0,
+) -> List[TypologyZone]:
+    global _CURRENT_DEVELOPMENT_FIELDS_V5, _CURRENT_FIELD_ZONE_MAP_V5, _CURRENT_FIELD_DIAG_TEXT_V5, _CURRENT_STRUCTURED_ZONE_IDS_V4
+
+    _CURRENT_DEVELOPMENT_FIELDS_V5 = []
+    _CURRENT_FIELD_ZONE_MAP_V5 = {}
+    _CURRENT_FIELD_DIAG_TEXT_V5 = ""
+
+    field_count = _recommended_field_count_v5(buildable_polygon, target_bra_m2, max_bya_pct, max_floors)
+    fallback = _ORIG_V5_PASS2_TYPOLOGY_ZONING(
+        buildable_polygon=buildable_polygon,
+        neighbor_summary=neighbor_summary,
+        nb_polys=nb_polys,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        terrain=terrain,
+        target_bra_m2=target_bra_m2,
+        max_bya_pct=max_bya_pct,
+    )
+
+    if field_count <= 1:
+        return fallback
+
+    fields, diag_zone, diag_line = _make_base_fields_v5(
+        buildable_polygon=buildable_polygon,
+        nb_polys=nb_polys,
+        program=program,
+        target_bra_m2=target_bra_m2,
+        max_floors=max_floors,
+        max_bya_pct=max_bya_pct,
+    )
+    if len(fields) < field_count:
+        return fallback
+
+    _phase_order_overrides_v5(fields)
+    zones = _make_field_zones_v5(fields, max_floors)
+    if not zones:
+        return fallback
+
+    _CURRENT_DEVELOPMENT_FIELDS_V5 = fields
+    _CURRENT_FIELD_ZONE_MAP_V5 = {z.zone_id: next((f for f in fields if f.field_id == z.field_id), None) for z in zones}
+    _CURRENT_STRUCTURED_ZONE_IDS_V4 = [z.zone_id for z in zones]
+    _CURRENT_FIELD_DIAG_TEXT_V5 = (
+        f"v5 delfelt: {len(fields)} felt, {len(zones)} understrukturer, "
+        f"diagonal={'ja' if diag_zone is not None else 'nei'}"
+    )
+    return zones
+
+
+
+def _assign_field_metadata_to_volumes_v5(volumes: List[Volume], zones: List[TypologyZone]) -> None:
+    zone_map = {z.zone_id: z for z in zones}
+    for v in volumes:
+        z = zone_map.get(getattr(v, "zone_id", None))
+        if z is None:
+            continue
+        v.field_id = z.field_id
+        v.field_name = z.field_name
+
+
+
+def _field_target_bta_map_v5(fields: List[DevelopmentField], program: ProgramAllocation, eff: float) -> Dict[str, float]:
+    total_target_bta = float(program.total_bra or 0.0) / max(eff, 1e-6)
+    total_field_target = sum(float(f.target_bra or 0.0) for f in fields) or 1.0
+    return {f.field_id: total_target_bta * (float(f.target_bra or 0.0) / total_field_target) for f in fields}
+
+
+
+def _field_fill_typology_v5(field_obj: DevelopmentField) -> str:
+    if field_obj.context == "sensitive_edge":
+        return "LamellSegmentert" if field_obj.preferred_floors_max >= 4 else "Rekke"
+    mix = list(field_obj.typology_mix or [])
+    return mix[0] if mix else "LamellSegmentert"
+
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V5_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    _assign_field_metadata_to_volumes_v5(volumes, zones)
+
+    if not _CURRENT_DEVELOPMENT_FIELDS_V5 or buildable_polygon is None or getattr(buildable_polygon, "is_empty", True):
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    field_targets_bta = _field_target_bta_map_v5(_CURRENT_DEVELOPMENT_FIELDS_V5, program, efficiency_ratio)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+    existing_ids = []
+    for v in volumes:
+        try:
+            if isinstance(v.volume_id, str) and v.volume_id.startswith("V"):
+                existing_ids.append(int(v.volume_id[1:]))
+        except Exception:
+            pass
+    volume_counter = max(existing_ids, default=0)
+
+    for field_obj in _CURRENT_DEVELOPMENT_FIELDS_V5:
+        if fp_used >= max_fp_total * 0.985:
+            break
+        field_vols = [v for v in volumes if getattr(v, "field_id", None) == field_obj.field_id and v.polygon is not None]
+        actual_bta = sum(float(v.footprint_m2 or 0.0) * float(v.floors or 0.0) for v in field_vols)
+        deficit = field_targets_bta.get(field_obj.field_id, 0.0) - actual_bta
+        if deficit <= 500.0:
+            continue
+        remaining = field_obj.polygon.buffer(0)
+        if field_vols:
+            try:
+                remaining = remaining.difference(unary_union([v.polygon for v in field_vols]).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+            except Exception:
+                remaining = remaining.buffer(0)
+        pseudo_zone = TypologyZone(
+            zone_id=f"QV4-{field_obj.field_id}-FILL",
+            typology=_field_fill_typology_v5(field_obj),  # type: ignore[arg-type]
+            polygon=field_obj.polygon,
+            floors_min=max(2, field_obj.preferred_floors_min),
+            floors_max=max(field_obj.preferred_floors_min, field_obj.preferred_floors_max),
+            target_bra=0.0,
+            rationale=f"v5 delfelt-backfill {field_obj.name}",
+            field_id=field_obj.field_id,
+            field_name=field_obj.name,
+            zone_role="field_fill",
+        )
+        extra, volume_counter = _place_compact_bars_v42(
+            zone=pseudo_zone,
+            remaining_poly=remaining,
+            deficit_bta=deficit,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        for ev in extra:
+            ev.field_id = field_obj.field_id
+            ev.field_name = field_obj.name
+            ev.bra_efficiency_ratio = efficiency_ratio
+        if extra:
+            volumes.extend(extra)
+            fp_used += sum(float(v.footprint_m2 or 0.0) for v in extra)
+
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+
+def _group_sorted_volumes_v5(volumes: List[Volume], n_groups: int) -> List[List[Volume]]:
+    if n_groups <= 1 or len(volumes) <= 1:
+        return [list(volumes)]
+    xs = [v.cx for v in volumes]
+    ys = [v.cy for v in volumes]
+    sort_key = (lambda v: v.cx) if (max(xs) - min(xs) if xs else 0.0) >= (max(ys) - min(ys) if ys else 0.0) else (lambda v: v.cy)
+    ordered = sorted(volumes, key=sort_key)
+    total_bra = sum(v.bra_m2 for v in ordered)
+    target = total_bra / max(n_groups, 1)
+    groups: List[List[Volume]] = [[]]
+    running = 0.0
+    for v in ordered:
+        if len(groups) < n_groups and groups[-1] and running + v.bra_m2 > target * 1.08:
+            groups.append([])
+            running = 0.0
+        groups[-1].append(v)
+        running += v.bra_m2
+    while len(groups) < n_groups:
+        groups.append([])
+    groups = [g for g in groups if g]
+    return groups
+
+
+
+def _phase_groups_from_fields_v5(volumes: List[Volume], phasing_config: PhasingConfig) -> List[Tuple[List[str], List[Volume], List[str], int]]:
+    field_order = {f.field_id: f.phase_order_hint for f in _CURRENT_DEVELOPMENT_FIELDS_V5}
+    field_map = {f.field_id: f for f in _CURRENT_DEVELOPMENT_FIELDS_V5}
+    groups: List[Tuple[List[str], List[Volume], List[str], int]] = []
+
+    vols_by_field: Dict[str, List[Volume]] = {}
+    for v in volumes:
+        fid = getattr(v, "field_id", None) or getattr(v, "zone_id", None) or "Uten delfelt"
+        vols_by_field.setdefault(fid, []).append(v)
+
+    # Først: del opp store delfelt bare når de klart overstiger håndterbar størrelse.
+    for fid, field_vols in vols_by_field.items():
+        field_vols = [v for v in field_vols if v.polygon is not None]
+        if not field_vols:
+            continue
+        total_bra = sum(v.bra_m2 for v in field_vols)
+        field_obj = field_map.get(fid)
+        field_name = field_obj.name if field_obj else fid
+        target_subphases = 1
+        split_threshold = max(8500.0, phasing_config.MAX_PHASE_BRA * 1.30)
+        if total_bra > split_threshold and len(field_vols) >= 5:
+            target_subphases = 2
+        subgroups = _group_sorted_volumes_v5(field_vols, target_subphases)
+        for idx, subgroup in enumerate(subgroups, start=1):
+            sg_name = field_name if len(subgroups) == 1 else f"{field_name} del {idx}"
+            groups.append(([fid], subgroup, [sg_name], field_order.get(fid, 2)))
+
+    # Så: slå sammen for små grupper med nærmeste andre gruppe hvis mulig.
+    changed = True
+    while changed:
+        changed = False
+        for i, (fids, gvols, gnames, hint) in enumerate(list(groups)):
+            gbra = sum(v.bra_m2 for v in gvols)
+            if gbra >= phasing_config.MIN_PHASE_BRA * 0.85 or len(groups) <= 1:
+                continue
+            # Finn nærmeste gruppe i rommet.
+            cx = sum(v.cx for v in gvols) / max(len(gvols), 1)
+            cy = sum(v.cy for v in gvols) / max(len(gvols), 1)
+            best_j = None
+            best_dist = float("inf")
+            for j, (_, oth_vols, _, _) in enumerate(groups):
+                if i == j or not oth_vols:
+                    continue
+                ocx = sum(v.cx for v in oth_vols) / len(oth_vols)
+                ocy = sum(v.cy for v in oth_vols) / len(oth_vols)
+                dist = math.hypot(cx - ocx, cy - ocy)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_j = j
+            if best_j is not None:
+                ofids, ovols, onames, ohint = groups[best_j]
+                groups[best_j] = (ofids + fids, ovols + gvols, onames + gnames, min(hint, ohint))
+                del groups[i]
+                changed = True
+                break
+
+    groups.sort(key=lambda item: (item[3], min(v.cy for v in item[1]) if item[1] else 0.0, min(v.cx for v in item[1]) if item[1] else 0.0))
+
+    # Hold totalen nede på 3-5 trinn for store tomter; merge de minste gruppene hvis vi overskrider dette.
+    while len(groups) > 5:
+        sizes = [sum(v.bra_m2 for v in g[1]) for g in groups]
+        i = min(range(len(groups)), key=lambda idx: sizes[idx])
+        cx = sum(v.cx for v in groups[i][1]) / max(len(groups[i][1]), 1)
+        cy = sum(v.cy for v in groups[i][1]) / max(len(groups[i][1]), 1)
+        best_j = None
+        best_dist = float("inf")
+        for j in range(len(groups)):
+            if i == j or not groups[j][1]:
+                continue
+            ocx = sum(v.cx for v in groups[j][1]) / len(groups[j][1])
+            ocy = sum(v.cy for v in groups[j][1]) / len(groups[j][1])
+            dist = math.hypot(cx - ocx, cy - ocy)
+            if dist < best_dist:
+                best_dist = dist
+                best_j = j
+        if best_j is None:
+            break
+        mfids, mvols, mnames, mhint = groups[i]
+        ofids, ovols, onames, ohint = groups[best_j]
+        groups[best_j] = (ofids + mfids, ovols + mvols, onames + mnames, min(mhint, ohint))
+        del groups[i]
+        groups.sort(key=lambda item: (item[3], min(v.cy for v in item[1]) if item[1] else 0.0, min(v.cx for v in item[1]) if item[1] else 0.0))
+
+    return groups
+
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    if not _CURRENT_DEVELOPMENT_FIELDS_V5:
+        return _ORIG_V5_PASS4_PHASING(volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon)
+
+    phase_groups = _phase_groups_from_fields_v5(volumes, phasing_config)
+    phases: List[BuildingPhase] = []
+    for idx, (field_ids, cluster_volumes, field_names, _) in enumerate(phase_groups, start=1):
+        if not cluster_volumes:
+            continue
+        phase_bra = sum(v.bra_m2 for v in cluster_volumes)
+        phase_units = sum(v.units_estimate for v in cluster_volumes)
+        programs_in_phase: List[ProgramKind] = []
+        for v in cluster_volumes:
+            if v.program not in programs_in_phase:
+                programs_in_phase.append(v.program)
+            if v.ground_floor_program and v.ground_floor_program not in programs_in_phase:
+                programs_in_phase.append(v.ground_floor_program)
+        label = f"Trinn {idx} — {' + '.join(field_names)}"
+        phase = BuildingPhase(
+            phase_number=idx,
+            label=label,
+            volume_ids=[v.volume_id for v in cluster_volumes],
+            target_bra=phase_bra,
+            actual_bra=phase_bra,
+            programs_included=programs_in_phase,
+            units_estimate=phase_units,
+            field_ids=list(dict.fromkeys(field_ids)),
+            field_names=list(dict.fromkeys(field_names)),
+        )
+        for v in cluster_volumes:
+            v.assigned_phase = idx
+        phase_union = unary_union([v.polygon for v in cluster_volumes if v.polygon is not None])
+        phase.construction_barrier_zone = phase_union.buffer(15.0) if phase_union is not None else None
+        if idx > 1:
+            phase.depends_on_phases = [idx - 1]
+        phases.append(phase)
+
+    parking_phases = _generate_parking_phases(
+        phases, volumes, buildable_polygon, phasing_config, program,
+    )
+    for bphase in phases:
+        bphase.parking_served_by = [
+            pp.phase_number for pp in parking_phases
+            if bphase.phase_number in pp.serves_building_phases
+        ]
+        if not bphase.parking_served_by and parking_phases:
+            bphase.parking_served_by = [parking_phases[0].phase_number]
+    return phases, parking_phases
+
+
+
+def pass5_outdoor_system(buildable_polygon, volumes: List[Volume],
+                         building_phases: List[BuildingPhase],
+                         program: ProgramAllocation, site_inputs: Dict[str, Any],
+                         typology_zones: Optional[List[Any]] = None) -> OutdoorSystem:
+    system = _ORIG_V5_PASS5_OUTDOOR_SYSTEM(
+        buildable_polygon=buildable_polygon,
+        volumes=volumes,
+        building_phases=building_phases,
+        program=program,
+        site_inputs=site_inputs,
+        typology_zones=typology_zones,
+    )
+    if not typology_zones or not _CURRENT_DEVELOPMENT_FIELDS_V5:
+        return system
+
+    zone_lookup = {z.zone_id: z for z in typology_zones}
+    field_phase_map = {
+        field_obj.field_id: [p.phase_number for p in building_phases if field_obj.field_id in (p.field_ids or [])]
+        for field_obj in _CURRENT_DEVELOPMENT_FIELDS_V5
+    }
+    for oz in system.zones:
+        zid = str(getattr(oz, "zone_id", ""))
+        if zid.startswith("OD-court-"):
+            source_zone_id = zid.replace("OD-court-", "", 1)
+            zsrc = zone_lookup.get(source_zone_id)
+            if zsrc is not None and getattr(zsrc, "field_id", None):
+                oz.serves_building_phases = field_phase_map.get(zsrc.field_id, [])
+                if getattr(zsrc, "courtyard_name", ""):
+                    if zsrc.courtyard_name not in oz.notes:
+                        oz.notes = f"{zsrc.courtyard_name}. {oz.notes}".strip()
+        elif getattr(oz, "kind", None) == "diagonal":
+            oz.serves_building_phases = [p.phase_number for p in building_phases]
+
+    for phase in building_phases:
+        phase_zones = [
+            z for z in system.zones
+            if phase.phase_number in (z.serves_building_phases or []) and z.is_felles and z.on_ground
+        ]
+        phase.standalone_outdoor_zone_ids = [z.zone_id for z in phase_zones]
+        phase.standalone_outdoor_m2 = sum(float(z.area_m2 or 0.0) for z in phase_zones)
+        phase.standalone_outdoor_has_sun = True
+    return system
+
+
+
+def pass6_validate(masterplan: Masterplan, max_bya_pct: float,
+                   max_floors: int, max_height_m: float) -> Masterplan:
+    masterplan = _ORIG_V5_PASS6_VALIDATE(masterplan, max_bya_pct, max_floors, max_height_m)
+    if masterplan.metrics is not None:
+        masterplan.metrics.field_count = len(getattr(masterplan, "development_fields", []) or _CURRENT_DEVELOPMENT_FIELDS_V5)
+        # Poeng for fasekoherens: én fase per delfelt er best; sammenslåtte delfelt litt lavere.
+        coherence_scores = []
+        for p in masterplan.building_phases:
+            n_fields = len(getattr(p, "field_ids", []) or [])
+            coherence_scores.append(100.0 if n_fields <= 1 else max(55.0, 100.0 - (n_fields - 1) * 20.0))
+        masterplan.metrics.field_balance_score = sum(coherence_scores) / len(coherence_scores) if coherence_scores else 0.0
+        masterplan.metrics.overall_score = min(
+            100.0,
+            float(masterplan.metrics.overall_score or 0.0) * 0.90 + masterplan.metrics.field_balance_score * 0.10,
+        )
+    return masterplan
+
+
+
+def plan_masterplan(*args, **kwargs) -> Masterplan:
+    mp = _ORIG_V5_PLAN_MASTERPLAN(*args, **kwargs)
+    try:
+        mp.development_fields = deepcopy(_CURRENT_DEVELOPMENT_FIELDS_V5)
+        for f in mp.development_fields:
+            f.zone_ids = [z.zone_id for z in mp.typology_zones if getattr(z, "field_id", None) == f.field_id]
+        if mp.metrics is not None:
+            mp.metrics.field_count = len(mp.development_fields)
+        if isinstance(getattr(mp, "diag_info", None), dict):
+            phase_desc = ", ".join(
+                f"T{p.phase_number}:{'/'.join(p.field_names or p.field_ids or ['?'])} {p.actual_bra:.0f} m²"
+                for p in mp.building_phases
+            )
+            mp.diag_info["v5"] = (
+                f"{_CURRENT_FIELD_DIAG_TEXT_V5}; "
+                f"byggetrinn={len(mp.building_phases)}; {phase_desc}"
+            )
+        mp.source = (getattr(mp, "source", "Builtly Masterplan") + " + v5 delfelt/phasing").strip()
+    except Exception:
+        pass
+    return mp
+
+# --- v5.1 hotfix: tilordne perimeter-/backfill-volumer til nærmeste delfelt ---
+
+def _nearest_field_for_volume_v5(volume: Volume, fields: List[DevelopmentField]) -> Optional[DevelopmentField]:
+    if not fields:
+        return None
+    vpoly = getattr(volume, 'polygon', None)
+    vc = None
+    try:
+        vc = vpoly.centroid if vpoly is not None else Point(float(volume.cx), float(volume.cy))
+    except Exception:
+        vc = Point(float(getattr(volume, 'cx', 0.0)), float(getattr(volume, 'cy', 0.0)))
+
+    best_field = None
+    best_tuple = None
+    for f in fields:
+        fpoly = getattr(f, 'polygon', None)
+        if fpoly is None or getattr(fpoly, 'is_empty', True):
+            continue
+        inter_area = 0.0
+        if vpoly is not None:
+            try:
+                inter_area = float(vpoly.intersection(fpoly).area)
+            except Exception:
+                inter_area = 0.0
+        try:
+            dist = float(vc.distance(fpoly))
+        except Exception:
+            dist = 1e9
+        # Mest overlapp først, deretter nærmeste avstand, deretter størst felt som tie-break.
+        candidate = (-inter_area, dist, -float(getattr(fpoly, 'area', 0.0) or 0.0))
+        if best_tuple is None or candidate < best_tuple:
+            best_tuple = candidate
+            best_field = f
+    return best_field
+
+
+def _assign_field_metadata_to_volumes_v5(volumes: List[Volume], zones: List[TypologyZone]) -> None:
+    zone_map = {z.zone_id: z for z in zones}
+    for v in volumes:
+        z = zone_map.get(getattr(v, 'zone_id', None))
+        if z is not None:
+            v.field_id = getattr(z, 'field_id', None) or getattr(v, 'field_id', None)
+            v.field_name = getattr(z, 'field_name', '') or getattr(v, 'field_name', '')
+        if getattr(v, 'field_id', None):
+            continue
+        nearest = _nearest_field_for_volume_v5(v, _CURRENT_DEVELOPMENT_FIELDS_V5)
+        if nearest is not None:
+            v.field_id = nearest.field_id
+            v.field_name = nearest.name
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V5_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    _assign_field_metadata_to_volumes_v5(volumes, zones)
+
+    if not _CURRENT_DEVELOPMENT_FIELDS_V5 or buildable_polygon is None or getattr(buildable_polygon, 'is_empty', True):
+        return volumes
+
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    field_targets_bta = _field_target_bta_map_v5(_CURRENT_DEVELOPMENT_FIELDS_V5, program, efficiency_ratio)
+    max_fp_total = float(buildable_polygon.area) * (max_bya_pct / 100.0)
+    fp_used = sum(float(v.footprint_m2 or 0.0) for v in volumes)
+    existing_ids = []
+    for v in volumes:
+        try:
+            if isinstance(v.volume_id, str) and v.volume_id.startswith('V'):
+                existing_ids.append(int(v.volume_id[1:]))
+        except Exception:
+            pass
+    volume_counter = max(existing_ids, default=0)
+
+    for field_obj in _CURRENT_DEVELOPMENT_FIELDS_V5:
+        if fp_used >= max_fp_total * 0.985:
+            break
+        field_vols = [v for v in volumes if getattr(v, 'field_id', None) == field_obj.field_id and v.polygon is not None]
+        actual_bta = sum(float(v.footprint_m2 or 0.0) * float(v.floors or 0.0) for v in field_vols)
+        deficit = field_targets_bta.get(field_obj.field_id, 0.0) - actual_bta
+        if deficit <= 500.0:
+            continue
+        remaining = field_obj.polygon.buffer(0)
+        if field_vols:
+            try:
+                remaining = remaining.difference(unary_union([v.polygon for v in field_vols]).buffer(MIN_BUILDING_SPACING / 2.0)).buffer(0)
+            except Exception:
+                remaining = remaining.buffer(0)
+        pseudo_zone = TypologyZone(
+            zone_id=f'QV4-{field_obj.field_id}-FILL',
+            typology=_field_fill_typology_v5(field_obj),  # type: ignore[arg-type]
+            polygon=field_obj.polygon,
+            floors_min=max(2, field_obj.preferred_floors_min),
+            floors_max=max(field_obj.preferred_floors_min, field_obj.preferred_floors_max),
+            target_bra=0.0,
+            rationale=f'v5 delfelt-backfill {field_obj.name}',
+            field_id=field_obj.field_id,
+            field_name=field_obj.name,
+            zone_role='field_fill',
+        )
+        extra, volume_counter = _place_compact_bars_v42(
+            zone=pseudo_zone,
+            remaining_poly=remaining,
+            deficit_bta=deficit,
+            max_floors=max_floors,
+            max_height_m=max_height_m,
+            floor_to_floor_m=floor_to_floor_m,
+            existing_polys=[v.polygon for v in volumes if v.polygon is not None],
+            volume_counter=volume_counter,
+            max_fp_remaining=max_fp_total - fp_used,
+        )
+        for ev in extra:
+            ev.field_id = field_obj.field_id
+            ev.field_name = field_obj.name
+            ev.bra_efficiency_ratio = efficiency_ratio
+        if extra:
+            volumes.extend(extra)
+            fp_used += sum(float(v.footprint_m2 or 0.0) for v in extra)
+
+    _assign_field_metadata_to_volumes_v5(volumes, zones)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes

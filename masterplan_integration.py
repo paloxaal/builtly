@@ -1228,3 +1228,89 @@ def masterplan_to_option_results(
             except Exception:
                 pass
     return results
+
+# =====================================================================
+# V5 PATCHES — delfeltmetadata tilbake til UI/rapport/3D-scene.
+# =====================================================================
+
+_ORIG_V5_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+
+
+def _development_fields_payload_v5(masterplan: Masterplan) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for f in getattr(masterplan, 'development_fields', []) or []:
+        try:
+            payload.append({
+                'field_id': getattr(f, 'field_id', ''),
+                'name': getattr(f, 'name', ''),
+                'context': getattr(f, 'context', ''),
+                'side_hint': getattr(f, 'side_hint', ''),
+                'target_bra': float(getattr(f, 'target_bra', 0.0) or 0.0),
+                'target_phase_count': int(getattr(f, 'target_phase_count', 1) or 1),
+                'polygon_coords': _polygon_to_coords_groups(getattr(f, 'polygon', None)),
+                'courtyard_coords': _polygon_to_coords_groups(getattr(f, 'courtyard_polygon', None)),
+                'zone_ids': list(getattr(f, 'zone_ids', []) or []),
+                'primary_outdoor_name': getattr(f, 'primary_outdoor_name', ''),
+                'primary_outdoor_program': getattr(f, 'primary_outdoor_program', ''),
+                'notes': getattr(f, 'notes', ''),
+            })
+        except Exception:
+            continue
+    return payload
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    results = _ORIG_V5_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    field_payload = _development_fields_payload_v5(masterplan)
+    field_name_map = {f.get('field_id'): f.get('name') for f in field_payload}
+
+    for res in results:
+        geom = getattr(res, 'geometry', {}) or {}
+        is_total = bool(geom.get('is_total_plan') or getattr(res, 'typology', '') == 'Masterplan')
+        notes = list(getattr(res, 'notes', []) or [])
+
+        if is_total:
+            geom['development_fields'] = field_payload
+            geom['development_field_count'] = len(field_payload)
+            if field_payload:
+                field_names = [f.get('name', '') for f in field_payload if f.get('name')]
+                note = f"Delfelt v5: {len(field_payload)} felt — " + ", ".join(field_names)
+                if note not in notes:
+                    notes.append(note)
+        else:
+            phase_num = geom.get('phase_number')
+            phase = masterplan.phase_by_number(int(phase_num)) if phase_num is not None else None
+            if phase is not None:
+                field_ids = list(getattr(phase, 'field_ids', []) or [])
+                field_names = list(getattr(phase, 'field_names', []) or [])
+                if not field_names:
+                    field_names = [field_name_map.get(fid, fid) for fid in field_ids if fid]
+                geom['phase_field_ids'] = field_ids
+                geom['phase_field_names'] = field_names
+                geom['phase_field_count'] = len(field_names)
+                geom['phase_is_field_coherent'] = len(field_names) <= 1
+                if field_names:
+                    note = 'Delfelt: ' + ' + '.join(field_names)
+                    if note not in notes:
+                        notes.append(note)
+                try:
+                    if getattr(phase, 'label', ''):
+                        setattr(res, 'name', phase.label)
+                except Exception:
+                    pass
+
+        try:
+            setattr(res, 'geometry', geom)
+        except Exception:
+            pass
+        try:
+            setattr(res, 'notes', notes)
+        except Exception:
+            pass
+
+    return results

@@ -37,7 +37,8 @@ except Exception:
 # ─────────────────────────────────────────────────────────────────────
 
 ProgramKind = Literal["bolig", "barnehage", "naering", "service", "felleshus"]
-TypologyKind = Literal["Lamell", "Punkthus", "Karré", "Rekke", "Tun", "Tårn", "Podium + Tårn"]
+TypologyKind = Literal["Lamell", "Punkthus", "Karré", "Rekke", "Tun", "Tårn", "Podium + Tårn", "LamellSegmentert", "HalvåpenKarré", "Gårdsklynge"]
+FieldContextKind = Literal["sensitive_edge", "urban_edge", "green_edge", "calm_inner", "active_diagonal", "barnehage_edge", "mixed_edge"]
 
 
 @dataclass
@@ -101,6 +102,36 @@ class TypologyZone:
     courtyard_name: str = ""                     # "Hovedgård", "Barnehagegård", "Lekeplass"
     courtyard_function: str = ""                 # "felles_bolig" | "barnehage_ute" | "lek_gront"
     courtyard_program: str = ""                  # f.eks. "trær, felles grill, blomster"
+    field_id: Optional[str] = None
+    field_name: str = ""
+    zone_role: str = ""
+    target_share_within_field: float = 0.0
+
+
+@dataclass
+class DevelopmentField:
+    """Et overordnet delfelt som organiserer flere bygningsstrukturer.
+
+    Delfelt er et nivå OVER typologisonene. På store tomter skal motoren først
+    tegne 2-5 tydelige delfelt basert på kontekst, og deretter legge 1-3
+    bygningsstrukturer inne i hvert delfelt.
+    """
+    field_id: str
+    name: str
+    polygon: Any
+    context: FieldContextKind = "calm_inner"
+    side_hint: str = ""
+    target_bra: float = 0.0
+    target_phase_count: int = 1
+    typology_mix: List[str] = field(default_factory=list)
+    preferred_floors_min: int = 3
+    preferred_floors_max: int = 5
+    primary_outdoor_name: str = ""
+    primary_outdoor_program: str = ""
+    courtyard_polygon: Optional[Any] = None
+    zone_ids: List[str] = field(default_factory=list)
+    phase_order_hint: int = 0
+    notes: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -184,6 +215,8 @@ class Volume:
     # Metadata for fasering
     assigned_phase: Optional[int] = None     # hvilken byggefase volumet hører til
     zone_id: Optional[str] = None            # hvilken typologisone
+    field_id: Optional[str] = None           # hvilket delfelt volumet hører til
+    field_name: str = ""
 
     notes: str = ""
 
@@ -253,6 +286,8 @@ class BuildingPhase:
     actual_bra: float = 0.0
     programs_included: List[ProgramKind] = field(default_factory=list)
     units_estimate: int = 0
+    field_ids: List[str] = field(default_factory=list)
+    field_names: List[str] = field(default_factory=list)
 
     # Adkomst og drift
     oppganger: List[Entrance] = field(default_factory=list)
@@ -387,6 +422,8 @@ class MasterplanMetrics:
     max_phase_bra: float = 0.0
     standalone_habitability_score: float = 0.0  # 0-100: andel av faser som er standalone OK
     target_fit_pct: float = 0.0
+    field_count: int = 0
+    field_balance_score: float = 0.0
     overall_score: float = 0.0
 
 
@@ -402,6 +439,7 @@ class Masterplan:
     building_phases: List[BuildingPhase]
     parking_phases: List[ParkingPhase]
 
+    development_fields: List[DevelopmentField] = field(default_factory=list)
     metrics: MasterplanMetrics = field(default_factory=MasterplanMetrics)
 
     phasing_config: PhasingConfig = field(default_factory=PhasingConfig)
@@ -433,6 +471,15 @@ class Masterplan:
             if p.phase_number == n:
                 return p
         return None
+
+    def field_by_id(self, field_id: str) -> Optional[DevelopmentField]:
+        for f in self.development_fields:
+            if f.field_id == field_id:
+                return f
+        return None
+
+    def phases_for_field(self, field_id: str) -> List[BuildingPhase]:
+        return [p for p in self.building_phases if field_id in (p.field_ids or [])]
 
     def volumes_in_phase(self, phase_number: int) -> List[Volume]:
         phase = self.phase_by_number(phase_number)
@@ -468,6 +515,8 @@ class Masterplan:
                 "typology": v.typology,
                 "program": v.program,
                 "zone_id": v.zone_id,
+                "field_id": v.field_id,
+                "field_name": v.field_name,
             })
         return out
 
@@ -495,6 +544,7 @@ class Masterplan:
             "parking_phases": self.parking_phases,
             "outdoor_system": self.outdoor_system,
             "typology_zones": self.typology_zones,
+            "development_fields": self.development_fields,
             "program": self.program,
             "metrics": asdict(self.metrics) if self.metrics else {},
             "warnings": self.warnings,
@@ -533,6 +583,13 @@ def masterplan_to_json(mp: Masterplan) -> Dict[str, Any]:
     def _zone(z: TypologyZone) -> Dict[str, Any]:
         d = asdict(z)
         d["polygon"] = _geom_to_wkt(z.polygon)
+        d["courtyard_polygon"] = _geom_to_wkt(z.courtyard_polygon)
+        return d
+
+    def _field_obj(f: DevelopmentField) -> Dict[str, Any]:
+        d = asdict(f)
+        d["polygon"] = _geom_to_wkt(f.polygon)
+        d["courtyard_polygon"] = _geom_to_wkt(f.courtyard_polygon)
         return d
 
     def _out(o: OutdoorZone) -> Dict[str, Any]:
@@ -564,6 +621,7 @@ def masterplan_to_json(mp: Masterplan) -> Dict[str, Any]:
         "buildable_polygon": _geom_to_wkt(mp.buildable_polygon),
         "program": asdict(mp.program),
         "typology_zones": [_zone(z) for z in mp.typology_zones],
+        "development_fields": [_field_obj(f) for f in mp.development_fields],
         "volumes": [_vol(v) for v in mp.volumes],
         "outdoor_system": {
             "zones": [_out(z) for z in mp.outdoor_system.zones],
