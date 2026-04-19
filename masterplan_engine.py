@@ -4126,3 +4126,348 @@ def pass6_validate(masterplan: Masterplan, max_bya_pct: float,
             seen.add(w)
     masterplan.warnings = deduped
     return masterplan
+
+
+# ====================================================================
+# V3 PATCHES — Tyholt / store tomter: kvartalsgrep, delt uterom-kreditt
+# og bedre tetthetsstyring i Pass 2.
+# ====================================================================
+
+_ORIG_V2_PLAN_MASTERPLAN = plan_masterplan
+_ORIG_V2_PASS2_TYPOLOGY_ZONING = pass2_typology_zoning
+_ORIG_V2_PASS5_OUTDOOR_SYSTEM = pass5_outdoor_system
+_ORIG_V2_PASS4_PHASING = pass4_phasing
+_CURRENT_PASS2_EFFICIENCY_RATIO_V3 = 0.85
+
+
+def _set_pass2_efficiency_ratio_v3(site_inputs: Optional[Dict[str, Any]] = None) -> None:
+    global _CURRENT_PASS2_EFFICIENCY_RATIO_V3
+    _CURRENT_PASS2_EFFICIENCY_RATIO_V3 = _get_efficiency_ratio_v2(site_inputs or {})
+
+
+def _required_avg_floors_v3(target_bra_m2: float, buildable_polygon, max_bya_pct: float) -> float:
+    if buildable_polygon is None or buildable_polygon.is_empty or target_bra_m2 <= 0:
+        return 0.0
+    buildable_area = float(buildable_polygon.area)
+    max_fp = buildable_area * (max_bya_pct / 100.0)
+    eff = max(_CURRENT_PASS2_EFFICIENCY_RATIO_V3, 1e-6)
+    return target_bra_m2 / max(max_fp * eff, 1.0)
+
+
+def _is_large_urban_masterplan_v3(buildable_polygon, program: ProgramAllocation,
+                                  target_bra_m2: float, max_bya_pct: float) -> bool:
+    if buildable_polygon is None or buildable_polygon.is_empty:
+        return False
+    buildable_area = float(buildable_polygon.area)
+    req_avg = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+    return buildable_area >= 15000.0 and program.total_bra >= 12000.0 and req_avg >= 2.6
+
+
+def _sort_zones_along_primary_axis_v3(zones: List[TypologyZone], buildable_polygon) -> List[TypologyZone]:
+    if not zones:
+        return []
+    bounds = buildable_polygon.bounds
+    bw = bounds[2] - bounds[0]
+    bh = bounds[3] - bounds[1]
+    if bh >= bw:
+        return sorted(zones, key=lambda z: z.polygon.centroid.y if z.polygon else 0.0, reverse=True)
+    return sorted(zones, key=lambda z: z.polygon.centroid.x if z.polygon else 0.0)
+
+
+def _promote_zone_typology_v3(zone: TypologyZone, share: float, max_floors: int,
+                              req_avg_floors: float) -> None:
+    promoted = False
+    if zone.typology in ("Rekke", "Tun") and share >= 0.12:
+        zone.typology = "LamellSegmentert" if share < 0.28 else "HalvåpenKarré"
+        promoted = True
+    elif zone.typology == "Lamell" and share >= 0.18:
+        zone.typology = "LamellSegmentert"
+        promoted = True
+    elif zone.typology == "Karré":
+        zone.typology = "HalvåpenKarré"
+        promoted = True
+
+    if promoted:
+        min_floor_target = 4 if req_avg_floors >= 3.2 else 3
+        zone.floors_min = max(zone.floors_min, min_floor_target)
+        zone.floors_max = max(zone.floors_max, min(max_floors, 5))
+        zone.rationale = (zone.rationale + " | v3: promotert til urban kvartalstypologi for stor tomt og høyt BRA-mål").strip()
+
+
+def _auto_courtyard_polygon_v3(zone: TypologyZone):
+    if zone.polygon is None or zone.polygon.is_empty:
+        return None
+    if zone.courtyard_polygon is not None and not zone.courtyard_polygon.is_empty:
+        return zone.courtyard_polygon
+
+    poly = zone.polygon.buffer(0)
+    bounds = poly.bounds
+    w = bounds[2] - bounds[0]
+    h = bounds[3] - bounds[1]
+    if min(w, h) < 36.0 or float(poly.area) < 2200.0:
+        return None
+
+    inset_x = max(12.0, min(w * 0.18, w / 3.0))
+    inset_y = max(12.0, min(h * 0.18, h / 3.0))
+    if w - 2 * inset_x < 15.0 or h - 2 * inset_y < 15.0:
+        return None
+
+    raw = shapely_box(bounds[0] + inset_x, bounds[1] + inset_y, bounds[2] - inset_x, bounds[3] - inset_y)
+    court = raw.intersection(poly).buffer(0)
+    if court.is_empty or float(court.area) < 225.0:
+        return None
+    if isinstance(court, MultiPolygon):
+        court = max(court.geoms, key=lambda g: g.area)
+    return court
+
+
+def _assign_quarter_identity_v3(ordered_zones: List[TypologyZone], program: ProgramAllocation) -> None:
+    total = len(ordered_zones)
+    if total == 0:
+        return
+    for idx, zone in enumerate(ordered_zones):
+        if zone.courtyard_polygon is None or zone.courtyard_polygon.is_empty:
+            continue
+        if program.barnehage_bra > 0 and idx == total - 1:
+            zone.courtyard_name = zone.courtyard_name or "Barnehagegården"
+            zone.courtyard_function = zone.courtyard_function or "barnehage_ute"
+            zone.courtyard_program = zone.courtyard_program or "lek, trær, sandkasse"
+            zone.floors_max = min(zone.floors_max, 4)
+        elif idx == 0:
+            zone.courtyard_name = zone.courtyard_name or "Nordgården"
+            zone.courtyard_function = zone.courtyard_function or "plantekasser"
+            zone.courtyard_program = zone.courtyard_program or "plantekasser, trær, benker"
+        elif idx == 1:
+            zone.courtyard_name = zone.courtyard_name or "Hovedgården"
+            zone.courtyard_function = zone.courtyard_function or "felles_bolig"
+            zone.courtyard_program = zone.courtyard_program or "trær, felles grill, blomster"
+        else:
+            zone.courtyard_name = zone.courtyard_name or "Lekegården"
+            zone.courtyard_function = zone.courtyard_function or "lek_gront"
+            zone.courtyard_program = zone.courtyard_program or "lek, grønt, naturlek"
+
+
+def pass2_typology_zoning(
+    buildable_polygon,
+    neighbor_summary: str,
+    nb_polys: List[Dict[str, Any]],
+    program: ProgramAllocation,
+    max_floors: int,
+    max_height_m: float,
+    terrain: Optional[Dict[str, Any]] = None,
+    target_bra_m2: float = 0.0,
+    max_bya_pct: float = 35.0,
+) -> List[TypologyZone]:
+    zones = _ORIG_V2_PASS2_TYPOLOGY_ZONING(
+        buildable_polygon=buildable_polygon,
+        neighbor_summary=neighbor_summary,
+        nb_polys=nb_polys,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        terrain=terrain,
+        target_bra_m2=target_bra_m2,
+        max_bya_pct=max_bya_pct,
+    )
+    if not zones:
+        return zones
+
+    if not _is_large_urban_masterplan_v3(buildable_polygon, program, target_bra_m2, max_bya_pct):
+        return zones
+
+    req_avg_floors = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+    total_program = max(program.total_bra, 1.0)
+    multi_zone = len(zones) >= 2
+
+    for zone in zones:
+        share = float(zone.target_bra or 0.0) / total_program
+        if multi_zone:
+            _promote_zone_typology_v3(zone, share, max_floors, req_avg_floors)
+        else:
+            # Én stor fallback-sone må forbli kapasitetssterk; ikke gjør hele tomta til ett gårdsrom.
+            if zone.typology in ("Rekke", "Tun"):
+                zone.typology = "Lamell"
+                zone.rationale = (zone.rationale + " | v3: promotert til kapasitetssterk hovedtypologi i single-zone fallback").strip()
+            zone.floors_min = max(zone.floors_min, 4 if req_avg_floors >= 3.2 else 3)
+            zone.floors_max = max(zone.floors_max, min(max_floors, 5))
+
+        if multi_zone and zone.typology in ("LamellSegmentert", "HalvåpenKarré", "Gårdsklynge"):
+            zone.courtyard_polygon = _auto_courtyard_polygon_v3(zone) or zone.courtyard_polygon
+
+    if multi_zone:
+        ordered = _sort_zones_along_primary_axis_v3(zones, buildable_polygon)
+        _assign_quarter_identity_v3(ordered, program)
+
+        large_first = sorted(ordered, key=lambda z: float(z.polygon.area) if z.polygon else 0.0, reverse=True)
+        for zone in large_first[:2]:
+            if zone.courtyard_polygon is None or zone.courtyard_polygon.is_empty:
+                zone.courtyard_polygon = _auto_courtyard_polygon_v3(zone)
+                if zone.courtyard_polygon is not None and zone.typology == "Lamell":
+                    zone.typology = "LamellSegmentert"
+                    zone.floors_min = max(zone.floors_min, 4 if req_avg_floors >= 3.2 else 3)
+                    zone.floors_max = max(zone.floors_max, min(max_floors, 5))
+
+    return zones
+
+
+def _evaluate_phase_standalone(phase: BuildingPhase, all_volumes: List[Volume],
+                               all_phases: List[BuildingPhase],
+                               outdoor_system: OutdoorSystem,
+                               parking_phases: List[ParkingPhase]) -> Tuple[float, List[str]]:
+    score = 0.0
+    issues = []
+    phase_volumes = [v for v in all_volumes if v.volume_id in phase.volume_ids]
+
+    total_oppganger = sum(v.oppganger for v in phase_volumes)
+    if total_oppganger >= len(phase_volumes):
+        score += 30
+    else:
+        score += 15
+        issues.append("Antall oppganger per volum er for lavt")
+
+    local_outdoor = float(getattr(phase, "local_outdoor_m2", 0.0) or 0.0)
+    shared_credit = float(getattr(phase, "shared_outdoor_credit_m2", 0.0) or 0.0)
+    total_credit = local_outdoor + shared_credit
+    zone_count = len(phase.standalone_outdoor_zone_ids or [])
+
+    full_req = max(900.0, float(phase.units_estimate) * 10.0)
+    min_req = max(650.0, float(phase.units_estimate) * 7.0)
+    local_req = max(250.0, float(phase.units_estimate) * 2.5)
+
+    if total_credit >= full_req and local_outdoor >= local_req and zone_count >= 1:
+        score += 25
+    elif total_credit >= min_req and zone_count >= 1:
+        score += 14
+        if local_outdoor < local_req:
+            issues.append(
+                f"Lokalt uterom ({local_outdoor:.0f} m²) er svakt; trinnet er avhengig av delt hoveduterom ({shared_credit:.0f} m² kreditert)"
+            )
+        else:
+            issues.append(
+                f"Standalone-uterom ({total_credit:.0f} m²) er på minimumssiden for {phase.units_estimate} boliger"
+            )
+    else:
+        score += 3
+        issues.append(
+            f"Standalone-uterom ({total_credit:.0f} m² kreditert; lokalt {local_outdoor:.0f} m²) er for lite for {phase.units_estimate} boliger"
+        )
+    if zone_count == 0:
+        issues.append("Ingen dedikerte uteromssoner er koblet til byggetrinnet")
+
+    if phase.parking_served_by:
+        required_p = [p for p in parking_phases if p.phase_number in phase.parking_served_by]
+        if any(p.must_complete_before_building_phase is None or p.must_complete_before_building_phase <= phase.phase_number for p in required_p):
+            score += 20
+        else:
+            score += 10
+            issues.append("P-fase ferdigstilles etter byggefasens innflytting")
+    else:
+        issues.append("Ingen parkering tilknyttet")
+
+    if phase.neighboring_construction_risk < 0.3:
+        score += 15
+    elif phase.neighboring_construction_risk < 0.6:
+        score += 8
+        issues.append("Moderat byggeplass-risiko fra senere faser")
+    else:
+        issues.append("Høy byggeplass-risiko fra senere faser")
+
+    if "barnehage" in phase.programs_included and phase.phase_number <= max(1, len(all_phases) // 2):
+        score += 10
+    elif not any(p in phase.programs_included for p in ["barnehage", "naering"]):
+        score += 10
+    else:
+        score += 5
+
+    return score, issues
+
+
+def pass5_outdoor_system(buildable_polygon, volumes: List[Volume],
+                         building_phases: List[BuildingPhase],
+                         program: ProgramAllocation, site_inputs: Dict[str, Any],
+                         typology_zones: Optional[List[Any]] = None) -> OutdoorSystem:
+    system = _ORIG_V2_PASS5_OUTDOOR_SYSTEM(
+        buildable_polygon=buildable_polygon,
+        volumes=volumes,
+        building_phases=building_phases,
+        program=program,
+        site_inputs=site_inputs,
+        typology_zones=typology_zones,
+    )
+    if not building_phases or not system.zones:
+        return system
+
+    for phase in building_phases:
+        local_ground = 0.0
+        shared_ground_credit = 0.0
+        zone_ids = []
+        for z in system.zones:
+            if not z.on_ground or not z.is_felles:
+                continue
+            if phase.phase_number not in (z.serves_building_phases or []):
+                continue
+            zone_ids.append(z.zone_id)
+            served = max(len(z.serves_building_phases or []), 1)
+            if served == 1:
+                local_ground += float(z.area_m2)
+            else:
+                shared_ground_credit += float(z.area_m2) / served
+
+        phase.standalone_outdoor_zone_ids = zone_ids
+        phase.local_outdoor_m2 = local_ground  # type: ignore[attr-defined]
+        phase.shared_outdoor_credit_m2 = shared_ground_credit  # type: ignore[attr-defined]
+        phase.standalone_outdoor_m2 = local_ground + shared_ground_credit
+        phase.standalone_outdoor_has_sun = True
+
+    return system
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    actual_total_bra = sum(v.bra_m2 for v in volumes)
+    target_total_bra = max(float(program.total_bra or 0.0), 1.0)
+    target_attainment = actual_total_bra / target_total_bra if target_total_bra > 0 else 1.0
+
+    if phasing_config.phasing_mode == "auto" and target_total_bra >= 15000.0:
+        min_k_hard = max(1, math.ceil(actual_total_bra / phasing_config.MAX_PHASE_BRA)) if actual_total_bra > 0 else 1
+        max_k_hard = max(1, int(actual_total_bra / phasing_config.MIN_PHASE_BRA)) if actual_total_bra >= phasing_config.MIN_PHASE_BRA else 1
+        desired_k = int(_clamp(round(target_total_bra / 4200.0), min_k_hard, max_k_hard))
+        # På store tomter skal fasetallet i hovedsak styres av marked/produkt og mål-BRA,
+        # ikke av midlertidige avvik i Pass 3-plasseringen.
+        patched_cfg = PhasingConfig(
+            phasing_mode="manual",
+            manual_phase_count=desired_k,
+            parking_mode=phasing_config.parking_mode,
+            manual_parking_phase_count=phasing_config.manual_parking_phase_count,
+            MIN_PHASE_BRA=phasing_config.MIN_PHASE_BRA,
+            MAX_PHASE_BRA=phasing_config.MAX_PHASE_BRA,
+            TARGET_PHASE_BRA_LOW=phasing_config.TARGET_PHASE_BRA_LOW,
+            TARGET_PHASE_BRA_HIGH=phasing_config.TARGET_PHASE_BRA_HIGH,
+            SINGLE_PHASE_MAX_BRA=phasing_config.SINGLE_PHASE_MAX_BRA,
+        )
+        return _ORIG_V2_PASS4_PHASING(volumes, buildable_polygon, patched_cfg, desired_k, program, site_polygon)
+
+    return _ORIG_V2_PASS4_PHASING(volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon)
+
+
+def plan_masterplan(*args, **kwargs) -> Masterplan:
+    site_inputs = kwargs.get("site_inputs") or {}
+    _set_pass2_efficiency_ratio_v3(site_inputs)
+    mp = _ORIG_V2_PLAN_MASTERPLAN(*args, **kwargs)
+    try:
+        mp.source = (getattr(mp, "source", "Builtly Masterplan") + " + v3 large-site/quarter tuning").strip()
+        if isinstance(getattr(mp, "diag_info", None), dict):
+            buildable_polygon = kwargs.get("buildable_polygon") if "buildable_polygon" in kwargs else (args[1] if len(args) > 1 else None)
+            req_avg = _required_avg_floors_v3(
+                float(kwargs.get("target_bra_m2", 0.0) or 0.0),
+                buildable_polygon,
+                float(kwargs.get("max_bya_pct", 35.0) or 35.0),
+            )
+            mp.diag_info["v3"] = (
+                f"v3: efficiency={_CURRENT_PASS2_EFFICIENCY_RATIO_V3:.2f}, "
+                f"required_avg_floors={req_avg:.2f}, shared-outdoor-credit aktiv"
+            )
+    except Exception:
+        pass
+    return mp

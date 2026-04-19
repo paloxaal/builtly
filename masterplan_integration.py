@@ -1093,3 +1093,70 @@ def render_phasing_report_markdown(masterplan: Masterplan) -> str:
     if target_fit < 90.0:
         addon.append("- Planen bør densifiseres videre før den presenteres som anbefalt alternativ.")
     return text + "\n" + "\n".join(addon) + "\n"
+
+
+# =====================================================================
+# Builtly patch v3 — tydeliggjør lokalt vs delt uterom i rapport/UI.
+# =====================================================================
+
+_ORIG_V2_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+_ORIG_V2_RENDER_PHASING_REPORT_MARKDOWN = render_phasing_report_markdown
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    results = _ORIG_V2_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    for res in results:
+        geom = getattr(res, "geometry", {}) or {}
+        phase_num = geom.get("phase_number")
+        if phase_num is None:
+            continue
+        phase = masterplan.phase_by_number(int(phase_num))
+        if phase is None:
+            continue
+
+        local_out = float(getattr(phase, "local_outdoor_m2", 0.0) or 0.0)
+        shared_credit = float(getattr(phase, "shared_outdoor_credit_m2", 0.0) or 0.0)
+        total_credit = local_out + shared_credit
+
+        geom["phase_local_outdoor_m2"] = local_out
+        geom["phase_shared_outdoor_credit_m2"] = shared_credit
+        geom["phase_standalone_outdoor_m2"] = total_credit
+
+        notes = list(getattr(res, "notes", []) or [])
+        note = (
+            f"Uterom kreditert: {total_credit:,.0f} m² "
+            f"(lokalt {local_out:,.0f} + delt {shared_credit:,.0f})"
+        )
+        if note not in notes:
+            notes.append(note)
+        try:
+            setattr(res, "notes", notes)
+        except Exception:
+            pass
+    return results
+
+
+
+def render_phasing_report_markdown(masterplan: Masterplan) -> str:
+    text = _ORIG_V2_RENDER_PHASING_REPORT_MARKDOWN(masterplan)
+    lines = ["", "### Uteromskreditt per trinn", ""]
+    added = False
+    for phase in masterplan.building_phases:
+        local_out = float(getattr(phase, "local_outdoor_m2", 0.0) or 0.0)
+        shared_credit = float(getattr(phase, "shared_outdoor_credit_m2", 0.0) or 0.0)
+        total_credit = local_out + shared_credit
+        if total_credit <= 0:
+            continue
+        added = True
+        lines.append(
+            f"- T{phase.phase_number}: **{total_credit:.0f} m²** kreditert uterom "
+            f"(lokalt {local_out:.0f} + delt {shared_credit:.0f})"
+        )
+    if not added:
+        return text
+    return text + "\n" + "\n".join(lines) + "\n"
