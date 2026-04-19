@@ -535,6 +535,8 @@ def pass2_typology_zoning(
     max_floors: int,
     max_height_m: float,
     terrain: Optional[Dict[str, Any]] = None,
+    target_bra_m2: float = 0.0,
+    max_bya_pct: float = 35.0,
 ) -> List[TypologyZone]:
     """Del tomta i typologisoner basert på kontekst.
 
@@ -582,7 +584,7 @@ def pass2_typology_zoning(
         claude_zones = _pass2_claude_zones(
             buildable_polygon, bounds, bw, bh, neighbor_summary,
             program, low_directions, max_floors, max_height_m,
-            terrain_info, api_key,
+            terrain_info, target_bra_m2, max_bya_pct, api_key,
         )
 
     if claude_zones:
@@ -657,8 +659,15 @@ def _polygon_from_bbox_fraction(bounds, frac):
 
 def _pass2_claude_zones(buildable_polygon, bounds, bw, bh, neighbor_summary,
                         program, low_directions, max_floors, max_height_m,
-                        terrain_info, api_key) -> Optional[List[Dict[str, Any]]]:
-    """La Claude foreslå typologisoner."""
+                        terrain_info, target_bra_m2, max_bya_pct, api_key) -> Optional[List[Dict[str, Any]]]:
+    """La Claude foreslå typologisoner.
+
+    Kontekst til Claude inkluderer BRA-mål og nødvendig tetthet slik at
+    typologi-valg ikke bare velges på estetikk, men også på kapasitet.
+    Uten denne konteksten har Claude en tendens til å velge estetiske
+    småskala-typologier (Tun, Rekke) selv på store tomter der de ikke
+    kan bære BRA-målet.
+    """
     coords = [[round(c[0] - bounds[0], 1), round(c[1] - bounds[1], 1)]
               for c in buildable_polygon.exterior.coords]
 
@@ -686,6 +695,48 @@ def _pass2_claude_zones(buildable_polygon, bounds, bw, bh, neighbor_summary,
                            else "Relativt flatt — ingen terrengbegrensning")))
         )
 
+    # Tetthets-kontekst: beregn nødvendig gjennomsnittlig etasjeantall for å bære BRA-målet
+    buildable_area = float(buildable_polygon.area)
+    max_fp = buildable_area * max_bya_pct / 100.0
+    # Hvis tomten fylles opp til maks BYA, hvor mange etasjer trengs i snitt?
+    required_avg_floors = target_bra_m2 / max(max_fp * 0.85, 1.0) if target_bra_m2 > 0 else 0
+    density_text = ""
+    if target_bra_m2 > 0:
+        density_tier = "LAV"
+        density_rec = ""
+        if required_avg_floors >= 5:
+            density_tier = "VELDIG HØY"
+            density_rec = (
+                "UTELUKKENDE høye typologier: Punkthus 5-7 et, Lamell 5-6 et, Karré 5-6 et, "
+                "eller Tårn. UNNGÅ Tun, Rekke og andre småskala-typologier — de har for "
+                "lavt fotavtrykk-til-BRA-forhold til å bære BRA-målet."
+            )
+        elif required_avg_floors >= 3.5:
+            density_tier = "HØY"
+            density_rec = (
+                "Bruk høye urbane typologier: Lamell 4-5 et, Punkthus 5-6 et, Karré 4-5 et. "
+                "Tun og Rekke er kun OK i små perifer-soner for kontekst-mykning."
+            )
+        elif required_avg_floors >= 2.5:
+            density_tier = "MIDDELS"
+            density_rec = (
+                "Bruk balansert miks: Lamell 3-4 et som hovedtypologi. Tun, Rekke, Karré "
+                "OK som supplement."
+            )
+        else:
+            density_tier = "LAV"
+            density_rec = (
+                "Alle typologier OK. Tun, Rekke, Lamell 2-3 et passer fint."
+            )
+        density_text = (
+            f"\n\nTETTHETSKRAV (KRITISK):"
+            f"\n- BRA-MÅL: {target_bra_m2:.0f} m² på {buildable_area:.0f} m² byggbart"
+            f"\n- Maks BYA: {max_bya_pct:.0f}% = {max_fp:.0f} m² fotavtrykk"
+            f"\n- Nødvendig snitt-etasjer for å nå målet: {required_avg_floors:.1f}"
+            f"\n- Tetthetsklasse: {density_tier}"
+            f"\n- TYPOLOGI-RETNINGSLINJE: {density_rec}"
+        )
+
     prompt = f"""Du er Norges fremste byarkitekt. Del denne tomta i typologisoner.
 
 TOMT (byggbart, lokal koordinater fra {bounds[0]:.0f}/{bounds[1]:.0f}):
@@ -695,7 +746,7 @@ TOMT (byggbart, lokal koordinater fra {bounds[0]:.0f}/{bounds[1]:.0f}):
 
 PROGRAM: {prog_text}
 
-{neighbor_summary}{terrain_text}
+{neighbor_summary}{terrain_text}{density_text}
 
 SMÅHUS-NÆRHET (krever nedtrapping): {low_text}
 
@@ -2316,6 +2367,8 @@ def plan_masterplan(
         max_floors=max_floors,
         max_height_m=max_height_m,
         terrain=terrain,
+        target_bra_m2=target_bra_m2,
+        max_bya_pct=max_bya_pct,
     )
 
     # --- PASS 3: Volume placement ---
