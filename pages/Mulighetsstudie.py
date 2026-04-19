@@ -1988,6 +1988,12 @@ class OptionResult:
     notes: List[str]
     score: float
     geometry: Dict[str, Any]
+    # v1.6: Flagg for å pinne "Totalt — N byggetrinn" øverst i UI uansett score.
+    # Individuelle byggetrinn kan få høyere score enn masterplanen som helhet
+    # fordi trinn-score ikke straffes for lav BYA-utnyttelse. For brukeren er
+    # det likevel masterplanen (ikke ett tilfeldig trinn) som bør vises som
+    # "anbefalt alternativ".
+    is_total_plan: bool = False
 
 
 def parse_regulation_hints(free_text: str) -> Dict[str, float]:
@@ -9258,14 +9264,32 @@ if run_analysis:
         target_bra_diag = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
-        st.session_state["_motor_diag"] = (
-            f"v9.5 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+        diag_parts = [
+            f"v9.6 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
-        )
+        ]
+        # v1.6: Surface masterplan pass-diag slik at brukeren ser hva Pass 2 faktisk lagde
+        _mp_for_diag = st.session_state.get("_current_masterplan")
+        if _mp_for_diag is not None and getattr(_mp_for_diag, "diag_info", None):
+            diag_parts.append("")  # blanklinje
+            for pass_name in ("pass2", "pass3", "pass4"):
+                text = _mp_for_diag.diag_info.get(pass_name, "")
+                if text:
+                    diag_parts.append(text)
+        st.session_state["_motor_diag"] = "\n".join(diag_parts)
 
     if HAS_SITE_INTELLIGENCE and site_intelligence_bundle.get('available'):
         options = apply_site_intelligence_to_options(options, site_intelligence_bundle)
+
+    # v1.6: Pin Totalt-alternativet øverst i options-listen.
+    # Individuelle byggetrinn kan få høyere score enn hele masterplanen fordi
+    # trinn-score ikke straffes for lav BYA-utnyttelse. For brukeren er likevel
+    # hele masterplanen det "anbefalte alternativet" — ikke ett tilfeldig trinn.
+    total_idx = next((i for i, o in enumerate(options)
+                      if getattr(o, "is_total_plan", False)), None)
+    if total_idx is not None and total_idx != 0:
+        options.insert(0, options.pop(total_idx))
 
     if not options:
         st.error("Klarte ikke å generere alternativer. Kontroller tomtepolygon, byggegrenser og BYA.")
@@ -9276,7 +9300,16 @@ if run_analysis:
     if site_polygon_input is not None:
         with st.spinner("Analyserer miljøforhold: støy, dagslys, utsikt, vind..."):
             try:
-                best_option = max(options, key=lambda o: o.score)
+                # For miljøanalyse bruker vi Totalt hvis tilgjengelig, ellers
+                # beste individuelle alternativ
+                _total_options = [o for o in options if getattr(o, "is_total_plan", False)]
+                _non_total = [o for o in options if not getattr(o, "is_total_plan", False)]
+                if _total_options:
+                    best_option = _total_options[0]
+                elif _non_total:
+                    best_option = max(_non_total, key=lambda o: o.score)
+                else:
+                    best_option = options[0]
                 fp_polys = split_geometry_to_polygons(
                     Polygon(flatten_coord_groups(best_option.geometry.get("footprint_polygon_coords", [])))
                 ) if best_option.geometry.get("footprint_polygon_coords") else []
@@ -9596,7 +9629,13 @@ if "analysis_results" in st.session_state:
     # Motor-diagnostikk (persistent)
     diag = st.session_state.get("_motor_diag")
     if diag:
-        st.caption(f"🔧 {diag}")
+        # Første linje er alltid one-liner (v9.6 | tomt... | ... | oppnådd_BTA)
+        # Resterende linjer er multi-linje Pass 2-diag fra masterplan
+        lines = diag.split("\n")
+        st.caption(f"🔧 {lines[0]}")
+        if len(lines) > 1:
+            with st.expander("Pass-diagnostikk (hva motoren faktisk gjorde)", expanded=False):
+                st.code("\n".join(lines[1:]).strip(), language=None)
 
     st.markdown("<div class='section-header'>Alternativsammenligning</div>", unsafe_allow_html=True)
     comparison_df = pd.DataFrame(
