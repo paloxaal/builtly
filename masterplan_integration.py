@@ -1834,3 +1834,328 @@ def masterplan_to_option_results(
         except Exception:
             pass
     return results
+
+
+# =====================================================================
+# V8 PATCH — reelle sol-/skyggetall, robust MUA-fallback og roligere
+# presentasjonshus for UI/PDF.
+# =====================================================================
+try:
+    from shapely.geometry import Polygon, Point
+    from shapely.ops import unary_union
+    from shapely import affinity
+except Exception:
+    Polygon = Point = None  # type: ignore
+    unary_union = None  # type: ignore
+    affinity = None  # type: ignore
+import math
+
+_ORIG_V8_RUN_MASTERPLAN = run_masterplan_from_site_inputs
+_ORIG_V8_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+
+
+def run_masterplan_from_site_inputs(site: Any, geodata_context: Dict[str, Any], phasing_config: PhasingConfig,
+                                    target_bra_m2: float, include_barnehage: bool = False,
+                                    include_naering: bool = False, byggesone: str = '2'):
+    mp, err = _ORIG_V8_RUN_MASTERPLAN(site, geodata_context, phasing_config, target_bra_m2, include_barnehage, include_naering, byggesone)
+    if mp is not None:
+        try:
+            mp.site_inputs = dict(getattr(mp, 'site_inputs', {}) or {})
+            mp.site_inputs['target_bra_m2'] = float(target_bra_m2)
+            mp.site_inputs['avg_unit_bra'] = float(getattr(site, 'avg_unit_bra', 55.0) or 55.0)
+        except Exception:
+            pass
+    return mp, err
+
+
+def _rings_to_polys_v8(groups_like: Any) -> List[Any]:
+    polys: List[Any] = []
+    if Polygon is None:
+        return polys
+    if not groups_like:
+        return polys
+    # groups_like may be coords_groups or list of dicts containing coords
+    if isinstance(groups_like, list) and groups_like and isinstance(groups_like[0], dict):
+        iterable = [g.get('coords') or [] for g in groups_like]
+    else:
+        iterable = [groups_like]
+    for groups in iterable:
+        try:
+            if groups and isinstance(groups[0], list) and groups[0] and isinstance(groups[0][0], (int, float)):
+                groups = [groups]
+        except Exception:
+            pass
+        if not isinstance(groups, list):
+            continue
+        for ring in groups:
+            try:
+                if len(ring) >= 3:
+                    poly = Polygon([(float(x), float(y)) for x, y in ring]).buffer(0)
+                    if not poly.is_empty and float(poly.area) > 1.0:
+                        polys.append(poly)
+            except Exception:
+                continue
+    return polys
+
+
+def _sample_points_v8(poly, spacing_m: float = 10.0) -> List[Any]:
+    pts: List[Any] = []
+    if poly is None or getattr(poly, 'is_empty', True) or Point is None:
+        return pts
+    minx, miny, maxx, maxy = poly.bounds
+    x = minx + spacing_m / 2.0
+    while x <= maxx:
+        y = miny + spacing_m / 2.0
+        while y <= maxy:
+            p = Point(x, y)
+            if poly.covers(p):
+                pts.append(p)
+            y += spacing_m
+        x += spacing_m
+    if not pts:
+        try:
+            pts = [poly.representative_point()]
+        except Exception:
+            pts = []
+    return pts
+
+
+def _day_angle_v8(day_of_year: int) -> float:
+    return 2 * math.pi * (day_of_year - 81) / 365.0
+
+
+def _solar_declination_deg_v8(day_of_year: int) -> float:
+    return 23.45 * math.sin(_day_angle_v8(day_of_year))
+
+
+def _solar_altitude_deg_v8(latitude_deg: float, day_of_year: int, solar_hour: float) -> float:
+    phi = math.radians(latitude_deg)
+    delta = math.radians(_solar_declination_deg_v8(day_of_year))
+    h = math.radians(15.0 * (solar_hour - 12.0))
+    sin_alt = math.sin(phi) * math.sin(delta) + math.cos(phi) * math.cos(delta) * math.cos(h)
+    return math.degrees(math.asin(max(-1.0, min(1.0, sin_alt))))
+
+
+def _solar_azimuth_deg_v8(latitude_deg: float, day_of_year: int, solar_hour: float) -> float:
+    phi = math.radians(latitude_deg)
+    delta = math.radians(_solar_declination_deg_v8(day_of_year))
+    h = math.radians(15.0 * (solar_hour - 12.0))
+    alt = math.radians(max(_solar_altitude_deg_v8(latitude_deg, day_of_year, solar_hour), 0.1))
+    cos_az = (math.sin(delta) - math.sin(phi) * math.sin(alt)) / max(math.cos(phi) * math.cos(alt), 1e-6)
+    cos_az = max(-1.0, min(1.0, cos_az))
+    az = math.degrees(math.acos(cos_az))
+    return 360.0 - az if solar_hour > 12.0 else az
+
+
+def _build_shadow_poly_v8(poly, height_m: float, sun_azimuth_deg: float, sun_altitude_deg: float):
+    if poly is None or getattr(poly, 'is_empty', True) or affinity is None or sun_altitude_deg <= 0.5:
+        return None
+    length = float(height_m) / max(math.tan(math.radians(sun_altitude_deg)), 0.02)
+    az = math.radians((sun_azimuth_deg + 180.0) % 360.0)
+    dx = math.sin(az) * length
+    dy = math.cos(az) * length
+    translated = affinity.translate(poly, xoff=dx, yoff=dy)
+    try:
+        return unary_union([poly, translated]).convex_hull.buffer(0)
+    except Exception:
+        return translated.buffer(0)
+
+
+def _evaluate_option_solar_v8(site: Any, option: Any, geodata_context: Dict[str, Any]) -> Dict[str, float]:
+    if Polygon is None or unary_union is None:
+        return {}
+    geom = getattr(option, 'geometry', {}) or {}
+    eval_groups = geom.get('phase_field_polygons') or geom.get('buildable_polygon_coords') or geom.get('site_polygon_coords') or []
+    eval_polys = _rings_to_polys_v8(eval_groups)
+    eval_poly = unary_union(eval_polys).buffer(0) if eval_polys else geodata_context.get('buildable_polygon') or geodata_context.get('site_polygon')
+    if eval_poly is None or getattr(eval_poly, 'is_empty', True):
+        return {}
+    building_polys: List[Any] = []
+    building_parts = list(geom.get('massing_parts', []) or [])
+    heights: List[float] = []
+    if building_parts:
+        for part in building_parts:
+            polys = _rings_to_polys_v8(part.get('coords') or [])
+            for p in polys:
+                building_polys.append(p)
+                heights.append(float(part.get('height_m', getattr(option, 'building_height_m', 0.0)) or 0.0))
+    elif geom.get('footprint_polygon_coords'):
+        for p in _rings_to_polys_v8(geom.get('footprint_polygon_coords') or []):
+            building_polys.append(p)
+            heights.append(float(getattr(option, 'building_height_m', 0.0) or 0.0))
+    if not building_polys:
+        return {}
+    footprint = unary_union(building_polys).buffer(0)
+    try:
+        open_space = eval_poly.difference(footprint).buffer(0)
+    except Exception:
+        open_space = eval_poly.buffer(0)
+    if getattr(open_space, 'is_empty', True):
+        open_space = eval_poly
+    spacing = max(6.0, min(14.0, math.sqrt(max(float(getattr(open_space, 'area', 1.0) or 1.0), 1.0) / 80.0)))
+    sample_points = _sample_points_v8(open_space, spacing_m=spacing)
+    if not sample_points:
+        return {}
+    latitude = float(getattr(site, 'latitude_deg', 63.42) or 63.42)
+    north_rot = float(getattr(site, 'north_rotation_deg', 0.0) or 0.0)
+    neighbors = list(geodata_context.get('neighbors', []) or [])
+
+    def sunlit_fraction(day_of_year: int, solar_hour: float) -> float:
+        alt = _solar_altitude_deg_v8(latitude, day_of_year, solar_hour)
+        if alt <= 0.5:
+            return 0.0
+        az = (_solar_azimuth_deg_v8(latitude, day_of_year, solar_hour) - north_rot) % 360.0
+        shadow_polys = []
+        for poly, h in zip(building_polys, heights):
+            sh = _build_shadow_poly_v8(poly, h, az, alt)
+            if sh is not None and not getattr(sh, 'is_empty', True):
+                shadow_polys.append(sh)
+        for nb in neighbors:
+            sh = _build_shadow_poly_v8(nb.get('polygon'), float(nb.get('height_m', 9.0) or 9.0), az, alt)
+            if sh is not None and not getattr(sh, 'is_empty', True):
+                shadow_polys.append(sh)
+        if not shadow_polys:
+            return 1.0
+        shadow_union = unary_union(shadow_polys).buffer(0)
+        sunlit = 0
+        for point in sample_points:
+            if not shadow_union.covers(point):
+                sunlit += 1
+        return float(sunlit / max(1, len(sample_points)))
+
+    equinox_hours = [9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    winter_hours = [10.0, 11.0, 12.0, 13.0, 14.0]
+    eq_fracs = [sunlit_fraction(80, hour) for hour in equinox_hours]
+    wi_fracs = [sunlit_fraction(355, hour) for hour in winter_hours]
+    mean_eq = sum(eq_fracs) / max(len(eq_fracs), 1)
+    winter_noon = sunlit_fraction(355, 12.0)
+    eq_noon = sunlit_fraction(80, 12.0)
+    typology_bonus = {'Punkthus': 0.06, 'Lamell': 0.04, 'Tun': -0.02, 'Rekke': 0.05}.get(str(getattr(option, 'typology', '') or ''), 0.0)
+    neighbor_penalty = min(0.12, 0.012 * len(neighbors))
+    solar_score = 100.0 * max(0.18, min(1.0, 0.54 * mean_eq + 0.26 * winter_noon + 0.14 * eq_noon + typology_bonus - neighbor_penalty))
+    max_h = max(heights or [float(getattr(option, 'building_height_m', 0.0) or 0.0)])
+    winter_alt = _solar_altitude_deg_v8(latitude, 355, 12.0)
+    summer_alt = _solar_altitude_deg_v8(latitude, 172, 15.0)
+    eq_alt = _solar_altitude_deg_v8(latitude, 80, 12.0)
+    return {
+        'solar_score': round(max(18.0, min(100.0, solar_score)), 1),
+        'estimated_equinox_sun_hours': round(sum(eq_fracs), 2),
+        'estimated_winter_sun_hours': round(sum(wi_fracs), 2),
+        'sunlit_open_space_pct': round(mean_eq * 100.0, 1),
+        'winter_noon_shadow_m': round(float(max_h) / max(math.tan(math.radians(max(winter_alt, 1.0))), 0.02), 1),
+        'equinox_noon_shadow_m': round(float(max_h) / max(math.tan(math.radians(max(eq_alt, 1.0))), 0.02), 1),
+        'summer_afternoon_shadow_m': round(float(max_h) / max(math.tan(math.radians(max(summer_alt, 1.0))), 0.02), 1),
+    }
+
+
+def _presentation_buildings_v7(masterplan: Masterplan) -> List[Dict[str, Any]]:
+    """V8: grupper roligere etter delfelt + hovedrolle, ikke mange små vinkelbøtter."""
+    phase_by_vid: Dict[str, int] = {}
+    for p in getattr(masterplan, 'building_phases', []) or []:
+        for vid in getattr(p, 'volume_ids', []) or []:
+            phase_by_vid[vid] = int(getattr(p, 'phase_number', 0) or 0)
+    field_polys = {f.field_id: getattr(f, 'polygon', None) for f in getattr(masterplan, 'development_fields', []) or []}
+
+    def role_of(v: Volume) -> str:
+        typ = str(getattr(v, 'typology', '') or '')
+        prog = str(getattr(v, 'program', '') or '')
+        if 'barnehage' in prog:
+            return 'barnehage'
+        if typ in {'Karré', 'HalvåpenKarré'}:
+            return 'kvartal'
+        if typ in {'Punkthus', 'Tårn'}:
+            return 'punkt'
+        if typ in {'Rekke'}:
+            return 'rekke'
+        return 'lamell'
+
+    buckets: Dict[Tuple[int, str, str], List[Volume]] = {}
+    for v in getattr(masterplan, 'volumes', []) or []:
+        if getattr(v, 'polygon', None) is None:
+            continue
+        phase = int(phase_by_vid.get(getattr(v, 'volume_id', ''), getattr(v, 'assigned_phase', 0) or 0))
+        field_id = str(getattr(v, 'field_id', '') or '')
+        buckets.setdefault((phase, field_id, role_of(v)), []).append(v)
+
+    houses: List[Dict[str, Any]] = []
+    for (phase, field_id, role), vols in buckets.items():
+        field_poly = field_polys.get(field_id)
+        comps = _component_groups_v7(vols, gap_m=9.0)
+        for comp in comps:
+            typology = str(getattr(comp[0], 'typology', '') or '') if comp else ''
+            poly = _clean_presentation_polygon_v7([v.polygon for v in comp], typology, field_poly=field_poly)
+            if poly is None or getattr(poly, 'is_empty', True):
+                continue
+            bra = sum(float(getattr(v, 'bra_m2', 0.0) or 0.0) for v in comp)
+            footprint = float(getattr(poly, 'area', 0.0) or 0.0)
+            floors_vals = [int(getattr(v, 'floors', 0) or 0) for v in comp]
+            floors = max(floors_vals or [0])
+            height = max(float(getattr(v, 'height_m', 0.0) or 0.0) for v in comp)
+            cx = float(getattr(poly.centroid, 'x', 0.0) or 0.0)
+            cy = float(getattr(poly.centroid, 'y', 0.0) or 0.0)
+            field_name = next((str(getattr(v, 'field_name', '') or '') for v in comp if getattr(v, 'field_name', '')), '')
+            internal_name = ', '.join([str(getattr(v, 'internal_name', '') or getattr(v, 'volume_id', '') or '') for v in comp[:4]])
+            program = next((str(getattr(v, 'program', '') or '') for v in comp if getattr(v, 'program', '')), 'bolig')
+            houses.append({
+                'phase_number': int(phase),
+                'field_id': field_id,
+                'field_name': field_name,
+                'typology': typology,
+                'program': program,
+                'floors': int(floors),
+                'height_m': round(height, 1),
+                'footprint_m2': round(footprint, 1),
+                'bra_m2': round(bra, 1),
+                'units_estimate': int(sum(int(getattr(v, 'units_estimate', 0) or 0) for v in comp)),
+                'cx': round(cx, 1),
+                'cy': round(cy, 1),
+                'internal_name': internal_name,
+                'source_volume_ids': [getattr(v, 'volume_id', '') for v in comp],
+                'polygon': poly,
+                'coords': _polygon_to_coords_groups(poly),
+            })
+
+    houses.sort(key=lambda r: (-float(r.get('cy', 0.0) or 0.0), float(r.get('cx', 0.0) or 0.0), str(r.get('field_name', '') or '')))
+    for idx, row in enumerate(houses):
+        row['house_id'] = f"HUS {chr(65 + (idx % 26))}" if idx < 26 else f"HUS {chr(65 + (idx // 26) - 1)}{chr(65 + (idx % 26))}"
+        role = 'Lamell'
+        typ = str(row.get('typology', '') or '')
+        if typ in {'Punkthus', 'Tårn'}:
+            role = 'Punkthus'
+        elif typ in {'Karré', 'HalvåpenKarré'}:
+            role = 'Kvartalhus'
+        elif typ == 'Rekke':
+            role = 'Rekkehus'
+        elif 'barnehage' in str(row.get('program', '') or ''):
+            role = 'Barnehage'
+        field_name = str(row.get('field_name', '') or '').strip()
+        row['name'] = f"{field_name} – {role}".strip(' –') if field_name else role
+    return houses
+
+
+def masterplan_to_option_results(masterplan: Masterplan, site: Any, geodata_context: Dict[str, Any], OptionResult_cls: Any) -> List[Any]:
+    results = _ORIG_V8_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    target_bra = float(getattr(getattr(masterplan, 'site_inputs', {}), 'get', lambda _k, _d=None: _d)('target_bra_m2', None) or (getattr(masterplan, 'site_inputs', {}) or {}).get('target_bra_m2', 0.0) or 0.0)
+    if target_bra <= 0:
+        target_bra = float(getattr(getattr(masterplan, 'program', None), 'total_bra', 0.0) or 0.0)
+    for res in results:
+        try:
+            metrics = _evaluate_option_solar_v8(site, res, geodata_context)
+            for key, value in metrics.items():
+                setattr(res, key, value)
+        except Exception:
+            pass
+        try:
+            if bool((getattr(res, 'geometry', {}) or {}).get('is_total_plan')) and target_bra > 0:
+                setattr(res, 'target_fit_pct', round(float(getattr(res, 'saleable_area_m2', 0.0) or 0.0) / max(target_bra, 1.0) * 100.0, 1))
+        except Exception:
+            pass
+        try:
+            geom = getattr(res, 'geometry', {}) or {}
+            if bool(geom.get('is_total_plan')):
+                summary = _mua_summary_fallback_v8(site, res, dict(geom.get('mua_summary', {}) or {}), list(geom.get('outdoor_zones', []) or []))
+                geom['mua_summary'] = summary
+                setattr(res, 'geometry', geom)
+        except Exception:
+            pass
+    return results
