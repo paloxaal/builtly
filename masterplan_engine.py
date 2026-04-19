@@ -7470,3 +7470,325 @@ def plan_masterplan(*args, **kwargs) -> Masterplan:
     except Exception:
         pass
     return mp
+
+
+# =====================================================================
+# V8 PATCH — mer feltstyrt struktur, høyere måloppnåelse og roligere
+# byggetrinn for store tomter som NRK Tyholt.
+# =====================================================================
+
+_ORIG_V8_PASS3_PLACE_VOLUMES = pass3_place_volumes
+_ORIG_V8_PASS4_PHASING = pass4_phasing
+_ORIG_V8_PLAN_MASTERPLAN = plan_masterplan
+
+
+def _recommended_field_count_v5(buildable_polygon, target_bra_m2: float,
+                                 max_bya_pct: float, max_floors: int) -> int:
+    area = float(getattr(buildable_polygon, 'area', 0.0) or 0.0)
+    if area <= 0:
+        return 1
+    bounds = getattr(buildable_polygon, 'bounds', (0.0, 0.0, 0.0, 0.0))
+    bw = float(bounds[2] - bounds[0])
+    bh = float(bounds[3] - bounds[1])
+    aspect = max(bw, bh) / max(min(bw, bh), 1.0)
+    req_avg = _required_avg_floors_v3(target_bra_m2, buildable_polygon, max_bya_pct)
+    if area < 10000.0:
+        return 1
+    if area < 20000.0:
+        return 2
+    if area < 30000.0:
+        return 4 if (aspect >= 1.45 or req_avg >= 3.8) else 3
+    # 30k–36k m²: hold normalt 4 delfelt for bedre lesbarhet.
+    if area < 36000.0:
+        return 4
+    if area < 45000.0:
+        return 5 if (aspect >= 1.80 or req_avg >= 4.5 or max_floors >= 8) else 4
+    return 5
+
+
+def _v8_field_priority(field_obj: DevelopmentField) -> int:
+    ctx = str(getattr(field_obj, 'context', '') or '')
+    return {
+        'barnehage_edge': 1,
+        'sensitive_edge': 2,
+        'green_edge': 3,
+        'mixed_edge': 4,
+        'urban_edge': 5,
+        'active_diagonal': 4,
+        'calm_inner': 3,
+    }.get(ctx, 3)
+
+
+def _v8_average_angle(vols: List[Volume]) -> float:
+    vals = [float(getattr(v, 'angle_deg', 0.0) or 0.0) % 180.0 for v in vols if getattr(v, 'polygon', None) is not None]
+    if not vals:
+        return 0.0
+    # circular mean on doubled angle to handle 180-periodicity
+    s = sum(math.sin(math.radians(v * 2.0)) for v in vals)
+    c = sum(math.cos(math.radians(v * 2.0)) for v in vals)
+    if abs(s) < 1e-6 and abs(c) < 1e-6:
+        return vals[0]
+    return (math.degrees(math.atan2(s, c)) / 2.0) % 180.0
+
+
+def _v8_next_volume_counter(vols: List[Volume]) -> int:
+    out = 0
+    for v in vols:
+        try:
+            if isinstance(v.volume_id, str) and v.volume_id.startswith('V'):
+                out = max(out, int(v.volume_id[1:]))
+        except Exception:
+            continue
+    return out
+
+
+def _v8_add_clean_infill_bars(volumes: List[Volume], fields: List[DevelopmentField], target_total_bra: float,
+                              max_floors: int, max_height_m: float, floor_to_floor_m: float,
+                              efficiency_ratio: float) -> List[Volume]:
+    if not fields or target_total_bra <= 0:
+        return volumes
+    current_bra = sum(float(v.bra_m2 or 0.0) for v in volumes)
+    if current_bra >= target_total_bra * 0.96:
+        return volumes
+    if not HAS_SHAPELY or unary_union is None:
+        return volumes
+
+    existing_polys = [v.polygon for v in volumes if getattr(v, 'polygon', None) is not None]
+    volume_counter = _v8_next_volume_counter(volumes)
+    diag_zone = _CURRENT_DIAGONAL_ZONE_V4
+    field_lookup = {f.field_id: f for f in fields}
+
+    for field_obj in sorted(fields, key=lambda f: (_v8_field_priority(f), -float(getattr(f, 'target_bra', 0.0) or 0.0)), reverse=True):
+        if current_bra >= target_total_bra * 0.985:
+            break
+        ctx = str(getattr(field_obj, 'context', '') or '')
+        if ctx in {'sensitive_edge', 'barnehage_edge'}:
+            continue
+        field_poly = getattr(field_obj, 'polygon', None)
+        if field_poly is None or getattr(field_poly, 'is_empty', True):
+            continue
+        try:
+            occupied = unary_union(existing_polys).buffer(max(MIN_BUILDING_SPACING * 0.55, 4.5)) if existing_polys else None
+            residual = field_poly.buffer(0)
+            if occupied is not None and not getattr(occupied, 'is_empty', True):
+                residual = residual.difference(occupied).buffer(0)
+            if diag_zone is not None and not getattr(diag_zone, 'is_empty', True):
+                residual = residual.difference(diag_zone.buffer(2.0)).buffer(0)
+        except Exception:
+            residual = field_poly.buffer(0)
+        comps = list(residual.geoms) if isinstance(residual, MultiPolygon) else [residual]
+        comps = [c.buffer(0) for c in comps if c is not None and not c.is_empty and float(c.area) >= 320.0]
+        comps.sort(key=lambda g: float(g.area), reverse=True)
+        if not comps:
+            continue
+        field_vols = [v for v in volumes if getattr(v, 'field_id', None) == field_obj.field_id]
+        base_angle = _v8_average_angle(field_vols)
+        floor_cap = min(max_floors, int(getattr(field_obj, 'preferred_floors_max', max_floors) or max_floors))
+        if ctx == 'urban_edge':
+            floor_cap = min(max_floors, max(floor_cap, 6))
+        floors = max(4, min(floor_cap, int(max_height_m / max(floor_to_floor_m, 2.8))))
+        for comp in comps[:2]:
+            if current_bra >= target_total_bra * 0.985:
+                break
+            c = comp.centroid
+            attempts = [
+                (34.0, 13.0, base_angle),
+                (30.0, 13.0, base_angle),
+                (28.0, 12.5, base_angle),
+                (26.0, 12.0, (base_angle + 90.0) % 180.0),
+            ]
+            placed = False
+            for width_m, depth_m, ang in attempts:
+                poly = _make_building_polygon(float(c.x), float(c.y), width_m, depth_m, ang)
+                if poly is None:
+                    continue
+                if not poly.buffer(0).within(comp.buffer(-0.8)):
+                    continue
+                too_close = False
+                for ep in existing_polys:
+                    try:
+                        if poly.distance(ep) < max(MIN_BUILDING_SPACING - 0.6, 7.2):
+                            too_close = True
+                            break
+                    except Exception:
+                        continue
+                if too_close:
+                    continue
+                volume_counter += 1
+                cc = poly.centroid
+                v = Volume(
+                    volume_id=f'V{volume_counter:02d}',
+                    name=f'V8 {field_obj.name} infill',
+                    polygon=poly,
+                    typology='Lamell',
+                    floors=int(floors),
+                    height_m=round(float(floors) * float(floor_to_floor_m), 1),
+                    width_m=round(width_m, 1),
+                    depth_m=round(depth_m, 1),
+                    angle_deg=round(float(ang), 1),
+                    cx=round(float(cc.x), 1),
+                    cy=round(float(cc.y), 1),
+                    footprint_m2=round(float(poly.area), 1),
+                    bra_efficiency_ratio=float(efficiency_ratio or 0.85),
+                    program='bolig',
+                    zone_id=f'QV4-{field_obj.field_id}-V8FILL',
+                    field_id=field_obj.field_id,
+                    field_name=field_obj.name,
+                    notes='v8 clean infill bar',
+                )
+                volumes.append(v)
+                existing_polys.append(poly)
+                current_bra += float(v.bra_m2 or 0.0)
+                placed = True
+                break
+            if placed and current_bra >= target_total_bra * 0.985:
+                break
+    return volumes
+
+
+def _v8_raise_floors_toward_target(volumes: List[Volume], fields: List[DevelopmentField], target_total_bra: float,
+                                   max_floors: int, max_height_m: float, floor_to_floor_m: float) -> None:
+    current_bra = sum(float(v.bra_m2 or 0.0) for v in volumes)
+    if current_bra >= target_total_bra * 0.96 or not volumes:
+        return
+    field_map = {f.field_id: f for f in fields}
+    site_centroid = unary_union([f.polygon for f in fields if getattr(f, 'polygon', None) is not None]).centroid if HAS_SHAPELY and fields else None
+    candidates = []
+    for v in volumes:
+        if getattr(v, 'polygon', None) is None:
+            continue
+        field_obj = field_map.get(getattr(v, 'field_id', None))
+        ctx = str(getattr(field_obj, 'context', '') or '') if field_obj else ''
+        field_cap = min(max_floors, int(getattr(field_obj, 'preferred_floors_max', max_floors) or max_floors)) if field_obj else max_floors
+        if ctx in {'urban_edge', 'mixed_edge'}:
+            field_cap = min(max_floors, max(field_cap, 6))
+        if v.floors >= field_cap:
+            continue
+        if float(v.height_m or 0.0) + float(floor_to_floor_m or 3.2) > float(max_height_m or 99.0) + 0.15:
+            continue
+        north_bonus = 0.0
+        if field_obj is not None and getattr(field_obj, 'polygon', None) is not None:
+            north_bonus = (float(v.cy or 0.0) - float(field_obj.polygon.centroid.y)) / 40.0
+        center_penalty = 0.0
+        if site_centroid is not None:
+            center_penalty = math.hypot(float(v.cx or 0.0) - float(site_centroid.x), float(v.cy or 0.0) - float(site_centroid.y)) / 140.0
+        ctx_bonus = {'urban_edge': 3.5, 'mixed_edge': 2.6, 'green_edge': 2.1, 'active_diagonal': 1.8, 'calm_inner': 1.6, 'barnehage_edge': 0.0, 'sensitive_edge': -2.0}.get(ctx, 1.0)
+        candidates.append((ctx_bonus + north_bonus - center_penalty, v, field_cap))
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    loops = 0
+    idx = 0
+    while current_bra < target_total_bra * 0.965 and candidates and loops < len(candidates) * 3:
+        score, v, field_cap = candidates[idx % len(candidates)]
+        if v.floors < field_cap and float(v.height_m or 0.0) + float(floor_to_floor_m or 3.2) <= float(max_height_m or 99.0) + 0.15:
+            v.floors += 1
+            v.height_m = round(float(v.floors) * float(floor_to_floor_m), 1)
+            current_bra += float(v.footprint_m2 or 0.0) * float(v.bra_efficiency_ratio or 0.85)
+        idx += 1
+        loops += 1
+
+
+def pass3_place_volumes(zones: List[TypologyZone], program: ProgramAllocation,
+                        max_floors: int, max_height_m: float, max_bya_pct: float,
+                        floor_to_floor_m: float,
+                        neighbors: Optional[List[Dict[str, Any]]],
+                        site_polygon, buildable_polygon,
+                        site_inputs: Dict[str, Any]) -> List[Volume]:
+    volumes = _ORIG_V8_PASS3_PLACE_VOLUMES(
+        zones=zones,
+        program=program,
+        max_floors=max_floors,
+        max_height_m=max_height_m,
+        max_bya_pct=max_bya_pct,
+        floor_to_floor_m=floor_to_floor_m,
+        neighbors=neighbors,
+        site_polygon=site_polygon,
+        buildable_polygon=buildable_polygon,
+        site_inputs=site_inputs,
+    )
+    fields = list(_CURRENT_DEVELOPMENT_FIELDS_V5 or [])
+    if not fields:
+        _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+        return volumes
+    efficiency_ratio = _get_efficiency_ratio_v2(site_inputs)
+    target_total_bra = float(program.total_bra or site_inputs.get('target_bra_m2', 0.0) or 0.0)
+    volumes = _v8_add_clean_infill_bars(volumes, fields, target_total_bra, max_floors, max_height_m, floor_to_floor_m, efficiency_ratio)
+    _v8_raise_floors_toward_target(volumes, fields, target_total_bra, max_floors, max_height_m, floor_to_floor_m)
+    _apply_efficiency_ratio_to_volumes_v2(volumes, efficiency_ratio)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    return volumes
+
+
+def _phase_groups_from_fields_v6(volumes: List[Volume], phasing_config: PhasingConfig) -> List[Tuple[List[str], List[Volume], List[str], int]]:
+    """V8: én fase per delfelt som hovedregel; bare del ved tydelig overkapasitet."""
+    field_map = {f.field_id: f for f in _CURRENT_DEVELOPMENT_FIELDS_V5}
+    grouped: Dict[str, List[Volume]] = {}
+    for v in volumes:
+        fid = getattr(v, 'field_id', None) or getattr(v, 'zone_id', None) or 'uten_delfelt'
+        grouped.setdefault(fid, []).append(v)
+    groups: List[Tuple[List[str], List[Volume], List[str], int]] = []
+    split_target = max(7600.0, float(phasing_config.MAX_PHASE_BRA or 6500.0) * 1.18)
+    for fid, field_vols in grouped.items():
+        field_vols = [v for v in field_vols if getattr(v, 'polygon', None) is not None]
+        if not field_vols:
+            continue
+        field_obj = field_map.get(fid)
+        field_name = getattr(field_obj, 'name', fid) if field_obj else fid
+        order_hint = int(getattr(field_obj, 'phase_order_hint', 2) or 2) if field_obj else 2
+        total_bra = sum(float(v.bra_m2 or 0.0) for v in field_vols)
+        ctx = str(getattr(field_obj, 'context', '') or '') if field_obj else ''
+        target_subphases = 1
+        if total_bra > split_target and len(field_vols) >= 6 and ctx not in {'barnehage_edge', 'sensitive_edge'}:
+            target_subphases = 2
+        if target_subphases == 1:
+            groups.append(([fid], list(field_vols), [field_name], order_hint))
+            continue
+        subgroups = _group_sorted_volumes_v6(field_vols, target_subphases)
+        for idx, subgroup in enumerate(subgroups, start=1):
+            gname = field_name if len(subgroups) == 1 else f"{field_name} del {idx}"
+            groups.append(([fid], subgroup, [gname], order_hint))
+    groups.sort(key=lambda item: (int(item[3]), -_phase_group_centroid_v7(item[1])[1], _phase_group_centroid_v7(item[1])[0]))
+    # Hold samlet antall trinn nede på 4-5. Slå bare sammen nærmeste små grupper hvis vi går over 5.
+    while len(groups) > 5:
+        sizes = [sum(float(v.bra_m2 or 0.0) for v in g[1]) for g in groups]
+        i = min(range(len(groups)), key=lambda k: sizes[k])
+        cx, cy = _phase_group_centroid_v7(groups[i][1])
+        best_j = None
+        best_dist = float('inf')
+        for j in range(len(groups)):
+            if i == j:
+                continue
+            ocx, ocy = _phase_group_centroid_v7(groups[j][1])
+            dist = math.hypot(cx - ocx, cy - ocy)
+            if dist < best_dist:
+                best_dist = dist
+                best_j = j
+        if best_j is None:
+            break
+        _merge_group_pair_v7(groups, i, best_j)
+        groups.sort(key=lambda item: (int(item[3]), -_phase_group_centroid_v7(item[1])[1], _phase_group_centroid_v7(item[1])[0]))
+    return groups
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    return _ORIG_V8_PASS4_PHASING(volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon)
+
+
+def plan_masterplan(*args, **kwargs) -> Masterplan:
+    mp = _ORIG_V8_PLAN_MASTERPLAN(*args, **kwargs)
+    try:
+        target_bra = float((getattr(mp, 'site_inputs', {}) or {}).get('target_bra_m2', kwargs.get('target_bra_m2', 0.0)) or kwargs.get('target_bra_m2', 0.0) or 0.0)
+        if mp.metrics is not None and target_bra > 0:
+            mp.metrics.target_fit_pct = round(float(mp.metrics.total_bra or 0.0) / max(target_bra, 1.0) * 100.0, 1)
+            mp.metrics.field_count = len(getattr(mp, 'development_fields', []) or [])
+        if isinstance(getattr(mp, 'diag_info', None), dict):
+            mp.diag_info['v8'] = '; '.join([
+                f"måltreff={float(getattr(getattr(mp, 'metrics', None), 'target_fit_pct', 0.0) or 0.0):.1f}%",
+                f"felt={len(getattr(mp, 'development_fields', []) or [])}",
+                f"trinn={len(getattr(mp, 'building_phases', []) or [])}",
+            ])
+        mp.source = (getattr(mp, 'source', 'Builtly Masterplan') + ' + v8 structure/targetfit').strip()
+    except Exception:
+        pass
+    return mp
