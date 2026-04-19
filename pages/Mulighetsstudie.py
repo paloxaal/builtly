@@ -9076,6 +9076,603 @@ def create_full_report_pdf(
         return bytes(output)
 
 
+
+
+# =====================================================================
+# V8 PATCH — robust Builtly-rasterkart, tydeligere volumskisser og mer
+# lesbare rapport-/UI-illustrasjoner uten SVG-avhengighet.
+# =====================================================================
+
+def _rgba_v8(color: Any, alpha: int = 255) -> Tuple[int, int, int, int]:
+    if isinstance(color, tuple):
+        if len(color) == 4:
+            return tuple(int(v) for v in color)  # type: ignore[return-value]
+        if len(color) == 3:
+            return (int(color[0]), int(color[1]), int(color[2]), int(alpha))
+    if isinstance(color, str):
+        c = color.strip()
+        if c.startswith('#') and len(c) in (7, 9):
+            if len(c) == 7:
+                return (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), int(alpha))
+            return (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), int(c[7:9], 16))
+    return (255, 255, 255, int(alpha))
+
+
+def _lerp_color_v8(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int], t: float) -> Tuple[int, int, int, int]:
+    t = clamp(float(t), 0.0, 1.0)
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(4))  # type: ignore[return-value]
+
+
+def _draw_gradient_rect_v8(draw: ImageDraw.ImageDraw, box: Tuple[int, int, int, int], c0: Tuple[int, int, int, int], c1: Tuple[int, int, int, int], vertical: bool = True) -> None:
+    x0, y0, x1, y1 = [int(v) for v in box]
+    if vertical:
+        span = max(1, y1 - y0)
+        for yy in range(y0, y1):
+            t = (yy - y0) / span
+            draw.line([(x0, yy), (x1, yy)], fill=_lerp_color_v8(c0, c1, t))
+    else:
+        span = max(1, x1 - x0)
+        for xx in range(x0, x1):
+            t = (xx - x0) / span
+            draw.line([(xx, y0), (xx, y1)], fill=_lerp_color_v8(c0, c1, t))
+
+
+def _draw_group_polygons_v8(draw: ImageDraw.ImageDraw, groups: Any, project, fill=None, outline=None, width: int = 1) -> None:
+    fill_rgba = _rgba_v8(fill, 255) if fill is not None else None
+    outline_rgba = _rgba_v8(outline, 255) if outline is not None else None
+    for ring in _extract_rings_v6(groups):
+        pts = [project(p) for p in ring]
+        if len(pts) < 3:
+            continue
+        if fill_rgba is not None:
+            draw.polygon(pts, fill=fill_rgba)
+        if outline_rgba is not None:
+            draw.line(pts + [pts[0]], fill=outline_rgba, width=width)
+
+
+def _draw_shadow_text_v8(draw: ImageDraw.ImageDraw, xy: Tuple[float, float], text: str, font, fill=(17,24,39,255), shadow=(255,255,255,200), anchor='mm') -> None:
+    x, y = xy
+    for dx, dy in ((1,1), (1,0), (0,1)):
+        draw.text((x + dx, y + dy), text, font=font, fill=shadow, anchor=anchor)
+    draw.text((x, y), text, font=font, fill=fill, anchor=anchor)
+
+
+def _draw_boxed_label_v8(draw: ImageDraw.ImageDraw, rect: Tuple[float, float, float, float], title: str, subtitle: str = '', glyph: str = '', accent=(56,189,248,255), text_color=(17,24,39,255)) -> None:
+    x0, y0, x1, y1 = rect
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=12, fill=(255,255,255,232), outline=(216,225,235,255), width=1)
+    if glyph:
+        cx = x0 + 18
+        cy = y0 + 18
+        draw.ellipse((cx - 10, cy - 10, cx + 10, cy + 10), fill=accent, outline=(255,255,255,255), width=2)
+        _draw_shadow_text_v8(draw, (cx, cy + 1), glyph, _pil_font(12, bold=True), fill=(255,255,255,255), shadow=(0,0,0,0), anchor='mm')
+        tx = x0 + 34
+    else:
+        tx = x0 + 12
+    draw.text((tx, y0 + 8), title, font=_pil_font(15, bold=True), fill=text_color)
+    if subtitle:
+        draw.text((tx, y0 + 28), subtitle, font=_pil_font(12), fill=(71,85,105,255))
+
+
+def _mua_summary_fallback_v8(site: Optional['SiteInputs'], option: 'OptionResult', summary: Dict[str, Any], outdoor_zones: List[Dict[str, Any]]) -> Dict[str, Any]:
+    out = dict(summary or {})
+    ground_common = float(out.get('ground_common_m2', out.get('ground_felles_m2', 0.0)) or 0.0)
+    roof_m2 = float(out.get('roof_m2', 0.0) or 0.0)
+    private_m2 = float(out.get('private_m2', 0.0) or 0.0)
+    if outdoor_zones:
+        ground_direct = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_zones if z.get('counts_toward_mua') and z.get('is_felles') and z.get('on_ground'))
+        roof_direct = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_zones if z.get('counts_toward_mua') and not z.get('on_ground'))
+        private_direct = sum(float(z.get('area_m2', 0.0) or 0.0) for z in outdoor_zones if z.get('counts_toward_mua') and not z.get('is_felles'))
+        if ground_direct > ground_common:
+            ground_common = ground_direct
+        roof_m2 = max(roof_m2, roof_direct)
+        private_m2 = max(private_m2, private_direct)
+    if ground_common <= 1.0:
+        try:
+            site_poly = None
+            groups = option.geometry.get('buildable_polygon_coords') or option.geometry.get('site_polygon_coords') or []
+            rings = _extract_rings_v6(groups)
+            if rings:
+                site_poly = Polygon([(float(x), float(y)) for x, y in rings[0]]).buffer(0)
+            building_polys = []
+            for row in option.geometry.get('building_roster', []) or option.geometry.get('massing_parts', []) or []:
+                coords = row.get('coords') or []
+                for ring in _extract_rings_v6(coords):
+                    try:
+                        p = Polygon([(float(x), float(y)) for x, y in ring]).buffer(0)
+                        if not p.is_empty:
+                            building_polys.append(p)
+                    except Exception:
+                        pass
+            if site_poly is not None and building_polys:
+                fp = unary_union(building_polys).buffer(0)
+                accessible = site_poly.difference(fp).buffer(0)
+                if not accessible.is_empty:
+                    ground_common = max(ground_common, float(accessible.area) * 0.72)
+        except Exception:
+            pass
+    total = ground_common + roof_m2 + private_m2
+    units = int(out.get('units', getattr(option, 'unit_count', 0) or 0) or 0)
+    required = float(out.get('required_m2', units * 40.0) or units * 40.0)
+    out.update({
+        'ground_common_m2': round(ground_common, 1),
+        'ground_felles_m2': round(ground_common, 1),
+        'roof_m2': round(roof_m2, 1),
+        'private_m2': round(private_m2, 1),
+        'total_mua_m2': round(total, 1),
+        'total_m2': round(total, 1),
+        'required_m2': round(required, 1),
+        'compliant': bool(total >= required and ground_common >= required * 0.25 and (ground_common + roof_m2) >= required * 0.5),
+    })
+    if ground_common <= 1.0:
+        out['diagnostic_status'] = 'missing_ground_mua'
+        out['diagnostic_message'] = 'Bakke-MUA kunne ikke beregnes sikkert fra uteromssonene. Viser konservativt fallback-estimat.'
+    return out
+
+
+def _field_fill_color_v8(field: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    ctx = str(field.get('context', '') or '').lower()
+    if ctx == 'barnehage_edge':
+        return (166, 116, 82, 42)
+    if ctx == 'green_edge':
+        return (122, 170, 107, 42)
+    if ctx == 'urban_edge':
+        return (56, 189, 248, 34)
+    if ctx == 'sensitive_edge':
+        return (148, 163, 184, 40)
+    if ctx == 'mixed_edge':
+        return (94, 234, 212, 34)
+    return (226, 232, 240, 36)
+
+
+def _field_outline_color_v8(field: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    ctx = str(field.get('context', '') or '').lower()
+    if ctx == 'barnehage_edge':
+        return (120, 53, 15, 255)
+    if ctx == 'green_edge':
+        return (47, 106, 79, 255)
+    if ctx == 'urban_edge':
+        return (14, 165, 233, 255)
+    if ctx == 'sensitive_edge':
+        return (71, 85, 105, 255)
+    return (15, 23, 42, 255)
+
+
+def _render_masterplan_concept_map_v6(site: Optional['SiteInputs'], option: 'OptionResult', width: int = 1700, height: int = 980) -> Image.Image:
+    geometry = getattr(option, 'geometry', {}) or {}
+    fields = list(geometry.get('development_fields', []) or [])
+    outdoor_zones = list(geometry.get('outdoor_zones', []) or [])
+    buildings = list(geometry.get('building_roster', []) or [])
+    neighbors = list(geometry.get('neighbor_polygons', []) or [])
+    bounds = _plan_bounds_v6(geometry)
+    pal = _builtly_palette_v7()
+
+    left_w = int(width * 0.29)
+    plan_x0 = left_w + 22
+    plan_y0 = 28
+    plan_w = width - plan_x0 - 28
+    plan_h = height - 56
+    project, _ = _make_projector_v6(bounds, plan_x0 + 24, plan_y0 + 18, plan_w - 48, plan_h - 36)
+
+    img = Image.new('RGBA', (width, height), _rgba_v8(pal['paper']))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    _draw_gradient_rect_v8(draw, (0, 0, left_w, height), _rgba_v8('#07111d'), _rgba_v8('#0d1b2a'))
+    draw.rounded_rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), radius=18, fill=_rgba_v8(pal['plan_bg']), outline=(216,225,235,255), width=2)
+    draw.rounded_rectangle((38, 48, 94, 54), radius=3, fill=_rgba_v8(pal['teal']))
+    draw.text((38, 76), 'BUILTLY · KONSEPT', font=_pil_font(16), fill=_rgba_v8(pal['teal_soft']))
+    draw.text((38, 118), 'KVARTALSTRUKTUR', font=_pil_font(38, bold=True), fill=(235,242,248,255))
+    draw.text((38, 160), 'Delfelt, siktlinjer og uterom i én lesbar oversikt', font=_pil_font(15), fill=(146,167,186,255))
+
+    concept_lines = _field_summary_lines_v6(fields, outdoor_zones)
+    if not concept_lines:
+        concept_lines = ['Masterplanen er organisert i tydelige delfelt med egne gårdsrom.', 'Diagonal og gangnett skal binde feltene sammen og holde uterommene lesbare.']
+    y = 220
+    for line in concept_lines[:6]:
+        for wrapped in _wrap_lines_v6(line, max_chars=34):
+            draw.ellipse((44, y - 9, 52, y - 1), fill=_rgba_v8(pal['teal']))
+            draw.text((62, y - 14), wrapped, font=_pil_font(17), fill=(232,239,247,255))
+            y += 24
+        y += 6
+    draw.text((38, height - 48), 'Builtly-identitet: mørk UI, teal-aksenter og tydelige delfelt for', font=_pil_font(13), fill=(138,160,183,255))
+    draw.text((38, height - 28), 'reguleringsdialog, konseptvalg og rapportpresentasjon.', font=_pil_font(13), fill=(138,160,183,255))
+
+    for nb in neighbors[:160]:
+        _draw_group_polygons_v8(draw, nb.get('coords') or [], project, fill=(214,220,228,255), outline=(194,204,214,255), width=1)
+    _draw_group_polygons_v8(draw, geometry.get('buildable_polygon_coords') or [], project, fill=(237,243,235,180), outline=None)
+    _draw_group_polygons_v8(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(239,68,68,255), width=3)
+
+    for field in fields:
+        _draw_group_polygons_v8(draw, field.get('polygon_coords') or [], project, fill=_field_fill_color_v8(field), outline=_field_outline_color_v8(field), width=3)
+
+    # Ett unikt uterom per delfelt + ev. diagonal/grønnstruktur
+    labels = _main_outdoor_labels_v7(fields, outdoor_zones)
+    for lbl in labels:
+        fill = _rgba_v8(pal.get(lbl.get('color_key', 'ground_green'), pal['ground_green']), 220)
+        _draw_group_polygons_v8(draw, lbl.get('coords') or [], project, fill=fill, outline=(255,255,255,255), width=2)
+
+    for b in buildings:
+        _draw_group_polygons_v8(draw, b.get('coords') or [], project, fill=(255,255,255,255), outline=(139,151,165,255), width=2)
+
+    occupied: List[Tuple[float, float, float, float]] = []
+    # Store feltlabels sentrert i hvert delfelt
+    big_font = _pil_font(28, bold=True)
+    for field in fields:
+        cx, cy = _centroid_v6(field.get('polygon_coords') or [])
+        sx, sy = project([cx, cy])
+        title = _truncate_label_v7(str(field.get('name') or field.get('field_id') or 'Delfelt'), 24)
+        tw = max(60, int(len(title) * 14))
+        th = 34
+        rect = (sx - tw/2 - 10, sy - th/2 - 8, sx + tw/2 + 10, sy + th/2 + 8)
+        if not _rect_overlaps_v7(rect, occupied, pad=12):
+            occupied.append(rect)
+            draw.rounded_rectangle(rect, radius=10, fill=(255,255,255,208))
+            _draw_shadow_text_v8(draw, (sx, sy + 1), title, big_font, fill=(15,23,42,255), shadow=(255,255,255,180), anchor='mm')
+
+    # Gårdsromlabels med kollisjonsdeteksjon
+    for lbl in labels[:7]:
+        cx, cy = _centroid_v6(lbl.get('coords') or [])
+        ax, ay = project([cx, cy])
+        title = _truncate_label_v7(lbl.get('title', ''), 26)
+        subtitle = _truncate_label_v7(lbl.get('subtitle', ''), 34)
+        rect, anchor, _ = _place_label_v7((ax, ay), title, subtitle, occupied, plan_x0 + 10, plan_y0 + 12, plan_x0 + plan_w - 14, plan_y0 + plan_h - 14)
+        color = _rgba_v8(pal.get(lbl.get('color_key', 'ground_green'), pal['ground_green']))
+        bx0, by0, bx1, by1 = rect
+        draw.line((anchor[0], anchor[1], bx0 + 16, (by0 + by1) / 2), fill=(100,116,139,235), width=1)
+        _draw_boxed_label_v8(draw, rect, title, subtitle, lbl.get('glyph', ''), accent=color)
+
+    return img.convert('RGB')
+
+
+def _render_masterplan_mua_map_v6(site: Optional['SiteInputs'], option: 'OptionResult', width: int = 1760, height: int = 980) -> Image.Image:
+    geometry = getattr(option, 'geometry', {}) or {}
+    outdoor_zones = list(geometry.get('outdoor_zones', []) or [])
+    buildings = list(geometry.get('building_roster', []) or [])
+    neighbors = list(geometry.get('neighbor_polygons', []) or [])
+    fields = list(geometry.get('development_fields', []) or [])
+    summary = _mua_summary_fallback_v8(site, option, dict(geometry.get('mua_summary', {}) or {}), outdoor_zones)
+    bounds = _plan_bounds_v6(geometry)
+    pal = _builtly_palette_v7()
+
+    left_w = int(width * 0.27)
+    right_w = int(width * 0.18)
+    plan_x0 = left_w + 20
+    plan_y0 = 28
+    plan_w = width - left_w - right_w - 46
+    plan_h = height - 56
+    legend_x0 = plan_x0 + plan_w + 12
+    project, _ = _make_projector_v6(bounds, plan_x0 + 18, plan_y0 + 18, plan_w - 36, plan_h - 36)
+
+    img = Image.new('RGBA', (width, height), _rgba_v8(pal['paper']))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    _draw_gradient_rect_v8(draw, (0, 0, left_w, height), _rgba_v8('#09121d'), _rgba_v8('#122336'))
+    draw.rounded_rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), radius=18, fill=_rgba_v8(pal['plan_bg']), outline=(216,225,235,255), width=2)
+    draw.rounded_rectangle((legend_x0, plan_y0, legend_x0 + right_w, plan_y0 + plan_h), radius=18, fill=(255,255,255,255), outline=(216,225,235,255), width=2)
+    draw.rounded_rectangle((38, 48, 94, 54), radius=3, fill=_rgba_v8(pal['teal']))
+    draw.text((38, 76), 'BUILTLY · BESTEMMELSER', font=_pil_font(16), fill=_rgba_v8(pal['teal_soft']))
+    draw.text((38, 118), 'BESTEMMELSER MUA', font=_pil_font(38, bold=True), fill=(235,242,248,255))
+    draw.text((38, 160), 'Felles, tak og privat MUA beregnet direkte fra uteromssystemet', font=_pil_font(15), fill=(146,167,186,255))
+
+    ground_common = float(summary.get('ground_common_m2', summary.get('ground_felles_m2', 0.0)) or 0.0)
+    roof_m2 = float(summary.get('roof_m2', 0.0) or 0.0)
+    private_m2 = float(summary.get('private_m2', 0.0) or 0.0)
+    total_mua = float(summary.get('total_mua_m2', summary.get('total_m2', 0.0)) or 0.0)
+    required = float(summary.get('required_m2', 0.0) or 0.0)
+    site_area = float(getattr(site, 'site_area_m2', 0.0) or 0.0) if site is not None else 0.0
+    total_bra = float(getattr(option, 'saleable_area_m2', 0.0) or 0.0)
+    unit_count = int(getattr(option, 'unit_count', summary.get('units', 0) or 0) or 0)
+    bra_pct = (total_bra / max(site_area, 1.0) * 100.0) if site_area else 0.0
+    rows = [
+        ('Tomteareal', f"{site_area:,.0f} m²".replace(',', ' ')),
+        ('Utnyttelse BRA', f"{bra_pct:.0f}%"),
+        ('Total BRA', f"{total_bra:,.0f} m²".replace(',', ' ')),
+        ('Boligenheter', f"{unit_count}"),
+        ('MUA-krav', f"{required:,.0f} m²".replace(',', ' ')),
+        ('Min. 50% felles', f"{required * 0.5:,.0f} m²".replace(',', ' ')),
+        ('Min. felles på bakken', f"{required * 0.25:,.0f} m²".replace(',', ' ')),
+    ]
+    y = 222
+    for label, value in rows:
+        draw.text((38, y), label, font=_pil_font(16), fill=(202,214,226,255))
+        tw = draw.textbbox((0,0), value, font=_pil_font(16, bold=True))[2]
+        draw.text((left_w - 34 - tw, y), value, font=_pil_font(16, bold=True), fill=(255,255,255,255))
+        y += 28
+    if summary.get('diagnostic_status') == 'missing_ground_mua':
+        draw.rounded_rectangle((34, y + 10, left_w - 34, y + 88), radius=10, fill=(64,21,25,255), outline=(127,29,29,255), width=1)
+        draw.text((48, y + 26), 'Diagnostikk', font=_pil_font(14, bold=True), fill=(254,202,202,255))
+        for idx, line in enumerate(_wrap_lines_v6(summary.get('diagnostic_message', ''), max_chars=42)[:2]):
+            draw.text((48, y + 48 + idx * 16), line, font=_pil_font(13), fill=(253,226,226,255))
+        y += 96
+    draw.text((38, y + 18), 'Byggesone 2', font=_pil_font(16, bold=True), fill=(255,255,255,255))
+    for idx, rule in enumerate([
+        '40 m² MUA per bolig',
+        'Min. 50% felles uteoppholdsareal',
+        'Min. 50% av felles MUA på bakkeplan',
+        'Takflater kan medregnes når de er tilgjengelige',
+    ]):
+        yy = y + 46 + idx * 22
+        draw.ellipse((44, yy - 10, 52, yy - 2), fill=_rgba_v8(pal['teal']))
+        draw.text((58, yy - 14), rule, font=_pil_font(13), fill=(202,214,226,255))
+
+    for nb in neighbors[:160]:
+        _draw_group_polygons_v8(draw, nb.get('coords') or [], project, fill=(214,220,228,255), outline=(194,204,214,255), width=1)
+    _draw_group_polygons_v8(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(239,68,68,255), width=3)
+    for field in fields:
+        _draw_group_polygons_v8(draw, field.get('polygon_coords') or [], project, fill=None, outline=(17,24,39,255), width=3)
+
+    for z in outdoor_zones:
+        if not bool(z.get('counts_toward_mua', False)):
+            continue
+        fill = None
+        outline = None
+        if bool(z.get('on_ground', False)) and bool(z.get('is_felles', False)):
+            fill = (238,154,77,212)
+            outline = (255,255,255,235)
+        elif not bool(z.get('on_ground', False)):
+            fill = (44,86,125,205)
+            outline = (255,255,255,235)
+        else:
+            fill = None
+            outline = (217,75,90,255)
+        _draw_group_polygons_v8(draw, z.get('coords') or [], project, fill=fill, outline=outline, width=2 if outline else 1)
+
+    for b in buildings:
+        _draw_group_polygons_v8(draw, b.get('coords') or [], project, fill=(255,255,255,255), outline=(139,151,165,255), width=2)
+
+    # Eksterne etasje-labels for et lite utvalg bygg, så kartet holder seg lesbart.
+    occupied: List[Tuple[float, float, float, float]] = []
+    site_cent = _centroid_v6(geometry.get('site_polygon_coords') or [])
+    scx, scy = site_cent
+    b_sorted = sorted(buildings, key=lambda row: float(row.get('footprint_m2', 0.0) or 0.0), reverse=True)[:10]
+    for b in b_sorted:
+        floors = int(b.get('floors', 0) or 0)
+        if floors <= 0:
+            continue
+        cx, cy = _centroid_v6(b.get('coords') or [])
+        sx, sy = project([cx, cy])
+        vx = cx - scx
+        vy = cy - scy
+        mag = max((vx * vx + vy * vy) ** 0.5, 1.0)
+        lx = sx + (vx / mag) * 34.0
+        ly = sy - (vy / mag) * 34.0
+        label = f"{floors} et"
+        tw = max(32, int(len(label) * 8.5))
+        th = 22
+        rect = (lx - tw/2 - 6, ly - th/2 - 5, lx + tw/2 + 6, ly + th/2 + 5)
+        if _rect_overlaps_v7(rect, occupied, pad=6):
+            rect, _, _ = _place_label_v7((sx, sy), label, '', occupied, plan_x0 + 8, plan_y0 + 8, plan_x0 + plan_w - 8, plan_y0 + plan_h - 8)
+        else:
+            occupied.append(rect)
+        rx0, ry0, rx1, ry1 = rect
+        draw.line((sx, sy, rx0 + 8, (ry0 + ry1) / 2), fill=(100,116,139,220), width=1)
+        draw.rounded_rectangle(rect, radius=8, fill=(255,255,255,240), outline=(216,225,235,255), width=1)
+        _draw_shadow_text_v8(draw, ((rx0 + rx1) / 2, (ry0 + ry1) / 2 + 1), label, _pil_font(14, bold=True), fill=(17,24,39,255), shadow=(255,255,255,180), anchor='mm')
+
+    # Legende/kontroll
+    lx = legend_x0 + 18
+    ly = 72
+    draw.text((lx, ly), 'LEGENDE', font=_pil_font(18, bold=True), fill=(17,24,39,255))
+    ly += 34
+    legend_items = [
+        ('Felles MUA på bakken', (238,154,77,255), ground_common),
+        ('MUA på takflater', (44,86,125,255), roof_m2),
+        ('Privat MUA', (217,75,90,255), private_m2),
+        ('Total MUA', (107,114,128,255), total_mua),
+    ]
+    for label, color, area in legend_items:
+        if label == 'Privat MUA':
+            draw.rounded_rectangle((lx, ly - 14, lx + 22, ly + 8), radius=4, fill=None, outline=color, width=3)
+        else:
+            draw.rounded_rectangle((lx, ly - 14, lx + 22, ly + 8), radius=4, fill=color)
+        draw.text((lx + 34, ly - 10), label, font=_pil_font(13), fill=(51,65,85,255))
+        area_txt = f"{area:,.0f} m²".replace(',', ' ')
+        tw = draw.textbbox((0,0), area_txt, font=_pil_font(13, bold=True))[2]
+        draw.text((legend_x0 + right_w - 18 - tw, ly - 10), area_txt, font=_pil_font(13, bold=True), fill=(17,24,39,255))
+        ly += 30
+    ly += 18
+    draw.text((lx, ly), 'KONTROLL', font=_pil_font(18, bold=True), fill=(17,24,39,255))
+    ly += 30
+    checks = [
+        ('Krav oppfylt', bool(total_mua >= required)),
+        ('Fellesandel oppfylt', bool((ground_common + roof_m2) >= required * 0.5)),
+        ('Bakkeandel oppfylt', bool(ground_common >= required * 0.25)),
+    ]
+    for label, ok in checks:
+        bg = (220,252,231,255) if ok else (254,226,226,255)
+        fg = (22,101,52,255) if ok else (153,27,27,255)
+        draw.rounded_rectangle((lx, ly - 15, legend_x0 + right_w - 18, ly + 8), radius=10, fill=bg)
+        draw.text((lx + 10, ly - 11), f"{label}: {'Ja' if ok else 'Nei'}", font=_pil_font(12, bold=True), fill=fg)
+        ly += 30
+
+    return img.convert('RGB')
+
+
+_ORIG_V8_RENDER_PLAN_DIAGRAM = render_plan_diagram
+
+def render_plan_diagram(site: 'SiteInputs', option: 'OptionResult') -> Image.Image:
+    """V8: roligere volumskisser med mindre label-støy og tydeligere delfelt."""
+    canvas_w, canvas_h = 1100, 900
+    img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = _pil_font(16)
+    font_bold = _pil_font(16, bold=True)
+    font_info = _pil_font(14)
+    font_north = _pil_font(18, bold=True)
+
+    geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = geometry.get('buildable_polygon_coords') or site_coords
+    shadow_coords = geometry.get('winter_shadow_polygon_coords') or []
+    neighbor_polys = geometry.get('neighbor_polygons', [])
+    massing_parts = list(geometry.get('massing_parts', []) or [])
+    field_polys = geometry.get('phase_field_polygons', []) or [f.get('polygon_coords') for f in (geometry.get('development_fields') or []) if f.get('polygon_coords')]
+
+    site_pts = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+    target_screen_span = min(canvas_w, canvas_h) * 0.48
+    pixel_scale = target_screen_span / site_span
+    screen_cx = canvas_w * 0.50
+    screen_cy = canvas_h * 0.65
+    ISO_ANGLE = math.radians(30)
+    COS_A = math.cos(ISO_ANGLE)
+    SIN_A = math.sin(ISO_ANGLE)
+    Z_SCALE = 1.2
+
+    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
+        return sx, sy
+
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
+
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), int(c[3]) if len(c)>3 else 255)
+
+    def lighten(c, a):
+        return (min(255,int(c[0]+a)), min(255,int(c[1]+a)), min(255,int(c[2]+a)), int(c[3]) if len(c)>3 else 255)
+
+    def draw_iso_flat(coords, z, fill, outline, w=1):
+        pts = iso_pts(coords, z)
+        if len(pts) < 3:
+            return
+        draw.polygon(pts, fill=fill, outline=outline)
+        if w > 1:
+            draw.line(pts + [pts[0]], fill=outline, width=w)
+
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return 0.0
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return 0.0
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
+        return 0.0
+
+    # Himmelgradient
+    for row in range(canvas_h // 2):
+        t = row / max(1.0, canvas_h / 2.0)
+        draw.line([(0, row), (canvas_w, row)], fill=(int(6+t*10), int(17+t*18), int(26+t*28), 255))
+
+    draw_iso_flat(flatten_coord_groups(site_coords), 0.0, (15,28,42,200), (80,100,130,180), 2)
+    draw_iso_flat(flatten_coord_groups(buildable_coords), 0.0, (56,189,248,18), (56,189,248,84), 1)
+    draw_iso_flat(flatten_coord_groups(shadow_coords), 0.0, (255,213,79,20), (255,213,79,55), 1)
+    for poly in field_polys[:8]:
+        pts = flatten_coord_groups(poly)
+        if pts:
+            draw_iso_flat(pts, 0.0, (56,189,248,12), (255,255,255,70), 1)
+
+    # Dybdesortering
+    volumes = []
+    view_radius = site_span * 0.50
+    for neighbor in neighbor_polys:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
+            continue
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        volumes.append({'coords': ncoords, 'height_m': float(neighbor.get('height_m', 9.0)), 'type': 'neighbor', 'depth': (avg_x - cx) + (avg_y - cy)})
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords:
+            continue
+        avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+        avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+        volumes.append({'coords': pcoords, 'height_m': float(part.get('height_m', option.building_height_m)), 'name': part.get('name', ''), 'color': tuple(part.get('color', [34,197,94,200])), 'floors': int(part.get('floors', option.floors)), 'type': 'proposed', 'depth': (avg_x - cx) + (avg_y - cy)})
+    volumes.sort(key=lambda v: v['depth'])
+
+    show_height_labels = len([v for v in volumes if v['type'] == 'proposed']) <= 6
+    for vol in volumes:
+        coords, h = vol['coords'], vol['height_m']
+        if vol['type'] == 'neighbor':
+            alpha = min(95, int(45 + h * 3))
+            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(130,alpha+25)), 1)
+        else:
+            base = vol.get('color', (34,197,94,200))
+            base = tuple(int(v) if v > 1 else int(v * 255) for v in base)
+            if len(base) < 4:
+                base = (base[0], base[1], base[2], 220)
+            draw_extruded(coords, h, (int(base[0]),int(base[1]),int(base[2]),230), darken(base, 0.74), lighten(base, 44), 2)
+            if show_height_labels:
+                avg_x = sum(p[0] for p in coords) / len(coords)
+                avg_y = sum(p[1] for p in coords) / len(coords)
+                lx, ly = iso_project(avg_x, avg_y, h * 1.08)
+                floors = int(vol.get('floors', 0) or 0)
+                _draw_shadow_text_v8(draw, (lx, ly - 2), f"{floors} et", _pil_font(12, bold=True), fill=(255,255,255,245), shadow=(6,17,26,180), anchor='mm')
+
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay+22, ax, ay-16), fill=(245,247,251,200), width=3)
+    draw.polygon([(ax, ay-25), (ax-7, ay-7), (ax+7, ay-7)], fill=(245,247,251,200))
+    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font_north)
+
+    yt = canvas_h - 75
+    draw.rectangle([(0, yt-4), (canvas_w, canvas_h)], fill=(6,17,26,232))
+    n_parts = len(massing_parts)
+    field_count = len(geometry.get('development_fields') or [])
+    title = f"{option.name} | {option.typology}"
+    draw.text((30, yt), title, fill=(245,247,251,255), font=font_bold)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m² | {option.unit_count} boliger | {option.floors} et. | Høyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
+    draw.text((30, yt+32), f"Bygg {n_parts} | Delfelt {field_count or max(1, len(field_polys))} | Fotavtrykk {option.footprint_area_m2:.0f} m² | Uteareal sol {option.sunlit_open_space_pct:.0f}%", fill=(159,176,195,255), font=font_info)
+    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {geometry.get('site_source', '')}", fill=(130,145,165,255), font=font_info)
+    return img.convert('RGB')
+
+
+_ORIG_RENDER_PLAN_VIEW_V8 = render_plan_view
+
+def render_plan_view(site: 'SiteInputs', option: 'OptionResult') -> Image.Image:
+    """V8: tydeligere delfeltgrenser og enklere, mer lesbar planvisning."""
+    try:
+        base = _ORIG_RENDER_PLAN_VIEW_V8(site, option).convert('RGBA')
+        draw = ImageDraw.Draw(base, 'RGBA')
+        geom = option.geometry or {}
+        phase_polys = geom.get('phase_field_polygons', []) or []
+        if phase_polys:
+            site_coords = geom.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+            site_pts = flatten_coord_groups(site_coords)
+            if site_pts:
+                sxs = [p[0] for p in site_pts]; sys_ = [p[1] for p in site_pts]
+                cx = (min(sxs) + max(sxs)) / 2.0; cy = (min(sys_) + max(sys_)) / 2.0
+                site_span = max(max(sxs)-min(sxs), max(sys_)-min(sys_), 1.0)
+                margin = 60; target_span = min(base.size[0], base.size[1]) - 2 * margin; scale = target_span / site_span
+                ox = base.size[0] / 2.0; oy = base.size[1] / 2.0
+                def proj(x, y):
+                    return ox + (x - cx) * scale, oy + (y - cy) * scale
+                for poly in phase_polys:
+                    pts = [proj(p[0], p[1]) for p in flatten_coord_groups(poly)]
+                    if len(pts) >= 3:
+                        draw.line(pts + [pts[0]], fill=(17,24,39,235), width=4)
+                names = geom.get('phase_field_names') or []
+                if names:
+                    txt = ' + '.join(names)
+                    draw.rounded_rectangle((24, 22, 24 + min(520, 12 * len(txt) + 34), 56), radius=10, fill=(255,255,255,215))
+                    draw.text((38, 30), txt, font=_pil_font(16, bold=True), fill=(15,23,42,255))
+        return base.convert('RGB')
+    except Exception:
+        return _ORIG_RENDER_PLAN_VIEW_V8(site, option)
+
+
 # --- 6. STYLING ---
 st.markdown(
     """
