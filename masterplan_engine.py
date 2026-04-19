@@ -505,7 +505,7 @@ def pass1_program_synthesis(
         prog.bolig_bra = max(0, prog.bolig_bra - naering_target)
 
     # Beregn MUA-krav (byggesone 2: 40 m² per bolig)
-    units = prog.unit_estimate(avg_unit_bra=float(site_inputs.get("avg_unit_bra", 70.0)))
+    units = prog.unit_estimate(avg_unit_bra=float(site_inputs.get("avg_unit_bra", 55.0)))
     prog.mua_total_required = units * BYGGESONE2_MUA_PER_BOLIG
     prog.mua_felles_min = prog.mua_total_required * BYGGESONE2_MUA_FELLES_MIN_FRAC
     prog.mua_bakke_min = prog.mua_felles_min * BYGGESONE2_MUA_BAKKE_MIN_FRAC
@@ -556,7 +556,7 @@ Svar KUN med JSON:
         prog.naering_bra = float(parsed.get("naering_bra", prog.naering_bra))
         prog.notes = str(parsed.get("notes", prog.notes))
         # Oppdater avledede krav
-        avg_unit = float(site_inputs.get("avg_unit_bra", 70.0))
+        avg_unit = float(site_inputs.get("avg_unit_bra", 55.0))
         units = prog.unit_estimate(avg_unit)
         prog.mua_total_required = units * BYGGESONE2_MUA_PER_BOLIG
         prog.mua_felles_min = prog.mua_total_required * BYGGESONE2_MUA_FELLES_MIN_FRAC
@@ -7121,6 +7121,352 @@ def plan_masterplan(*args, **kwargs) -> Masterplan:
                 ', '.join(f"T{p.phase_number}:{p.label} {float(p.actual_bra or 0.0):.0f} m²" for p in getattr(mp, 'building_phases', [])[:8])
             ])
         mp.source = (getattr(mp, 'source', 'Builtly Masterplan') + ' + v6 final').strip()
+    except Exception:
+        pass
+    return mp
+
+# =====================================================================
+# V7 PATCH — sterkere delfeltkoherens, roligere navn og mindre fragmenterte
+# byggetrinn for presentasjon/UI.
+# =====================================================================
+
+_V7_ROLE_LABELS = {
+    'perimeter': 'Bykant',
+    'bakfelt': 'Tunhus',
+    'tun': 'Tunhus',
+    'punkt': 'Punkthus',
+    'barnehage': 'Barnehage',
+}
+
+
+def _field_fill_typology_v5(field_obj: DevelopmentField) -> str:
+    """V7: roligere og mer arkitektonisk lesbar backfill.
+
+    Unngår at små restarealer fylles med mange LamellSegmentert-fragmenter.
+    """
+    ctx = str(getattr(field_obj, 'context', '') or '')
+    maxf = int(getattr(field_obj, 'preferred_floors_max', 5) or 5)
+    if ctx == 'sensitive_edge':
+        return 'Rekke' if maxf <= 3 else 'Lamell'
+    if ctx == 'barnehage_edge':
+        return 'Lamell'
+    if ctx in {'urban_edge', 'green_edge', 'mixed_edge'}:
+        return 'Lamell'
+    if ctx in {'calm_inner', 'active_diagonal'}:
+        return 'HalvåpenKarré' if maxf >= 5 else 'Lamell'
+    return 'Lamell'
+
+
+def _dedupe_field_names_v7(fields: List[DevelopmentField]) -> None:
+    groups: Dict[str, List[DevelopmentField]] = {}
+    for f in fields:
+        base = str(getattr(f, 'name', '') or '').strip() or 'Delfelt'
+        groups.setdefault(base, []).append(f)
+    for base, peers in groups.items():
+        if len(peers) <= 1:
+            peers[0].name = base
+            continue
+        peers_sorted = sorted(
+            peers,
+            key=lambda item: (
+                -float(getattr(getattr(item, 'polygon', None), 'centroid', Point(0, 0)).y),
+                float(getattr(getattr(item, 'polygon', None), 'centroid', Point(0, 0)).x),
+            ),
+        )
+        for idx, item in enumerate(peers_sorted, start=1):
+            item.name = f"{base} {idx}"
+
+
+def _phase_group_centroid_v7(vols: List[Volume]) -> Tuple[float, float]:
+    if not vols:
+        return (0.0, 0.0)
+    return (
+        sum(float(getattr(v, 'cx', 0.0) or 0.0) for v in vols) / len(vols),
+        sum(float(getattr(v, 'cy', 0.0) or 0.0) for v in vols) / len(vols),
+    )
+
+
+def _group_sorted_volumes_v6(field_vols: List[Volume], target_subphases: int) -> List[List[Volume]]:
+    """V7: grupper volum langs feltets hovedretning, men ikke for aggressivt."""
+    if target_subphases <= 1 or len(field_vols) <= 1:
+        return [list(field_vols)]
+    xs = [float(getattr(v, 'cx', 0.0) or 0.0) for v in field_vols]
+    ys = [float(getattr(v, 'cy', 0.0) or 0.0) for v in field_vols]
+    sort_key = (lambda v: float(getattr(v, 'cx', 0.0) or 0.0)) if (max(xs) - min(xs) >= max(ys) - min(ys)) else (lambda v: -float(getattr(v, 'cy', 0.0) or 0.0))
+    ordered = sorted(field_vols, key=sort_key)
+    total = sum(float(v.bra_m2 or 0.0) for v in ordered)
+    per = total / max(target_subphases, 1)
+    groups: List[List[Volume]] = [[]]
+    acc = 0.0
+    for v in ordered:
+        vbra = float(v.bra_m2 or 0.0)
+        cur = groups[-1]
+        # Hopp bare til ny gruppe hvis vi allerede har minst 2 bygg i gruppen.
+        if cur and len(cur) >= 2 and len(groups) < target_subphases and acc + vbra > per * 1.08:
+            groups.append([])
+            cur = groups[-1]
+            acc = 0.0
+        cur.append(v)
+        acc += vbra
+    return [g for g in groups if g]
+
+
+def _merge_group_pair_v7(groups, i: int, j: int):
+    fids_a, vols_a, names_a, hint_a = groups[i]
+    fids_b, vols_b, names_b, hint_b = groups[j]
+    merged = (
+        list(dict.fromkeys(list(fids_a) + list(fids_b))),
+        list(vols_a) + list(vols_b),
+        list(dict.fromkeys(list(names_a) + list(names_b))),
+        min(int(hint_a), int(hint_b)),
+    )
+    keep = min(i, j)
+    drop = max(i, j)
+    groups[keep] = merged
+    del groups[drop]
+
+
+def _phase_groups_from_fields_v6(volumes: List[Volume], phasing_config: PhasingConfig) -> List[Tuple[List[str], List[Volume], List[str], int]]:
+    """V7: hold byggetrinn feltkoherente.
+
+    Prioriterer én fase per delfelt. Felt kan deles i to ved store BRA-mengder,
+    men små felt slås ikke sammen på tvers med mindre det er helt nødvendig.
+    """
+    field_map = {f.field_id: f for f in _CURRENT_DEVELOPMENT_FIELDS_V5}
+    grouped: Dict[str, List[Volume]] = {}
+    for v in volumes:
+        fid = getattr(v, 'field_id', None) or getattr(v, 'zone_id', None) or 'uten_delfelt'
+        grouped.setdefault(fid, []).append(v)
+
+    groups: List[Tuple[List[str], List[Volume], List[str], int]] = []
+    min_soft = max(1800.0, float(phasing_config.MIN_PHASE_BRA or 2500.0) * 0.72)
+    split_target = min(6200.0, max(float(phasing_config.MAX_PHASE_BRA or 6500.0), 4800.0))
+
+    for fid, field_vols in grouped.items():
+        field_vols = [v for v in field_vols if getattr(v, 'polygon', None) is not None]
+        if not field_vols:
+            continue
+        field_obj = field_map.get(fid)
+        field_name = getattr(field_obj, 'name', fid) if field_obj else fid
+        order_hint = int(getattr(field_obj, 'phase_order_hint', 2) or 2) if field_obj else 2
+        total_bra = sum(float(v.bra_m2 or 0.0) for v in field_vols)
+        target_subphases = 1
+        if total_bra > split_target * 1.25 and len(field_vols) >= 4 and str(getattr(field_obj, 'context', '') or '') != 'barnehage_edge':
+            target_subphases = int(math.ceil(total_bra / split_target))
+        target_subphases = max(1, min(target_subphases, 3))
+        subgroups = _group_sorted_volumes_v6(field_vols, target_subphases)
+        for idx, subgroup in enumerate(subgroups, start=1):
+            gname = field_name if len(subgroups) == 1 else f"{field_name} del {idx}"
+            groups.append(([fid], subgroup, [gname], order_hint))
+
+    def _group_size(g) -> float:
+        return sum(float(v.bra_m2 or 0.0) for v in g[1])
+
+    # 1) Slå først sammen undersized subgrupper med søsken fra samme felt.
+    changed = True
+    while changed:
+        changed = False
+        for i, g in enumerate(list(groups)):
+            fid_list = list(g[0])
+            if len(fid_list) != 1:
+                continue
+            gbra = _group_size(g)
+            if gbra >= min_soft:
+                continue
+            fid = fid_list[0]
+            sib_idx = [j for j, og in enumerate(groups) if j != i and list(og[0]) == [fid]]
+            if not sib_idx:
+                continue
+            best_j = min(sib_idx, key=lambda j: _group_size(groups[j]))
+            _merge_group_pair_v7(groups, i, best_j)
+            changed = True
+            break
+
+    # 2) Hold oss innen 5 faser ved å slå sammen søskengrupper før alt annet.
+    while len(groups) > 5:
+        candidates = []
+        for i, gi in enumerate(groups):
+            for j in range(i + 1, len(groups)):
+                gj = groups[j]
+                if set(gi[0]) == set(gj[0]):
+                    candidates.append((i, j, _group_size(gi) + _group_size(gj)))
+        if candidates:
+            i, j, _ = min(candidates, key=lambda row: row[2])
+            _merge_group_pair_v7(groups, i, j)
+            continue
+        break
+
+    # 3) Bare hvis vi fremdeles har veldig små grupper og for mange faser, merge med nærmeste gruppe.
+    # Barnehagefelt og spesialfelt får lov til å være mindre for å beholde lesbar delfeltstruktur.
+    changed = True
+    while changed:
+        changed = False
+        for i, g in enumerate(list(groups)):
+            gbra = _group_size(g)
+            fid = list(g[0])[0] if len(g[0]) == 1 else ''
+            field_obj = field_map.get(fid)
+            ctx = str(getattr(field_obj, 'context', '') or '') if field_obj else ''
+            if gbra >= min_soft or len(groups) <= 5 or ctx == 'barnehage_edge':
+                continue
+            cx, cy = _phase_group_centroid_v7(g[1])
+            best_j = None
+            best_tuple = None
+            for j, other in enumerate(groups):
+                if i == j:
+                    continue
+                ocx, ocy = _phase_group_centroid_v7(other[1])
+                dist = math.hypot(cx - ocx, cy - ocy)
+                resulting = gbra + _group_size(other)
+                # Ikke lag monstertrinn.
+                if resulting > max(float(phasing_config.MAX_PHASE_BRA or 6500.0) * 1.25, 7600.0):
+                    continue
+                cand = (dist, resulting)
+                if best_tuple is None or cand < best_tuple:
+                    best_tuple = cand
+                    best_j = j
+            if best_j is not None:
+                _merge_group_pair_v7(groups, i, best_j)
+                changed = True
+                break
+
+    groups.sort(key=lambda item: (int(item[3]), -_phase_group_centroid_v7(item[1])[1], _phase_group_centroid_v7(item[1])[0]))
+    return groups
+
+
+def pass4_phasing(volumes: List[Volume], buildable_polygon,
+                  phasing_config: PhasingConfig, target_phase_count: int,
+                  program: ProgramAllocation, site_polygon) -> Tuple[List[BuildingPhase], List[ParkingPhase]]:
+    if not _CURRENT_DEVELOPMENT_FIELDS_V5:
+        return _ORIG_V6_PASS4_PHASING(volumes, buildable_polygon, phasing_config, target_phase_count, program, site_polygon)
+    _reestimate_units_v4(volumes, _CURRENT_AVG_UNIT_BRA_V4)
+    phase_groups = _phase_groups_from_fields_v6(volumes, phasing_config)
+    phases: List[BuildingPhase] = []
+    for idx, (field_ids, cluster_volumes, field_names, _) in enumerate(phase_groups, start=1):
+        if not cluster_volumes:
+            continue
+        phase_bra = sum(float(v.bra_m2 or 0.0) for v in cluster_volumes)
+        phase_units = sum(int(getattr(v, 'units_estimate', 0) or 0) for v in cluster_volumes)
+        programs_in_phase: List[ProgramKind] = []
+        for v in cluster_volumes:
+            if v.program not in programs_in_phase:
+                programs_in_phase.append(v.program)
+            if v.ground_floor_program and v.ground_floor_program not in programs_in_phase:
+                programs_in_phase.append(v.ground_floor_program)
+        label_names = list(dict.fromkeys(field_names))
+        phase = BuildingPhase(
+            phase_number=idx,
+            label=f"Trinn {idx} — {' + '.join(label_names)}",
+            volume_ids=[v.volume_id for v in cluster_volumes],
+            target_bra=phase_bra,
+            actual_bra=phase_bra,
+            programs_included=programs_in_phase,
+            units_estimate=phase_units,
+            field_ids=list(dict.fromkeys(field_ids)),
+            field_names=label_names,
+            estimated_duration_months=int(_clamp(math.ceil(max(phase_bra, 1.0) / 650.0), 6, 18)),
+        )
+        for v in cluster_volumes:
+            v.assigned_phase = idx
+        phase_union = unary_union([v.polygon for v in cluster_volumes if v.polygon is not None])
+        phase.construction_barrier_zone = phase_union.buffer(15.0) if phase_union is not None else None
+        if idx > 1:
+            phase.depends_on_phases = [idx - 1]
+        phases.append(phase)
+
+    parking_phases = _generate_parking_phases(phases, volumes, buildable_polygon, phasing_config, program)
+    for bphase in phases:
+        bphase.parking_served_by = [pp.phase_number for pp in parking_phases if bphase.phase_number in pp.serves_building_phases]
+        if not bphase.parking_served_by and parking_phases:
+            bphase.parking_served_by = [parking_phases[0].phase_number]
+    return phases, parking_phases
+
+
+def _assign_readable_names_v6(masterplan: Masterplan) -> None:
+    fields = list(getattr(masterplan, 'development_fields', []) or _CURRENT_DEVELOPMENT_FIELDS_V5)
+    field_map = {f.field_id: f for f in fields}
+    for f in fields:
+        f.name = _field_display_name_v6(f)
+    _dedupe_field_names_v7(fields)
+
+    zone_lookup = {z.zone_id: z for z in masterplan.typology_zones}
+    role_counts: Dict[Tuple[str, str], int] = {}
+    ordered = sorted(
+        masterplan.volumes,
+        key=lambda v: (-float(getattr(v, 'cy', 0.0) or 0.0), float(getattr(v, 'cx', 0.0) or 0.0), str(getattr(v, 'volume_id', ''))),
+    )
+    for idx, v in enumerate(ordered):
+        if not getattr(v, 'internal_name', ''):
+            v.internal_name = getattr(v, 'name', '') or getattr(v, 'volume_id', '')
+        field_obj = field_map.get(getattr(v, 'field_id', None))
+        if field_obj is not None:
+            v.field_name = field_obj.name
+        role = _volume_role_label_v6(v, zone_lookup, field_obj)
+        key = (v.field_name or 'Delfelt', role)
+        role_counts[key] = role_counts.get(key, 0) + 1
+        seq = role_counts[key]
+        pretty_role = _V7_ROLE_LABELS.get(role, role.title())
+        v.display_name = f"{v.field_name or 'Delfelt'} – {pretty_role} {seq}".strip()
+        v.house_id = f"HUS {_alpha_code_v6(idx)}"
+        v.name = v.house_id
+
+    for z in masterplan.typology_zones:
+        if getattr(z, 'field_id', None) and z.field_id in field_map:
+            z.field_name = field_map[z.field_id].name
+
+    for phase in masterplan.building_phases:
+        vols = [v for v in masterplan.volumes if v.volume_id in phase.volume_ids]
+        new_names = []
+        for fid in phase.field_ids or []:
+            f = field_map.get(fid)
+            if f is not None:
+                new_names.append(f.name)
+        phase.field_names = list(dict.fromkeys(new_names or phase.field_names or []))
+        if phase.field_names:
+            phase.label = f"Trinn {phase.phase_number} — {' + '.join(phase.field_names)}"
+        phase.units_estimate = sum(int(getattr(v, 'units_estimate', 0) or 0) for v in vols)
+        phase.actual_bra = sum(float(v.bra_m2 or 0.0) for v in vols)
+        phase.target_bra = phase.actual_bra
+        if not getattr(phase, 'estimated_duration_months', None):
+            phase.estimated_duration_months = int(_clamp(math.ceil(max(phase.actual_bra, 1.0) / 650.0), 6, 18))
+
+
+def pass6_validate(masterplan: Masterplan, max_bya_pct: float,
+                   max_floors: int, max_height_m: float) -> Masterplan:
+    masterplan = _ORIG_V6_PASS6_VALIDATE(masterplan, max_bya_pct, max_floors, max_height_m)
+    _apply_solar_guardrails_v6(masterplan)
+    _assign_readable_names_v6(masterplan)
+    if masterplan.metrics is not None:
+        spacing_score = _solar_spacing_score_v6(masterplan)
+        phase_scores = []
+        for p in masterplan.building_phases:
+            n_fields = len(getattr(p, 'field_ids', []) or [])
+            coherence = 100.0 if n_fields <= 1 else max(55.0, 100.0 - (n_fields - 1) * 20.0)
+            phase_scores.append(coherence)
+        masterplan.metrics.field_balance_score = sum(phase_scores) / len(phase_scores) if phase_scores else masterplan.metrics.field_balance_score
+        masterplan.metrics.avg_phase_bra = sum(float(p.actual_bra or 0.0) for p in masterplan.building_phases) / max(len(masterplan.building_phases), 1)
+        masterplan.metrics.min_phase_bra = min((float(p.actual_bra or 0.0) for p in masterplan.building_phases), default=0.0)
+        masterplan.metrics.max_phase_bra = max((float(p.actual_bra or 0.0) for p in masterplan.building_phases), default=0.0)
+        masterplan.metrics.units_total = sum(int(getattr(v, 'units_estimate', 0) or 0) for v in masterplan.volumes)
+        masterplan.metrics.total_bra = sum(float(v.bra_m2 or 0.0) for v in masterplan.volumes)
+        masterplan.metrics.overall_score = min(100.0, float(masterplan.metrics.overall_score or 0.0) * 0.82 + spacing_score * 0.08 + masterplan.metrics.field_balance_score * 0.10)
+        if spacing_score < 40.0:
+            masterplan.warnings.append('Lav sol-/avstandskvalitet i enkelte delfelt. Øk avstand mellom parallelle volumer eller trapp ned sørflanker.')
+    return masterplan
+
+
+def plan_masterplan(*args, **kwargs) -> Masterplan:
+    mp = _ORIG_V6_PLAN_MASTERPLAN(*args, **kwargs)
+    try:
+        _assign_readable_names_v6(mp)
+        if mp.metrics is not None:
+            mp.metrics.field_count = len(getattr(mp, 'development_fields', []) or [])
+        if isinstance(getattr(mp, 'diag_info', None), dict):
+            mp.diag_info['v7'] = '; '.join([
+                f"felt={len(getattr(mp, 'development_fields', []) or [])}",
+                f"trinn={len(getattr(mp, 'building_phases', []) or [])}",
+                ', '.join(f"T{p.phase_number}:{p.label} {float(p.actual_bra or 0.0):.0f} m²" for p in getattr(mp, 'building_phases', [])[:8])
+            ])
+        mp.source = (getattr(mp, 'source', 'Builtly Masterplan') + ' + v7 builtly').strip()
     except Exception:
         pass
     return mp
