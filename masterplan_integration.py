@@ -234,7 +234,7 @@ def run_masterplan_from_site_inputs(
     site_inputs_dict = {
         "latitude_deg": float(getattr(site, "latitude_deg", 63.4)),
         "site_area_m2": float(getattr(site, "site_area_m2", 0.0)),
-        "avg_unit_bra": 70.0,
+        "avg_unit_bra": 55.0,
         "terrain": terrain,
         "site_intelligence": site_intelligence,
     }
@@ -924,7 +924,7 @@ def run_masterplan_from_site_inputs(
     max_bya_pct = float(getattr(site, "max_bya_pct", 35.0))
     floor_to_floor = float(getattr(site, "floor_to_floor_m", 3.2))
     efficiency_ratio = _site_efficiency_ratio_v2(site)
-    avg_unit_bra = float(getattr(site, "avg_unit_bra", 70.0) or 70.0)
+    avg_unit_bra = float(getattr(site, "avg_unit_bra", 55.0) or 55.0)
 
     max_footprint = buildable_area * (max_bya_pct / 100.0)
     max_theoretical_bra = max_footprint * max_floors * efficiency_ratio
@@ -1309,6 +1309,202 @@ def masterplan_to_option_results(
         except Exception:
             pass
         try:
+            setattr(res, 'notes', notes)
+        except Exception:
+            pass
+
+    return results
+
+# =====================================================================
+# V6 FINAL PATCHES — lesbare husnavn, meningsfull trinntabell og
+# presentasjonsmetadata for 2D/3D/UI/PDF.
+# =====================================================================
+
+_ORIG_V6_MASTERPLAN_TO_OPTION_RESULTS = masterplan_to_option_results
+
+
+def _avg_unit_bra_from_site_v6(site: Any) -> float:
+    try:
+        val = float(getattr(site, 'avg_unit_bra', 55.0) or 55.0)
+    except Exception:
+        val = 55.0
+    return max(35.0, min(120.0, val))
+
+
+def _phase_summary_row_v6(phase: BuildingPhase, phase_volumes: List[Volume]) -> Dict[str, Any]:
+    bta = sum(float(v.footprint_m2 or 0.0) * float(v.floors or 0.0) for v in phase_volumes)
+    bra = sum(float(v.bra_m2 or 0.0) for v in phase_volumes)
+    footprint = sum(float(v.footprint_m2 or 0.0) for v in phase_volumes)
+    max_floors = max((int(v.floors or 0) for v in phase_volumes), default=0)
+    min_floors = min((int(v.floors or 0) for v in phase_volumes), default=0)
+    floor_text = f"{min_floors}-{max_floors}" if min_floors and min_floors != max_floors else str(max_floors or min_floors or 0)
+    return {
+        'phase_number': int(getattr(phase, 'phase_number', 0) or 0),
+        'label': getattr(phase, 'label', '') or f"Trinn {getattr(phase, 'phase_number', '?')}",
+        'field_ids': list(getattr(phase, 'field_ids', []) or []),
+        'field_names': list(getattr(phase, 'field_names', []) or []),
+        'bta_m2': round(bta, 1),
+        'bra_m2': round(bra, 1),
+        'footprint_m2': round(footprint, 1),
+        'units': int(sum(int(getattr(v, 'units_estimate', 0) or 0) for v in phase_volumes)),
+        'segments': len(phase_volumes),
+        'floors_text': floor_text,
+        'max_floors': max_floors,
+        'duration_months': int(getattr(phase, 'estimated_duration_months', 0) or 0),
+        'programs': list(dict.fromkeys([str(getattr(v, 'program', '') or '') for v in phase_volumes if getattr(v, 'program', None)])),
+    }
+
+
+def _building_roster_v6(masterplan: Masterplan) -> List[Dict[str, Any]]:
+    roster: List[Dict[str, Any]] = []
+    by_phase: Dict[str, int] = {}
+    for p in getattr(masterplan, 'building_phases', []) or []:
+        for vid in getattr(p, 'volume_ids', []) or []:
+            by_phase[vid] = int(getattr(p, 'phase_number', 0) or 0)
+    ordered = sorted(
+        list(getattr(masterplan, 'volumes', []) or []),
+        key=lambda v: (str(getattr(v, 'house_id', '') or getattr(v, 'name', '')), -float(getattr(v, 'cy', 0.0) or 0.0), float(getattr(v, 'cx', 0.0) or 0.0)),
+    )
+    for v in ordered:
+        roster.append({
+            'house_id': getattr(v, 'house_id', '') or getattr(v, 'name', ''),
+            'name': getattr(v, 'display_name', '') or getattr(v, 'name', ''),
+            'internal_name': getattr(v, 'internal_name', '') or getattr(v, 'volume_id', ''),
+            'field_id': getattr(v, 'field_id', '') or '',
+            'field_name': getattr(v, 'field_name', '') or '',
+            'typology': getattr(v, 'typology', ''),
+            'program': getattr(v, 'program', ''),
+            'floors': int(getattr(v, 'floors', 0) or 0),
+            'height_m': round(float(getattr(v, 'height_m', 0.0) or 0.0), 1),
+            'footprint_m2': round(float(getattr(v, 'footprint_m2', 0.0) or 0.0), 1),
+            'bra_m2': round(float(getattr(v, 'bra_m2', 0.0) or 0.0), 1),
+            'phase_number': int(by_phase.get(getattr(v, 'volume_id', ''), getattr(v, 'assigned_phase', 0) or 0)),
+            'cx': round(float(getattr(v, 'cx', 0.0) or 0.0), 1),
+            'cy': round(float(getattr(v, 'cy', 0.0) or 0.0), 1),
+            'coords': _polygon_to_coords_groups(getattr(v, 'polygon', None)),
+        })
+    return roster
+
+
+def _outdoor_payload_v6(masterplan: Masterplan) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for z in getattr(getattr(masterplan, 'outdoor_system', None), 'zones', []) or []:
+        payload.append({
+            'zone_id': getattr(z, 'zone_id', ''),
+            'kind': getattr(z, 'kind', ''),
+            'area_m2': round(float(getattr(z, 'area_m2', 0.0) or 0.0), 1),
+            'is_felles': bool(getattr(z, 'is_felles', False)),
+            'on_ground': bool(getattr(z, 'on_ground', False)),
+            'counts_toward_mua': bool(getattr(z, 'counts_toward_mua', False)),
+            'requires_sun_hours': float(getattr(z, 'requires_sun_hours', 0.0) or 0.0),
+            'serves_building_phases': list(getattr(z, 'serves_building_phases', []) or []),
+            'notes': getattr(z, 'notes', '') or '',
+            'coords': _polygon_to_coords_groups(getattr(z, 'geometry', None)),
+        })
+    return payload
+
+
+def masterplan_to_option_results(
+    masterplan: Masterplan,
+    site: Any,
+    geodata_context: Dict[str, Any],
+    OptionResult_cls: Any,
+) -> List[Any]:
+    results = _ORIG_V6_MASTERPLAN_TO_OPTION_RESULTS(masterplan, site, geodata_context, OptionResult_cls)
+    avg_unit_bra = _avg_unit_bra_from_site_v6(site)
+    field_payload = _development_fields_payload_v5(masterplan)
+    field_name_map = {f.get('field_id'): f.get('name') for f in field_payload}
+    outdoor_payload = _outdoor_payload_v6(masterplan)
+    building_roster = _building_roster_v6(masterplan)
+    phase_rows: List[Dict[str, Any]] = []
+    for phase in getattr(masterplan, 'building_phases', []) or []:
+        vols = [v for v in getattr(masterplan, 'volumes', []) or [] if v.volume_id in (phase.volume_ids or [])]
+        phase_rows.append(_phase_summary_row_v6(phase, vols))
+    target_fit_total = float(getattr(getattr(masterplan, 'metrics', None), 'target_fit_pct', 0.0) or 0.0)
+
+    roster_by_phase: Dict[int, List[Dict[str, Any]]] = {}
+    for row in building_roster:
+        roster_by_phase.setdefault(int(row.get('phase_number', 0) or 0), []).append(row)
+
+    for res in results:
+        geom = getattr(res, 'geometry', {}) or {}
+        is_total = bool(geom.get('is_total_plan') or getattr(res, 'typology', '') == 'Masterplan')
+        notes = list(getattr(res, 'notes', []) or [])
+
+        # Sørg for at massing_parts bruker lesbare navn og kompakt metadata.
+        new_parts = []
+        for part in list(geom.get('massing_parts', []) or []):
+            part_name = part.get('name', '')
+            roster_match = next((r for r in building_roster if r.get('house_id') == part_name or r.get('internal_name') == part_name or r.get('name') == part_name), None)
+            if roster_match is not None:
+                part = dict(part)
+                part['name'] = roster_match.get('house_id') or part.get('name')
+                part['house_id'] = roster_match.get('house_id', '')
+                part['display_name'] = roster_match.get('name', '')
+                part['internal_name'] = roster_match.get('internal_name', '')
+                part['field_name'] = roster_match.get('field_name', '')
+                part['bra_m2'] = roster_match.get('bra_m2', 0.0)
+                part['phase'] = roster_match.get('phase_number', part.get('phase'))
+            new_parts.append(part)
+        if new_parts:
+            geom['massing_parts'] = new_parts
+
+        if is_total:
+            geom['development_fields'] = field_payload
+            geom['development_field_count'] = len(field_payload)
+            geom['building_roster'] = building_roster
+            geom['phase_summary_rows'] = phase_rows
+            geom['outdoor_zones'] = outdoor_payload
+            geom['mua_summary'] = {
+                'ground_felles_m2': round(float(masterplan.outdoor_system.mua_on_ground_felles() if masterplan.outdoor_system else 0.0), 1),
+                'roof_m2': round(float(masterplan.outdoor_system.mua_on_roof() if masterplan.outdoor_system else 0.0), 1),
+                'private_m2': round(float(masterplan.outdoor_system.mua_privat() if masterplan.outdoor_system else 0.0), 1),
+                'total_m2': round(float(masterplan.outdoor_system.mua_total() if masterplan.outdoor_system else 0.0), 1),
+                'required_m2': round(float(getattr(getattr(masterplan, 'metrics', None), 'mua_required_m2', 0.0) or 0.0), 1),
+                'compliant': bool(getattr(getattr(masterplan, 'metrics', None), 'mua_compliant', False)),
+                'avg_unit_bra': round(avg_unit_bra, 1),
+                'units': int(getattr(res, 'unit_count', 0) or 0),
+            }
+            if target_fit_total > 0:
+                try:
+                    setattr(res, 'target_fit_pct', round(target_fit_total, 1))
+                except Exception:
+                    pass
+            if building_roster:
+                note = f"Husoversikt v6: {len(building_roster)} bygg — {', '.join(r.get('house_id', '') for r in building_roster[:8])}"
+                if note not in notes:
+                    notes.append(note)
+        else:
+            phase_num = int(geom.get('phase_number') or 0)
+            phase = masterplan.phase_by_number(phase_num) if phase_num else None
+            phase_roster = roster_by_phase.get(phase_num, [])
+            if phase is not None:
+                field_ids = list(getattr(phase, 'field_ids', []) or [])
+                field_names = list(getattr(phase, 'field_names', []) or [])
+                if not field_names:
+                    field_names = [field_name_map.get(fid, fid) for fid in field_ids if fid]
+                geom['phase_field_ids'] = field_ids
+                geom['phase_field_names'] = field_names
+                geom['phase_field_count'] = len(field_names)
+                geom['phase_is_field_coherent'] = len(field_names) <= 1
+                geom['phase_summary_row'] = _phase_summary_row_v6(phase, [v for v in masterplan.volumes if v.volume_id in (phase.volume_ids or [])])
+                geom['building_roster'] = phase_roster
+                try:
+                    setattr(res, 'name', phase.label or getattr(res, 'name', ''))
+                    setattr(res, 'target_fit_pct', round(100.0 * float(getattr(phase, 'actual_bra', 0.0) or 0.0) / max(float(getattr(phase, 'target_bra', 0.0) or 1.0), 1.0), 1))
+                except Exception:
+                    pass
+                if field_names:
+                    note = 'Delfelt: ' + ' + '.join(field_names)
+                    if note not in notes:
+                        notes.append(note)
+            if phase_roster:
+                note = f"Hus i trinn {phase_num}: " + ', '.join(r.get('house_id', '') for r in phase_roster[:8])
+                if note not in notes:
+                    notes.append(note)
+
+        try:
+            setattr(res, 'geometry', geom)
             setattr(res, 'notes', notes)
         except Exception:
             pass

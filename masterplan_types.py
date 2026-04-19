@@ -217,6 +217,9 @@ class Volume:
     zone_id: Optional[str] = None            # hvilken typologisone
     field_id: Optional[str] = None           # hvilket delfelt volumet hører til
     field_name: str = ""
+    house_id: str = ""                      # kort lesbart ID, f.eks. HUS A
+    display_name: str = ""                 # rapport-/UI-navn, f.eks. Nord perimeter 1
+    internal_name: str = ""                # debug-navn med teknisk struktur hvis ønsket
 
     notes: str = ""
 
@@ -517,6 +520,9 @@ class Masterplan:
                 "zone_id": v.zone_id,
                 "field_id": v.field_id,
                 "field_name": v.field_name,
+                "house_id": v.house_id,
+                "display_name": v.display_name,
+                "internal_name": v.internal_name,
             })
         return out
 
