@@ -8906,6 +8906,18 @@ with st.expander("3. Produktforutsetninger og leilighetsmiks", expanded=True):
     share_sum = sum(item.share_pct for item in mix_inputs)
     if abs(share_sum - 100.0) > 0.01:
         st.warning(f"Andelene summerer til {share_sum:.1f}%. Motoren normaliserer dette automatisk.")
+    normalized_mix_preview = normalize_mix_specs(mix_inputs)
+    mix_weight_total = max(sum(spec.share_pct for spec in normalized_mix_preview), 1.0)
+    mix_avg_default = sum(spec.share_pct * spec.avg_size_m2 for spec in normalized_mix_preview) / mix_weight_total
+    avg_unit_bra_for_masterplan = st.number_input(
+        "Gj.sn. boligstørrelse brukt i masterplan (m²)",
+        min_value=35.0,
+        max_value=120.0,
+        value=float(round(mix_avg_default, 1)),
+        step=1.0,
+        help="Brukes til å beregne boligantall, MUA-krav og fasevis standalone-kvalitet i masterplanen.",
+    )
+    st.caption(f"Vektet miks-snitt fra tabellen over: {mix_avg_default:.1f} m²")
 
 with st.expander("4. Visuelt grunnlag (kart og skisser)", expanded=True):
     saved_images: List[Image.Image] = []
@@ -9147,6 +9159,15 @@ if run_analysis:
         utnyttelsesgrad_bra_pct=utnyttelsesgrad_bra_pct,
     )
 
+    try:
+        site.avg_unit_bra = float(avg_unit_bra_for_masterplan)
+    except Exception:
+        site.avg_unit_bra = 55.0
+    try:
+        site.mix_specs = normalize_mix_specs(mix_inputs)
+    except Exception:
+        site.mix_specs = []
+
     geodata_context = prepare_site_context(
         site=site,
         site_polygon_input=site_polygon_input,
@@ -9230,10 +9251,10 @@ if run_analysis:
                 )
                 # Maks teoretisk BRA for sammenligning
                 _bp_area = float(_bp.area) if _bp else 0
-                _max_theo = _bp_area * (site.max_bya_pct / 100.0) * site.max_floors * 0.85
+                _max_theo = _bp_area * (site.max_bya_pct / 100.0) * site.max_floors * site.efficiency_ratio
                 st.caption(
                     f"Maks teoretisk BRA: {_max_theo:.0f} m² "
-                    f"(byggbart × BYA × etasjer × 0.85). "
+                    f"(byggbart × BYA × etasjer × effektivitet). "
                     f"Mål-BRA er {_target_bra/_max_theo*100:.0f}% av dette."
                     if _max_theo > 0 else "Maks teoretisk BRA: ikke beregnet"
                 )
