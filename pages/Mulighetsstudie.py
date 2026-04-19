@@ -4339,21 +4339,22 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
 
 
 def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """
-    Planvisning (fugleperspektiv / top-down) av volumskisse.
-    Viser tomtegrense, byggefelt, fotavtrykk og bygninger med etasjefarge-koding.
+    """Planvisning (fugleperspektiv / top-down) av volumskisse.
+
+    V7: tydeligere delfeltgrenser og roligere labelbruk.
     """
     canvas_w, canvas_h = 1100, 780
-    img = Image.new('RGBA', (canvas_w, canvas_h), (240, 243, 248, 255))
+    img = Image.new('RGBA', (canvas_w, canvas_h), (241, 245, 249, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
     font = _pil_font(14)
-    font_bold = _pil_font(14, bold=True)
+    font_bold = _pil_font(15, bold=True)
     font_north = _pil_font(16, bold=True)
 
     site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
     buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
     massing_parts = option.geometry.get('massing_parts', []) or []
     neighbor_polys = option.geometry.get('neighbor_polygons', [])
+    phase_field_polygons = option.geometry.get('phase_field_polygons', []) or []
 
     site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
@@ -4376,26 +4377,28 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     def pts(coords):
         return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
 
-    # Tomtegrense
     sp = pts(flatten_coord_groups(site_coords))
     if len(sp) >= 3:
-        draw.polygon(sp, fill=(220, 225, 233, 180), outline=(100, 110, 130, 220))
+        draw.polygon(sp, fill=(223, 228, 235, 180), outline=(239, 68, 68, 230))
 
-    # Byggefelt
     bp = pts(flatten_coord_groups(buildable_coords))
     if len(bp) >= 3:
-        draw.polygon(bp, fill=(200, 218, 240, 60), outline=(56, 140, 248, 120))
+        draw.polygon(bp, fill=(56, 189, 248, 36), outline=(56, 189, 248, 120))
 
-    # Nabobygg
     for neighbor in neighbor_polys:
         ncoords = neighbor.get('coords') or neighbor.get('polygon_coords', [])
-        if isinstance(ncoords, str):
-            continue
         np_ = pts(flatten_coord_groups(ncoords))
         if len(np_) >= 3:
-            draw.polygon(np_, fill=(180, 185, 195, 120), outline=(140, 145, 155, 180))
+            draw.polygon(np_, fill=(186, 191, 200, 120), outline=(151, 156, 165, 160))
 
-    # Bygningsvolumer
+    # Delfelt / trinngrense
+    for poly in phase_field_polygons:
+        pp = pts(flatten_coord_groups(poly))
+        if len(pp) >= 3:
+            draw.line(pp + [pp[0]], fill=(17, 24, 39, 230), width=4)
+
+    # Bygninger
+    label_candidates = []
     for part in massing_parts:
         pcoords = flatten_coord_groups(part.get('coords', []))
         if not pcoords:
@@ -4409,22 +4412,26 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             base_c = (base_c[0], base_c[1], base_c[2], 200)
         draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 220))
         draw.line(pp + [pp[0]], fill=(255, 255, 255, 220), width=2)
-
-        # Label
         avg_x = sum(p[0] for p in pp) / len(pp)
         avg_y = sum(p[1] for p in pp) / len(pp)
-        floors = part.get('floors', 0)
-        name = part.get('name', '')
-        draw.text((avg_x - 20, avg_y - 8), f"{name}", fill=(30, 30, 30, 255), font=font)
-        draw.text((avg_x - 15, avg_y + 4), f"{floors} et.", fill=(60, 60, 60, 220), font=font)
+        label_candidates.append((float(part.get('bra_m2', 0.0) or 0.0), avg_x, avg_y, str(part.get('name', '') or part.get('house_id', '') or '')))
 
-    # Nordpil
+    # Bare noen få labels i fasekart — ellers blir det uleselig.
+    if len(label_candidates) <= 8:
+        chosen = label_candidates
+    else:
+        chosen = sorted(label_candidates, key=lambda row: row[0], reverse=True)[:6]
+    for _, avg_x, avg_y, name in chosen:
+        if not name:
+            continue
+        draw.rounded_rectangle((avg_x - 30, avg_y - 12, avg_x + 30, avg_y + 12), radius=8, fill=(255, 255, 255, 210))
+        draw.text((avg_x, avg_y + 4), name, fill=(17, 24, 39, 255), font=font, anchor='mm')
+
     ax, ay = canvas_w - 55, 50
     draw.line((ax, ay + 22, ax, ay - 16), fill=(60, 70, 90, 200), width=3)
     draw.polygon([(ax, ay - 25), (ax - 7, ay - 7), (ax + 7, ay - 7)], fill=(60, 70, 90, 200))
     draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font_north)
 
-    # Målestokk
     scale_bar_m = 10.0
     while scale_bar_m * scale < 40:
         scale_bar_m *= 2
@@ -4437,12 +4444,11 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     draw.line([(bx + bar_px, by_s - 4), (bx + bar_px, by_s + 4)], fill=(60, 70, 90, 200), width=2)
     draw.text((bx + bar_px / 2 - 10, by_s - 16), f"{scale_bar_m:.0f} m", fill=(60, 70, 90, 220), font=font)
 
-    # Infopanel
-    yt = canvas_h - 35
-    draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(240, 243, 248, 240))
-    title = f"PLANVISNING | {option.name} | {option.typology}"
-    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font_bold)
-    draw.text((30, yt + 14), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(80, 90, 110, 220), font=font)
+    yt = canvas_h - 40
+    draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(241, 245, 249, 240))
+    title = f"PLANVISNING | {option.name}"
+    draw.text((30, yt), title, fill=(15, 23, 42, 255), font=font_bold)
+    draw.text((30, yt + 16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(71, 85, 105, 220), font=font)
 
     return img.convert('RGB')
 
@@ -4655,6 +4661,136 @@ def _find_masterplan_option_v6(options: List["OptionResult"], fallback: Optional
     return fallback or (options[0] if options else None)
 
 
+def _svg_escape_v7(text: Any) -> str:
+    import html
+    return html.escape(str(text or ''))
+
+
+def _truncate_label_v7(text: str, max_len: int = 40) -> str:
+    text = str(text or '').strip()
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + '…'
+
+
+def _text_size_est_v7(text: str, font_size: int) -> Tuple[float, float]:
+    t = str(text or '')
+    return (max(32.0, len(t) * font_size * 0.58), font_size * 1.45)
+
+
+def _rect_overlaps_v7(rect: Tuple[float, float, float, float], others: List[Tuple[float, float, float, float]], pad: float = 6.0) -> bool:
+    x0, y0, x1, y1 = rect
+    for ox0, oy0, ox1, oy1 in others:
+        if not (x1 + pad < ox0 or ox1 + pad < x0 or y1 + pad < oy0 or oy1 + pad < y0):
+            return True
+    return False
+
+
+def _place_label_v7(anchor: Tuple[float, float], title: str, subtitle: str, occupied: List[Tuple[float, float, float, float]],
+                    min_x: float, min_y: float, max_x: float, max_y: float) -> Tuple[Tuple[float, float, float, float], Tuple[float, float], Tuple[float, float]]:
+    tw, th = _text_size_est_v7(title, 16)
+    sw, sh = _text_size_est_v7(subtitle, 12)
+    box_w = max(tw, sw) + 48
+    box_h = th + sh + 24
+    ax, ay = anchor
+    offsets = [
+        (22, -box_h * 0.6), (22, 12), (-box_w - 22, -box_h * 0.6), (-box_w - 22, 12),
+        (-box_w / 2, -box_h - 20), (-box_w / 2, 20), (32, -box_h - 10), (-box_w - 32, -10),
+    ]
+    for dx, dy in offsets:
+        x0 = max(min_x, min(max_x - box_w, ax + dx))
+        y0 = max(min_y, min(max_y - box_h, ay + dy))
+        rect = (x0, y0, x0 + box_w, y0 + box_h)
+        if not _rect_overlaps_v7(rect, occupied):
+            occupied.append(rect)
+            return rect, (ax, ay), (x0, y0)
+    x0 = max(min_x, min(max_x - box_w, ax + 20))
+    y0 = max(min_y, min(max_y - box_h, ay + 20))
+    rect = (x0, y0, x0 + box_w, y0 + box_h)
+    occupied.append(rect)
+    return rect, (ax, ay), (x0, y0)
+
+
+def _svg_rings_path_v7(rings_like: Any, project) -> str:
+    parts: List[str] = []
+    for ring in _extract_rings_v6(rings_like):
+        pts = [project(p) for p in ring]
+        if len(pts) < 3:
+            continue
+        cmd = 'M ' + ' L '.join(f"{x:.1f},{y:.1f}" for x, y in pts) + ' Z'
+        parts.append(cmd)
+    return ' '.join(parts)
+
+
+def _svg_to_image_v7(svg_markup: str) -> Image.Image:
+    try:
+        import cairosvg
+        png_bytes = cairosvg.svg2png(bytestring=svg_markup.encode('utf-8'))
+        return Image.open(io.BytesIO(png_bytes)).convert('RGB')
+    except Exception:
+        fallback = Image.new('RGB', (1400, 900), (245, 247, 250))
+        draw = ImageDraw.Draw(fallback)
+        draw.text((32, 32), 'Kunne ikke rendere SVG-illustrasjon.', fill=(40, 40, 40), font=_pil_font(22, bold=True))
+        return fallback
+
+
+def _builtly_palette_v7() -> Dict[str, str]:
+    return {
+        'navy': '#08111d',
+        'navy2': '#0b1625',
+        'teal': '#38bdf8',
+        'teal_soft': '#8dd8fb',
+        'line': '#15283b',
+        'muted': '#8aa0b7',
+        'text': '#e7eef7',
+        'paper': '#f4f7fb',
+        'plan_bg': '#e9eef5',
+        'site_red': '#ef4444',
+        'field_stroke': '#0f172a',
+        'field_fill': '#f8fbff',
+        'ground_green': '#7faa6b',
+        'play_orange': '#ef8d5d',
+        'barnehage_brown': '#a07452',
+        'diagonal_yellow': '#dfc36e',
+        'mua_orange': '#ee9a4d',
+        'mua_roof': '#2c567d',
+        'mua_private': '#d94b5a',
+    }
+
+
+def _main_outdoor_labels_v7(fields: List[Dict[str, Any]], outdoor_zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    labels: List[Dict[str, Any]] = []
+    seen: set = set()
+    for field in fields:
+        courtyard = field.get('courtyard_coords') or []
+        if not courtyard:
+            continue
+        title = _truncate_label_v7(str(field.get('primary_outdoor_name') or field.get('name') or 'Gårdsrom'), 32)
+        subtitle = _truncate_label_v7(str(field.get('primary_outdoor_program') or field.get('context') or 'trær, opphold, møteplass'), 40)
+        key = (title.lower(), tuple(round(v, 1) for v in _centroid_v6(courtyard)))
+        if key in seen:
+            continue
+        seen.add(key)
+        prog_l = subtitle.lower()
+        color = 'ground_green'
+        glyph = 'F'
+        if 'barnehage' in prog_l:
+            color = 'barnehage_brown'; glyph = 'B'
+        elif 'lek' in prog_l:
+            color = 'play_orange'; glyph = 'L'
+        elif 'gang' in prog_l or 'diagonal' in prog_l or 'sykkel' in prog_l:
+            color = 'diagonal_yellow'; glyph = 'D'
+        labels.append({'coords': courtyard, 'title': title, 'subtitle': subtitle, 'color_key': color, 'glyph': glyph})
+    # legg til én diagonal hvis den finnes og ikke allerede dekket
+    diag = next((z for z in outdoor_zones if str(z.get('kind') or '').lower() == 'diagonal'), None)
+    if diag is not None:
+        title = 'Diagonal'
+        key = (title.lower(), tuple(round(v, 1) for v in _centroid_v6(diag.get('coords') or [])))
+        if key not in seen:
+            labels.append({'coords': diag.get('coords') or [], 'title': title, 'subtitle': _truncate_label_v7(str(diag.get('notes') or 'gang, sykkel og møteplasser'), 40), 'color_key': 'diagonal_yellow', 'glyph': 'D'})
+    return labels[:8]
+
+
 def _render_masterplan_concept_map_v6(site: Optional[SiteInputs], option: OptionResult, width: int = 1700, height: int = 980) -> Image.Image:
     geometry = getattr(option, 'geometry', {}) or {}
     fields = list(geometry.get('development_fields', []) or [])
@@ -4662,109 +4798,98 @@ def _render_masterplan_concept_map_v6(site: Optional[SiteInputs], option: Option
     buildings = list(geometry.get('building_roster', []) or [])
     neighbors = list(geometry.get('neighbor_polygons', []) or [])
     bounds = _plan_bounds_v6(geometry)
+    pal = _builtly_palette_v7()
 
-    img = Image.new('RGBA', (width, height), (243, 244, 246, 255))
-    draw = ImageDraw.Draw(img)
-    left_w = int(width * 0.33)
-    plan_x0 = left_w + 22
-    plan_y0 = 42
-    plan_w = width - plan_x0 - 36
-    plan_h = height - 84
-    draw.rectangle((0, 0, left_w, height), fill=(248, 249, 251, 255))
-    draw.rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), fill=(235, 237, 239, 255))
-    project, _ = _make_projector_v6(bounds, plan_x0 + 16, plan_y0 + 16, plan_w - 32, plan_h - 32)
+    left_w = int(width * 0.30)
+    plan_x0 = left_w + 24
+    plan_y0 = 28
+    plan_w = width - plan_x0 - 28
+    plan_h = height - 56
+    project, _ = _make_projector_v6(bounds, plan_x0 + 26, plan_y0 + 20, plan_w - 52, plan_h - 40)
 
-    font_cap = _pil_font(18, bold=False)
-    font_title = _pil_font(44, bold=True)
-    font_body = _pil_font(17, bold=False)
-    font_small = _pil_font(14, bold=False)
-    font_field = _pil_font(18, bold=True)
-    font_prog = _pil_font(13, bold=False)
-
-    draw.text((58, 58), 'KONSEPT', font=font_cap, fill=(68, 68, 68, 255))
-    draw.text((58, 98), 'KVARTALSTRUKTUR', font=font_title, fill=(20, 20, 20, 255))
     concept_lines = _field_summary_lines_v6(fields, outdoor_zones)
-    y = 200
-    for line in concept_lines:
-        for wrapped in _wrap_lines_v6(line, max_chars=36):
-            draw.text((72, y), '•', font=font_body, fill=(45, 45, 45, 255))
-            draw.text((96, y), wrapped, font=font_body, fill=(45, 45, 45, 255))
-            y += 28
+    labels = _main_outdoor_labels_v7(fields, outdoor_zones)
+
+    svg: List[str] = []
+    svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
+    svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="{pal["paper"]}"/>')
+    svg.append(f'<rect x="0" y="0" width="{left_w}" height="{height}" fill="{pal["navy"]}"/>')
+    svg.append(f'<rect x="{plan_x0}" y="{plan_y0}" width="{plan_w}" height="{plan_h}" rx="18" fill="{pal["plan_bg"]}" stroke="#d8e1eb" stroke-width="1.5"/>')
+    svg.append(f'<rect x="38" y="48" width="56" height="6" rx="3" fill="{pal["teal"]}"/>')
+    svg.append(f'<text x="38" y="92" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="{pal["teal_soft"]}" letter-spacing="1.2">BUILTLY · KONSEPT</text>')
+    svg.append(f'<text x="38" y="138" font-family="DejaVu Sans, Arial, sans-serif" font-size="40" font-weight="700" fill="{pal["text"]}">KVARTALSTRUKTUR</text>')
+    svg.append(f'<text x="38" y="170" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" fill="{pal["muted"]}">Delfelt, uterom og lesbar bygningsstruktur</text>')
+
+    y = 228
+    for line in concept_lines[:6]:
+        wrapped = _wrap_lines_v6(line, max_chars=34)
+        for wline in wrapped:
+            svg.append(f'<circle cx="48" cy="{y - 6}" r="3.5" fill="{pal["teal"]}"/>')
+            svg.append(f'<text x="62" y="{y}" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="{pal["text"]}">{_svg_escape_v7(wline)}</text>')
+            y += 24
         y += 8
+    svg.append(f'<text x="38" y="{height - 46}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" fill="{pal["muted"]}">Builtly-konseptkart: fargekodede gårdsrom, tydelige delfelt og stedsrettet</text>')
+    svg.append(f'<text x="38" y="{height - 28}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" fill="{pal["muted"]}">struktur tilpasset reguleringsdialog og presentasjon.</text>')
 
-    draw.text((58, height - 70), 'Rapportklar konseptskisse med delfelt, gårdsrom og tydelig byggestruktur.', font=font_small, fill=(95, 95, 95, 255))
-
-    # Nabolag i gråtoner
-    for nb in neighbors[:120]:
-        _draw_rings_v6(draw, nb.get('coords') or [], project, fill=(214, 216, 220, 255), outline=(196, 198, 202, 255), width=1)
-
-    # Byggbart areal og tomt
-    _draw_rings_v6(draw, geometry.get('buildable_polygon_coords') or [], project, fill=(224, 228, 220, 255), outline=None, width=1)
-    _draw_rings_v6(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(221, 58, 58, 255), width=3)
-
-    # Delfelt
+    # planbakgrunn
+    for nb in neighbors[:140]:
+        d = _svg_rings_path_v7(nb.get('coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="#d7dde5" stroke="#c4ccd6" stroke-width="1"/>')
+    buildable_d = _svg_rings_path_v7(geometry.get('buildable_polygon_coords') or [], project)
+    if buildable_d:
+        svg.append(f'<path d="{buildable_d}" fill="#eef3eb" opacity="0.75"/>')
+    site_d = _svg_rings_path_v7(geometry.get('site_polygon_coords') or [], project)
+    if site_d:
+        svg.append(f'<path d="{site_d}" fill="none" stroke="{pal["site_red"]}" stroke-width="3"/>')
     for field in fields:
-        _draw_rings_v6(draw, field.get('polygon_coords') or [], project, fill=(239, 232, 213, 120), outline=(28, 28, 28, 255), width=3)
-
-    # Uterom / gårdsrom
-    label_items: List[Tuple[Tuple[float, float], str, str, Tuple[int, int, int, int]]] = []
-    for field in fields:
-        courtyard = field.get('courtyard_coords') or []
-        if courtyard:
-            nm = str(field.get('primary_outdoor_name') or f"{field.get('name', 'Felt')}gården")
-            prog = str(field.get('primary_outdoor_program') or field.get('context') or 'trær, opphold, møteplass')
-            color = (129, 178, 112, 220)
-            prog_l = prog.lower()
-            if 'barnehage' in prog_l:
-                color = (150, 110, 82, 220)
-            elif 'lek' in prog_l:
-                color = (237, 149, 100, 220)
-            elif 'diagonal' in prog_l or 'gang' in prog_l:
-                color = (227, 194, 95, 220)
-            _draw_rings_v6(draw, courtyard, project, fill=color, outline=(255, 255, 255, 220), width=2)
-            label_items.append((_centroid_v6(courtyard), nm, prog, color))
-
-    for zone in outdoor_zones:
-        kind = str(zone.get('kind') or '').lower()
-        if kind in {'gangforbindelse'}:
-            continue
-        name, program, color = _outdoor_display_v6(zone)
-        if zone.get('area_m2', 0) >= 120:
-            _draw_rings_v6(draw, zone.get('coords') or [], project, fill=color, outline=(255, 255, 255, 180), width=2)
-            label_items.append((_centroid_v6(zone.get('coords') or []), name, program, color))
-
-    # Bygg
+        d = _svg_rings_path_v7(field.get('polygon_coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="{pal["field_fill"]}" fill-opacity="0.22" stroke="{pal["field_stroke"]}" stroke-width="3"/>')
+    for lbl in labels:
+        color = pal.get(lbl['color_key'], pal['ground_green'])
+        d = _svg_rings_path_v7(lbl.get('coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="{color}" fill-opacity="0.72" stroke="#ffffff" stroke-width="2"/>')
     for b in buildings:
-        _draw_rings_v6(draw, b.get('coords') or [], project, fill=(252, 252, 252, 255), outline=(126, 126, 126, 255), width=2)
+        d = _svg_rings_path_v7(b.get('coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="#ffffff" stroke="#8b97a5" stroke-width="2"/>')
 
-    # Delfeltnavn
+    occupied: List[Tuple[float, float, float, float]] = []
+    # store feltlabels først
     for field in fields:
         cx, cy = _centroid_v6(field.get('polygon_coords') or [])
         sx, sy = project([cx, cy])
-        _text_box_v6(draw, (sx, sy), str(field.get('name') or field.get('field_id') or 'Delfelt'), font_field, (15, 15, 15, 255), (255, 255, 255, 210), pad=6, anchor='mm')
+        title = _truncate_label_v7(str(field.get('name') or field.get('field_id') or 'Delfelt'), 26)
+        tw, th = _text_size_est_v7(title, 26)
+        rect = (sx - tw / 2 - 12, sy - th / 2 - 10, sx + tw / 2 + 12, sy + th / 2 + 10)
+        if not _rect_overlaps_v7(rect, occupied, pad=10):
+            occupied.append(rect)
+            svg.append(f'<rect x="{rect[0]:.1f}" y="{rect[1]:.1f}" width="{rect[2]-rect[0]:.1f}" height="{rect[3]-rect[1]:.1f}" rx="10" fill="rgba(255,255,255,0.82)"/>')
+            svg.append(f'<text x="{sx:.1f}" y="{sy + 8:.1f}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" font-weight="700" fill="#111827">{_svg_escape_v7(title)}</text>')
 
-    # Gårdsrom-programmer
-    placed = []
-    for (cx, cy), name, program, color in label_items[:18]:
-        sx, sy = project([cx, cy])
-        # flytt label litt hvis svært nær en eksisterende label
-        for px, py in placed:
-            if abs(px - sx) < 90 and abs(py - sy) < 45:
-                sy += 28
-        placed.append((sx, sy))
-        draw.ellipse((sx - 15, sy - 15, sx + 15, sy + 15), fill=color, outline=(255, 255, 255, 220), width=2)
-        try:
-            initial = (name or 'G')[0].upper()
-        except Exception:
-            initial = 'G'
-        draw.text((sx, sy - 1), initial, font=_pil_font(18, bold=True), fill=(255, 255, 255, 255), anchor='mm')
-        _text_box_v6(draw, (sx + 24, sy - 8), name, _pil_font(14, bold=True), (25, 25, 25, 255), (255, 255, 255, 210), pad=4, anchor='lm')
-        _text_box_v6(draw, (sx + 24, sy + 10), ' · '.join(_wrap_lines_v6(program, max_chars=24)[:1]) or program[:28], _pil_font(12, bold=False), (55, 55, 55, 255), (255, 255, 255, 205), pad=3, anchor='lm')
+    # gårdsromlabels med kollisjonsdeteksjon
+    for lbl in labels:
+        cx, cy = _centroid_v6(lbl.get('coords') or [])
+        ax, ay = project([cx, cy])
+        title = _truncate_label_v7(lbl['title'], 28)
+        subtitle = _truncate_label_v7(lbl['subtitle'], 38)
+        rect, anchor, box_xy = _place_label_v7((ax, ay), title, subtitle, occupied, plan_x0 + 14, plan_y0 + 14, plan_x0 + plan_w - 14, plan_y0 + plan_h - 14)
+        color = pal.get(lbl['color_key'], pal['ground_green'])
+        bx0, by0, bx1, by1 = rect
+        svg.append(f'<line x1="{anchor[0]:.1f}" y1="{anchor[1]:.1f}" x2="{bx0 + 16:.1f}" y2="{(by0 + by1) / 2:.1f}" stroke="#64748b" stroke-width="1.2" opacity="0.9"/>')
+        svg.append(f'<rect x="{bx0:.1f}" y="{by0:.1f}" width="{bx1-bx0:.1f}" height="{by1-by0:.1f}" rx="11" fill="rgba(255,255,255,0.92)" stroke="#d8e1eb" stroke-width="1"/>')
+        svg.append(f'<circle cx="{bx0 + 16:.1f}" cy="{by0 + 17:.1f}" r="11" fill="{color}" stroke="#ffffff" stroke-width="1.5"/>')
+        svg.append(f'<text x="{bx0 + 16:.1f}" y="{by0 + 21:.1f}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700" fill="#ffffff">{_svg_escape_v7(lbl["glyph"])}</text>')
+        svg.append(f'<text x="{bx0 + 34:.1f}" y="{by0 + 17:.1f}" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" font-weight="700" fill="#111827">{_svg_escape_v7(title)}</text>')
+        svg.append(f'<text x="{bx0 + 34:.1f}" y="{by0 + 35:.1f}" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" fill="#475569">{_svg_escape_v7(subtitle)}</text>')
 
-    return img.convert('RGB')
+    svg.append('</svg>')
+    return _svg_to_image_v7(''.join(svg))
 
 
-def _render_masterplan_mua_map_v6(site: Optional[SiteInputs], option: OptionResult, width: int = 1800, height: int = 980) -> Image.Image:
+def _render_masterplan_mua_map_v6(site: Optional[SiteInputs], option: OptionResult, width: int = 1760, height: int = 980) -> Image.Image:
     geometry = getattr(option, 'geometry', {}) or {}
     outdoor_zones = list(geometry.get('outdoor_zones', []) or [])
     buildings = list(geometry.get('building_roster', []) or [])
@@ -4772,41 +4897,43 @@ def _render_masterplan_mua_map_v6(site: Optional[SiteInputs], option: OptionResu
     fields = list(geometry.get('development_fields', []) or [])
     summary = dict(geometry.get('mua_summary', {}) or {})
     bounds = _plan_bounds_v6(geometry)
+    pal = _builtly_palette_v7()
 
-    img = Image.new('RGBA', (width, height), (245, 246, 248, 255))
-    draw = ImageDraw.Draw(img)
-    left_w = int(width * 0.28)
+    left_w = int(width * 0.26)
     right_w = int(width * 0.20)
-    plan_x0 = left_w + 22
-    plan_y0 = 42
-    plan_w = width - left_w - right_w - 56
-    plan_h = height - 84
-    legend_x0 = plan_x0 + plan_w + 14
-    draw.rectangle((0, 0, left_w, height), fill=(249, 250, 251, 255))
-    draw.rectangle((plan_x0, plan_y0, plan_x0 + plan_w, plan_y0 + plan_h), fill=(236, 238, 241, 255))
-    draw.rounded_rectangle((legend_x0, 54, width - 24, height - 54), radius=12, fill=(255, 255, 255, 245), outline=(220, 224, 230, 255), width=1)
-    project, _ = _make_projector_v6(bounds, plan_x0 + 16, plan_y0 + 16, plan_w - 32, plan_h - 32)
+    plan_x0 = left_w + 20
+    plan_y0 = 28
+    plan_w = width - left_w - right_w - 46
+    plan_h = height - 56
+    legend_x0 = plan_x0 + plan_w + 12
+    project, _ = _make_projector_v6(bounds, plan_x0 + 20, plan_y0 + 18, plan_w - 40, plan_h - 36)
 
-    font_cap = _pil_font(18, bold=False)
-    font_title = _pil_font(44, bold=True)
-    font_body = _pil_font(16, bold=False)
-    font_small = _pil_font(14, bold=False)
-    font_build = _pil_font(16, bold=True)
-
-    total_bra = float(summary.get('total_mua_m2', 0.0) or 0.0)
-    total_bra = float(getattr(option, 'gross_bta_m2', 0.0) or 0.0) * float(getattr(option, 'efficiency_ratio', 0.0) or 0.0)
-    bolig_bra = sum(float(b.get('bra_m2', 0.0) or 0.0) for b in buildings if str(b.get('program') or '').lower() == 'bolig')
-    unit_count = int(getattr(option, 'unit_count', 0) or 0)
-    site_area = float(getattr(site, 'site_area_m2', 0.0) or 0.0) if site is not None else 0.0
-    required = float(summary.get('required_m2', 0.0) or unit_count * 40.0)
-    ground_common = float(summary.get('ground_common_m2', 0.0) or 0.0)
+    ground_common = float(summary.get('ground_common_m2', summary.get('ground_felles_m2', 0.0)) or 0.0)
     roof_mua = float(summary.get('roof_m2', 0.0) or 0.0)
     private_mua = float(summary.get('private_m2', 0.0) or 0.0)
-    total_mua = float(summary.get('total_mua_m2', 0.0) or (ground_common + roof_mua + private_mua))
+    total_mua = float(summary.get('total_mua_m2', summary.get('total_m2', ground_common + roof_mua + private_mua)) or 0.0)
+    unit_count = int(getattr(option, 'unit_count', summary.get('units', 0) or 0))
+    required = float(summary.get('required_m2', unit_count * 40.0) or unit_count * 40.0)
+    site_area = float(getattr(site, 'site_area_m2', 0.0) or 0.0) if site is not None else 0.0
+    total_bra = float(getattr(option, 'saleable_area_m2', 0.0) or 0.0)
+    bolig_bra = sum(float(b.get('bra_m2', 0.0) or 0.0) for b in buildings if str(b.get('program') or '').lower() == 'bolig')
     bra_pct = (total_bra / max(site_area, 1.0) * 100.0) if site_area else 0.0
+    compliance = {
+        'Krav oppfylt': total_mua >= required,
+        'Fellesandel oppfylt': (ground_common + roof_mua) >= required * 0.5,
+        'Bakkeandel oppfylt': ground_common >= required * 0.25,
+    }
 
-    draw.text((58, 58), 'BESTEMMELSER', font=font_cap, fill=(68, 68, 68, 255))
-    draw.text((58, 98), 'BESTEMMELSER MUA', font=font_title, fill=(20, 20, 20, 255))
+    svg: List[str] = []
+    svg.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
+    svg.append(f'<rect x="0" y="0" width="{width}" height="{height}" fill="{pal["paper"]}"/>')
+    svg.append(f'<rect x="0" y="0" width="{left_w}" height="{height}" fill="{pal["navy2"]}"/>')
+    svg.append(f'<rect x="{plan_x0}" y="{plan_y0}" width="{plan_w}" height="{plan_h}" rx="18" fill="{pal["plan_bg"]}" stroke="#d8e1eb" stroke-width="1.5"/>')
+    svg.append(f'<rect x="{legend_x0}" y="{plan_y0}" width="{right_w}" height="{plan_h}" rx="18" fill="#ffffff" stroke="#d8e1eb" stroke-width="1.5"/>')
+    svg.append(f'<rect x="38" y="48" width="56" height="6" rx="3" fill="{pal["teal"]}"/>')
+    svg.append(f'<text x="38" y="92" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="{pal["teal_soft"]}" letter-spacing="1.2">BUILTLY · BESTEMMELSER</text>')
+    svg.append(f'<text x="38" y="138" font-family="DejaVu Sans, Arial, sans-serif" font-size="40" font-weight="700" fill="{pal["text"]}">BESTEMMELSER MUA</text>')
+    svg.append(f'<text x="38" y="170" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" fill="{pal["muted"]}">Bakke, tak og privat uteoppholdsareal i ett samlet kart</text>')
 
     rows = [
         ('Tomteareal', f"{site_area:,.0f} m²".replace(',', ' ')),
@@ -4816,90 +4943,120 @@ def _render_masterplan_mua_map_v6(site: Optional[SiteInputs], option: OptionResu
         ('Antall boligenheter', f"{unit_count}"),
         ('MUA-krav', f"{required:,.0f} m²".replace(',', ' ')),
         ('Min. 50% felles', f"{required * 0.5:,.0f} m²".replace(',', ' ')),
-        ('Min. felles på bakke', f"{required * 0.25:,.0f} m²".replace(',', ' ')),
+        ('Min. felles på bakken', f"{required * 0.25:,.0f} m²".replace(',', ' ')),
     ]
-    y = 200
+    y = 220
     for label, value in rows:
-        draw.text((58, y), label, font=font_body, fill=(60, 60, 60, 255))
-        draw.text((250, y), value, font=_pil_font(16, bold=True), fill=(15, 15, 15, 255), anchor='ra')
-        y += 30
+        svg.append(f'<text x="38" y="{y}" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#c8d3df">{_svg_escape_v7(label)}</text>')
+        svg.append(f'<text x="{left_w - 34}" y="{y}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="700" fill="#ffffff">{_svg_escape_v7(value)}</text>')
+        y += 29
+    if summary.get('diagnostic_status') == 'missing_ground_mua':
+        svg.append(f'<rect x="34" y="{y + 10}" width="{left_w - 68}" height="68" rx="10" fill="#401519" stroke="#7f1d1d" stroke-width="1"/>')
+        svg.append(f'<text x="48" y="{y + 36}" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700" fill="#fecaca">Diagnostikk</text>')
+        svg.append(f'<text x="48" y="{y + 58}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" fill="#fde2e2">{_svg_escape_v7(summary.get("diagnostic_message", "Bakke-MUA mangler."))}</text>')
+        y += 92
+    svg.append(f'<text x="38" y="{y + 18}" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" font-weight="700" fill="#ffffff">Byggesone 2</text>')
+    for idx, rule in enumerate([
+        '40 m² MUA per bolig',
+        'Min. 50% felles uteoppholdsareal',
+        'Min. 50% av felles MUA på bakkeplan',
+        'Takflater kan medregnes der de er tilgjengelige',
+    ]):
+        yy = y + 46 + idx * 22
+        svg.append(f'<circle cx="47" cy="{yy - 4}" r="3.2" fill="{pal["teal"]}"/>')
+        svg.append(f'<text x="58" y="{yy}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" fill="#c8d3df">{_svg_escape_v7(rule)}</text>')
 
-    draw.text((58, y + 10), 'Byggesone 2', font=_pil_font(16, bold=True), fill=(22, 22, 22, 255))
-    rules = [
-        '• 40 m² MUA per bolig',
-        '• Min. 50% felles uteoppholdsareal',
-        '• Min. 50% av felles MUA på bakkeplan',
-        '• Takflater kan medregnes der de er egnet og tilgjengelige',
-    ]
-    y += 40
-    for rule in rules:
-        draw.text((72, y), rule, font=font_small, fill=(65, 65, 65, 255))
-        y += 24
-
-    # Planbase
-    for nb in neighbors[:120]:
-        _draw_rings_v6(draw, nb.get('coords') or [], project, fill=(222, 224, 227, 255), outline=(205, 207, 210, 255), width=1)
-    _draw_rings_v6(draw, geometry.get('site_polygon_coords') or [], project, fill=None, outline=(221, 58, 58, 255), width=3)
+    # Planbakgrunn
+    for nb in neighbors[:140]:
+        d = _svg_rings_path_v7(nb.get('coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="#d7dde5" stroke="#c4ccd6" stroke-width="1"/>')
+    site_d = _svg_rings_path_v7(geometry.get('site_polygon_coords') or [], project)
+    if site_d:
+        svg.append(f'<path d="{site_d}" fill="none" stroke="{pal["site_red"]}" stroke-width="3"/>')
     for field in fields:
-        _draw_rings_v6(draw, field.get('polygon_coords') or [], project, fill=None, outline=(40, 40, 40, 255), width=2)
+        d = _svg_rings_path_v7(field.get('polygon_coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="none" stroke="#111827" stroke-width="2.5"/>')
 
-    # MUA-soner
-    color_ground = (233, 153, 77, 195)
-    color_roof = (44, 86, 125, 180)
-    outline_private = (190, 50, 50, 255)
     for z in outdoor_zones:
         if not bool(z.get('counts_toward_mua', False)):
             continue
-        rings = z.get('coords') or []
+        d = _svg_rings_path_v7(z.get('coords') or [], project)
+        if not d:
+            continue
         if bool(z.get('on_ground', False)) and bool(z.get('is_felles', False)):
-            _draw_rings_v6(draw, rings, project, fill=color_ground, outline=(255, 255, 255, 180), width=2)
+            svg.append(f'<path d="{d}" fill="{pal["mua_orange"]}" fill-opacity="0.78" stroke="#ffffff" stroke-width="1.8"/>')
         elif not bool(z.get('on_ground', False)):
-            _draw_rings_v6(draw, rings, project, fill=color_roof, outline=(255, 255, 255, 160), width=2)
+            svg.append(f'<path d="{d}" fill="{pal["mua_roof"]}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.5"/>')
         else:
-            _draw_rings_v6(draw, rings, project, fill=(255, 255, 255, 0), outline=outline_private, width=3)
+            svg.append(f'<path d="{d}" fill="none" stroke="{pal["mua_private"]}" stroke-width="2.6" stroke-dasharray="6 4"/>')
 
-    # Bygg med etasjer
     for b in buildings:
-        rings = b.get('coords') or []
-        _draw_rings_v6(draw, rings, project, fill=(252, 252, 252, 255), outline=(120, 120, 120, 255), width=2)
-        cx, cy = _centroid_v6(rings)
-        sx, sy = project([cx, cy])
-        _text_box_v6(draw, (sx, sy), f"{int(b.get('floors', 0) or 0)} et", font_build, (25, 25, 25, 255), (255, 255, 255, 210), pad=4, anchor='mm')
+        d = _svg_rings_path_v7(b.get('coords') or [], project)
+        if d:
+            svg.append(f'<path d="{d}" fill="#ffffff" stroke="#8b97a5" stroke-width="2"/>')
 
-    # Legende høyre
+    # eksterne etasje-labels med ledelinjer — kun de største byggene hvis mange.
+    b_sorted = sorted(buildings, key=lambda row: float(row.get('footprint_m2', 0.0) or 0.0), reverse=True)
+    if len(b_sorted) > 18:
+        b_sorted = b_sorted[:18]
+    occupied: List[Tuple[float, float, float, float]] = []
+    site_cent = _centroid_v6(geometry.get('site_polygon_coords') or [])
+    scx, scy = site_cent
+    for b in b_sorted:
+        cx, cy = _centroid_v6(b.get('coords') or [])
+        sx, sy = project([cx, cy])
+        vx = cx - scx
+        vy = cy - scy
+        mag = max((vx * vx + vy * vy) ** 0.5, 1.0)
+        bx = sx + (vx / mag) * 30.0
+        by = sy - (vy / mag) * 30.0
+        label = f"{int(b.get('floors', 0) or 0)} et"
+        tw, th = _text_size_est_v7(label, 14)
+        rect = (bx - tw / 2 - 8, by - th / 2 - 6, bx + tw / 2 + 8, by + th / 2 + 6)
+        if _rect_overlaps_v7(rect, occupied, pad=6):
+            rect, _, _ = _place_label_v7((sx, sy), label, '', occupied, plan_x0 + 10, plan_y0 + 10, plan_x0 + plan_w - 10, plan_y0 + plan_h - 10)
+        else:
+            occupied.append(rect)
+        rx0, ry0, rx1, ry1 = rect
+        tx = (rx0 + rx1) / 2
+        ty = (ry0 + ry1) / 2 + 5
+        svg.append(f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{rx0 + 8:.1f}" y2="{(ry0 + ry1) / 2:.1f}" stroke="#64748b" stroke-width="1.0" opacity="0.8"/>')
+        svg.append(f'<rect x="{rx0:.1f}" y="{ry0:.1f}" width="{rx1-rx0:.1f}" height="{ry1-ry0:.1f}" rx="8" fill="rgba(255,255,255,0.94)" stroke="#d8e1eb" stroke-width="1"/>')
+        svg.append(f'<text x="{tx:.1f}" y="{ty:.1f}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" font-weight="700" fill="#111827">{_svg_escape_v7(label)}</text>')
+
+    # Legende
     lx = legend_x0 + 18
-    ly = 84
-    draw.text((lx, ly), 'LEGENDE', font=_pil_font(18, bold=True), fill=(18, 18, 18, 255))
-    ly += 38
+    ly = 72
+    svg.append(f'<text x="{lx}" y="{ly}" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">LEGENDE</text>')
+    ly += 34
     legend_items = [
-        ('Felles MUA på bakken', color_ground, ground_common),
-        ('MUA på takflater', color_roof, roof_mua),
-        ('Privat MUA', outline_private, private_mua),
-        ('Total MUA', (80, 80, 80, 255), total_mua),
+        ('Felles MUA på bakken', pal['mua_orange'], ground_common),
+        ('MUA på takflater', pal['mua_roof'], roof_mua),
+        ('Privat MUA', pal['mua_private'], private_mua),
+        ('Total MUA', '#6b7280', total_mua),
     ]
     for label, color, area in legend_items:
         if label == 'Privat MUA':
-            draw.rectangle((lx, ly, lx + 22, ly + 22), outline=color, width=3)
+            svg.append(f'<rect x="{lx}" y="{ly - 14}" width="22" height="22" fill="none" stroke="{color}" stroke-width="2.4" stroke-dasharray="5 3"/>')
         else:
-            draw.rectangle((lx, ly, lx + 22, ly + 22), fill=color)
-        draw.text((lx + 34, ly + 2), label, font=font_small, fill=(35, 35, 35, 255))
-        draw.text((width - 34, ly + 2), f"{area:,.0f} m²".replace(',', ' '), font=_pil_font(14, bold=True), fill=(18, 18, 18, 255), anchor='ra')
-        ly += 34
+            svg.append(f'<rect x="{lx}" y="{ly - 14}" width="22" height="22" rx="4" fill="{color}"/>')
+        svg.append(f'<text x="{lx + 34}" y="{ly + 2}" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" fill="#334155">{_svg_escape_v7(label)}</text>')
+        svg.append(f'<text x="{width - 28}" y="{ly + 2}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="13" font-weight="700" fill="#111827">{_svg_escape_v7(f"{area:,.0f} m²".replace(",", " "))}</text>')
+        ly += 30
+    ly += 16
+    svg.append(f'<text x="{lx}" y="{ly}" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" font-weight="700" fill="#111827">KONTROLL</text>')
+    ly += 28
+    for label, ok in compliance.items():
+        color = '#166534' if ok else '#991b1b'
+        bg = '#dcfce7' if ok else '#fee2e2'
+        svg.append(f'<rect x="{lx}" y="{ly - 16}" width="{right_w - 36}" height="24" rx="10" fill="{bg}"/>')
+        svg.append(f'<text x="{lx + 10}" y="{ly}" font-family="DejaVu Sans, Arial, sans-serif" font-size="12" font-weight="700" fill="{color}">{_svg_escape_v7(label + ": " + ("Ja" if ok else "Nei"))}</text>')
+        ly += 30
 
-    ly += 20
-    draw.text((lx, ly), 'Kontrollregler', font=_pil_font(18, bold=True), fill=(18, 18, 18, 255))
-    ly += 30
-    rules2 = [
-        f"Krav oppfylt: {'Ja' if total_mua >= required else 'Nei'}",
-        f"Fellesandel oppfylt: {'Ja' if ground_common + roof_mua >= required * 0.5 else 'Nei'}",
-        f"Bakkeandel oppfylt: {'Ja' if ground_common >= required * 0.25 else 'Nei'}",
-    ]
-    for rule in rules2:
-        draw.text((lx, ly), '• ' + rule, font=font_small, fill=(70, 70, 70, 255))
-        ly += 22
-
-    return img.convert('RGB')
-
+    svg.append('</svg>')
+    return _svg_to_image_v7(''.join(svg))
 
 
 
@@ -11616,40 +11773,44 @@ render();
     phase_rows_payload = list(geom3d.get('phase_summary_rows', []) or [])
     if not phase_rows_payload and geom3d.get('phase_summary_row'):
         phase_rows_payload = [geom3d.get('phase_summary_row')]
+    try:
+        render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
+    except Exception as exc:
+        st.caption(f'3D-modell kunne ikke rendres: {exc}')
 
-    c3d_left, c3d_right = st.columns([1.8, 1.0], gap='large')
-    with c3d_left:
-        try:
-            render_interactive_3d(SiteInputs(**site_result), sel3d_opt, height_px=650, terrain_ctx=result.get('terrain_ctx'))
-        except Exception as exc:
-            st.caption(f'3D-modell kunne ikke rendres: {exc}')
-    with c3d_right:
-        st.markdown('#### Husoversikt')
-        if roster_rows:
-            phase_options = ['Alle'] + [str(p) for p in sorted({int(r.get('phase_number', 0) or 0) for r in roster_rows if int(r.get('phase_number', 0) or 0) > 0})]
-            phase_filter = st.selectbox('Filter trinn', phase_options, index=0, key='roster_phase_filter')
-            visible_rows = roster_rows if phase_filter == 'Alle' else [r for r in roster_rows if str(int(r.get('phase_number', 0) or 0)) == phase_filter]
-            roster_df = pd.DataFrame(visible_rows)
-            if not roster_df.empty:
-                roster_df = roster_df.rename(columns={
-                    'house_id': 'HUS', 'floors': 'Etg', 'typology': 'Typologi',
-                    'bra_m2': 'BRA m²', 'phase_number': 'Trinn', 'field_name': 'Delfelt', 'name': 'Navn'
+    show_roster = st.toggle(
+        'Vis husoversikt og byggetrinn',
+        value=False,
+        key='show_roster_panel_v7',
+        help='3D-sol/skygge er primær. Tabeller holdes skjult som standard for å gi modellen full bredde.',
+    )
+    if show_roster:
+        t_hus, t_trinn = st.tabs(['Husoversikt', 'Byggetrinn'])
+        with t_hus:
+            if roster_rows:
+                phase_options = ['Alle'] + [str(p) for p in sorted({int(r.get('phase_number', 0) or 0) for r in roster_rows if int(r.get('phase_number', 0) or 0) > 0})]
+                phase_filter = st.selectbox('Filter trinn', phase_options, index=0, key='roster_phase_filter')
+                visible_rows = roster_rows if phase_filter == 'Alle' else [r for r in roster_rows if str(int(r.get('phase_number', 0) or 0)) == phase_filter]
+                roster_df = pd.DataFrame(visible_rows)
+                if not roster_df.empty:
+                    roster_df = roster_df.rename(columns={
+                        'house_id': 'HUS', 'floors': 'Etg', 'typology': 'Typologi',
+                        'bra_m2': 'BRA m²', 'phase_number': 'Trinn', 'field_name': 'Delfelt', 'name': 'Navn'
+                    })
+                    show_cols = [c for c in ['HUS', 'Etg', 'Typologi', 'BRA m²', 'Trinn', 'Delfelt'] if c in roster_df.columns]
+                    st.dataframe(roster_df[show_cols], use_container_width=True, hide_index=True, height=340)
+            else:
+                st.caption('Ingen husoversikt tilgjengelig for dette alternativet.')
+        with t_trinn:
+            if phase_rows_payload:
+                phase_df = pd.DataFrame(phase_rows_payload).rename(columns={
+                    'label': 'Trinn', 'bta_m2': 'BTA m²', 'bra_m2': 'BRA m²', 'footprint_m2': 'Fotavtrykk m²',
+                    'units': 'Boliger', 'segments': 'Segmenter', 'floors_text': 'Etasjer', 'duration_months': 'Varighet mnd'
                 })
-                show_cols = [c for c in ['HUS', 'Etg', 'Typologi', 'BRA m²', 'Trinn', 'Delfelt'] if c in roster_df.columns]
-                st.dataframe(roster_df[show_cols], use_container_width=True, hide_index=True, height=330)
-        else:
-            st.caption('Ingen husoversikt tilgjengelig for dette alternativet.')
-
-        st.markdown('#### Byggetrinn')
-        if phase_rows_payload:
-            phase_df = pd.DataFrame(phase_rows_payload).rename(columns={
-                'label': 'Trinn', 'bta_m2': 'BTA m²', 'bra_m2': 'BRA m²', 'footprint_m2': 'Fotavtrykk m²',
-                'units': 'Boliger', 'segments': 'Segmenter', 'floors_text': 'Etasjer', 'duration_months': 'Varighet mnd'
-            })
-            show_cols = [c for c in ['Trinn', 'BTA m²', 'BRA m²', 'Fotavtrykk m²', 'Boliger', 'Segmenter', 'Etasjer', 'Varighet mnd'] if c in phase_df.columns]
-            st.dataframe(phase_df[show_cols], use_container_width=True, hide_index=True, height=220)
-        else:
-            st.caption('Ingen byggetrinn-tabell tilgjengelig for dette alternativet.')
+                show_cols = [c for c in ['Trinn', 'BTA m²', 'BRA m²', 'Fotavtrykk m²', 'Boliger', 'Segmenter', 'Etasjer', 'Varighet mnd'] if c in phase_df.columns]
+                st.dataframe(phase_df[show_cols], use_container_width=True, hide_index=True, height=260)
+            else:
+                st.caption('Ingen byggetrinn-tabell tilgjengelig for dette alternativet.')
 
     st.markdown("<div class='section-header'>Konsept og bestemmelser</div>", unsafe_allow_html=True)
     concept_opt = _find_masterplan_option_v6(options, sel3d_opt)
