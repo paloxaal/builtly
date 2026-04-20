@@ -35,3 +35,4 @@ pydantic==2.10.3
 supabase>=2.0.0
 stripe
 resend>=2.0.0
+pvlib 
