@@ -2,42 +2,30 @@ from __future__ import annotations
 
 """Core datatypes for the Builtly v8 masterplan engine.
 
-Design goals:
-- deterministic geometry / sol / MUA pipeline
-- project-agnostic concept families
-- rule-engine agnostic `PlanRegler`
-- optional program elements are opt-in
+Delivery 4 extends the deterministic geometry/sol/MUA foundation with:
+- concept-family level alternatives
+- AI-pass parameter selection hooks (pass 2)
+- AI/fallback report narratives (pass 6)
+- concept-level OptionResult integration
 
-The module is intentionally small and stable so later passes can depend on it
-without importing legacy concepts such as volume phases or AI-generated zones.
+The types remain intentionally compact and project-agnostic.
 """
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol, Tuple
 
 try:
     from shapely.geometry import Polygon
     from shapely import wkt as shapely_wkt
     HAS_SHAPELY = True
-except Exception:  # pragma: no cover - environment fallback
+except Exception:
     Polygon = object  # type: ignore[assignment]
     shapely_wkt = None  # type: ignore[assignment]
     HAS_SHAPELY = False
 
 
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
-
 class ConceptFamily(str, Enum):
-    """Project-independent concept families.
-
-    These values are engine-facing. UI titles may be more human-friendly and are
-    expected to be generated later from actual outputs.
-    """
-
     LINEAR_MIXED = "LINEAR_MIXED"
     COURTYARD_URBAN = "COURTYARD_URBAN"
     CLUSTER_PARK = "CLUSTER_PARK"
@@ -62,11 +50,6 @@ class ComplianceState(str, Enum):
     IKKE_VURDERT = "IKKE VURDERT"
 
 
-# ---------------------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------------------
-
-
 def _serialize_polygon(poly: Optional[Polygon]) -> Optional[str]:
     if poly is None:
         return None
@@ -84,11 +67,6 @@ def _deserialize_polygon(text: Optional[str]) -> Optional[Polygon]:
     if not isinstance(geom, Polygon):
         raise TypeError("Expected Polygon WKT.")
     return geom
-
-
-# ---------------------------------------------------------------------------
-# Main datatypes
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -130,7 +108,7 @@ class Delfelt:
             floors_min=int(data.get("floors_min", 1)),
             floors_max=int(data.get("floors_max", 1)),
             target_bra=float(data.get("target_bra", 0.0)),
-            courtyard_kind=(CourtyardKind(data["courtyard_kind"]) if data.get("courtyard_kind") else None),
+            courtyard_kind=CourtyardKind(data["courtyard_kind"]) if data.get("courtyard_kind") else None,
             tower_size_m=data.get("tower_size_m"),
             phase=int(data.get("phase", 1)),
             phase_label=str(data.get("phase_label", "")),
@@ -150,6 +128,10 @@ class Bygg:
     barnehage_inne_m2: float = 0.0
     barnehage_ute_delfelt_id: Optional[str] = None
     display_name: str = ""
+    angle_deg: float = 0.0
+    has_tak_mua: Optional[bool] = None
+    tak_mua_share: float = 0.30
+    privat_mua_m2: float = 0.0
 
     @property
     def footprint_m2(self) -> float:
@@ -158,6 +140,11 @@ class Bygg:
     @property
     def bra_m2(self) -> float:
         return self.footprint_m2 * float(self.floors)
+
+    @property
+    def tak_mua_m2(self) -> float:
+        enabled = self.has_tak_mua if self.has_tak_mua is not None else self.floors >= 3
+        return self.footprint_m2 * float(self.tak_mua_share) if enabled and self.floors >= 3 else 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -172,6 +159,10 @@ class Bygg:
             "barnehage_inne_m2": float(self.barnehage_inne_m2),
             "barnehage_ute_delfelt_id": self.barnehage_ute_delfelt_id,
             "display_name": self.display_name,
+            "angle_deg": float(self.angle_deg),
+            "has_tak_mua": self.has_tak_mua,
+            "tak_mua_share": float(self.tak_mua_share),
+            "privat_mua_m2": float(self.privat_mua_m2),
         }
 
     @classmethod
@@ -188,6 +179,10 @@ class Bygg:
             barnehage_inne_m2=float(data.get("barnehage_inne_m2", 0.0)),
             barnehage_ute_delfelt_id=data.get("barnehage_ute_delfelt_id"),
             display_name=str(data.get("display_name", "")),
+            angle_deg=float(data.get("angle_deg", 0.0)),
+            has_tak_mua=data.get("has_tak_mua"),
+            tak_mua_share=float(data.get("tak_mua_share", 0.30)),
+            privat_mua_m2=float(data.get("privat_mua_m2", 0.0)),
         )
 
 
@@ -202,43 +197,21 @@ class BarnehageConfig:
 
 @dataclass
 class PlanRegler:
-    """Abstract rule container.
-
-    All fields are optional unless a safe fallback is legally or technically
-    meaningful. `None` must be interpreted as *not evaluated* later in the
-    compliance tables.
-    """
-
-    # Utilisation
     max_bya_pct: Optional[float] = None
     max_bra_pct: Optional[float] = None
     max_floors: Optional[int] = None
     max_height_m: Optional[float] = None
-
-    # Open space / MUA
     mua_per_bolig_m2: Optional[float] = None
     mua_min_felles_pct: Optional[float] = None
     mua_min_bakke_pct: Optional[float] = None
     mua_min_sol_timer: Optional[float] = None
-
-    # Parking
     parkering_per_100m2_bra: Optional[Tuple[float, float]] = None
     parkering_sykkel_per_bolig: Optional[float] = None
-
-    # Distances
     avstand_nabogrense_m: Optional[float] = None
     avstand_bygg_bygg_m: Optional[float] = None
-
-    # Fire / safety
     brann_avstand_m: float = 8.0
-
-    # Solar requirements
     sol_krav_timer_varjevndogn: Optional[float] = None
-
-    # Additional rule slots
     custom_rules: Dict[str, Any] = field(default_factory=dict)
-
-    # Provenance
     source_name: str = ""
     source_url: Optional[str] = None
 
@@ -249,14 +222,38 @@ class SolBuildingResult:
     sol_score: float = 0.0
     soltimer_varjevndogn: float = 0.0
     tek17_mua_compliant: Optional[bool] = None
+    facade_sun_fraction: float = 0.0
+    possible_samples: int = 0
+    sunlit_samples: int = 0
+    facade_results: Dict[str, float] = field(default_factory=dict)
     per_leilighet: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class SolKeyMoment:
+    label: str
+    elevation_deg: float
+    azimuth_deg: float
+    representative_shadow_m: float
 
 
 @dataclass
 class SolReport:
     per_building: List[SolBuildingResult] = field(default_factory=list)
     total_sol_score: float = 0.0
+    project_soltimer_varjevndogn: float = 0.0
+    mua_soltimer_varjevndogn: Optional[float] = None
+    mua_sun_compliant: Optional[bool] = None
+    solbelyst_uteareal_pct: float = 0.0
+    vinter_skygge_kl_12_m: float = 0.0
+    sommerskygge_kl_15_m: float = 0.0
+    key_moments: List[SolKeyMoment] = field(default_factory=list)
+    analysis_samples: int = 0
     notes: List[str] = field(default_factory=list)
+
+    @property
+    def mua_sun_hours_eqx(self) -> float:
+        return float(self.mua_soltimer_varjevndogn or 0.0)
 
     def result_for(self, bygg_id: str) -> Optional[SolBuildingResult]:
         for item in self.per_building:
@@ -284,12 +281,44 @@ class MUAReport:
     fellesareal: float = 0.0
     krav_fellesareal: Optional[float] = None
     privat: float = 0.0
+    tak: float = 0.0
+    open_ground_area: float = 0.0
     checks: List[ComplianceCheck] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
 
     @property
     def compliant(self) -> bool:
         relevant = [check for check in self.checks if check.status != ComplianceState.IKKE_VURDERT]
         return bool(relevant) and all(check.status == ComplianceState.JA for check in relevant)
+
+    def status_for(self, rule_key: str) -> ComplianceState:
+        for check in self.checks:
+            if check.rule_key == rule_key:
+                return check.status
+        return ComplianceState.IKKE_VURDERT
+
+
+@dataclass
+class FieldParameterChoice:
+    field_id: str
+    typology: Typology
+    orientation_deg: float
+    floors_min: int
+    floors_max: int
+    target_bra: float
+    courtyard_kind: Optional[CourtyardKind] = None
+    tower_size_m: Optional[Literal[17, 21]] = None
+    rationale: str = ""
+
+
+@dataclass
+class ReportNarrative:
+    title: str
+    summary: str
+    architectural_assessment: str
+    recommendation: str
+    risks: List[str] = field(default_factory=list)
+    source: str = "fallback"
 
 
 @dataclass
@@ -303,9 +332,23 @@ class Masterplan:
     total_bya_m2: float
     antall_boliger: int
     display_title: str = ""
+    display_subtitle: str = ""
+    report_summary: str = ""
+    report_architectural_assessment: str = ""
+    report_recommendation: str = ""
+    report_risks: List[str] = field(default_factory=list)
+    score: float = 0.0
+    buildable_polygon: Optional[Polygon] = None
+    site_area_m2: float = 0.0
+    parkering_areal: float = 0.0
+    vei_areal: float = 0.0
     plan_regler: PlanRegler = field(default_factory=PlanRegler)
     barnehage_config: BarnehageConfig = field(default_factory=BarnehageConfig)
     bra_deficit: float = 0.0
+    latitude_deg: float = 63.43
+    longitude_deg: float = 10.40
+    pass2_source: str = "fallback"
+    pass6_source: str = "fallback"
 
     def iter_buildings_for_delfelt(self, field_id: str) -> Iterable[Bygg]:
         return (bygg for bygg in self.bygg if bygg.delfelt_id == field_id)
@@ -316,50 +359,6 @@ class Masterplan:
                 return field_obj
         return None
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "concept_family": self.concept_family.value,
-            "delfelt": [item.to_dict() for item in self.delfelt],
-            "bygg": [item.to_dict() for item in self.bygg],
-            "sol_report": {
-                "per_building": [
-                    {
-                        "bygg_id": res.bygg_id,
-                        "sol_score": res.sol_score,
-                        "soltimer_varjevndogn": res.soltimer_varjevndogn,
-                        "tek17_mua_compliant": res.tek17_mua_compliant,
-                        "per_leilighet": res.per_leilighet,
-                    }
-                    for res in self.sol_report.per_building
-                ],
-                "total_sol_score": self.sol_report.total_sol_score,
-                "notes": list(self.sol_report.notes),
-            },
-            "mua_report": {
-                "total": self.mua_report.total,
-                "krav_total": self.mua_report.krav_total,
-                "bakke": self.mua_report.bakke,
-                "krav_bakke": self.mua_report.krav_bakke,
-                "fellesareal": self.mua_report.fellesareal,
-                "krav_fellesareal": self.mua_report.krav_fellesareal,
-                "privat": self.mua_report.privat,
-                "checks": [
-                    {
-                        "rule_key": check.rule_key,
-                        "status": check.status.value,
-                        "actual_value": check.actual_value,
-                        "required_value": check.required_value,
-                        "unit": check.unit,
-                        "note": check.note,
-                    }
-                    for check in self.mua_report.checks
-                ],
-            },
-            "total_bra_m2": self.total_bra_m2,
-            "total_bya_m2": self.total_bya_m2,
-            "antall_boliger": self.antall_boliger,
-            "display_title": self.display_title,
-            "plan_regler": self.plan_regler.__dict__,
-            "barnehage_config": self.barnehage_config.__dict__,
-            "bra_deficit": self.bra_deficit,
-        }
+
+class StructuredPassClient(Protocol):
+    def __call__(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]: ...
