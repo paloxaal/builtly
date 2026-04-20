@@ -102,6 +102,38 @@ except Exception:
     HAS_MASTERPLAN = False
 
 
+# Builtly v8-motor (deterministisk pipeline, konseptfamilier, sol/MUA).
+# Importeres fra `builtly`-pakken for å unngå navnekollisjon med legacy-
+# masterplan_engine / masterplan_integration som ligger i project root.
+# Når HAS_BUILTLY_V8 er True kan v8 kjøres parallelt med eksisterende motor
+# via sidebar-toggle. V8 erstatter ikke legacy — den gir et alternativt kall
+# for sammenligning og framtidig migrasjon.
+try:
+    from builtly.masterplan_integration import run_concept_options as v8_run_concept_options
+    from builtly.masterplan_types import (
+        PlanRegler as V8PlanRegler,
+        ConceptFamily as V8ConceptFamily,
+    )
+    from builtly.plan_regler_presets import (
+        TRONDHEIM_KPA_2022_SONE_2 as V8_TRONDHEIM_PRESET,
+        GENERISK_TEK17_NORGE as V8_GENERISK_PRESET,
+    )
+    from builtly.svg_diagrams import (
+        render_quartalstruktur_svg as v8_render_quartalstruktur_svg,
+        render_mua_svg as v8_render_mua_svg,
+    )
+    HAS_BUILTLY_V8 = True
+except Exception:
+    v8_run_concept_options = None  # type: ignore
+    V8PlanRegler = None  # type: ignore
+    V8ConceptFamily = None  # type: ignore
+    V8_TRONDHEIM_PRESET = None  # type: ignore
+    V8_GENERISK_PRESET = None  # type: ignore
+    v8_render_quartalstruktur_svg = None  # type: ignore
+    v8_render_mua_svg = None  # type: ignore
+    HAS_BUILTLY_V8 = False
+
+
 # --- 1. TEKNISK OPPSETT ---
 st.set_page_config(
     page_title="Mulighetsstudie (ARK) | Builtly",
@@ -1994,6 +2026,231 @@ class OptionResult:
     # det likevel masterplanen (ikke ett tilfeldig trinn) som bør vises som
     # "anbefalt alternativ".
     is_total_plan: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Builtly v8-motor-bro
+# ---------------------------------------------------------------------------
+#
+# Disse funksjonene kobler den nye v8-motoren inn i den eksisterende
+# Mulighetsstudie-flyten uten å røre legacy-koden. V8 kjører som en parallell
+# motor: når toggle er aktivert i sidebar bytter `generate_options()` til
+# v8-kall bak kulissene, konverterer outputs til legacy-`OptionResult`-format,
+# og resten av fila (PDF, 3D, UI) fortsetter å fungere som før.
+#
+# Tre funksjoner:
+#   * `_resolve_v8_plan_regler()` - velger preset basert på sidebar-valg
+#   * `_v8_option_to_legacy_option()` - konverterer v8-OptionResult -> legacy
+#   * `generate_options_v8()` - entrypoint som returnerer List[OptionResult]
+
+
+def _resolve_v8_plan_regler(preset_name: Optional[str] = None):
+    """Velg v8 PlanRegler fra preset-navn. Default: Trondheim KPA sone 2."""
+    if not HAS_BUILTLY_V8:
+        return None
+    if preset_name == "GENERISK_TEK17_NORGE":
+        return V8_GENERISK_PRESET
+    return V8_TRONDHEIM_PRESET
+
+
+def _v8_option_to_legacy_option(v8_opt, site: 'SiteInputs', is_primary: bool = False) -> 'OptionResult':
+    """Konverter v8 OptionResult til legacy OptionResult.
+
+    Beholder samme felter som dagens motor produserer, slik at resten av
+    appen (PDF-generering, 3D-visning, session state) ikke trenger å vite
+    om at motoren er byttet.
+    """
+    plan = v8_opt.masterplan
+    if plan is None:
+        # Nødfallback hvis masterplan mangler — skal ikke skje i praksis
+        return OptionResult(
+            name=v8_opt.title or v8_opt.option_id,
+            typology=", ".join(v8_opt.typology_mix) or "Blandet",
+            floors=0,
+            building_height_m=0.0,
+            footprint_area_m2=0.0,
+            gross_bta_m2=v8_opt.total_bra_m2,
+            saleable_area_m2=v8_opt.total_bra_m2 * float(site.efficiency_ratio),
+            footprint_width_m=0.0,
+            footprint_depth_m=0.0,
+            buildable_area_m2=float(site.site_area_m2),
+            open_space_ratio=0.0,
+            target_fit_pct=0.0,
+            unit_count=v8_opt.antall_boliger,
+            mix_counts={},
+            parking_spaces=0,
+            parking_pressure_pct=0.0,
+            solar_score=float(v8_opt.sol_score),
+            estimated_equinox_sun_hours=0.0,
+            estimated_winter_sun_hours=0.0,
+            sunlit_open_space_pct=0.0,
+            winter_noon_shadow_m=0.0,
+            equinox_noon_shadow_m=0.0,
+            summer_afternoon_shadow_m=0.0,
+            efficiency_ratio=float(site.efficiency_ratio),
+            neighbor_count=int(site.neighbor_count),
+            terrain_slope_pct=float(site.terrain_slope_pct),
+            terrain_relief_m=float(site.terrain_relief_m),
+            notes=[f"v8-motor ({v8_opt.option_id})"] + list(v8_opt.risks),
+            score=float(v8_opt.score),
+            geometry={},
+            is_total_plan=is_primary,
+        )
+
+    # Hent gjennomsnittstall fra bygningene
+    buildings = plan.bygg or []
+    total_footprint = sum(b.footprint_m2 for b in buildings)
+    avg_floors = (sum(b.floors for b in buildings) / len(buildings)) if buildings else 0
+    avg_height = (sum(b.height_m for b in buildings) / len(buildings)) if buildings else 0
+    # Beregn bounding-dim fra union av footprints
+    try:
+        union_fp = unary_union([b.footprint for b in buildings]) if buildings else None
+        if union_fp is not None and not union_fp.is_empty:
+            minx, miny, maxx, maxy = union_fp.bounds
+            width_m = float(maxx - minx)
+            depth_m = float(maxy - miny)
+        else:
+            width_m = depth_m = 0.0
+    except Exception:
+        width_m = depth_m = 0.0
+
+    # Geometry-dict for render-funksjoner (bruk legacy-format)
+    geometry_dict: Dict[str, Any] = {
+        "v8_plan": True,
+        "concept_family": plan.concept_family.value,
+        "delfelt": [
+            {
+                "field_id": f.field_id,
+                "typology": f.typology.value,
+                "phase": f.phase,
+                "coords": polygon_to_coords(f.polygon) if hasattr(f.polygon, "exterior") else [],
+            }
+            for f in plan.delfelt
+        ],
+        "buildings": [
+            {
+                "bygg_id": b.bygg_id,
+                "delfelt_id": b.delfelt_id,
+                "typology": b.typology.value,
+                "phase": b.phase,
+                "floors": b.floors,
+                "height_m": b.height_m,
+                "coords": polygon_to_coords(b.footprint) if hasattr(b.footprint, "exterior") else [],
+            }
+            for b in buildings
+        ],
+    }
+
+    # Beregn parkering
+    try:
+        parking_spaces = int(round(v8_opt.antall_boliger * float(site.parking_ratio_per_unit)))
+    except Exception:
+        parking_spaces = 0
+
+    # Solberegninger fra v8 sol-rapport
+    sol_report = plan.sol_report
+    equinox_hours = float(getattr(sol_report, "project_soltimer_varjevndogn", 0.0) or 0.0)
+    mua_hours = float(getattr(sol_report, "mua_soltimer_varjevndogn", 0.0) or 0.0)
+    sunlit_pct = float(getattr(sol_report, "solbelyst_uteareal_pct", 0.0) or 0.0)
+    winter_shadow = float(getattr(sol_report, "vinter_skygge_kl_12_m", 0.0) or 0.0)
+    summer_shadow = float(getattr(sol_report, "sommerskygge_kl_15_m", 0.0) or 0.0)
+
+    return OptionResult(
+        name=v8_opt.title or v8_opt.option_id,
+        typology=", ".join(v8_opt.typology_mix) if v8_opt.typology_mix else "Blandet",
+        floors=int(round(avg_floors)),
+        building_height_m=float(avg_height),
+        footprint_area_m2=float(total_footprint),
+        gross_bta_m2=float(v8_opt.total_bra_m2),
+        saleable_area_m2=float(v8_opt.total_bra_m2 * float(site.efficiency_ratio)),
+        footprint_width_m=width_m,
+        footprint_depth_m=depth_m,
+        buildable_area_m2=float(plan.site_area_m2 or site.site_area_m2),
+        open_space_ratio=float(plan.mua_report.bakke / max(plan.site_area_m2, 1.0)) if plan.site_area_m2 else 0.0,
+        target_fit_pct=100.0 - abs(v8_opt.total_bra_m2 - site.desired_bta_m2) / max(site.desired_bta_m2, 1.0) * 100.0,
+        unit_count=int(v8_opt.antall_boliger),
+        mix_counts={},  # v8 har ikke unit-mix i denne fasen — kan utvides senere
+        parking_spaces=parking_spaces,
+        parking_pressure_pct=0.0,
+        solar_score=float(v8_opt.sol_score),
+        estimated_equinox_sun_hours=equinox_hours,
+        estimated_winter_sun_hours=mua_hours,  # best proxy vi har
+        sunlit_open_space_pct=sunlit_pct,
+        winter_noon_shadow_m=winter_shadow,
+        equinox_noon_shadow_m=0.0,
+        summer_afternoon_shadow_m=summer_shadow,
+        efficiency_ratio=float(site.efficiency_ratio),
+        neighbor_count=int(site.neighbor_count),
+        terrain_slope_pct=float(site.terrain_slope_pct),
+        terrain_relief_m=float(site.terrain_relief_m),
+        notes=[
+            f"v8-motor ({v8_opt.option_id}): {v8_opt.subtitle or ''}",
+            f"MUA compliance: {v8_opt.mua_status}",
+        ] + list(v8_opt.risks or []),
+        score=float(v8_opt.score),
+        geometry=geometry_dict,
+        is_total_plan=is_primary,
+    )
+
+
+def generate_options_v8(
+    site: 'SiteInputs',
+    mix_specs: List['MixSpec'],
+    geodata_context: Optional[Dict[str, Any]] = None,
+    preset_name: Optional[str] = None,
+) -> List['OptionResult']:
+    """Kjør v8-motoren og returner resultater som legacy OptionResult.
+
+    Denne funksjonen er et drop-in alternativ for `generate_options()`.
+    Når den kalles kjører den v8-pipelinen (pass 1-6) og produserer tre
+    konseptalternativer (LINEAR_MIXED, COURTYARD_URBAN, CLUSTER_PARK) som
+    konverteres til legacy-format for kompatibilitet med eksisterende UI,
+    PDF-rapporter og 3D-visninger.
+    """
+    if not HAS_BUILTLY_V8 or v8_run_concept_options is None:
+        return []
+
+    geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
+    buildable_polygon = geodata_context.get("buildable_polygon") or geodata_context.get("site_polygon")
+    if buildable_polygon is None or buildable_polygon.is_empty:
+        return []
+
+    plan_regler = _resolve_v8_plan_regler(preset_name)
+
+    try:
+        v8_options = v8_run_concept_options(
+            buildable_polygon,
+            target_bra_m2=float(site.desired_bta_m2 or site.max_bra_m2 or buildable_polygon.area * 0.8),
+            plan_regler=plan_regler,
+            avg_unit_bra_m2=55.0,
+            latitude_deg=float(site.latitude_deg),
+            longitude_deg=10.43,  # default Trondheim; bør komme fra site-context senere
+            site_area_m2=float(site.site_area_m2),
+        )
+    except Exception as exc:
+        st.warning(f"V8-motor feilet: {exc}. Bruker legacy-motor.")
+        return []
+
+    if not v8_options:
+        return []
+
+    # Lagre v8-masterplan for første (primary) option slik at SVG-rendering
+    # senere i visningen kan bruke plan.bygg, plan.delfelt, plan.sol_report osv.
+    # direkte uten å konvertere tilbake fra legacy-format.
+    try:
+        primary_plan = v8_options[0].masterplan
+        if primary_plan is not None:
+            st.session_state["_v8_masterplan_for_concept"] = primary_plan
+    except Exception:
+        pass
+
+    # Merk første option som primary (highest score etter sortering)
+    legacy_results: List[OptionResult] = []
+    for idx, v8_opt in enumerate(v8_options):
+        legacy_opt = _v8_option_to_legacy_option(v8_opt, site, is_primary=(idx == 0))
+        legacy_results.append(legacy_opt)
+
+    return legacy_results
 
 
 def parse_regulation_hints(free_text: str) -> Dict[str, float]:
@@ -10400,6 +10657,39 @@ with st.expander("5. Hva modulen faktisk gjør nå", expanded=False):
     )
 
 
+# --- 5B. Builtly v8-motor (valgfri, under utprøving) ---
+if HAS_BUILTLY_V8:
+    with st.expander("5B. Builtly v8-motor (eksperimentell)", expanded=False):
+        st.markdown(
+            """
+**V8-motoren er en ny deterministisk pipeline som kan kjøres som alternativ til dagens A/B/C-flyt.**
+
+- **Pass 1:** PCA-basert delfelt-splitt med naturlige knekkpunkter
+- **Pass 2:** AI velger typologi og parametre fra låst meny (kun når nettverks-AI er aktivert)
+- **Pass 3:** Deterministisk volumplassering med hard ortogonalitet og splint-forbud
+- **Pass 4:** Sol-beregning via ray-casting mot 3D-mesh
+- **Pass 5:** Regelverk-agnostisk MUA-compliance mot PlanRegler
+- **Pass 6:** AI-generert rapport (valgfritt, ellers deterministisk fallback)
+
+Motoren produserer **tre konseptalternativer** (Lineært blandet, Urbane gårdsrom, Boligklynger rundt park) i stedet for A/B/C-trinn.
+
+Når v8 er aktivert konverteres resultatene til samme format som dagens motor, slik at PDF-rapport, 3D-visning og UI fortsetter å fungere uendret. Legacy-motoren er uberørt og kan slås på igjen ved å skru av toggle under.
+"""
+        )
+        st.session_state["_use_builtly_v8"] = st.toggle(
+            "Bruk Builtly v8-motor i stedet for legacy A/B/C-flyt",
+            value=bool(st.session_state.get("_use_builtly_v8", False)),
+            help="Når aktivert kjøres v8-pipelinen (konseptfamilier + deterministisk geometri + sol + MUA).",
+        )
+        if st.session_state.get("_use_builtly_v8"):
+            st.session_state["_v8_preset_name"] = st.selectbox(
+                "PlanRegler preset for v8",
+                ["TRONDHEIM_KPA_2022_SONE_2", "GENERISK_TEK17_NORGE"],
+                index=0 if st.session_state.get("_v8_preset_name", "TRONDHEIM_KPA_2022_SONE_2") == "TRONDHEIM_KPA_2022_SONE_2" else 1,
+                help="Preset velger grunnregler for MUA, parkering og avstand. Generisk TEK17 gir kun fallback-avstand — resten rapporteres som 'IKKE VURDERT'.",
+            )
+
+
 # --- 10. KJOR ANALYSE ---
 run_analysis = st.button("Kjør tomtestudie / volumstudie", type="primary", use_container_width=True)
 
@@ -10640,8 +10930,21 @@ if run_analysis:
             st.session_state["_current_masterplan"] = _masterplan
     else:
         # Klassisk A/B/C-flyt (fallback)
-        with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
-            options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+        use_v8 = bool(st.session_state.get("_use_builtly_v8", False))
+        if use_v8 and HAS_BUILTLY_V8:
+            v8_preset = st.session_state.get("_v8_preset_name", "TRONDHEIM_KPA_2022_SONE_2")
+            with st.spinner(f"Regner volumalternativer med Builtly v8{bra_label} ..."):
+                options = generate_options_v8(site, mix_inputs, geodata_context=geodata_context, preset_name=v8_preset)
+            # Fallback til legacy hvis v8 returnerer tomt
+            if not options:
+                st.warning("V8-motoren returnerte ingen alternativer. Prøver legacy-motor.")
+                st.session_state.pop("_v8_masterplan_for_concept", None)
+                with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+                    options = generate_options(site, mix_inputs, geodata_context=geodata_context)
+        else:
+            st.session_state.pop("_v8_masterplan_for_concept", None)
+            with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+                options = generate_options(site, mix_inputs, geodata_context=geodata_context)
         st.session_state["_current_masterplan"] = None
 
     # Diagnostikk — lagre i session_state for visning i resultatene
@@ -12425,6 +12728,22 @@ render();
                 st.image(mua_img, use_container_width=True)
         except Exception as exc:
             st.caption(f'Konseptkart kunne ikke genereres: {exc}')
+
+    # V8-motor: vis SVG-diagrammer hvis valgt alternativ er et v8-resultat
+    # Dette sporet eksisterer parallelt med legacy-rendering over. Kommer fra
+    # `builtly.svg_diagrams.render_*_svg` og bruker Builtly-identitet (dark
+    # mode, teal-accent, Inter-font) med label-kollisjonsdetektering.
+    if concept_opt is not None and (concept_opt.geometry or {}).get('v8_plan') and HAS_BUILTLY_V8:
+        try:
+            v8_masterplan = st.session_state.get("_v8_masterplan_for_concept")
+            if v8_masterplan is not None:
+                st.markdown('#### Builtly v8 · Konseptdiagrammer')
+                v8_svg_concept = v8_render_quartalstruktur_svg(v8_masterplan)
+                v8_svg_mua = v8_render_mua_svg(v8_masterplan)
+                st.components.v1.html(v8_svg_concept, height=720, scrolling=False)
+                st.components.v1.html(v8_svg_mua, height=720, scrolling=False)
+        except Exception as exc:
+            st.caption(f'V8-diagrammer kunne ikke genereres: {exc}')
 
     # --- Utforsk utsikten (first-person fra bygget) ---
     with st.expander("🔭 Utforsk utsikten — se fra en leilighet", expanded=False):
