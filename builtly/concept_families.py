@@ -1,159 +1,235 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, List
+"""Concept-family strategies for Builtly v8 delivery 4.
 
-from .masterplan_types import ConceptFamily, CourtyardKind, Delfelt, Typology
+Strategies are deterministic defaults. Pass 2 may optionally ask an AI model to
+adjust these parameters, but only within the strategy envelopes.
+"""
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from .masterplan_types import ConceptFamily, CourtyardKind, Delfelt, FieldParameterChoice, PlanRegler, Typology
 
 
 @dataclass(frozen=True)
-class ConceptPreset:
-    title: str
-    subtitle: str
-    dominant_typology: Typology
-    floor_band: tuple[int, int]
-    bya_target_pct: tuple[float, float]
+class FieldEnvelope:
+    allowed_typologies: Tuple[Typology, ...]
+    default_typology: Typology
+    default_orientation_offset_deg: float = 0.0
+    default_floors: Tuple[int, int] = (4, 5)
+    courtyard_kind: Optional[CourtyardKind] = None
+    tower_size_m: Optional[int] = None
 
 
-PRESETS: Dict[ConceptFamily, ConceptPreset] = {
-    ConceptFamily.LINEAR_MIXED: ConceptPreset(
-        title="Lineært blandet boliggrep",
-        subtitle="Lameller som hovedtypologi langs hovedaksen, med enkelte punkthus som aksenter.",
-        dominant_typology=Typology.LAMELL,
-        floor_band=(4, 6),
-        bya_target_pct=(20, 28),
-    ),
-    ConceptFamily.COURTYARD_URBAN: ConceptPreset(
-        title="Urban kvartalsstruktur med gårdsrom",
-        subtitle="Karrébebyggelse som dominerer, med tydelige urbane kanter og rolige gårdsrom.",
-        dominant_typology=Typology.KARRE,
-        floor_band=(5, 6),
-        bya_target_pct=(22, 30),
-    ),
-    ConceptFamily.CLUSTER_PARK: ConceptPreset(
-        title="Boligklynger rundt grønt fellesrom",
-        subtitle="Lameller og punkthus grupperes rundt et felles grønt parkrom med siktlinjer gjennom bebyggelsen.",
-        dominant_typology=Typology.LAMELL,
-        floor_band=(4, 6),
-        bya_target_pct=(16, 24),
-    ),
+class ConceptStrategy:
+    family: ConceptFamily
+    ui_label: str
+    fallback_title: str
+    fallback_tagline: str
+
+    def propose(
+        self,
+        delfelt: Sequence[Delfelt],
+        target_bra_m2: float,
+        plan_regler: Optional[PlanRegler] = None,
+        neighbors: Optional[Sequence[dict]] = None,
+    ) -> List[FieldParameterChoice]:
+        raise NotImplementedError
+
+    def envelope_for_field(self, index: int, count: int) -> FieldEnvelope:
+        raise NotImplementedError
+
+    def _area_shares(self, count: int) -> List[float]:
+        return [1.0 / max(count, 1)] * max(count, 1)
+
+    def _clamp_floors(self, floors_range: Tuple[int, int], plan_regler: Optional[PlanRegler]) -> Tuple[int, int]:
+        fmin, fmax = floors_range
+        if plan_regler and plan_regler.max_floors is not None:
+            fmax = min(fmax, int(plan_regler.max_floors))
+            fmin = min(fmin, fmax)
+        return max(1, fmin), max(1, fmax)
+
+    def _make_choices(
+        self,
+        delfelt: Sequence[Delfelt],
+        target_bra_m2: float,
+        plan_regler: Optional[PlanRegler],
+        shares: Sequence[float],
+    ) -> List[FieldParameterChoice]:
+        out: List[FieldParameterChoice] = []
+        for idx, field in enumerate(delfelt):
+            env = self.envelope_for_field(idx, len(delfelt))
+            floors_min, floors_max = self._clamp_floors(env.default_floors, plan_regler)
+            out.append(
+                FieldParameterChoice(
+                    field_id=field.field_id,
+                    typology=env.default_typology,
+                    orientation_deg=(field.orientation_deg + env.default_orientation_offset_deg) % 180.0,
+                    floors_min=floors_min,
+                    floors_max=floors_max,
+                    target_bra=float(target_bra_m2 * shares[idx]),
+                    courtyard_kind=env.courtyard_kind,
+                    tower_size_m=env.tower_size_m,
+                    rationale=self._field_rationale(idx, len(delfelt), env),
+                )
+            )
+        return out
+
+    def _field_rationale(self, index: int, count: int, env: FieldEnvelope) -> str:
+        return f"{self.family.value}: {env.default_typology.value} i felt {index + 1} av {count}."
+
+
+class LinearMixedStrategy(ConceptStrategy):
+    family = ConceptFamily.LINEAR_MIXED
+    ui_label = "Lineært blandet grep"
+    fallback_title = "Lineært grep med lameller og punkthus"
+    fallback_tagline = "Lameller og punkthus organisert langs tomtas hovedakse."
+
+    def _area_shares(self, count: int) -> List[float]:
+        if count <= 1:
+            return [1.0]
+        if count == 2:
+            return [0.55, 0.45]
+        if count == 3:
+            return [0.24, 0.52, 0.24]
+        if count == 4:
+            return [0.18, 0.32, 0.32, 0.18]
+        # outer accents + linear middle
+        middle = count - 2
+        mid_share = 0.64 / max(middle, 1)
+        return [0.18] + [mid_share] * middle + [0.18]
+
+    def envelope_for_field(self, index: int, count: int) -> FieldEnvelope:
+        edge = index == 0 or index == count - 1
+        if edge and count >= 3:
+            return FieldEnvelope(
+                allowed_typologies=(Typology.PUNKTHUS, Typology.LAMELL),
+                default_typology=Typology.PUNKTHUS,
+                default_orientation_offset_deg=0.0,
+                default_floors=(5, 6),
+                courtyard_kind=CourtyardKind.PARKKANT,
+                tower_size_m=17 if index == 0 else 21,
+            )
+        return FieldEnvelope(
+            allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS),
+            default_typology=Typology.LAMELL,
+            default_orientation_offset_deg=0.0,
+            default_floors=(4, 5),
+            courtyard_kind=CourtyardKind.FELLES_BOLIG,
+        )
+
+    def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
+        del neighbors
+        return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
+
+
+class CourtyardUrbanStrategy(ConceptStrategy):
+    family = ConceptFamily.COURTYARD_URBAN
+    ui_label = "Urbane gårdsrom"
+    fallback_title = "Urbane gårdsrom med tydelig kant"
+    fallback_tagline = "Karréer mot kantene og roligere boliger i innsiden."
+
+    def _area_shares(self, count: int) -> List[float]:
+        if count <= 1:
+            return [1.0]
+        if count == 2:
+            return [0.58, 0.42]
+        if count == 3:
+            return [0.38, 0.34, 0.28]
+        if count == 4:
+            return [0.30, 0.30, 0.24, 0.16]
+        base = [0.24, 0.24, 0.20]
+        remaining = max(count - len(base), 0)
+        return base + [max(0.32 / max(remaining, 1), 0.08)] * remaining
+
+    def envelope_for_field(self, index: int, count: int) -> FieldEnvelope:
+        if index in {0, min(1, count - 1)}:
+            return FieldEnvelope(
+                allowed_typologies=(Typology.KARRE, Typology.LAMELL),
+                default_typology=Typology.KARRE,
+                default_orientation_offset_deg=0.0 if index % 2 == 0 else 90.0,
+                default_floors=(5, 6),
+                courtyard_kind=CourtyardKind.URBAN_TORG,
+            )
+        if index == count - 1 and count >= 4:
+            return FieldEnvelope(
+                allowed_typologies=(Typology.REKKEHUS, Typology.LAMELL),
+                default_typology=Typology.REKKEHUS,
+                default_orientation_offset_deg=90.0,
+                default_floors=(2, 3),
+                courtyard_kind=CourtyardKind.FELLES_BOLIG,
+            )
+        return FieldEnvelope(
+            allowed_typologies=(Typology.KARRE, Typology.LAMELL, Typology.REKKEHUS),
+            default_typology=Typology.LAMELL,
+            default_orientation_offset_deg=90.0,
+            default_floors=(4, 5),
+            courtyard_kind=CourtyardKind.FELLES_BOLIG,
+        )
+
+    def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
+        del neighbors
+        return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
+
+
+class ClusterParkStrategy(ConceptStrategy):
+    family = ConceptFamily.CLUSTER_PARK
+    ui_label = "Klynger rundt park"
+    fallback_title = "Boligklynger rundt grøntrom"
+    fallback_tagline = "Klynger av lameller og punkthus rundt et tydelig felles grøntdrag."
+
+    def _area_shares(self, count: int) -> List[float]:
+        if count <= 1:
+            return [1.0]
+        if count == 2:
+            return [0.46, 0.54]
+        if count == 3:
+            return [0.27, 0.46, 0.27]
+        if count == 4:
+            return [0.20, 0.30, 0.30, 0.20]
+        middle = count - 2
+        mid_share = 0.60 / max(middle, 1)
+        return [0.20] + [mid_share] * middle + [0.20]
+
+    def envelope_for_field(self, index: int, count: int) -> FieldEnvelope:
+        center_like = index in {max(0, count // 2 - 1), count // 2}
+        if center_like and count >= 3:
+            return FieldEnvelope(
+                allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS),
+                default_typology=Typology.PUNKTHUS,
+                default_orientation_offset_deg=0.0,
+                default_floors=(5, 6),
+                courtyard_kind=CourtyardKind.PARKKANT,
+                tower_size_m=17 if index % 2 == 0 else 21,
+            )
+        return FieldEnvelope(
+            allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS),
+            default_typology=Typology.LAMELL,
+            default_orientation_offset_deg=90.0 if index % 2 else 0.0,
+            default_floors=(4, 5),
+            courtyard_kind=CourtyardKind.PARKKANT,
+        )
+
+    def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
+        del neighbors
+        return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
+
+
+STRATEGIES: Dict[ConceptFamily, ConceptStrategy] = {
+    ConceptFamily.LINEAR_MIXED: LinearMixedStrategy(),
+    ConceptFamily.COURTYARD_URBAN: CourtyardUrbanStrategy(),
+    ConceptFamily.CLUSTER_PARK: ClusterParkStrategy(),
 }
 
 
-def _linear_mixed_typologies(n: int) -> list[Typology]:
-    """Lamell must be the clear main typology."""
-    typologies = [Typology.LAMELL for _ in range(n)]
-    if n <= 2:
-        return typologies
-    accent_count = 1 if n < 6 else 2
-    accent_positions = [0] if accent_count == 1 else [0, n - 1]
-    for idx in accent_positions:
-        if 0 <= idx < n:
-            typologies[idx] = Typology.PUNKTHUS
-    return typologies
+def get_strategy(family: ConceptFamily) -> ConceptStrategy:
+    return STRATEGIES[family]
 
 
-def _courtyard_urban_typologies(fields: list[Delfelt]) -> list[Typology]:
-    """Karré should dominate and only fall back where geometry is truly narrow."""
-    n = len(fields)
-    typologies = [Typology.KARRE for _ in range(n)]
-    for idx, field in enumerate(fields):
-        minx, miny, maxx, maxy = field.polygon.bounds
-        w = maxx - minx
-        h = maxy - miny
-        # Only allow lamell fallback for very slender pieces.
-        if min(w, h) < 30 and max(w, h) / max(min(w, h), 1.0) > 2.6:
-            typologies[idx] = Typology.LAMELL
-    min_karre = max(1, int((n * 2 + 2) // 3))
-    if sum(1 for t in typologies if t == Typology.KARRE) < min_karre:
-        for idx in range(n):
-            typologies[idx] = Typology.KARRE
-            if sum(1 for t in typologies if t == Typology.KARRE) >= min_karre:
-                break
-    return typologies
-
-
-def _cluster_park_typologies(n: int) -> list[Typology]:
-    typologies: list[Typology] = []
-    for idx in range(n):
-        typologies.append(Typology.PUNKTHUS if idx % 3 == 1 else Typology.LAMELL)
-    return typologies
-
-
-def _courtyard_cycle_for(concept_family: ConceptFamily, n: int) -> list[CourtyardKind]:
-    if concept_family == ConceptFamily.COURTYARD_URBAN:
-        return [CourtyardKind.URBAN_TORG if i in (0, n - 1) else CourtyardKind.FELLES_BOLIG for i in range(n)]
-    if concept_family == ConceptFamily.CLUSTER_PARK:
-        return [CourtyardKind.PARKKANT if i % 2 == 0 else CourtyardKind.FELLES_BOLIG for i in range(n)]
-    return [CourtyardKind.PARKKANT if i in (0, n - 1) else CourtyardKind.FELLES_BOLIG for i in range(n)]
-
-
-def apply_concept_defaults(
-    concept_family: ConceptFamily,
-    fields: Iterable[Delfelt],
-    total_target_bra: float,
-) -> List[Delfelt]:
-    preset = PRESETS[concept_family]
-    fields = list(fields)
-    n = max(1, len(fields))
-
-    if concept_family == ConceptFamily.LINEAR_MIXED:
-        typologies = _linear_mixed_typologies(n)
-    elif concept_family == ConceptFamily.COURTYARD_URBAN:
-        typologies = _courtyard_urban_typologies(fields)
-    else:
-        typologies = _cluster_park_typologies(n)
-
-    courtyards = _courtyard_cycle_for(concept_family, n)
-    area_total = sum(max(1.0, f.area_m2) for f in fields)
-
-    # First pass: derive weights, then renormalise so the sum always matches total_target_bra.
-    raw_weights: list[float] = []
-    for i, field in enumerate(fields):
-        typology = typologies[i]
-        area_weight = max(1.0, field.area_m2) / max(1.0, area_total)
-        typology_factor = 1.0
-        if concept_family == ConceptFamily.COURTYARD_URBAN and typology == Typology.KARRE:
-            typology_factor = 1.18
-        elif concept_family == ConceptFamily.COURTYARD_URBAN and typology == Typology.LAMELL:
-            typology_factor = 0.72
-        elif concept_family == ConceptFamily.LINEAR_MIXED and typology == Typology.LAMELL:
-            typology_factor = 1.10
-        elif concept_family == ConceptFamily.LINEAR_MIXED and typology == Typology.PUNKTHUS:
-            typology_factor = 0.68
-        elif concept_family == ConceptFamily.CLUSTER_PARK and typology == Typology.PUNKTHUS:
-            typology_factor = 0.85
-        raw_weights.append(area_weight * typology_factor)
-
-    raw_sum = sum(raw_weights) or 1.0
-    output: List[Delfelt] = []
-    for i, field in enumerate(fields):
-        typology = typologies[i]
-        courtyard = courtyards[i]
-        floors_min, floors_max = preset.floor_band
-        target_bra = round(total_target_bra * (raw_weights[i] / raw_sum), 1)
-        tower_size = 21 if typology == Typology.PUNKTHUS and concept_family != ConceptFamily.LINEAR_MIXED else 17
-        output.append(
-            Delfelt(
-                field_id=field.field_id,
-                polygon=field.polygon,
-                typology=typology,
-                orientation_deg=field.orientation_deg,
-                floors_min=floors_min,
-                floors_max=floors_max,
-                target_bra=target_bra,
-                courtyard_kind=courtyard,
-                tower_size_m=tower_size if typology == Typology.PUNKTHUS else None,
-                phase=field.phase,
-                phase_label=field.phase_label or f"Trinn {field.phase}",
-            )
-        )
-    return output
-
-
-def concept_title(concept_family: ConceptFamily) -> str:
-    return PRESETS[concept_family].title
-
-
-def concept_subtitle(concept_family: ConceptFamily) -> str:
-    return PRESETS[concept_family].subtitle
+def all_concept_families() -> List[ConceptFamily]:
+    return [
+        ConceptFamily.LINEAR_MIXED,
+        ConceptFamily.COURTYARD_URBAN,
+        ConceptFamily.CLUSTER_PARK,
+    ]
