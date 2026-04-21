@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 
-from shapely.geometry import Polygon
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon
 from shapely.ops import unary_union
 
 from .masterplan_types import ComplianceState, Masterplan, Typology
@@ -19,6 +19,22 @@ _BUILDING_STROKE = "#94a3b8"
 _PRIVATE = "#fb7185"
 _ROOF = "#1d4ed8"
 _GROUND = "#14b8a6"
+
+
+
+def _flatten_polygons(geom) -> List[Polygon]:
+    if geom is None or getattr(geom, "is_empty", True):
+        return []
+    if isinstance(geom, Polygon):
+        return [geom]
+    if isinstance(geom, MultiPolygon):
+        return [g for g in geom.geoms if not g.is_empty]
+    if isinstance(geom, GeometryCollection):
+        parts: List[Polygon] = []
+        for g in geom.geoms:
+            parts.extend(_flatten_polygons(g))
+        return parts
+    return []
 
 _FIELD_COLORS = [
     "rgba(56,189,248,0.18)",
@@ -49,9 +65,45 @@ def _project(x: float, y: float, *, bounds: Tuple[float, float, float, float], w
     return px, py
 
 
-def _poly_to_svg_points(poly: Polygon, *, bounds: Tuple[float, float, float, float], width: int, height: int, margin: int) -> str:
+def _polygon_points(poly: Polygon, *, bounds: Tuple[float, float, float, float], width: int, height: int, margin: int) -> str:
     pts = [_project(x, y, bounds=bounds, width=width, height=height, margin=margin) for x, y in poly.exterior.coords]
     return " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+
+
+def _geometry_polygons_svg(geom, *, bounds: Tuple[float, float, float, float], width: int, height: int, margin: int, fill: str, stroke: str, stroke_width: float = 1.0, fill_opacity: Optional[float] = None, stroke_opacity: Optional[float] = None, dasharray: Optional[str] = None) -> str:
+    attrs = [f'fill="{fill}"', f'stroke="{stroke}"', f'stroke-width="{stroke_width}"']
+    if fill_opacity is not None:
+        attrs.append(f'fill-opacity="{fill_opacity}"')
+    if stroke_opacity is not None:
+        attrs.append(f'stroke-opacity="{stroke_opacity}"')
+    if dasharray is not None:
+        attrs.append(f'stroke-dasharray="{dasharray}"')
+    elems=[]
+    for poly in _flatten_polygons(geom):
+        elems.append(f'<polygon points="{_polygon_points(poly, bounds=bounds, width=width, height=height, margin=margin)}" {' '.join(attrs)}/>')
+    return ''.join(elems)
+
+
+def _geom_svg_with_poly_points(geom, poly_points_fn, *, fill: str, stroke: str, stroke_width: float = 1.0, fill_opacity: Optional[float] = None, stroke_opacity: Optional[float] = None, dasharray: Optional[str] = None) -> str:
+    """Render geometry til SVG polygons ved hjelp av en gitt poly_points-funksjon.
+
+    Bruker callback for projeksjon slik at både render_quartalstruktur_svg og
+    render_mua_svg kan dele koden uten å duplisere geom-svg-funksjonen som
+    lokal helper. Løser NameError når render_mua_svg refererer til
+    geom_svg_local som ikke finnes i sitt scope.
+    """
+    attrs = [f'fill="{fill}"', f'stroke="{stroke}"', f'stroke-width="{stroke_width}"']
+    if fill_opacity is not None:
+        attrs.append(f'fill-opacity="{fill_opacity}"')
+    if stroke_opacity is not None:
+        attrs.append(f'stroke-opacity="{stroke_opacity}"')
+    if dasharray is not None:
+        attrs.append(f'stroke-dasharray="{dasharray}"')
+    attr_str = ' '.join(attrs)
+    out = []
+    for poly in _flatten_polygons(geom):
+        out.append(f'<polygon points="{poly_points_fn(poly)}" {attr_str}/>')
+    return ''.join(out)
 
 
 @dataclass
@@ -111,7 +163,6 @@ def render_quartalstruktur_svg(plan: Masterplan, *, width: int = 1100, height: i
     draw_h = height - 80
     items.append(f'<rect x="{draw_x}" y="{draw_y}" width="{draw_w}" height="{draw_h}" rx="12" fill="#09131f" stroke="#12283f"/>')
 
-    # Transform helper for drawing area
     def project_local(x: float, y: float) -> Tuple[float, float]:
         px, py = _project(x, y, bounds=bounds, width=draw_w, height=draw_h, margin=40)
         return px + draw_x, py + draw_y
@@ -119,17 +170,19 @@ def render_quartalstruktur_svg(plan: Masterplan, *, width: int = 1100, height: i
     def poly_points_local(poly: Polygon) -> str:
         return " ".join(f"{x:.1f},{y:.1f}" for x, y in [project_local(px, py) for px, py in poly.exterior.coords])
 
+    def geom_svg_local(geom, **kwargs):
+        return _geom_svg_with_poly_points(geom, poly_points_local, **kwargs)
+
     # Site boundary
-    site_points = poly_points_local(plan.buildable_polygon)
-    items.append(f'<polygon points="{site_points}" fill="none" stroke="{_ACCENT}" stroke-width="3"/>')
+    items.append(geom_svg_local(plan.buildable_polygon, fill="none", stroke=_ACCENT, stroke_width=3))
 
     # Delfelt and buildings
     for idx, field in enumerate(plan.delfelt):
         color = _FIELD_COLORS[idx % len(_FIELD_COLORS)]
-        items.append(f'<polygon points="{poly_points_local(field.polygon)}" fill="{color}" stroke="#38bdf8" stroke-opacity="0.55" stroke-width="1.4"/>')
+        items.append(geom_svg_local(field.polygon, fill=color, stroke="#38bdf8", stroke_width=1.4, stroke_opacity=0.55))
 
     for building in plan.bygg:
-        items.append(f'<polygon points="{poly_points_local(building.footprint)}" fill="{_BUILDING}" stroke="{_BUILDING_STROKE}" stroke-width="1.0"/>')
+        items.append(geom_svg_local(building.footprint, fill=_BUILDING, stroke=_BUILDING_STROKE, stroke_width=1.0))
 
     labels = _place_labels(plan, bounds=plan.buildable_polygon.bounds, width=draw_w, height=draw_h, margin=40)
     for label in labels:
@@ -173,26 +226,22 @@ def render_mua_svg(plan: Masterplan, *, width: int = 1100, height: int = 680) ->
     def poly_points_local(poly: Polygon) -> str:
         return " ".join(f"{x:.1f},{y:.1f}" for x, y in [project_local(px, py) for px, py in poly.exterior.coords])
 
+    def geom_svg_local(geom, **kwargs):
+        return _geom_svg_with_poly_points(geom, poly_points_local, **kwargs)
+
     buildable = plan.buildable_polygon
     union_fp = unary_union([b.footprint for b in plan.bygg]) if plan.bygg else None
     open_ground = buildable.difference(union_fp).buffer(0) if union_fp else buildable
 
     # ground MUA areas
-    if hasattr(open_ground, 'geoms'):
-        parts = list(open_ground.geoms)
-    else:
-        parts = [open_ground]
-    for part in parts:
-        if part.is_empty:
-            continue
-        items.append(f'<polygon points="{poly_points_local(part)}" fill="{_GROUND}" fill-opacity="0.22" stroke="{_GROUND}" stroke-opacity="0.4" stroke-width="1"/>')
+    items.append(geom_svg_local(open_ground, fill=_GROUND, stroke=_GROUND, stroke_width=1, fill_opacity=0.22, stroke_opacity=0.4))
 
     for building in plan.bygg:
-        items.append(f'<polygon points="{poly_points_local(building.footprint)}" fill="{_BUILDING}" stroke="{_BUILDING_STROKE}" stroke-width="1.0"/>')
+        items.append(geom_svg_local(building.footprint, fill=_BUILDING, stroke=_BUILDING_STROKE, stroke_width=1.0))
         if building.tak_mua_m2 > 0:
-            items.append(f'<polygon points="{poly_points_local(building.footprint)}" fill="{_ROOF}" fill-opacity="0.12" stroke="{_ROOF}" stroke-opacity="0.35" stroke-width="0.8"/>')
+            items.append(geom_svg_local(building.footprint, fill=_ROOF, stroke=_ROOF, stroke_width=0.8, fill_opacity=0.12, stroke_opacity=0.35))
         if building.privat_mua_m2 > 0:
-            items.append(f'<polygon points="{poly_points_local(building.footprint)}" fill="none" stroke="{_PRIVATE}" stroke-width="1.2" stroke-dasharray="4 3"/>')
+            items.append(geom_svg_local(building.footprint, fill="none", stroke=_PRIVATE, stroke_width=1.2, dasharray="4 3"))
 
     checks = plan.mua_report.checks
     if checks:
