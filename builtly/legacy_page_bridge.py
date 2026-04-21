@@ -82,6 +82,11 @@ class LegacyMasterplanBundle:
         return phases
 
     def __getattr__(self, name: str) -> Any:
+        # Skjerm dunder-attributter. copy.deepcopy og dataclasses.asdict spør
+        # etter __setstate__, __reduce__, __getstate__ m.fl. Hvis __getattr__
+        # delegerer disse til self.best_plan ender Python i uendelig rekursjon.
+        if name.startswith('__') and name.endswith('__'):
+            raise AttributeError(name)
         return getattr(self.best_plan, name)
 
 def _coord_groups(poly: Any) -> List[List[List[float]]]:
