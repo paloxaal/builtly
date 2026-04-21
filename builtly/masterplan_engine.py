@@ -146,10 +146,10 @@ def _score_plan(plan: Masterplan) -> float:
         bya_alignment = max(0.35, high / max(plan.bya_pct, 0.1))
     typology_ratio = sum(1 for f in plan.delfelt if f.typology == preset.dominant_typology) / max(1, len(plan.delfelt))
     score = 100.0 * (
-        0.50 * target_util
-        + 0.15 * (plan.sol_report.total_score / 100.0)
-        + 0.15 * bya_alignment
-        + 0.15 * typology_ratio
+        0.42 * target_util
+        + 0.13 * (plan.sol_report.total_score / 100.0)
+        + 0.20 * bya_alignment
+        + 0.20 * typology_ratio
         + 0.05 * mua_ok
     )
     if plan.plan_regler.max_bra_pct is not None and plan.bra_pct > plan.plan_regler.max_bra_pct:
@@ -239,6 +239,8 @@ def run_single_masterplan(
         "concept_family": concept_family.value,
         "target_bra_m2": generation_target_bra,
         "dominant_typology": CONCEPT_PRESETS[concept_family].dominant_typology.value,
+        "delfelt_count": len(fields),
+        "achieved_target_pct": round((achieved_bra / generation_target_bra) * 100.0, 1) if generation_target_bra else None,
     }
     return plan
 
