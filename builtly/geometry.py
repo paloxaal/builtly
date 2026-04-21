@@ -10,7 +10,7 @@ The functions in this module are intentionally independent from AI and from the
 legacy masterplan stack. The only external geometric dependency is Shapely.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -244,6 +244,160 @@ def _reflex_vertices(local_poly: Polygon) -> List[Tuple[float, float]]:
     return reflex
 
 
+def largest_inscribed_rectangle(poly: Polygon, *, min_aspect: float = 0.25, grid_resolution: int = 24) -> Optional[Polygon]:
+    """Finn det største aksejusterte rektangelet som ligger helt innenfor poly.
+
+    Bruker grid-søk over mulige nedre-venstre hjørner og tester voksende
+    rektangler. Dette er en approksimasjon — ikke matematisk optimal — men
+    robust nok for våre bruksområder (L-former, T-former, konkave tomter).
+
+    For rektangulære polygoner returnerer dette det samme rektangelet.
+    For konkave polygoner returnerer den største rektangel som passer uten
+    å krysse en innkjerv eller et hull.
+    """
+    if poly is None or poly.is_empty or poly.area <= 1.0:
+        return None
+
+    minx, miny, maxx, maxy = poly.bounds
+    span_x = maxx - minx
+    span_y = maxy - miny
+    if span_x <= 0 or span_y <= 0:
+        return None
+
+    # Enkelt case: hvis polygonet allerede er rektangel, returnér det direkte
+    hull = poly.convex_hull
+    bbox = box(minx, miny, maxx, maxy)
+    if hull.area >= bbox.area * 0.995 and poly.area >= bbox.area * 0.995:
+        return bbox.intersection(poly).buffer(0) if not poly.contains(bbox) else bbox
+
+    # Grid-søk: test et rutenett av (x, y)-par som nedre-venstre hjørne og
+    # utvid rektangelet så langt det kan mens det fortsatt er inne.
+    gx = max(4, int(grid_resolution))
+    gy = max(4, int(grid_resolution))
+    step_x = span_x / gx
+    step_y = span_y / gy
+    poly_buf = poly.buffer(1e-6)
+
+    best_rect: Optional[Polygon] = None
+    best_area = 0.0
+
+    for i in range(gx + 1):
+        for j in range(gy + 1):
+            x0 = minx + i * step_x
+            y0 = miny + j * step_y
+            if not poly_buf.covers(Point(x0, y0)):
+                continue
+            # Finn maksimal bredde fra (x0, y0) mot høyre som er fortsatt i poly
+            # Deretter finn maksimal høyde som holder hele rektangelet i poly.
+            # Bruk binær-søk for hastighet.
+            lo_w, hi_w = 0.0, maxx - x0
+            for _ in range(18):
+                mid = (lo_w + hi_w) / 2.0
+                if mid < step_x * 0.5:
+                    break
+                test_rect = box(x0, y0, x0 + mid, y0 + step_y)
+                if poly_buf.covers(test_rect):
+                    lo_w = mid
+                else:
+                    hi_w = mid
+            w = lo_w
+            if w < step_x * 0.5:
+                continue
+            lo_h, hi_h = 0.0, maxy - y0
+            for _ in range(18):
+                mid = (lo_h + hi_h) / 2.0
+                if mid < step_y * 0.5:
+                    break
+                test_rect = box(x0, y0, x0 + w, y0 + mid)
+                if poly_buf.covers(test_rect):
+                    lo_h = mid
+                else:
+                    hi_h = mid
+            h = lo_h
+            if h < step_y * 0.5:
+                continue
+            aspect = min(w, h) / max(w, h)
+            if aspect < min_aspect:
+                continue
+            area = w * h
+            if area > best_area:
+                best_area = area
+                best_rect = box(x0, y0, x0 + w, y0 + h)
+
+    return best_rect
+
+
+def decompose_into_rectangles(poly: Polygon, *, min_rect_area: float = 200.0, max_rects: int = 4) -> List[Polygon]:
+    """Dekomponer et (potensielt konkavt) polygon i opptil max_rects aksejusterte
+    rektangler som dekker så mye som mulig av polygonet uten overlapp.
+
+    Bruker grådig algoritme: finner største inskriberte rektangel, trekker fra,
+    gjentar. Returnerer listen sortert etter areal (størst først).
+    """
+    if poly is None or poly.is_empty or poly.area <= min_rect_area:
+        return []
+
+    rects: List[Polygon] = []
+    remaining = poly.buffer(0)
+
+    for _ in range(max_rects):
+        if remaining.is_empty or remaining.area < min_rect_area:
+            break
+        # Største delkomponent hvis remaining er fragmentert
+        parts = _flatten_polygons(remaining)
+        if not parts:
+            break
+        parts.sort(key=lambda p: p.area, reverse=True)
+        target = parts[0]
+        if target.area < min_rect_area:
+            break
+        mir = largest_inscribed_rectangle(target, grid_resolution=18)
+        if mir is None or mir.area < min_rect_area:
+            # Siste utvei: hvis polygonet *er* nesten rektangulært, bruk bbox
+            minx, miny, maxx, maxy = target.bounds
+            bbox = box(minx, miny, maxx, maxy)
+            if target.area >= bbox.area * 0.95:
+                rects.append(bbox.intersection(target).buffer(0))
+            break
+        rects.append(mir)
+        # Subtraher rektangelet fra remaining, med litt buffer for å unngå
+        # numeriske edges som gir slivers
+        try:
+            remaining = remaining.difference(mir.buffer(0.5))
+            remaining = remaining.buffer(0) if not remaining.is_empty else remaining
+        except Exception:
+            break
+
+    return rects
+
+
+def _field_placement_cores(core: Polygon, *, concave_threshold: float = 0.90) -> List[Polygon]:
+    """Returner plasseringskjerner for et delfelt.
+
+    Hvis core er nesten konveks, returner [core] uendret.
+    Hvis core er konkavt, dekomponer i rektangler og returner de største
+    (opptil 2) som er store nok til å romme et bygg.
+
+    Dette brukes av _place_*_local-funksjonene for å unngå at plassering
+    feiler på L-formede eller T-formede delfelter.
+    """
+    if core is None or core.is_empty:
+        return []
+    ratio = convex_hull_ratio(core)
+    if ratio >= concave_threshold:
+        return [core]
+    rects = decompose_into_rectangles(core, min_rect_area=300.0, max_rects=3)
+    if not rects:
+        return [core]
+    # Behold rektangler som er minst 20% av core-arealet (unngå slivers)
+    min_accept = core.area * 0.20
+    kept = [r for r in rects if r.area >= min_accept]
+    if not kept:
+        # Fallback: returner største selv om det er lite
+        return [rects[0]]
+    return kept[:2]  # Maksimalt 2 delkjerner for å unngå for mange bygg i ett felt
+
+
 def _split_polygon_with_line(poly: Polygon, line: LineString) -> List[Polygon]:
     try:
         result = shapely_split(poly, line)
@@ -330,11 +484,11 @@ def _balanced_axis_split(local_poly: Polygon, axis: str = "x") -> List[Polygon]:
     return [local_poly]
 
 
-def subdivide_buildable_polygon(buildable_poly: Polygon, count: int, orientation_deg: float) -> List[Polygon]:
-    if count <= 1:
-        return [buildable_poly.buffer(0)]
+def _run_subdivision(local_poly: Polygon, count: int) -> List[Polygon]:
+    """Kjør den faktiske subdivisjonen på et polygon allerede rotert til lokalt rom.
 
-    local_poly = _rotate(buildable_poly, -orientation_deg, origin=buildable_poly.centroid)
+    Returnerer delene i lokalt koordinatsystem.
+    """
     parts: List[Polygon] = [local_poly.buffer(0)]
 
     if convex_hull_ratio(local_poly) < 0.75:
@@ -360,12 +514,124 @@ def subdivide_buildable_polygon(buildable_poly: Polygon, count: int, orientation
     if len(parts) > count:
         parts = sorted(parts, key=lambda p: p.area, reverse=True)[:count]
 
-    global_parts = [_rotate(part, orientation_deg, origin=buildable_poly.centroid).buffer(0) for part in parts]
+    return parts
+
+
+def _rectangularity_score(parts: List[Polygon]) -> float:
+    """Gjennomsnittlig bbox-fyll for alle deler: 1.0 = perfekte rektangler,
+    0.5 = trekantede halvdeler, osv. Brukes for å velge beste subdivide-retning."""
+    if not parts:
+        return 0.0
+    fills: List[float] = []
+    for p in parts:
+        if p.area <= 0:
+            continue
+        minx, miny, maxx, maxy = p.bounds
+        bbox_area = (maxx - minx) * (maxy - miny)
+        if bbox_area <= 0:
+            continue
+        fills.append(p.area / bbox_area)
+    return sum(fills) / len(fills) if fills else 0.0
+
+
+def subdivide_buildable_polygon(buildable_poly: Polygon, count: int, orientation_deg: float) -> List[Polygon]:
+    """Subdelt en tomt i `count` delfelter.
+
+    Vanligvis bruker vi `orientation_deg` (fra PCA) som subdivide-akse. Men for
+    L-former og andre konkave tomter med ~1:1 sideforhold gir PCA en
+    diagonal-retning (typisk 45°/135°) som ikke matcher de "naturlige"
+    bygningsaksene. En akse-justert split (0°) gir i disse tilfellene
+    rektangulære delfelter, mens en diagonal split gir trekantede.
+
+    Derfor: hvis tomten er konkav, prøv både PCA-retning og 0°, og velg den
+    som gir best rektangularitet (gjennomsnittlig bbox-fyll).
+    """
+    if count <= 1:
+        return [buildable_poly.buffer(0)]
+
+    candidate_orientations = [orientation_deg]
+    # For konkave tomter: vurder også aksejustert retning hvis den ikke
+    # allerede er i lista. Terskelen 0.90 matcher _field_placement_cores.
+    if convex_hull_ratio(buildable_poly) < 0.90:
+        # Normalise tested orientations for ~parallel comparisons
+        def _same_angle(a: float, b: float) -> bool:
+            diff = abs((a - b + 90.0) % 180.0 - 90.0)
+            return diff < 5.0
+
+        if not any(_same_angle(orientation_deg, 0.0) for _ in [0]):
+            candidate_orientations.append(0.0)
+        # Robustnesskandidat: 90° rotert fra 0°
+        if not _same_angle(orientation_deg, 90.0):
+            candidate_orientations.append(90.0)
+
+    best_parts: Optional[List[Polygon]] = None
+    best_orient: float = orientation_deg
+    best_score: float = -1.0
+
+    for orient in candidate_orientations:
+        local_poly = _rotate(buildable_poly, -orient, origin=buildable_poly.centroid)
+        parts = _run_subdivision(local_poly, count)
+        if not parts or len(parts) < count:
+            continue
+        score = _rectangularity_score(parts)
+        if score > best_score:
+            best_score = score
+            best_parts = parts
+            best_orient = orient
+
+    if best_parts is None:
+        # Fallback: kjør som før (uten alternativer)
+        local_poly = _rotate(buildable_poly, -orientation_deg, origin=buildable_poly.centroid)
+        best_parts = _run_subdivision(local_poly, count)
+        best_orient = orientation_deg
+
+    global_parts = [_rotate(part, best_orient, origin=buildable_poly.centroid).buffer(0) for part in best_parts]
     global_parts = [part for part in global_parts if part.area > 1.0]
 
     # Order fields south-to-north by centroid, as required by the spec.
     global_parts.sort(key=lambda p: (p.centroid.y, p.centroid.x))
     return global_parts
+
+
+def orientation_for_field(field_polygon: Polygon, fallback_deg: float = 0.0) -> float:
+    """Bestem best plasseringsorientering for et gitt delfelt i globalt rom.
+
+    Returnerer en vinkel i [0, 180) som skal lagres i `Delfelt.orientation_deg`.
+    Plasseringskoden roterer core_global med `-orientation_deg` for å få
+    core_local som antas aksejustert. Riktig orientering matcher derfor
+    delfeltets faktiske "hovedakse".
+
+    Strategi:
+      1. Hvis delfeltet er (nesten) rektangulært, bruk PCA på delfeltet selv.
+         Dette gir 0° for aksejusterte rektangler og riktig rotasjon for
+         skråstilte rektangler.
+      2. Hvis delfeltet er konkavt, bruk PCA på den største inskriberte
+         rektangelen — det er det området plasseringen faktisk kommer til å
+         jobbe i.
+      3. Hvis alt annet feiler (tom polygon eller degenerert), returner
+         fallback_deg.
+
+    Dette fjerner antagelsen om at alle delfelter deler tomtens globale
+    PCA-retning, som er feil når subdivide_buildable_polygon har byttet til
+    akse-justert split for konkave tomter.
+    """
+    if field_polygon is None or field_polygon.is_empty:
+        return float(fallback_deg) % 180.0
+
+    target = field_polygon
+    # For konkave delfelter: bruk MIR som representativt domene.
+    if convex_hull_ratio(field_polygon) < 0.90:
+        mir = largest_inscribed_rectangle(field_polygon, min_aspect=0.25, grid_resolution=20)
+        if mir is not None and mir.area > 100.0:
+            target = mir
+
+    try:
+        axes = pca_site_axes(target)
+        return float(axes.theta_deg) % 180.0
+    except Exception:
+        # Fallback: bruk bbox-sideforhold
+        minx, miny, maxx, maxy = field_polygon.bounds
+        return 0.0 if (maxx - minx) >= (maxy - miny) else 90.0
 
 
 # ---------------------------------------------------------------------------
@@ -420,31 +686,99 @@ def _make_rect(x0: float, y0: float, width_m: float, depth_m: float) -> Polygon:
 
 
 def _fit_rect_in_segment(poly: Polygon, y0: float, depth_m: float, min_length: float, max_length: float) -> Optional[Polygon]:
+    """Finn et aksejustert rektangel innenfor poly i en horisontal strip y0..y0+depth.
+
+    Tidligere versjon antok at midt-punktet (px0+px1)/2 alltid kunne brukes som
+    x-sentrum. Det feiler når piece er et trapez, triangel eller annen
+    ikke-rektangulær del (f.eks. etter diagonal rotasjon av en L-form), fordi
+    det sentrale punktet da kan ligge utenfor figuren selv om et rektangel av
+    passende lengde kunne passet med et annet sentrum.
+
+    Ny strategi per piece:
+      1. Prøv det sentrerte binærsøket som før (rask path for rektangulære pieces).
+      2. Hvis det gir None: skann en håndfull x-sentrum langs piece.bounds og
+         kjør binærsøk lokalt for hvert.
+      3. Hvis fortsatt None: bruk largest_inscribed_rectangle som siste fallback
+         og klipp den til riktig depth.
+    """
+    piece_poly = poly
     minx, miny, maxx, maxy = poly.bounds
     strip = box(minx - 1_000.0, y0, maxx + 1_000.0, y0 + depth_m)
     inter = poly.intersection(strip)
     candidates = _flatten_polygons(inter)
     best: Optional[Polygon] = None
-    best_len = 0.0
+    best_area = 0.0
+
+    # Lokal rect-bygger: snap bare x, ikke y. `_make_rect` snapper begge,
+    # og når y0 ikke er grid-alignet (typisk etter rotasjon av core_local) vil
+    # det snappes ned under piece-bunn slik at et ellers gyldig rektangel
+    # feiler covers-sjekken. Her låser vi y0 og y0+depth_m direkte.
+    def _rect_snap_x_only(x0: float, width_m: float) -> Polygon:
+        sx0 = snap_value(x0)
+        return box(sx0, y0, snap_value(sx0 + width_m), y0 + depth_m)
+
+    def _bsearch_at_center(piece: Polygon, x_center: float, lo: float, hi: float) -> Optional[Polygon]:
+        found: Optional[Polygon] = None
+        piece_buf = piece.buffer(1e-6)
+        for _ in range(30):
+            if hi + 1e-6 < lo:
+                break
+            mid = snap_value((lo + hi) / 2.0)
+            if mid < min_length - 1e-6:
+                break
+            rect = _rect_snap_x_only(x_center - mid / 2.0, mid)
+            if piece_buf.covers(rect):
+                found = rect
+                lo = mid + GRID_SNAP_M
+            else:
+                hi = mid - GRID_SNAP_M
+        return found
+
     for piece in candidates:
         px0, py0, px1, py1 = piece.bounds
         avail = px1 - px0
         if avail + 1e-6 < min_length:
             continue
-        lo, hi = min_length, min(max_length, avail)
-        found: Optional[Polygon] = None
-        for _ in range(35):
-            mid = snap_value((lo + hi) / 2.0)
-            x0 = snap_value((px0 + px1 - mid) / 2.0)
-            rect = _make_rect(x0, y0, mid, depth_m)
-            if piece.buffer(1e-6).covers(rect):
-                found = rect
-                lo = mid + GRID_SNAP_M
-            else:
-                hi = mid - GRID_SNAP_M
-        if found is not None and found.area > best_len:
+        lo_init = min_length
+        hi_init = min(max_length, avail)
+        if hi_init + 1e-6 < lo_init:
+            continue
+
+        # --- Pass 1: sentrert binærsøk (original rask-sti) ---
+        found = _bsearch_at_center(piece, (px0 + px1) / 2.0, lo_init, hi_init)
+
+        # --- Pass 2: skann x-sentrum hvis sentrert feilet ---
+        if found is None:
+            # Velg 7 kandidatsentrum jevnt fordelt; dekker trapez/triangel-pieces
+            scan_count = 7
+            step = avail / (scan_count + 1)
+            scan_best: Optional[Polygon] = None
+            scan_best_area = 0.0
+            for k in range(1, scan_count + 1):
+                x_c = px0 + k * step
+                cand = _bsearch_at_center(piece, x_c, lo_init, hi_init)
+                if cand is not None and cand.area > scan_best_area:
+                    scan_best = cand
+                    scan_best_area = cand.area
+            found = scan_best
+
+        # --- Pass 3: MIR-fallback på piece ---
+        if found is None:
+            mir = largest_inscribed_rectangle(piece, min_aspect=0.1, grid_resolution=18)
+            if mir is not None:
+                mx0, my0, mx1, my1 = mir.bounds
+                mir_w = mx1 - mx0
+                mir_h = my1 - my0
+                if mir_w + 1e-6 >= min_length and mir_h + 1e-6 >= depth_m * 0.9:
+                    use_len = snap_value(min(max_length, mir_w))
+                    x0 = mx0 + (mir_w - use_len) / 2.0
+                    rect = _rect_snap_x_only(x0, use_len)
+                    if piece.buffer(1e-6).covers(rect):
+                        found = rect
+
+        if found is not None and found.area > best_area:
             best = found
-            best_len = found.area
+            best_area = found.area
     return best
 
 
@@ -613,20 +947,80 @@ def _place_rekkehus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
 
 
 def _fit_centered_outer_rect(core: Polygon, max_width: float, max_height: float) -> Optional[Polygon]:
+    """Finn det største rektangel centrert i core med max-dimensjoner begrenset.
+
+    Originalversjonen gjør et binærsøk rundt core.centroid med uniform skalering.
+    Det fungerer bra når core er rektangulært (centroid ligger midt i et stort
+    rektangulært domene), men konvergerer for lavt når core har skjev form —
+    det sentrerte rektangelet når raskt en kant selv om det finnes et større
+    ikke-sentrert rektangel inne i figuren. Det gjør at Karré-ringen blir for
+    tynn og `_make_u_or_o_shape` feiler med "indre for liten".
+
+    Ny strategi:
+      1. Sentrert binærsøk som før — beste resultat tar vi vare på som `centered_best`.
+      2. Hvis `centered_best` er mindre enn 80% av bbox-grenseområdet (dvs. core
+         er ikke rektangulært), kjør largest_inscribed_rectangle og bruk den hvis
+         den gir et større rektangel som fortsatt respekterer max-dimensjonene.
+    """
     cx, cy = core.centroid.x, core.centroid.y
     lo, hi = 0.2, 1.0
-    best: Optional[Polygon] = None
+    centered_best: Optional[Polygon] = None
+    centered_area = 0.0
     for _ in range(50):
         mid = (lo + hi) / 2.0
         w = snap_value(max_width * mid)
         h = snap_value(max_height * mid)
         outer = box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
         if core.contains(outer):
-            best = outer
+            if outer.area > centered_area:
+                centered_best = outer
+                centered_area = outer.area
             lo = mid
         else:
             hi = mid
-    return best
+
+    # Vurder MIR-fallback hvis sentrert resultat er svakt.
+    # max_bbox_area = det vi *kunne* fått hvis core var rektangulært.
+    max_bbox_area = max_width * max_height
+    if centered_best is not None and centered_area >= max_bbox_area * 0.80:
+        return centered_best
+
+    mir = largest_inscribed_rectangle(core, min_aspect=0.30, grid_resolution=24)
+    if mir is None:
+        return centered_best
+
+    mx0, my0, mx1, my1 = mir.bounds
+    mir_w = mx1 - mx0
+    mir_h = my1 - my0
+    # Respekter max-dimensjoner: klipp ned om nødvendig, sentrert i MIR
+    use_w = snap_value(min(mir_w, max_width))
+    use_h = snap_value(min(mir_h, max_height))
+    if use_w <= 0 or use_h <= 0:
+        return centered_best
+    mir_cx = (mx0 + mx1) / 2.0
+    mir_cy = (my0 + my1) / 2.0
+    candidate = box(
+        mir_cx - use_w / 2.0, mir_cy - use_h / 2.0,
+        mir_cx + use_w / 2.0, mir_cy + use_h / 2.0,
+    )
+    if not core.buffer(1e-6).covers(candidate):
+        # MIR-approximasjonen kan overschyte litt — krymp proporsjonalt til det passer
+        for shrink in (0.98, 0.95, 0.92, 0.88, 0.82):
+            use_w2 = snap_value(use_w * shrink)
+            use_h2 = snap_value(use_h * shrink)
+            cand2 = box(
+                mir_cx - use_w2 / 2.0, mir_cy - use_h2 / 2.0,
+                mir_cx + use_w2 / 2.0, mir_cy + use_h2 / 2.0,
+            )
+            if core.buffer(1e-6).covers(cand2):
+                candidate = cand2
+                break
+        else:
+            return centered_best
+
+    if candidate.area > centered_area:
+        return candidate
+    return centered_best
 
 
 def _make_u_or_o_shape(outer: Polygon, ring_depth: float, min_courtyard: float) -> Optional[Polygon]:
@@ -670,8 +1064,10 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
     return None
 
 
-def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCandidate]:
-    spec = get_typology_spec(field.typology)
+def _place_single_core(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Plasser bygg i én enkelt rektangulær kjerne. Dette er den opprinnelige
+    plassering-logikken, nå trukket ut slik at _candidate_for_field kan kjøre
+    den over flere delkjerner når et delfelt er konkavt."""
     if field.typology == Typology.LAMELL:
         return _place_lameller_local(core, field, spec)
     if field.typology == Typology.PUNKTHUS:
@@ -683,6 +1079,63 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     return None
 
 
+def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCandidate]:
+    """Generer plasseringskandidat for et delfelt.
+
+    Hvis delfeltets core-polygon er konkavt (L-form, T-form, innhakk) vil
+    plasseringen direkte ofte feile fordi indre _fit_centered_outer_rect og
+    tilsvarende hjelpere antar et rektangulært domene. Vi dekomponerer da
+    kjernen i aksejusterte rektangler og prøver plassering i hver, og slår
+    resultatene sammen.
+    """
+    spec = get_typology_spec(field.typology)
+
+    # Hvis core er (nesten) konveks, bruk den direkte — rask sti.
+    if convex_hull_ratio(core) >= 0.90:
+        return _place_single_core(core, field, spec)
+
+    # Konkav core: dekomponer i rektangler og plasser i hver.
+    sub_cores = _field_placement_cores(core)
+    if not sub_cores:
+        return _place_single_core(core, field, spec)
+
+    # Hvis dekomposition gir bare én kjerne, kjør vanlig plassering på den.
+    if len(sub_cores) == 1:
+        return _place_single_core(sub_cores[0], field, spec)
+
+    # Karré trenger et sammenhengende rektangulært område for ring/U-form;
+    # kjør bare plassering i den største delkjernen, ikke flere.
+    if field.typology == Typology.KARRE:
+        return _place_single_core(sub_cores[0], field, spec)
+
+    # For Lamell / Punkthus / Rekkehus: tillatt å plassere bygg i flere
+    # delkjerner og slå sammen footprintene til én kandidat. Vi bruker
+    # samme etasje-antall på alle bygg for å holde kandidaten sammenhengende.
+    combined_footprints: List[Polygon] = []
+    chosen_floors: Optional[int] = None
+    proportional_target_total = float(field.target_bra)
+    total_sub_area = sum(sc.area for sc in sub_cores) or 1.0
+
+    for sc in sub_cores:
+        # Pro rata target_bra per delkjerne så hver får rimelig andel
+        sub_target = proportional_target_total * (sc.area / total_sub_area)
+        sub_field = replace(field, target_bra=sub_target)  # type: ignore[name-defined]
+        sub_cand = _place_single_core(sc, sub_field, spec)
+        if sub_cand is None:
+            continue
+        if chosen_floors is None:
+            chosen_floors = sub_cand.floors
+        combined_footprints.extend(sub_cand.footprints)
+
+    if not combined_footprints or chosen_floors is None:
+        return None
+
+    cand = _evaluate_candidate(combined_footprints, field.target_bra, (field.floors_min, field.floors_max))
+    if cand is None:
+        return None
+    return cand
+
+
 def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], plan_regler: Optional[PlanRegler] = None) -> Tuple[List[Bygg], float]:
     rules = plan_regler or PlanRegler()
     accepted: List[Bygg] = []
@@ -691,8 +1144,18 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
     build_counter = 1
 
     for field in delfelt:
-        core = _field_core_polygon(field.polygon, rules.brann_avstand_m)
-        candidate = _candidate_for_field(core, field)
+        # core er i globalt rom. Plasseringsalgoritmene (_fit_centered_outer_rect,
+        # _place_lameller_local, etc.) antar at koordinataksene matcher delfeltets
+        # hovedretning. Vi roterer derfor core til lokalt (aksejustert) system
+        # med -orientation_deg rundt delfeltets centroid før vi kaller plassering.
+        # Footprints som returneres er da også i lokalt system, og blir rotert
+        # tilbake med +orientation_deg nedenfor.
+        core_global = _field_core_polygon(field.polygon, rules.brann_avstand_m)
+        if abs(field.orientation_deg) > 1e-3:
+            core_local = _rotate(core_global, -field.orientation_deg, origin=field.polygon.centroid)
+        else:
+            core_local = core_global
+        candidate = _candidate_for_field(core_local, field)
         if candidate is None:
             bra_deficit += max(0.0, field.target_bra)
             continue
