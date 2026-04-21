@@ -20,49 +20,51 @@ PRESETS: Dict[ConceptFamily, ConceptPreset] = {
         title="Lineært blandet boliggrep",
         subtitle="Lameller som hovedtypologi langs hovedaksen, med enkelte punkthus som aksenter.",
         dominant_typology=Typology.LAMELL,
-        floor_band=(4, 5),
+        floor_band=(4, 6),
         bya_target_pct=(20, 28),
     ),
     ConceptFamily.COURTYARD_URBAN: ConceptPreset(
         title="Urban kvartalsstruktur med gårdsrom",
         subtitle="Karrébebyggelse som dominerer, med tydelige urbane kanter og rolige gårdsrom.",
         dominant_typology=Typology.KARRE,
-        floor_band=(4, 5),
+        floor_band=(5, 6),
         bya_target_pct=(22, 30),
     ),
     ConceptFamily.CLUSTER_PARK: ConceptPreset(
         title="Boligklynger rundt grønt fellesrom",
         subtitle="Lameller og punkthus grupperes rundt et felles grønt parkrom med siktlinjer gjennom bebyggelsen.",
         dominant_typology=Typology.LAMELL,
-        floor_band=(3, 5),
+        floor_band=(4, 6),
         bya_target_pct=(16, 24),
     ),
 }
 
 
 def _linear_mixed_typologies(n: int) -> list[Typology]:
+    """Lamell must be the clear main typology."""
     typologies = [Typology.LAMELL for _ in range(n)]
-    accent_indices = {0, n - 1} if n >= 2 else {0}
-    if n >= 10:
-        accent_indices |= {n // 2}
-    accent_indices = {idx for idx in accent_indices if 0 <= idx < n}
-    for idx in accent_indices:
-        typologies[idx] = Typology.PUNKTHUS
+    if n <= 2:
+        return typologies
+    accent_count = 1 if n < 6 else 2
+    accent_positions = [0] if accent_count == 1 else [0, n - 1]
+    for idx in accent_positions:
+        if 0 <= idx < n:
+            typologies[idx] = Typology.PUNKTHUS
     return typologies
 
 
 def _courtyard_urban_typologies(fields: list[Delfelt]) -> list[Typology]:
+    """Karré should dominate and only fall back where geometry is truly narrow."""
     n = len(fields)
     typologies = [Typology.KARRE for _ in range(n)]
-    # Keep narrow edge parcels buildable with lamell fallback, but karré must dominate.
     for idx, field in enumerate(fields):
         minx, miny, maxx, maxy = field.polygon.bounds
         w = maxx - minx
         h = maxy - miny
-        if min(w, h) < 40 and n > 4:
+        # Only allow lamell fallback for very slender pieces.
+        if min(w, h) < 30 and max(w, h) / max(min(w, h), 1.0) > 2.6:
             typologies[idx] = Typology.LAMELL
-    # Guarantee at least 75% karré share.
-    min_karre = max(1, int(round(n * 0.75)))
+    min_karre = max(1, int((n * 2 + 2) // 3))
     if sum(1 for t in typologies if t == Typology.KARRE) < min_karre:
         for idx in range(n):
             typologies[idx] = Typology.KARRE
@@ -74,10 +76,7 @@ def _courtyard_urban_typologies(fields: list[Delfelt]) -> list[Typology]:
 def _cluster_park_typologies(n: int) -> list[Typology]:
     typologies: list[Typology] = []
     for idx in range(n):
-        if idx % 3 == 1:
-            typologies.append(Typology.PUNKTHUS)
-        else:
-            typologies.append(Typology.LAMELL)
+        typologies.append(Typology.PUNKTHUS if idx % 3 == 1 else Typology.LAMELL)
     return typologies
 
 
@@ -106,25 +105,33 @@ def apply_concept_defaults(
         typologies = _cluster_park_typologies(n)
 
     courtyards = _courtyard_cycle_for(concept_family, n)
-
     area_total = sum(max(1.0, f.area_m2) for f in fields)
+
+    # First pass: derive weights, then renormalise so the sum always matches total_target_bra.
+    raw_weights: list[float] = []
+    for i, field in enumerate(fields):
+        typology = typologies[i]
+        area_weight = max(1.0, field.area_m2) / max(1.0, area_total)
+        typology_factor = 1.0
+        if concept_family == ConceptFamily.COURTYARD_URBAN and typology == Typology.KARRE:
+            typology_factor = 1.18
+        elif concept_family == ConceptFamily.COURTYARD_URBAN and typology == Typology.LAMELL:
+            typology_factor = 0.72
+        elif concept_family == ConceptFamily.LINEAR_MIXED and typology == Typology.LAMELL:
+            typology_factor = 1.10
+        elif concept_family == ConceptFamily.LINEAR_MIXED and typology == Typology.PUNKTHUS:
+            typology_factor = 0.68
+        elif concept_family == ConceptFamily.CLUSTER_PARK and typology == Typology.PUNKTHUS:
+            typology_factor = 0.85
+        raw_weights.append(area_weight * typology_factor)
+
+    raw_sum = sum(raw_weights) or 1.0
     output: List[Delfelt] = []
     for i, field in enumerate(fields):
         typology = typologies[i]
         courtyard = courtyards[i]
         floors_min, floors_max = preset.floor_band
-        area_weight = max(1.0, field.area_m2) / max(1.0, area_total)
-
-        # Urban concepts push more area into karré parcels; park concepts keep more reserve in open-space fields.
-        typology_factor = 1.0
-        if concept_family == ConceptFamily.COURTYARD_URBAN and typology == Typology.KARRE:
-            typology_factor = 1.08
-        elif concept_family == ConceptFamily.LINEAR_MIXED and typology == Typology.PUNKTHUS:
-            typology_factor = 0.82
-        elif concept_family == ConceptFamily.CLUSTER_PARK and typology == Typology.PUNKTHUS:
-            typology_factor = 0.88
-
-        target_bra = round(total_target_bra * area_weight * typology_factor, 1)
+        target_bra = round(total_target_bra * (raw_weights[i] / raw_sum), 1)
         tower_size = 21 if typology == Typology.PUNKTHUS and concept_family != ConceptFamily.LINEAR_MIXED else 17
         output.append(
             Delfelt(
