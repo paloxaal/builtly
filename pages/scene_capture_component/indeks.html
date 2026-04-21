@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="https://cdn.jsdelivr.net/npm/streamlit-component-lib@2.0.0/dist/streamlit-component-lib.min.js"></script>
+  <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/dark/main.css">
+  <style>
+    body { margin:0; padding:0; overflow:hidden; background:transparent; }
+    #container { position:relative; width:100%; border-radius:14px; overflow:hidden; border:1px solid rgba(56,189,248,0.3); }
+    #viewDiv { width:100%; }
+    #statusBar {
+      position:absolute; top:10px; left:10px; background:rgba(6,17,26,0.92);
+      border:1px solid rgba(56,189,248,0.4); border-radius:8px; padding:8px 14px;
+      color:#38bdf8; font-family:system-ui; font-size:12px; font-weight:600; z-index:10;
+    }
+    #statsPanel {
+      position:absolute; top:10px; right:10px; background:rgba(6,17,26,0.88);
+      border:1px solid rgba(56,189,248,0.3); border-radius:10px; padding:10px 14px;
+      color:#ecf0f5; font-family:system-ui; font-size:12px; line-height:1.5;
+      min-width:160px; pointer-events:none; z-index:10;
+    }
+    .stats-title { color:#38bdf8; font-weight:700; font-size:10px; letter-spacing:0.5px; margin-bottom:3px; }
+    .stats-bta { font-weight:700; font-size:14px; }
+    .stats-sub { font-size:11px; color:#9fb0c3; }
+  </style>
+</head>
+<body>
+<div id="container">
+  <div id="viewDiv"></div>
+  <div id="statusBar">Laster 3D-scene...</div>
+  <div id="statsPanel"></div>
+</div>
+
+<script src="https://js.arcgis.com/4.30/"></script>
+<script>
+// Streamlit component lifecycle
+function onRender(event) {
+  const data = event.detail;
+  if (!data || !data.args) return;
+
+  const allPayloads = data.args.payloads || [];
+  const heightPx = data.args.height || 620;
+  const captureW = data.args.capture_width || 1280;
+  const captureH = data.args.capture_height || 720;
+  const showNeighborLabels = data.args.show_neighbor_labels !== false;
+
+  document.getElementById('viewDiv').style.height = heightPx + 'px';
+  document.getElementById('container').style.height = heightPx + 'px';
+  Streamlit.setFrameHeight(heightPx + 4);
+
+  if (!allPayloads.length) {
+    document.getElementById('statusBar').textContent = 'Ingen alternativer';
+    return;
+  }
+
+  let currentIdx = 0;
+  const captures = [];
+
+  require([
+    'esri/Map', 'esri/views/SceneView', 'esri/layers/ImageryLayer',
+    'esri/layers/ElevationLayer', 'esri/layers/GraphicsLayer', 'esri/Graphic',
+    'esri/geometry/Polygon', 'esri/geometry/Point', 'esri/geometry/SpatialReference',
+    'esri/geometry/Extent', 'esri/identity/IdentityManager'
+  ], function(Map, SceneView, ImageryLayer, ElevationLayer, GraphicsLayer, Graphic, Polygon, Point, SpatialReference, Extent, IdentityManager) {
+    const sr = new SpatialReference({ wkid: 4326 });
+    const p0 = allPayloads[0];
+    const sc = p0.scene_config || {};
+    const services = sc.services || {};
+    const tkn = sc.token || '';
+
+    if (tkn) {
+      IdentityManager.registerToken({ server: 'https://services.geodataonline.no/arcgis', token: tkn });
+    }
+
+    const map = new Map({ basemap: 'satellite', ground: 'world-elevation' });
+    if (services.elevation_url && tkn) {
+      map.ground.layers.add(new ElevationLayer({ url: services.elevation_url, customParameters: { token: tkn } }));
+    }
+    if (services.imagery_latest_url && tkn) {
+      map.add(new ImageryLayer({ url: services.imagery_latest_url, opacity: 0.92, customParameters: { token: tkn } }));
+    }
+    const graphicsLayer = new GraphicsLayer();
+    map.add(graphicsLayer);
+
+    function polygonFromRings(rings) {
+      return new Polygon({ rings: rings, spatialReference: sr });
+    }
+
+    function loadOption(payload) {
+      graphicsLayer.removeAll();
+      // Tomtegrense
+      (payload.site.rings || []).forEach(function(ring) {
+        graphicsLayer.add(new Graphic({
+          geometry: polygonFromRings([ring]),
+          symbol: { type: 'simple-fill', color: [255,255,255,0.02], outline: { color: [210,220,235,0.6], width: 1.2 } }
+        }));
+      });
+      // Byggefelt
+      (payload.buildable.rings || []).forEach(function(ring) {
+        graphicsLayer.add(new Graphic({
+          geometry: polygonFromRings([ring]),
+          symbol: { type: 'simple-fill', color: [56,189,248,0.06], outline: { color: [56,189,248,0.5], width: 0.8 } }
+        }));
+      });
+      // Nabobygg
+      (payload.neighbors || []).forEach(function(item) {
+        (item.rings || []).forEach(function(ring) {
+          graphicsLayer.add(new Graphic({
+            geometry: polygonFromRings([ring]),
+            symbol: { type: 'polygon-3d', symbolLayers: [{ type: 'extrude', size: item.height_m || 3, material: { color: [140,140,150,0.32] }, edges: { type: 'solid', color: [200,200,210,0.25], size: 0.6 } }] }
+          }));
+        });
+      });
+      // Foreslåtte bygg
+      (payload.massing_parts || []).forEach(function(item) {
+        (item.rings || []).forEach(function(ring) {
+          var useColor = Array.isArray(item.color) ? [item.color[0], item.color[1], item.color[2], 0.82] : [34,197,94,0.82];
+          graphicsLayer.add(new Graphic({
+            geometry: polygonFromRings([ring]),
+            symbol: { type: 'polygon-3d', symbolLayers: [{ type: 'extrude', size: item.height_m || 3, material: { color: useColor }, edges: { type: 'solid', color: [255,255,255,0.45], size: 0.6 } }] }
+          }));
+        });
+      });
+
+      // Høyde-labels: foreslåtte bygg (hvit, tydelig)
+      (payload.massing_parts || []).forEach(function(item) {
+        (item.rings || []).forEach(function(ring) {
+          if (!ring || ring.length < 3) return;
+          var cx = 0, cy = 0;
+          ring.forEach(function(pt) { cx += pt[0]; cy += pt[1]; });
+          cx /= ring.length; cy /= ring.length;
+          var h = item.height_m || 3;
+          var fl = item.floors || '?';
+          var label = (item.name || '') + '\n' + fl + ' et. / ' + h.toFixed(0) + ' m';
+          graphicsLayer.add(new Graphic({
+            geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
+            symbol: {
+              type: 'point-3d',
+              verticalOffset: { screenLength: 30, maxWorldLength: h + 12, minWorldLength: h + 2 },
+              callout: { type: 'line', size: 1, color: [255, 255, 255, 150] },
+              symbolLayers: [{ type: 'text', material: { color: [255, 255, 255] }, text: label, size: 11, font: { weight: 'bold' }, halo: { color: [0, 0, 0], size: 1.5 } }]
+            }
+          }));
+        });
+      });
+
+      // Høyde-labels: nabobygg (diskret, kun for bygg > 4m)
+      if (showNeighborLabels) {
+        (payload.neighbors || []).forEach(function(item) {
+          if (!item.height_m || item.height_m < 4) return;
+          (item.rings || []).forEach(function(ring) {
+            if (!ring || ring.length < 3) return;
+            var cx = 0, cy = 0;
+            ring.forEach(function(pt) { cx += pt[0]; cy += pt[1]; });
+            cx /= ring.length; cy /= ring.length;
+            var h = item.height_m;
+            graphicsLayer.add(new Graphic({
+              geometry: new Point({ x: cx, y: cy, z: 0, spatialReference: sr }),
+              symbol: {
+                type: 'point-3d',
+                verticalOffset: { screenLength: 14, maxWorldLength: h + 5, minWorldLength: h },
+                symbolLayers: [{ type: 'text', material: { color: [180, 190, 205, 200] }, text: h.toFixed(0) + ' m', size: 8, font: { weight: 'normal' }, halo: { color: [0, 0, 0, 180], size: 1 } }]
+              }
+            }));
+          });
+        });
+      }
+
+      // Nøkkeltall-panel
+      var s = payload.stats || {};
+      document.getElementById('statsPanel').innerHTML =
+        '<div class="stats-title">NØKKELTALL</div>' +
+        '<div class="stats-bta">BTA: ' + (s.bta_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+        '<div class="stats-sub">BRA: ' + (s.bra_m2||0).toLocaleString('nb-NO') + ' m²</div>' +
+        (s.pct_bra ? '<div class="stats-sub" style="color:#f87171;font-weight:600;">%-BRA: ' + s.pct_bra + '%</div>' : '') +
+        '<div class="stats-sub">Boliger: ~' + (s.boliger||0) + '</div>' +
+        '<div class="stats-sub">' + (s.etasjer||0) + ' etasjer / ' + (s.hoyde_m||0) + ' m</div>' +
+        '<div class="stats-sub">Sol: ' + (s.sol||0) + '/100</div>';
+    }
+
+    var centroid = p0.site_centroid || [10.75, 59.91];
+    var view = new SceneView({
+      container: 'viewDiv', map: map, qualityProfile: 'high',
+      camera: { position: { x: centroid[0], y: centroid[1], z: 900 }, tilt: 68, heading: 20, spatialReference: sr },
+      environment: { atmosphereEnabled: true, starsEnabled: false }
+    });
+
+    function captureAndNext() {
+      if (currentIdx >= allPayloads.length) {
+        document.getElementById('statusBar').textContent = '✓ ' + allPayloads.length + ' scener fanget';
+        document.getElementById('statusBar').style.color = '#22c55e';
+        // Send all captures back to Streamlit
+        Streamlit.setComponentValue({ captures: captures, count: captures.length });
+        return;
+      }
+      var payload = allPayloads[currentIdx];
+      document.getElementById('statusBar').textContent = 'Rendrer ' + (currentIdx+1) + '/' + allPayloads.length + ': ' + (payload.site_name || '');
+      loadOption(payload);
+
+      setTimeout(function() {
+        view.takeScreenshot({ format: 'jpeg', quality: 88, width: captureW, height: captureH }).then(function(screenshot) {
+          captures.push({
+            name: payload.site_name || 'Alt ' + (currentIdx+1),
+            typology: payload.typology || '',
+            dataUrl: screenshot.dataUrl,
+            stats: payload.stats || {}
+          });
+          currentIdx++;
+          setTimeout(captureAndNext, 1500);
+        });
+      }, 2500);
+    }
+
+    view.when(function() {
+      var extent = null;
+      var rings = [].concat(p0.site.rings || []);
+      rings.forEach(function(ring) {
+        ring.forEach(function(pt) {
+          if (!extent) { extent = new Extent({ xmin: pt[0], ymin: pt[1], xmax: pt[0], ymax: pt[1], spatialReference: sr }); }
+          else { extent.xmin = Math.min(extent.xmin, pt[0]); extent.ymin = Math.min(extent.ymin, pt[1]); extent.xmax = Math.max(extent.xmax, pt[0]); extent.ymax = Math.max(extent.ymax, pt[1]); }
+        });
+      });
+      if (extent) {
+        view.goTo(extent.expand(1.8)).then(function() {
+          setTimeout(captureAndNext, 2000);
+        });
+      } else {
+        setTimeout(captureAndNext, 2000);
+      }
+    });
+  });
+}
+
+// Listen for Streamlit render events
+window.addEventListener("message", function(event) {
+  if (event.data.type === "streamlit:render") {
+    onRender(event);
+  }
+});
+
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(300);
+</script>
+</body>
+</html>
