@@ -137,18 +137,25 @@ def _estimate_units(total_bra_m2: float, concept_family: ConceptFamily) -> int:
 def _score_plan(plan: Masterplan) -> float:
     target_util = 0.0 if plan.target_bra_m2 <= 0 else min(1.0, plan.total_bra_m2 / plan.target_bra_m2)
     mua_ok = 1.0 if all(item.status != "NEI" for item in plan.mua_report.compliant if item.required is not None) else 0.55
-    bya_alignment = 1.0
     preset = CONCEPT_PRESETS[plan.concept_family]
     low, high = preset.bya_target_pct
+    bya_alignment = 1.0
     if plan.bya_pct < low:
-        bya_alignment = max(0.2, plan.bya_pct / low)
-    elif plan.bya_pct > high * 1.2:
-        bya_alignment = max(0.3, high / max(plan.bya_pct, 0.1))
+        bya_alignment = max(0.15, plan.bya_pct / max(low, 0.1))
+    elif plan.bya_pct > high * 1.15:
+        bya_alignment = max(0.35, high / max(plan.bya_pct, 0.1))
     typology_ratio = sum(1 for f in plan.delfelt if f.typology == preset.dominant_typology) / max(1, len(plan.delfelt))
-    return round(
-        100.0 * (0.40 * target_util + 0.25 * (plan.sol_report.total_score / 100.0) + 0.20 * mua_ok + 0.10 * bya_alignment + 0.05 * typology_ratio),
-        1,
+    score = 100.0 * (
+        0.50 * target_util
+        + 0.15 * (plan.sol_report.total_score / 100.0)
+        + 0.15 * bya_alignment
+        + 0.15 * typology_ratio
+        + 0.05 * mua_ok
     )
+    if plan.plan_regler.max_bra_pct is not None and plan.bra_pct > plan.plan_regler.max_bra_pct:
+        overflow_ratio = plan.bra_pct / max(plan.plan_regler.max_bra_pct, 1.0)
+        score *= max(0.82, 1.0 - (overflow_ratio - 1.0) * 0.12)
+    return round(score, 1)
 
 
 def _report_text(plan: Masterplan, use_ai: bool = False) -> str:
@@ -189,11 +196,13 @@ def run_single_masterplan(
     barnehage_config: Optional[BarnehageConfig] = None,
     use_ai: bool = False,
 ) -> Masterplan:
-    base_fields = build_default_fields(buildable_poly)
-    legal_target_bra = target_bra_m2
-    if plan_regler.max_bra_pct is not None:
-        legal_target_bra = min(target_bra_m2, float(buildable_poly.area) * (plan_regler.max_bra_pct / 100.0))
-    fields = apply_concept_defaults(concept_family, base_fields, legal_target_bra)
+    generation_target_bra = float(target_bra_m2)
+    base_fields = build_default_fields(
+        buildable_poly,
+        target_bra_m2=generation_target_bra,
+        concept_family=concept_family,
+    )
+    fields = apply_concept_defaults(concept_family, base_fields, generation_target_bra)
     fields = _apply_ai_pass(fields, concept_family, context=context, use_ai=use_ai)
 
     buildings = []
@@ -221,14 +230,14 @@ def run_single_masterplan(
         display_subtitle=concept_subtitle(concept_family),
         plan_regler=plan_regler,
         barnehage_config=barnehage_config or BarnehageConfig(),
-        bra_deficit=max(0.0, legal_target_bra - achieved_bra),
-        target_bra_m2=legal_target_bra,
+        bra_deficit=max(0.0, generation_target_bra - achieved_bra),
+        target_bra_m2=generation_target_bra,
     )
     plan.report_summary = _report_text(plan, use_ai=use_ai)
     plan.score = _score_plan(plan)
     plan.diagnostics = {
         "concept_family": concept_family.value,
-        "target_bra_m2": legal_target_bra,
+        "target_bra_m2": generation_target_bra,
         "dominant_typology": CONCEPT_PRESETS[concept_family].dominant_typology.value,
     }
     return plan
