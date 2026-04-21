@@ -112,6 +112,10 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
         return None
 
     def _post(model_name: str) -> requests.Response:
+        # Opus 4.7 returnerer 400 hvis temperature/top_p/top_k er satt til ikke-default verdi.
+        # Vi dropper temperature helt siden de deterministiske fallbackene uansett brukes
+        # hvis AI-kall ikke returnerer gyldig JSON. Dette gjelder både Opus 4.7 og Sonnet 4.6.
+        # Kilde: https://docs.claude.com/en/docs/about-claude/models/migration-guide
         return requests.post(
             ANTHROPIC_API_URL,
             headers={
@@ -122,7 +126,6 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             json={
                 "model": model_name,
                 "max_tokens": max_tokens,
-                "temperature": 0.2,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
             },
