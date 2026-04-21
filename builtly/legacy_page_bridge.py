@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import Polygon, box
+from shapely.geometry import MultiPolygon, Polygon, box
 
 from .masterplan_integration import OptionResult as V8OptionResult, run_concept_options
 from .masterplan_types import BarnehageConfig, Masterplan, PlanRegler
@@ -58,11 +58,19 @@ class LegacyMasterplanBundle:
     def __getattr__(self, name: str) -> Any:
         return getattr(self.best_plan, name)
 
-def _coord_groups(poly: Polygon) -> List[List[List[float]]]:
-    if poly is None or poly.is_empty:
+def _coord_groups(poly: Any) -> List[List[List[float]]]:
+    if poly is None or getattr(poly, "is_empty", True):
         return []
-    ext = [[float(x), float(y)] for x, y in list(poly.exterior.coords)]
-    return [ext]
+    if isinstance(poly, Polygon):
+        ext = [[float(x), float(y)] for x, y in list(poly.exterior.coords)]
+        return [ext]
+    if isinstance(poly, MultiPolygon) or hasattr(poly, "geoms"):
+        groups: List[List[List[float]]] = []
+        for part in getattr(poly, "geoms", []):
+            if isinstance(part, Polygon) and not part.is_empty:
+                groups.extend(_coord_groups(part))
+        return groups
+    return []
 
 def _pick_plan_regler(byggesone: str) -> PlanRegler:
     if str(byggesone) == "2":
@@ -98,7 +106,7 @@ def _poly_from_context(site: Any, geodata_context: Optional[Dict[str, Any]]) -> 
     gc = geodata_context or {}
     for key in ("buildable_polygon", "site_polygon"):
         poly = gc.get(key)
-        if isinstance(poly, Polygon) and not poly.is_empty:
+        if isinstance(poly, (Polygon, MultiPolygon)) and not poly.is_empty:
             return poly.buffer(0)
     return box(0, 0, float(getattr(site, "site_width_m", 50.0)), float(getattr(site, "site_depth_m", 50.0))).buffer(0)
 
@@ -154,7 +162,7 @@ def _legacy_geometry_for_plan(bundle: LegacyMasterplanBundle, plan: Masterplan) 
         rep = max((km.representative_shadow_m for km in plan.sol_report.key_moments), default=0.0)
         if rep > 0:
             shadow_poly = site_poly.buffer(rep * 0.15).intersection(site_poly.envelope.buffer(rep * 0.10))
-            if not shadow_poly.is_empty and hasattr(shadow_poly, "exterior"):
+            if not shadow_poly.is_empty:
                 shadow = _coord_groups(shadow_poly)
     return {
         "site_polygon_coords": _coord_groups(site_poly),
