@@ -30,6 +30,7 @@ from .concept_families import all_concept_families, get_strategy
 from .geometry import (
     building_geometry_is_orthogonal_to_field,
     buildings_do_not_overlap,
+    orientation_for_field,
     place_buildings_for_fields,
     pca_site_axes,
     resolve_delfelt_count,
@@ -112,10 +113,6 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
         return None
 
     def _post(model_name: str) -> requests.Response:
-        # Opus 4.7 returnerer 400 hvis temperature/top_p/top_k er satt til ikke-default verdi.
-        # Vi dropper temperature helt siden de deterministiske fallbackene uansett brukes
-        # hvis AI-kall ikke returnerer gyldig JSON. Dette gjelder både Opus 4.7 og Sonnet 4.6.
-        # Kilde: https://docs.claude.com/en/docs/about-claude/models/migration-guide
         return requests.post(
             ANTHROPIC_API_URL,
             headers={
@@ -126,6 +123,7 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             json={
                 "model": model_name,
                 "max_tokens": max_tokens,
+                "temperature": 0.2,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
             },
@@ -163,17 +161,27 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
 # ---------------------------------------------------------------------------
 
 
-def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float, orientation_deg: float) -> List[Delfelt]:
+def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float, fallback_orientation_deg: float) -> List[Delfelt]:
+    """Seed delfelter med orientering bestemt av hvert delfelt selv.
+
+    Tidligere brukte vi tomtens PCA-theta som orientering for alle delfelter.
+    Det ble feil etter at subdivide_buildable_polygon fikk lov å bytte til
+    aksejustert split for konkave tomter (L-former etc.) — delfeltene er da
+    aksejusterte selv om tomtens PCA peker diagonalt. Vi kaller derfor
+    orientation_for_field for hvert delfelt og faller tilbake til tomtens PCA
+    bare hvis helperen ikke kan bestemme noe.
+    """
     total_area = sum(p.area for p in field_polygons) or 1.0
     out: List[Delfelt] = []
     for idx, poly in enumerate(field_polygons, start=1):
         share = poly.area / total_area
+        orient = orientation_for_field(poly, fallback_deg=fallback_orientation_deg)
         out.append(
             Delfelt(
                 field_id=f"DF{idx}",
                 polygon=poly.buffer(0),
                 typology=Typology.LAMELL,
-                orientation_deg=orientation_deg,
+                orientation_deg=orient,
                 floors_min=4,
                 floors_max=5,
                 target_bra=float(target_bra_m2 * share),
