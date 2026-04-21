@@ -106,10 +106,13 @@ def _should_retry_with_fallback(status_code: Optional[int], body: str) -> bool:
 
 
 def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], api_key: Optional[str] = None, model: Optional[str] = None, max_tokens: int = 1600) -> Optional[Dict[str, Any]]:
-    if str(os.environ.get("BUILTLY_ENABLE_NETWORK_AI", "")).lower() not in {"1", "true", "yes"}:
+    enable_flag = str(os.environ.get("BUILTLY_ENABLE_NETWORK_AI", "")).lower()
+    if enable_flag not in {"1", "true", "yes"}:
+        logger.info("AI-pass skipped: BUILTLY_ENABLE_NETWORK_AI=%r (må være 1/true/yes)", enable_flag)
         return None
     key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
     if not key:
+        logger.warning("AI-pass skipped: ingen API-nøkkel funnet i ANTHROPIC_API_KEY eller CLAUDE_API_KEY")
         return None
 
     def _post(model_name: str) -> requests.Response:
@@ -123,7 +126,6 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             json={
                 "model": model_name,
                 "max_tokens": max_tokens,
-                "temperature": 0.2,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
             },
@@ -132,27 +134,36 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
 
     primary_model = model or DEFAULT_MODEL
     tried = [primary_model]
+    logger.info("AI-pass starter: model=%s max_tokens=%s", primary_model, max_tokens)
     try:
         resp = _post(primary_model)
         if resp.ok:
             blocks = resp.json().get("content", [])
             text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
-            return _safe_json_from_text(text)
+            result = _safe_json_from_text(text)
+            if result is None:
+                logger.warning("AI-pass %s returnerte OK men kunne ikke parse JSON. Tekst: %r", primary_model, text[:300])
+            else:
+                logger.info("AI-pass %s OK (parset JSON)", primary_model)
+            return result
         body = resp.text
+        logger.warning("AI-pass %s HTTP %s body: %s", primary_model, resp.status_code, body[:400])
         if FALLBACK_MODEL and FALLBACK_MODEL != primary_model and _should_retry_with_fallback(resp.status_code, body):
             tried.append(FALLBACK_MODEL)
-            logger.warning("Anthropic primary model %s failed (%s). Retrying once with fallback model %s.", primary_model, resp.status_code, FALLBACK_MODEL)
+            logger.info("Retrying med fallback-modell %s", FALLBACK_MODEL)
             fallback_resp = _post(FALLBACK_MODEL)
             if fallback_resp.ok:
                 blocks = fallback_resp.json().get("content", [])
                 text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
-                return _safe_json_from_text(text)
-            logger.warning("Anthropic fallback model %s failed (%s).", FALLBACK_MODEL, fallback_resp.status_code)
+                result = _safe_json_from_text(text)
+                if result is not None:
+                    logger.info("AI-pass %s (fallback) OK", FALLBACK_MODEL)
+                return result
+            logger.warning("Fallback %s HTTP %s body: %s", FALLBACK_MODEL, fallback_resp.status_code, fallback_resp.text[:400])
             return None
-        logger.warning("Anthropic primary model %s failed without retry (%s).", primary_model, resp.status_code)
         return None
     except Exception as exc:  # pragma: no cover - network dependent
-        logger.warning("Anthropic pass call failed for models %s: %s", tried, exc)
+        logger.warning("AI-pass exception (tried %s): %s", tried, exc)
         return None
 
 
