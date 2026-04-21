@@ -26,7 +26,8 @@ except Exception:
     HAS_SHAPELY = False
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = "claude-opus-4-6"
+DEFAULT_MODEL = "claude-opus-4-7"
+FALLBACK_MODEL = "claude-opus-4-6"
 
 # ──────────────────────────────────────────────
 # Typology constraints
@@ -58,19 +59,67 @@ def is_available():
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
+def _should_retry_with_fallback(status_code, body):
+    """Er dette en feil som kan fikses ved å bytte modell?"""
+    if status_code == 429:
+        return True
+    if not status_code or status_code < 400:
+        return False
+    body_l = (body or "").lower()
+    return any(m in body_l for m in ("model", "not found", "unknown model", "invalid model", "unsupported"))
+
+
 def _call_claude(prompt, api_key, model=DEFAULT_MODEL, temperature=0.3, max_tokens=4000):
+    """Kall Claude API. Prøver primær modell, faller tilbake til FALLBACK_MODEL hvis
+    primær gir 4xx med model-relatert feil eller 429.
+
+    NB: temperature sendes ikke inn i requesten. Opus 4.7 har endret støtten for
+    custom temperature i noen konfigurasjoner, og vår erfaring fra masterplan_engine
+    er at det er tryggere å la API-et bruke default.
+    """
+    def _post(model_name):
+        return requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model_name,
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=120,
+        )
+
+    tried = [model]
     try:
-        resp = requests.post(ANTHROPIC_API_URL,
-            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}], "temperature": temperature},
-            timeout=120)
-        resp.raise_for_status()
-        for block in resp.json().get("content", []):
-            if block.get("type") == "text":
-                return block["text"]
+        resp = _post(model)
+        if resp.ok:
+            for block in resp.json().get("content", []):
+                if block.get("type") == "text":
+                    return block["text"]
+            logger.warning("Claude %s svarte uten text-block: %s", model, resp.text[:200])
+            return None
+
+        body = resp.text
+        logger.warning("Claude %s HTTP %s: %s", model, resp.status_code, body[:300])
+        if FALLBACK_MODEL and FALLBACK_MODEL != model and _should_retry_with_fallback(resp.status_code, body):
+            tried.append(FALLBACK_MODEL)
+            logger.info("Retrying med fallback-modell %s", FALLBACK_MODEL)
+            fb_resp = _post(FALLBACK_MODEL)
+            if fb_resp.ok:
+                for block in fb_resp.json().get("content", []):
+                    if block.get("type") == "text":
+                        return block["text"]
+                logger.warning("Fallback %s svarte uten text-block: %s", FALLBACK_MODEL, fb_resp.text[:200])
+                return None
+            logger.warning("Fallback %s feilet også HTTP %s: %s", FALLBACK_MODEL, fb_resp.status_code, fb_resp.text[:300])
+        return None
     except Exception as exc:
-        logger.error(f"Claude API error: {exc}")
-    return None
+        logger.error("Claude API exception (tried %s): %s", tried, exc)
+        return None
 
 def _parse_json(text):
     if not text:
