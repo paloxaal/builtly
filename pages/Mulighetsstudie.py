@@ -991,10 +991,16 @@ def utm_crs_from_lonlat(lon: float, lat: float) -> Optional[CRS]:
     return CRS.from_epsg(epsg)
 
 
-def transform_polygon(poly: Polygon, src_crs: Optional[CRS], dst_crs: Optional[CRS]) -> Polygon:
+def transform_polygon(poly: Any, src_crs: Optional[CRS], dst_crs: Optional[CRS]) -> Any:
     if poly is None or src_crs is None or dst_crs is None or src_crs == dst_crs or not HAS_PYPROJ:
         return poly
     transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
+    if isinstance(poly, MultiPolygon):
+        parts = []
+        for part in poly.geoms:
+            coords = [transformer.transform(x, y) for x, y in list(part.exterior.coords)]
+            parts.append(Polygon(coords).buffer(0))
+        return unary_union(parts).buffer(0)
     coords = [transformer.transform(x, y) for x, y in list(poly.exterior.coords)]
     return Polygon(coords).buffer(0)
 
