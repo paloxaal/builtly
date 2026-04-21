@@ -88,6 +88,42 @@ def _flatten_polygons(geom: Any) -> List[Polygon]:
     return []
 
 
+
+
+def _exterior_coord_array(geom: Any) -> np.ndarray:
+    polys = _flatten_polygons(geom)
+    coords: List[Tuple[float, float]] = []
+    for poly in polys:
+        coords.extend((float(x), float(y)) for x, y in list(poly.exterior.coords)[:-1])
+    if len(coords) < 3:
+        raise ValueError("buildable_poly trenger minst 3 koordinater")
+    return np.array(coords, dtype=float)
+
+
+def _sort_polygons_south_to_north(polys: Sequence[Polygon]) -> List[Polygon]:
+    out = [p.buffer(0) for p in polys if p is not None and not p.is_empty and p.area > 1.0]
+    out.sort(key=lambda p: (p.centroid.y, p.centroid.x))
+    return out
+
+
+def _allocate_counts_by_area(parts: Sequence[Polygon], total_count: int) -> List[int]:
+    if not parts:
+        return []
+    total_count = max(int(total_count), len(parts))
+    total_area = sum(max(p.area, 1.0) for p in parts)
+    raw = [max(1, int(round(total_count * (p.area / total_area)))) for p in parts]
+    # normalize to exact total_count
+    while sum(raw) < total_count:
+        idx = max(range(len(parts)), key=lambda i: parts[i].area / raw[i])
+        raw[idx] += 1
+    while sum(raw) > total_count:
+        candidates = [i for i, c in enumerate(raw) if c > 1]
+        if not candidates:
+            break
+        idx = min(candidates, key=lambda i: parts[i].area / raw[i])
+        raw[idx] -= 1
+    return raw
+
 def _signed_area(coords: Sequence[Tuple[float, float]]) -> float:
     area = 0.0
     pts = list(coords)
@@ -115,13 +151,11 @@ def _cross(prev_pt: Tuple[float, float], curr_pt: Tuple[float, float], next_pt: 
 # ---------------------------------------------------------------------------
 
 
-def pca_site_axes(buildable_poly: Polygon) -> SiteAxes:
+def pca_site_axes(buildable_poly: Any) -> SiteAxes:
     if buildable_poly is None or buildable_poly.is_empty:
         raise ValueError("buildable_poly mangler eller er tomt")
 
-    coords = np.array(list(buildable_poly.exterior.coords)[:-1], dtype=float)
-    if len(coords) < 3:
-        raise ValueError("buildable_poly trenger minst 3 koordinater")
+    coords = _exterior_coord_array(buildable_poly)
 
     centroid = coords.mean(axis=0)
     centered = coords - centroid
@@ -169,7 +203,7 @@ def default_delfelt_count(area_m2: float, major_axis_m: float) -> int:
     return max(area_n, length_n)
 
 
-def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int] = None) -> int:
+def resolve_delfelt_count(buildable_poly: Any, requested_count: Optional[int] = None) -> int:
     """Resolve a practical field count.
 
     The spec's default formula is preserved in `default_delfelt_count()`, but
@@ -215,7 +249,7 @@ def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int
 # ---------------------------------------------------------------------------
 
 
-def convex_hull_ratio(poly: Polygon) -> float:
+def convex_hull_ratio(poly: Any) -> float:
     if poly.is_empty or poly.convex_hull.area <= 0:
         return 1.0
     return float(poly.area / poly.convex_hull.area)
@@ -322,7 +356,7 @@ def _balanced_axis_split(local_poly: Polygon, axis: str = "x") -> List[Polygon]:
     return [local_poly]
 
 
-def subdivide_buildable_polygon(buildable_poly: Polygon, count: int, orientation_deg: float) -> List[Polygon]:
+def _subdivide_single_polygon(buildable_poly: Polygon, count: int, orientation_deg: float) -> List[Polygon]:
     if count <= 1:
         return [buildable_poly.buffer(0)]
 
@@ -353,11 +387,21 @@ def subdivide_buildable_polygon(buildable_poly: Polygon, count: int, orientation
         parts = sorted(parts, key=lambda p: p.area, reverse=True)[:count]
 
     global_parts = [_rotate(part, orientation_deg, origin=buildable_poly.centroid).buffer(0) for part in parts]
-    global_parts = [part for part in global_parts if part.area > 1.0]
+    return _sort_polygons_south_to_north(global_parts)
 
-    # Order fields south-to-north by centroid, as required by the spec.
-    global_parts.sort(key=lambda p: (p.centroid.y, p.centroid.x))
-    return global_parts
+
+def subdivide_buildable_polygon(buildable_poly: Any, count: int, orientation_deg: float) -> List[Polygon]:
+    parts = _flatten_polygons(buildable_poly)
+    if not parts:
+        return []
+    if len(parts) == 1:
+        return _subdivide_single_polygon(parts[0], count=count, orientation_deg=orientation_deg)
+
+    allocations = _allocate_counts_by_area(parts, count)
+    out: List[Polygon] = []
+    for part, sub_count in zip(parts, allocations):
+        out.extend(_subdivide_single_polygon(part, count=sub_count, orientation_deg=orientation_deg))
+    return _sort_polygons_south_to_north(out)
 
 
 # ---------------------------------------------------------------------------
