@@ -52,20 +52,20 @@ def density_adjusted_delfelt_count(
         return base
 
     ratio = target_bra_m2 / max(area_m2, 1.0)
-    dense_target = math.ceil(target_bra_m2 / 5_500.0)
-
-    if ratio >= 1.0:
-        base = max(base, dense_target)
-    elif ratio >= 0.85:
+    if ratio >= 1.1:
+        base = max(base, math.ceil(target_bra_m2 / 5_000.0))
+    elif ratio >= 0.95:
+        base = max(base, math.ceil(target_bra_m2 / 5_750.0))
+    elif ratio >= 0.8:
         base = max(base, math.ceil(target_bra_m2 / 6_500.0))
 
-    if concept_family == ConceptFamily.COURTYARD_URBAN and ratio >= 0.9:
-        base = max(base, math.ceil(target_bra_m2 / 5_250.0))
-    if concept_family == ConceptFamily.LINEAR_MIXED and ratio >= 0.9:
-        base = max(base, math.ceil(target_bra_m2 / 5_750.0))
+    # Dense urban studies on 30k+ sites should resolve into many readable fields.
+    if area_m2 >= 30_000 and target_bra_m2 >= 38_000:
+        base = max(base, 8)
+    if concept_family == ConceptFamily.COURTYARD_URBAN and area_m2 >= 25_000 and target_bra_m2 >= 0.9 * area_m2:
+        base = max(base, 7)
 
-    # Keep very large counts in check for small sites.
-    upper_bound = max(2, int(math.ceil(area_m2 / 2_500.0)))
+    upper_bound = max(2, int(math.ceil(area_m2 / 2_200.0)))
     return max(1, min(base, upper_bound))
 
 
@@ -141,7 +141,6 @@ def split_buildable_into_delfelt(
     cols, rows = _grid_dimensions(n, width, height)
 
     pieces: list[Polygon] = []
-    # Split into axis-aligned grid cells in rotated space for legible, orthogonal delfelt.
     for r in range(rows):
         for c in range(cols):
             if len(pieces) >= n:
@@ -157,7 +156,6 @@ def split_buildable_into_delfelt(
             pieces.append(affinity.rotate(piece, theta_deg, origin="centroid"))
 
     if len(pieces) < n:
-        # Top up by splitting largest current pieces along their longest local axis.
         while len(pieces) < n and pieces:
             pieces.sort(key=lambda g: g.area, reverse=True)
             largest = pieces.pop(0)
@@ -248,34 +246,35 @@ def _lamell_schemes(rotated_field: Polygon, floors: int, target_bra: float, exis
     minx, miny, maxx, maxy = rotated_field.bounds
     width = maxx - minx
     height = maxy - miny
-    min_spacing = max(8.0, 1.2 * building_height_for_floors(floors))
+    min_spacing = max(8.0, 1.15 * building_height_for_floors(floors))
     schemes: list[list[tuple[Polygon, int]]] = []
 
-    # Scheme A: bars along x-axis.
     for axis in ("x", "y"):
         local: list[tuple[Polygon, int]] = []
         if axis == "x":
-            length = max(28.0, min(58.0, width - 8.0))
-            if length < 26.0 or height < 18.0:
-                continue
             depth = 13.0
-            capacity = max(1, int((height - 8.0 + min_spacing) // (depth + min_spacing)))
+            feasible_lengths = [l for l in (56.0, 48.0, 40.0, 32.0) if l <= width - 6.0]
+            if not feasible_lengths or height < 18.0:
+                continue
+            length = feasible_lengths[0]
+            capacity = max(1, int((height - 6.0 + min_spacing) // (depth + min_spacing)))
             desired = max(2, min(capacity, math.ceil(target_bra / max(length * depth * floors, 1.0))))
-            ys = _centered_positions(height - 8.0, depth, min_spacing, desired, miny + 4.0)
-            x = minx + max(4.0, (width - length) / 2.0)
+            ys = _centered_positions(height - 6.0, depth, min_spacing, desired, miny + 3.0)
+            x = minx + max(3.0, (width - length) / 2.0)
             for y in ys:
                 candidate = _rect(x, y, length, depth)
                 if _candidate_ok(candidate, rotated_field, existing + [p for p, _ in local], min_spacing):
                     local.append((candidate, floors))
         else:
-            length = max(28.0, min(58.0, height - 8.0))
-            if length < 26.0 or width < 18.0:
-                continue
             depth = 13.0
-            capacity = max(1, int((width - 8.0 + min_spacing) // (depth + min_spacing)))
+            feasible_lengths = [l for l in (56.0, 48.0, 40.0, 32.0) if l <= height - 6.0]
+            if not feasible_lengths or width < 18.0:
+                continue
+            length = feasible_lengths[0]
+            capacity = max(1, int((width - 6.0 + min_spacing) // (depth + min_spacing)))
             desired = max(2, min(capacity, math.ceil(target_bra / max(length * depth * floors, 1.0))))
-            xs = _centered_positions(width - 8.0, depth, min_spacing, desired, minx + 4.0)
-            y = miny + max(4.0, (height - length) / 2.0)
+            xs = _centered_positions(width - 6.0, depth, min_spacing, desired, minx + 3.0)
+            y = miny + max(3.0, (height - length) / 2.0)
             for x in xs:
                 candidate = _rect(x, y, depth, length)
                 if _candidate_ok(candidate, rotated_field, existing + [p for p, _ in local], min_spacing):
@@ -303,18 +302,18 @@ def _place_punkthus(rotated_field: Polygon, floors: int, target_bra: float, size
     minx, miny, maxx, maxy = rotated_field.bounds
     width = maxx - minx
     height = maxy - miny
-    min_spacing = max(15.0, 0.8 * building_height_for_floors(floors))
+    min_spacing = max(12.0, 0.7 * building_height_for_floors(floors))
     desired = max(2, math.ceil(target_bra / max(size * size * floors, 1.0)))
-    max_cols = max(1, int((width - 8.0 + min_spacing) // (size + min_spacing)))
-    max_rows = max(1, int((height - 8.0 + min_spacing) // (size + min_spacing)))
+    max_cols = max(1, int((width - 6.0 + min_spacing) // (size + min_spacing)))
+    max_rows = max(1, int((height - 6.0 + min_spacing) // (size + min_spacing)))
     capacity = max_cols * max_rows
     count = min(desired, capacity)
     if count <= 0:
         return []
     cols = min(max_cols, math.ceil(math.sqrt(count)))
     rows = min(max_rows, math.ceil(count / cols))
-    xs = _centered_positions(width - 8.0, size, min_spacing, cols, minx + 4.0)
-    ys = _centered_positions(height - 8.0, size, min_spacing, rows, miny + 4.0)
+    xs = _centered_positions(width - 6.0, size, min_spacing, cols, minx + 3.0)
+    ys = _centered_positions(height - 6.0, size, min_spacing, rows, miny + 3.0)
 
     outputs: list[tuple[Polygon, int]] = []
     for y in ys:
@@ -359,7 +358,7 @@ def _place_karre(rotated_field: Polygon, floors: int, target_bra: float, existin
     width = maxx - minx
     height = maxy - miny
     segment_d = 13.0
-    min_spacing = max(8.0, 1.0 * building_height_for_floors(floors))
+    min_spacing = max(8.0, 0.95 * building_height_for_floors(floors))
     outputs: list[tuple[Polygon, int]] = []
 
     block_count = 2 if max(width, height) > 95 and min(width, height) > 45 and target_bra > 6_500 else 1
@@ -400,8 +399,8 @@ def _place_karre(rotated_field: Polygon, floors: int, target_bra: float, existin
 
     if outputs:
         achieved = sum(poly.area * poly_floors for poly, poly_floors in outputs)
-        if achieved < target_bra * 0.85:
-            infill = _place_lameller(rotated_field, max(3, floors - 1), max(0.0, target_bra - achieved), existing + [p for p, _ in outputs])
+        if achieved < target_bra * 0.92:
+            infill = _place_lameller(rotated_field, max(4, floors - 1), max(0.0, target_bra - achieved), existing + [p for p, _ in outputs])
             for poly, poly_floors in infill:
                 if all(poly.distance(existing_poly) >= 8.0 for existing_poly, _ in outputs):
                     outputs.append((poly, poly_floors))
