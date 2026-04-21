@@ -141,12 +141,26 @@ def run_masterplan_from_site_inputs(*, site: Any, geodata_context: Optional[Dict
         buildable_poly = _poly_from_context(site, geodata_context)
         regler = _pick_plan_regler(byggesone)
         barnehage = BarnehageConfig(enabled=bool(include_barnehage), inne_m2=1279.0 if include_barnehage else 0.0, ute_m2=2448.0 if include_barnehage else 0.0)
+
+        # KRITISK: phasing_config.requested_delfelt_count kan være satt av UI
+        # basert på et preview-target (ofte brukerens "Ønsket BTA") som ikke
+        # samsvarer med faktisk target_bra_m2. Hvis antallet er for høyt for
+        # det faktiske volumet, ender v8 opp med mange tomme delfelter.
+        # Vi beregner auto-anbefaling mot det faktiske målet, og tar min av
+        # brukerens valg og denne anbefalingen.
+        _auto_cfg = PhasingConfig()  # uten requested_delfelt_count
+        auto_count_for_actual = _auto_cfg.resolve_phase_count(float(target_bra_m2))
+        if phasing_config.requested_delfelt_count and phasing_config.requested_delfelt_count > auto_count_for_actual:
+            effective_delfelt_count = auto_count_for_actual
+        else:
+            effective_delfelt_count = phasing_config.requested_delfelt_count
+
         options = run_concept_options(
             buildable_poly,
             target_bra_m2=float(target_bra_m2),
             plan_regler=regler,
-            requested_delfelt_count=phasing_config.requested_delfelt_count,
-            avg_unit_bra_m2=float(getattr(site, "efficiency_ratio", 0.78) and getattr(site, "desired_bta_m2", 0.0) and 55.0 or 55.0),
+            requested_delfelt_count=effective_delfelt_count,
+            avg_unit_bra_m2=55.0,
             barnehage_config=barnehage,
             latitude_deg=float(getattr(site, "latitude_deg", 63.42)),
             longitude_deg=float((geodata_context or {}).get("longitude_deg", 10.43)),
