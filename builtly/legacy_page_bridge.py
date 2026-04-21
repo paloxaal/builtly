@@ -4,13 +4,39 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from shapely.geometry import Polygon, box
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box
+from shapely.ops import unary_union
 
 from .masterplan_integration import OptionResult as V8OptionResult, run_concept_options
 from .masterplan_types import BarnehageConfig, Masterplan, PlanRegler
 from .plan_regler_presets import GENERISK_TEK17_NORGE, TRONDHEIM_KPA_2022_SONE_2
 
 PHASE_COLORS_HEX = ["#38bdf8", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#60a5fa"]
+
+
+def _flatten_polygons(geom: Any) -> List[Polygon]:
+    if geom is None or getattr(geom, "is_empty", True):
+        return []
+    if isinstance(geom, Polygon):
+        return [geom.buffer(0)]
+    if isinstance(geom, MultiPolygon):
+        return [g.buffer(0) for g in geom.geoms if not g.is_empty]
+    if isinstance(geom, GeometryCollection):
+        parts: List[Polygon] = []
+        for g in geom.geoms:
+            parts.extend(_flatten_polygons(g))
+        return parts
+    return []
+
+
+def _normalize_site_geometry(geom: Any) -> Any:
+    parts = _flatten_polygons(geom)
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return unary_union(parts).buffer(0)
+
 
 @dataclass
 class PhasingConfig:
@@ -56,21 +82,15 @@ class LegacyMasterplanBundle:
         return phases
 
     def __getattr__(self, name: str) -> Any:
-        # Viktig: skjerm dunder-attributter. copy.deepcopy og dataclasses.asdict
-        # spør etter __setstate__, __reduce__, __getstate__ m.fl. Hvis __getattr__
-        # delegerer disse videre til self.best_plan, kan Python ende i uendelig
-        # rekursjon fordi self.best_plan også er et Masterplan-objekt som kan
-        # bli deepkopiert. Skjermingen gjør at copy-protokollen får korrekt
-        # AttributeError og bruker sin default-path istedenfor.
-        if name.startswith('__') and name.endswith('__'):
-            raise AttributeError(name)
         return getattr(self.best_plan, name)
 
-def _coord_groups(poly: Polygon) -> List[List[List[float]]]:
-    if poly is None or poly.is_empty:
-        return []
-    ext = [[float(x), float(y)] for x, y in list(poly.exterior.coords)]
-    return [ext]
+def _coord_groups(poly: Any) -> List[List[List[float]]]:
+    groups: List[List[List[float]]] = []
+    for part in _flatten_polygons(poly):
+        ext = [[float(x), float(y)] for x, y in list(part.exterior.coords)]
+        if ext:
+            groups.append(ext)
+    return groups
 
 def _pick_plan_regler(byggesone: str) -> PlanRegler:
     if str(byggesone) == "2":
@@ -102,12 +122,12 @@ def _neighbor_buildings_from_context(geodata_context: Optional[Dict[str, Any]]) 
         out.append({"coords": coords, "height_m": h})
     return out
 
-def _poly_from_context(site: Any, geodata_context: Optional[Dict[str, Any]]) -> Polygon:
+def _poly_from_context(site: Any, geodata_context: Optional[Dict[str, Any]]) -> Any:
     gc = geodata_context or {}
     for key in ("buildable_polygon", "site_polygon"):
-        poly = gc.get(key)
-        if isinstance(poly, Polygon) and not poly.is_empty:
-            return poly.buffer(0)
+        poly = _normalize_site_geometry(gc.get(key))
+        if poly is not None and not poly.is_empty:
+            return poly
     return box(0, 0, float(getattr(site, "site_width_m", 50.0)), float(getattr(site, "site_depth_m", 50.0))).buffer(0)
 
 def run_masterplan_from_site_inputs(*, site: Any, geodata_context: Optional[Dict[str, Any]], phasing_config: PhasingConfig, target_bra_m2: float, include_barnehage: bool = False, include_naering: bool = False, byggesone: str = "2"):
