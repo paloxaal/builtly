@@ -826,7 +826,38 @@ def _choose_best(candidates: List[_PlacementCandidate], target_bra: float) -> Op
     return min(candidates, key=score)
 
 
+def _solar_orientation_bonus(global_angle_deg: float, typology: Typology) -> float:
+    """Gir en bonus (0..1) basert på hvor godt global vinkel matcher solbane-optimum.
+
+    For Norge (rundt 63°N) er idealt:
+    - Lamell: langfasaden vendt 90° (øst-vest akse) slik at sørfasade får mest sol
+    - Rekkehus: samme; lang akse ideellt i øst-vest
+    - Karré: retningsuavhengig siden alle 4 sider har fasader
+    - Punkthus: retningsuavhengig, kvadratisk
+
+    global_angle_deg er vinkelen lamellens langfasade peker (0° = langs x-aksen = øst-vest).
+    Returnerer 1.0 ved perfekt øst-vest orientering (0° eller 180°),
+    0.0 ved nord-sør orientering (90°).
+    """
+    if typology in (Typology.KARRE, Typology.PUNKTHUS):
+        return 0.5  # nøytralt - retningsuavhengig
+
+    # Normaliser til [0, 180)
+    a = global_angle_deg % 180.0
+    # Avstand til nærmeste øst-vest (0° eller 180°)
+    east_west_distance = min(a, 180.0 - a)
+    # Konverter: 0° distance -> 1.0, 90° distance -> 0.0
+    return 1.0 - (east_west_distance / 90.0)
+
+
 def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Plasser lameller i delfeltet. Vi prøver begge orienteringer (0° og 90°
+    offset relativt til feltets hovedakse) og scorer kandidatene basert på
+    både BRA-oppnåelse og sol-orientering.
+
+    En lamell med langfasade i øst-vest gir mer sørsol enn en i nord-sør, så vi
+    foretrekker øst-vest-orientering selv om BRA skulle bli marginalt lavere.
+    """
     candidates: List[_PlacementCandidate] = []
     for angle_offset in (0.0, 90.0):
         local_poly = core if angle_offset == 0.0 else _rotate(core, -90.0, origin=core.centroid)
@@ -857,11 +888,52 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
             if cand:
                 cand.angle_offset_deg = angle_offset
                 candidates.append(cand)
-    return _choose_best(candidates, field.target_bra)
+    # Score med sol-hensyn: vi trenger global orientering for å score.
+    # field.orientation_deg er feltets hovedakse i globalt rom. For angle_offset=0,
+    # er lamellens langfasade langs feltets hovedakse. For angle_offset=90,
+    # er den vinkelrett på hovedaksen.
+    return _choose_best_with_solar(candidates, field, Typology.LAMELL)
+
+
+def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfelt, typology: Typology) -> Optional[_PlacementCandidate]:
+    """Velg beste kandidat med både BRA-oppnåelse og sol-orientering.
+
+    For retningsavhengige typologier (lamell, rekkehus) blir sol-scoren viktig.
+    For retningsuavhengige typologier (karré, punkthus) er den nøytral.
+    """
+    if not candidates:
+        return None
+
+    def combined_score(item: _PlacementCandidate) -> Tuple[float, float, int]:
+        # Primary score: hvor godt BRA-målet treffes
+        deficit = max(0.0, field.target_bra - item.total_bra)
+        overshoot = max(0.0, item.total_bra - field.target_bra)
+        bra_score = deficit + overshoot * 0.25
+
+        # Solar penalty: for lamell/rekkehus, straffer nord-sør-orientering
+        global_angle = (field.orientation_deg + item.angle_offset_deg) % 180.0
+        solar_bonus = _solar_orientation_bonus(global_angle, typology)
+        # Solar penalty er opptil 20% av BRA-målet når solar_bonus=0 (dårligst)
+        # og 0% når solar_bonus=1 (beste). Dette betyr at BRA-forskjeller
+        # mellom orienteringer fortsatt dominerer, men solar-hensyn vipper
+        # valget når BRA er omtrent likt.
+        solar_penalty = field.target_bra * 0.20 * (1.0 - solar_bonus)
+
+        return (bra_score + solar_penalty, -item.total_bra, len(item.footprints))
+
+    return min(candidates, key=combined_score)
 
 
 def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
-    candidates: List[_PlacementCandidate] = []
+    """Plasser punkthus i et delfelt. Vi genererer flere grid-layouts
+    (1x1, 1x2, 2x1, 2x2, 2x3, 3x2, 3x3) og velger den som balanserer
+    BRA-oppnåelse med kompakt klynge-form.
+
+    Et kvadratisk arrangement (cols≈rows) er arkitektonisk bedre enn en lang
+    "togrekke" fordi klyngen får tydeligere fellesrom mellom tårnene. Vi scorer
+    derfor cols×rows-konfigurasjoner med en klynge-bonus for forholdstall nær 1.
+    """
+    candidates: List[Tuple[_PlacementCandidate, int, int]] = []  # (cand, cols, rows)
     sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
@@ -891,8 +963,32 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                     continue
                 cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max))
                 if cand:
-                    candidates.append(cand)
-    return _choose_best(candidates, field.target_bra)
+                    candidates.append((cand, cols, rows))
+
+    if not candidates:
+        return None
+
+    def punkthus_score(item: Tuple[_PlacementCandidate, int, int]) -> Tuple[float, float, int]:
+        cand, cols, rows = item
+        deficit = max(0.0, field.target_bra - cand.total_bra)
+        overshoot = max(0.0, cand.total_bra - field.target_bra)
+        bra_score = deficit + overshoot * 0.25
+
+        # Klynge-bonus: kvadratisk (cols == rows) er best, lineær (1xN) er verst
+        total_count = cols * rows
+        if total_count <= 1:
+            cluster_penalty = 0.0  # enkeltbygg, ikke relevant
+        else:
+            aspect = max(cols, rows) / min(cols, rows)
+            # aspect = 1.0 (kvadrat) -> 0.0 penalty
+            # aspect = 2.0 (f.eks. 2x1 eller 1x3) -> moderat penalty
+            # aspect = 3.0 (1x3) -> høy penalty
+            cluster_penalty = field.target_bra * 0.12 * (aspect - 1.0)
+
+        return (bra_score + cluster_penalty, -cand.total_bra, len(cand.footprints))
+
+    best = min(candidates, key=punkthus_score)
+    return best[0]
 
 
 def _place_rekkehus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
@@ -943,7 +1039,7 @@ def _place_rekkehus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
             if cand:
                 cand.angle_offset_deg = angle_offset
                 candidates.append(cand)
-    return _choose_best(candidates, field.target_bra)
+    return _choose_best_with_solar(candidates, field, Typology.REKKEHUS)
 
 
 def _fit_centered_outer_rect(core: Polygon, max_width: float, max_height: float) -> Optional[Polygon]:
