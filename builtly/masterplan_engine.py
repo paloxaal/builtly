@@ -214,6 +214,132 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
 
 
+def pass1_generate_delfelt_contextual(
+    buildable_poly: Polygon,
+    concept_family: ConceptFamily,
+    target_bra_m2: float,
+    site_context: Optional[Any] = None,
+    requested_count: Optional[int] = None,
+) -> List[Delfelt]:
+    """Pass 1 v2 — kontekstuell delfelt-inndeling basert på SiteContext.
+
+    Strategi:
+    - Hvis site_context har 2+ armer, bruker vi armene som grunndelfelt
+    - Store armer (>6000 m²) deles videre i 2 delfelt langs sin egen akse
+    - Små armer er 1 delfelt (rekkehus passer ofte her)
+    - Hvert delfelt får en FieldCharacter basert på armens retning og
+      nabolaget langs armens kanter
+    - Fallback: hvis pass 0 feilet eller tomten er rektangulær, bruker vi
+      gammel pass1_generate_delfelt
+
+    Returnerer delfelter med arm_id og character fylt ut.
+    """
+    del concept_family  # concept brukes i pass 2
+    from .site_analysis import _cardinal_from_bearing
+
+    # Fallback til gammel logikk hvis ikke kontekstdata eller enkel tomt
+    if site_context is None or not site_context.has_arms:
+        return pass1_generate_delfelt(buildable_poly, concept_family,
+                                       target_bra_m2, requested_count)
+
+    arms = site_context.arms
+    total_arm_area = sum(a.area_m2 for a in arms) or 1.0
+
+    # Inndeling: hver arm blir 1-2 delfelt avhengig av størrelse
+    field_polys_with_meta: List[Tuple[Polygon, str, str, float]] = []
+    # tuple: (polygon, arm_id, character, target_bra_share)
+
+    for arm in arms:
+        arm_share = arm.area_m2 / total_arm_area
+        arm_target = target_bra_m2 * arm_share
+        arm_poly = arm.polygon
+
+        if arm_poly is None:
+            continue
+
+        # Bestem karakter basert på armens retning fra tomtens senter
+        card = _cardinal_from_bearing(arm.bearing_from_site_center_deg)
+        # Sør-arm: street_facing (typisk hovedadkomst)
+        # Nord-arm: sheltered (innvendig)
+        # Øst/vest: neighborhood_edge
+        character_map = {
+            "south": "street_facing",
+            "southeast": "street_facing",
+            "southwest": "street_facing",
+            "north": "sheltered",
+            "northeast": "neighborhood_edge",
+            "northwest": "neighborhood_edge",
+            "east": "neighborhood_edge",
+            "west": "neighborhood_edge",
+        }
+        character = character_map.get(card, "sheltered")
+
+        # Splitt store armer i 2 delfelt langs armens egen akse
+        if arm.area_m2 > 6000 and arm.aspect_ratio > 1.4:
+            sub_polys = subdivide_buildable_polygon(
+                arm_poly, count=2, orientation_deg=arm.dominant_axis_deg
+            )
+            for i, sub in enumerate(sub_polys):
+                share = sub.area / arm.area_m2
+                field_polys_with_meta.append(
+                    (sub.buffer(0), arm.arm_id, character, arm_target * share)
+                )
+        else:
+            # Små armer er 1 delfelt
+            field_polys_with_meta.append(
+                (arm_poly.buffer(0), arm.arm_id, character, arm_target)
+            )
+
+    # Bygg Delfelt-objekter
+    out: List[Delfelt] = []
+    for idx, (poly, arm_id, character, target) in enumerate(field_polys_with_meta, start=1):
+        orient = orientation_for_field(poly, fallback_deg=0.0)
+        # Beregn max nabohøyde for dette feltet ved å finne kantene som ligger
+        # nær feltets yttergrense og lese av deres avg_neighbor_height_m.
+        max_neighbor_h = _estimate_max_neighbor_height(poly, site_context)
+        out.append(Delfelt(
+            field_id=f"DF{idx}",
+            polygon=poly,
+            typology=Typology.LAMELL,  # pass 2 setter riktig typologi
+            orientation_deg=orient,
+            floors_min=4,
+            floors_max=5,
+            target_bra=float(target),
+            courtyard_kind=CourtyardKind.FELLES_BOLIG,
+            tower_size_m=None,
+            phase=idx,
+            phase_label=f"Delfelt {idx} ({arm_id})",
+            arm_id=arm_id,
+            character=character,
+            max_neighbor_height_m=max_neighbor_h,
+        ))
+    return out
+
+
+def _estimate_max_neighbor_height(field_poly: Polygon, site_context: Any,
+                                  buffer_m: float = 30.0) -> Optional[float]:
+    """Finn nabohøyden som feltet "ser" mot — gjennomsnitt av nabohøyder
+    på kanter som ligger nær dette feltets yttergrense.
+    """
+    if site_context is None or not site_context.edges:
+        return None
+    try:
+        from shapely.geometry import LineString
+        field_boundary = field_poly.boundary.buffer(buffer_m)
+        heights: List[float] = []
+        for edge in site_context.edges:
+            if edge.avg_neighbor_height_m is None:
+                continue
+            edge_line = LineString([edge.p0, edge.p1])
+            if field_boundary.intersects(edge_line):
+                heights.append(edge.avg_neighbor_height_m)
+        if heights:
+            return sum(heights) / len(heights)
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Pass 2 — parameter selection
 # ---------------------------------------------------------------------------
@@ -436,6 +562,7 @@ def pass3_design_directives(
     buildable_poly: Optional[Polygon] = None,
     latitude_deg: Optional[float] = None,
     target_bra_m2: Optional[float] = None,
+    site_context: Optional[Any] = None,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
 ) -> Tuple[List[Delfelt], str]:
@@ -459,7 +586,7 @@ def pass3_design_directives(
     field_payload = []
     for f in base_fields:
         geom = _polygon_to_compact_dict(f.polygon)
-        field_payload.append({
+        entry = {
             "field_id": f.field_id,
             "typology": f.typology.value,
             "orientation_deg": round(f.orientation_deg, 1),
@@ -468,9 +595,47 @@ def pass3_design_directives(
             "target_bra": round(f.target_bra, 0),
             "phase": f.phase,
             "geometry": geom,
-        })
+        }
+        # Legg til kontekst fra pass 0 hvis tilgjengelig
+        if f.arm_id is not None:
+            entry["arm_id"] = f.arm_id
+        if f.character is not None:
+            entry["character"] = f.character
+        field_payload.append(entry)
 
     site_payload = _polygon_to_compact_dict(buildable_poly) if buildable_poly is not None else {}
+
+    # Utvid site_payload med SiteContext-informasjon hvis tilgjengelig
+    if site_context is not None:
+        site_payload["label"] = site_context.site_label
+        site_payload["has_arms"] = site_context.has_arms
+        site_payload["n_arms"] = len(site_context.arms)
+        site_payload["dominant_axis_deg"] = round(site_context.site_bearing_deg, 1)
+        if site_context.dominant_view_direction:
+            site_payload["dominant_view_direction"] = site_context.dominant_view_direction
+        # Armer som kompakt liste
+        if site_context.arms:
+            site_payload["arms"] = [
+                {
+                    "arm_id": a.arm_id,
+                    "area_m2": round(a.area_m2, 0),
+                    "bearing_from_center_deg": round(a.bearing_from_site_center_deg, 0),
+                    "dominant_axis_deg": round(a.dominant_axis_deg, 0),
+                    "aspect_ratio": round(a.aspect_ratio, 1),
+                }
+                for a in site_context.arms
+            ]
+        # Edges som sammendrag (hvilke retninger har naboer/åpning)
+        if site_context.edges:
+            edge_summary = {"neighbor_dense": [], "neighbor_sparse": [], "open": []}
+            from .site_analysis import _cardinal_from_bearing
+            for e in site_context.edges:
+                card = _cardinal_from_bearing(e.outward_bearing_deg)
+                key = e.character.value if hasattr(e.character, 'value') else str(e.character)
+                if key in edge_summary:
+                    if card not in edge_summary[key]:
+                        edge_summary[key].append(card)
+            site_payload["edge_summary"] = edge_summary
 
     payload = {
         "task": "assign_design_directives",
@@ -504,6 +669,21 @@ def pass3_design_directives(
         "For each delfelt you assign design variants that the deterministic "
         "geometry engine will realize. Never invent field ids. Never generate "
         "coordinates. Stay within the 'allowed' lists in the payload. "
+        "\n\n"
+        "SITE CONTEXT: The 'site' object may contain 'arms' (L/U/T-shaped sites "
+        "are decomposed into arms), an 'edge_summary' (which compass directions "
+        "have dense neighbors vs open views), and 'label' (rectangle/narrow_rectangle/"
+        "multi_arm_N/irregular). Each field may have 'arm_id' and 'character': "
+        "(a) 'street_facing' fields should be ARCHITECTURALLY MARKANT — prefer "
+        "uo_chamfered karré or terraced lamell with a subtle rotation toward the "
+        "dominant access direction. "
+        "(b) 'sheltered' fields (inner/enclosed) should be CALM — prefer single "
+        "lamell or plain uo karré with modest variation. "
+        "(c) 'neighborhood_edge' fields should RESPOND TO SCALE — avoid rotations "
+        "and L-shapes that could feel aggressive toward neighbors. Keep heights "
+        "uniform or stepping DOWN toward the neighbor side. "
+        "(d) 'open_view' fields can use taller punkthus or height_pattern='accent' "
+        "to exploit the view. "
         "\n\n"
         "CRITICAL CONSTRAINTS: Volume (BRA) matters as much as design. "
         "The following variants typically COST BRA on constrained fields: "
@@ -770,7 +950,43 @@ def plan_masterplan_geometry(
         raise ValueError("buildable_poly mangler eller er tom")
     rules = plan_regler or PlanRegler()
 
-    base_fields = pass1_generate_delfelt(buildable_poly, concept_family, target_bra_m2, requested_delfelt_count)
+    # Pass 0: Analyser tomten — finn armer, kanter, naboskap
+    # SiteContext brukes fra uke 2 og fremover av pass 1 og AI-pass 3.
+    # I denne versjonen kjører vi analysen og logger resultatet, men
+    # beholder gammel pass 1 som default slik at vi kan sammenligne.
+    try:
+        from .site_analysis import analyze_site
+        site_context = analyze_site(buildable_poly, neighbor_buildings=neighbor_buildings)
+        logger.warning(
+            "Pass 0 site analysis: label=%s arms=%d edges=%d rectangular=%s view=%s",
+            site_context.site_label,
+            len(site_context.arms),
+            len(site_context.edges),
+            site_context.is_rectangular,
+            site_context.dominant_view_direction,
+        )
+    except Exception as exc:
+        logger.warning("Pass 0 site analysis failed: %s", exc)
+        site_context = None
+
+    # Pass 1: Delfelt-inndeling.
+    # Hvis site_context har armer (L/U/kompleks), bruker vi kontekstuell
+    # inndeling som snitter etter armene i stedet for generiske bånd.
+    # Ellers faller vi tilbake til gammel pass1_generate_delfelt.
+    if site_context is not None and site_context.has_arms:
+        base_fields = pass1_generate_delfelt_contextual(
+            buildable_poly, concept_family, target_bra_m2,
+            site_context=site_context,
+            requested_count=requested_delfelt_count,
+        )
+        logger.warning(
+            "Pass 1 contextual: %d fields from %d arms",
+            len(base_fields), len(site_context.arms),
+        )
+    else:
+        base_fields = pass1_generate_delfelt(
+            buildable_poly, concept_family, target_bra_m2, requested_delfelt_count
+        )
     configured_fields, pass2_source = pass2_select_field_parameters(
         concept_family,
         base_fields,
@@ -791,6 +1007,7 @@ def plan_masterplan_geometry(
             buildable_poly=buildable_poly,
             latitude_deg=latitude_deg,
             target_bra_m2=target_bra_m2,
+            site_context=site_context,  # ny: gir kontekst til AI
         )
     except Exception as exc:
         logger.warning("pass3_design_directives failed, keeping unmodified fields: %s", exc)
