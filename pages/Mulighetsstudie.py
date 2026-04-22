@@ -467,12 +467,14 @@ def generer_arkitekt_render(
         )
 
     try:
-        # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
+        # Prefer stabil modell først (Gemini 2.5 Flash Image / Nano Banana),
+        # fallback til preview hvis stabil av en eller annen grunn ikke er
+        # tilgjengelig. Preview-modeller (3.1-flash-image-preview) endrer seg
+        # oftere og kan være midlertidig utilgjengelige.
         try:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-        except Exception:
-            # Fallback til 2.5 hvis 3.1 ikke tilgjengelig
             model = genai.GenerativeModel("gemini-2.5-flash-image")
+        except Exception:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
 
         response = model.generate_content(
             [prompt, safe_image],
@@ -555,10 +557,12 @@ def generer_utsiktsrender(
     )
 
     try:
+        # Prefer stabil modell først (Gemini 2.5 Flash Image / Nano Banana),
+        # fallback til preview hvis stabil ikke er tilgjengelig.
         try:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-        except Exception:
             model = genai.GenerativeModel("gemini-2.5-flash-image")
+        except Exception:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
 
         response = model.generate_content(
             [prompt, safe_image],
@@ -8638,7 +8642,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.5</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.7</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -9314,7 +9318,7 @@ if run_analysis:
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
         diag_parts = [
-            f"v9.6 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"v9.7 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         ]
@@ -9674,6 +9678,59 @@ if "analysis_results" in st.session_state:
         meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
     if meta_lines:
         st.caption(" · ".join(meta_lines))
+
+    # v9: Arkitekturkvalitet — vises hvis masterplan har scores
+    _mp_v9 = st.session_state.get("_current_masterplan")
+    if _mp_v9 is not None and getattr(_mp_v9, "architecture_scores", None):
+        scores = _mp_v9.architecture_scores
+        composition = getattr(_mp_v9, "composition_plan", None)
+        concept_label = composition.concept_name if composition else "—"
+        st.markdown(
+            "<div class='section-header'>Arkitekturkvalitet (v9)</div>",
+            unsafe_allow_html=True,
+        )
+        a1, a2, a3, a4 = st.columns(4)
+        def _fmt(v):
+            return f"{float(v):.2f}"
+        with a1:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Totalscore</div>"
+                f"<div class='metric-value'>{_fmt(scores.get('total', 0))}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a2:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Gatelinje</div>"
+                f"<div class='metric-value'>{_fmt(scores.get('frontage_continuity', 0))}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a3:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Gårdsrom</div>"
+                f"<div class='metric-value'>{_fmt(scores.get('courtyard_clarity', 0))}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a4:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Hierarki</div>"
+                f"<div class='metric-value'>{_fmt(scores.get('hierarchy', 0))}</div></div>",
+                unsafe_allow_html=True,
+            )
+        # Andre rad med flere metrikker i en expander
+        with st.expander("Flere arkitekturmetrikker (v9)", expanded=False):
+            st.write(f"**Komposisjonskonsept**: {concept_label}")
+            if composition:
+                st.write(f"- Frontages: {len(composition.street_frontages)}")
+                st.write(f"- Gårdsrom: {len(composition.courtyards)}")
+                st.write(f"- Aksentposisjoner: {len(composition.accent_points)}")
+            st.write(f"**Rytme (høyder)**: {_fmt(scores.get('rhythm', 0))} — "
+                     "andel bygg innen ±1 etasje fra dominant-høyde")
+            st.write(f"**Form-entropi**: {_fmt(scores.get('form_entropy', 0))} — "
+                     "variasjon i byggstørrelser (sweet spot: 3-5 ulike)")
+            st.write(f"**Skala-konsistens**: {_fmt(scores.get('scale_consistency', 0))} — "
+                     "hvor jevn byggstørrelse er på tvers av delfelt")
+            st.caption("v9 arkitekturscore er en objektiv måling av planens "
+                       "komposisjon — gatelinje, gårdsrom, rytme, hierarki. Alle skala 0-1.")
 
     # Motor-diagnostikk (persistent)
     diag = st.session_state.get("_motor_diag")
@@ -10103,8 +10160,9 @@ if "analysis_results" in st.session_state:
   <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
   <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
 </div>
-<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
+<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;flex-wrap:wrap;max-width:calc(100% - 24px);">
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
+  <button onclick="duplicateBuilding()" style="background:rgba(168,130,240,0.85);border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">⧉ Dupliser valgt</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
   <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
   <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
@@ -10112,6 +10170,18 @@ if "analysis_results" in st.session_state:
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
+</div>
+<div id="dimensionEditor" style="position:absolute;top:12px;left:12px;display:none;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:10px 12px;font-family:Inter,sans-serif;">
+  <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-weight:600;">Valgt bygg — dimensjoner</div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label style="color:#9fb0c3;font-size:12px;">Bredde:</label>
+    <input id="inputW" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
+    <span style="color:#9fb0c3;font-size:12px;">m</span>
+    <label style="color:#9fb0c3;font-size:12px;margin-left:8px;">Dybde:</label>
+    <input id="inputD" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
+    <span style="color:#9fb0c3;font-size:12px;">m</span>
+  </div>
+  <div style="color:#7a8b9c;font-size:10px;margin-top:6px;">Skriv inn eksakt bredde og dybde. Endringer lagres automatisk.</div>
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
@@ -10332,10 +10402,56 @@ window.addBuilding = function() {
   const cy = (minY + maxY) / 2 + (Math.random() - 0.5) * spanY * 0.3;
   buildings.push({ cx, cy, w: 40, d: 14, angle: 0, floors: defaultFloors, name: 'Bygg ' + String.fromCharCode(65 + buildings.length) });
   selectedIdx = buildings.length - 1;
+  updateDimensionEditor();
   render();
 };
 
-window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
+window.duplicateBuilding = function() {
+  if (selectedIdx < 0 || selectedIdx >= buildings.length) {
+    alert('Velg et bygg først (klikk på det).');
+    return;
+  }
+  const src = buildings[selectedIdx];
+  // Offset kopien 8m til høyre og ned slik at det blir synlig
+  const offset = 8;
+  const copy = {
+    cx: src.cx + offset,
+    cy: src.cy - offset,
+    w: src.w,
+    d: src.d,
+    angle: src.angle,
+    floors: src.floors,
+    name: 'Bygg ' + String.fromCharCode(65 + buildings.length),
+  };
+  buildings.push(copy);
+  selectedIdx = buildings.length - 1;
+  updateDimensionEditor();
+  render();
+};
+
+window.updateDimensions = function() {
+  if (selectedIdx < 0) return;
+  const wInput = document.getElementById('inputW');
+  const dInput = document.getElementById('inputD');
+  const newW = parseFloat(wInput.value);
+  const newD = parseFloat(dInput.value);
+  if (isFinite(newW) && newW >= 8 && newW <= 200) buildings[selectedIdx].w = newW;
+  if (isFinite(newD) && newD >= 8 && newD <= 200) buildings[selectedIdx].d = newD;
+  render();
+};
+
+function updateDimensionEditor() {
+  const panel = document.getElementById('dimensionEditor');
+  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    panel.style.display = 'block';
+    document.getElementById('inputW').value = Math.round(buildings[selectedIdx].w * 10) / 10;
+    document.getElementById('inputD').value = Math.round(buildings[selectedIdx].d * 10) / 10;
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+window.clearAll = function() { buildings = []; selectedIdx = -1; updateDimensionEditor(); render(); };
 
 window.setFloors = function() {
   defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
@@ -10460,10 +10576,12 @@ canvas.addEventListener('mousedown', e => {
     dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy];
     dragging = true;
     document.getElementById('floorSelect').value = buildings[idx].floors;
+    updateDimensionEditor();
     render();
     return;
   }
   selectedIdx = -1;
+  updateDimensionEditor();
   render();
 });
 
@@ -10481,6 +10599,11 @@ canvas.addEventListener('mousemove', e => {
     const dx = wx - b.cx, dy = wy - b.cy;
     b.w = Math.max(8, Math.abs(dx) * 2);
     b.d = Math.max(8, Math.abs(dy) * 2);
+    // Oppdater input-feltene live
+    const wInput = document.getElementById('inputW');
+    const dInput = document.getElementById('inputD');
+    if (wInput) wInput.value = Math.round(b.w * 10) / 10;
+    if (dInput) dInput.value = Math.round(b.d * 10) / 10;
     render();
   } else {
     // Cursor hint
@@ -10523,7 +10646,7 @@ render();
 })();
 </script>
 """.replace("__PAYLOAD__", editor_payload)
-    components.html(editor_html, height=680, scrolling=False)
+    components.html(editor_html, height=720, scrolling=False)
 
     # --- SKISSE TIL MOTOR ---
     with st.expander("Kjør motor fra manuell skisse", expanded=False):
