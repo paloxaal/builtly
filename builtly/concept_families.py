@@ -61,11 +61,32 @@ class ConceptStrategy:
         for idx, field in enumerate(delfelt):
             env = self.envelope_for_field(idx, len(delfelt))
             floors_min, floors_max = self._clamp_floors(env.default_floors, plan_regler)
+            # v9: hvis feltet har 'role' (fra komposisjonslaget), respekter
+            # feltets orienteringsvalg. Ellers: bruk default offset fra envelope.
+            field_role = getattr(field, "role", None)
+            if field_role and field_role != "generic":
+                # Role-satt orientering brukes direkte (den er allerede satt av
+                # orientation_for_role i pass 1 til frontage-vinkelen).
+                orient_final = field.orientation_deg % 180.0
+            else:
+                orient_final = (field.orientation_deg + env.default_orientation_offset_deg) % 180.0
+
+            # v9: velg typologi basert på role når det er relevant
+            typology_final = env.default_typology
+            if field_role == "frontage_primary":
+                # Primær frontage: foretrekk LAMELL (langt bygg langs gata)
+                if Typology.LAMELL in env.allowed_typologies:
+                    typology_final = Typology.LAMELL
+            elif field_role == "accent":
+                # Aksent: foretrekk PUNKTHUS
+                if Typology.PUNKTHUS in env.allowed_typologies:
+                    typology_final = Typology.PUNKTHUS
+
             out.append(
                 FieldParameterChoice(
                     field_id=field.field_id,
-                    typology=env.default_typology,
-                    orientation_deg=(field.orientation_deg + env.default_orientation_offset_deg) % 180.0,
+                    typology=typology_final,
+                    orientation_deg=orient_final,
                     floors_min=floors_min,
                     floors_max=floors_max,
                     target_bra=float(target_bra_m2 * shares[idx]),
