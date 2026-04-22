@@ -1114,13 +1114,38 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                     footprints_rotated.append(fp)
                     angles_rotated.append(angle)
 
+            # Variant D: terrassert lamell — samme footprints som single, men
+            # med varierte etasjer slik at silhuetten blir trappet. For en rad
+            # med 2+ bygg gir dette visuell rytme. For 1 bygg faller det
+            # tilbake til single.
+            footprints_terraced: List[Polygon] = []
+            floors_terraced: List[int] = []
+            valid_terraced = valid_single and len(footprints_single) >= 2
+            if valid_terraced:
+                # Basis-etasjetall (samme som single ville ha fått)
+                total_fp = sum(p.area for p in footprints_single)
+                base_floors = int(round(field.target_bra / total_fp)) if field.target_bra > 0 and total_fp > 0 else field.floors_min
+                base_floors = max(field.floors_min, min(field.floors_max, base_floors))
+                # Trapp-mønster: stepped gir gradvis trapp (f.eks. 5-6-7 eller 7-6-5)
+                floors_terraced = _varied_floors_for_cluster(
+                    len(footprints_single), base_floors,
+                    field.floors_min, field.floors_max, variation="stepped"
+                )
+                # Hvis stepped-mønsteret er identisk (kun én etasjeverdi), faller
+                # det effektivt tilbake til single — da er det ikke meningsfullt
+                if len(set(floors_terraced)) < 2:
+                    valid_terraced = False
+                else:
+                    footprints_terraced = list(footprints_single)
+
             # Registrer alle varianter som kandidater
             variants_to_register = [
-                ("single", footprints_single if valid_single else [], None),
-                ("varied", footprints_varied, None),
-                ("rotated", footprints_rotated if valid_rotated else [], angles_rotated if valid_rotated else None),
+                ("single", footprints_single if valid_single else [], None, None),
+                ("varied", footprints_varied, None, None),
+                ("rotated", footprints_rotated if valid_rotated else [], angles_rotated if valid_rotated else None, None),
+                ("terraced", footprints_terraced if valid_terraced else [], None, floors_terraced if valid_terraced else None),
             ]
-            for variant, footprints, angles in variants_to_register:
+            for variant, footprints, angles, floors_per in variants_to_register:
                 if not footprints:
                     continue
                 if angle_offset == 90.0:
@@ -1128,6 +1153,7 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                 cand = _evaluate_candidate(
                     footprints, field.target_bra, (field.floors_min, field.floors_max),
                     angle_offset_per_bygg=angles,
+                    floors_per_bygg=floors_per,
                 )
                 if cand:
                     cand.angle_offset_deg = angle_offset
@@ -1170,6 +1196,10 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
             variation_bonus = -(field.target_bra * 0.05)
         elif variant == "rotated" and len(item.footprints) >= 2:
             variation_bonus = -(field.target_bra * 0.04)
+        elif variant == "terraced" and len(item.footprints) >= 2:
+            # Terraced har ingen BRA-tap vs. single men gir sterk visuell effekt.
+            # Gi den en moderat bonus.
+            variation_bonus = -(field.target_bra * 0.06)
 
         # AI-direktiv-bonus: hvis field.design_variant er satt (AI ba om en
         # spesifikk variant), gi en MODERAT bonus til matchende kandidat.
@@ -1458,6 +1488,41 @@ def _fit_centered_outer_rect(core: Polygon, max_width: float, max_height: float)
     return centered_best
 
 
+def _make_chamfered_uo_shape(outer: Polygon, ring_depth: float, min_courtyard: float,
+                              chamfer_corner: str = "ne", chamfer_size: float = 10.0) -> Optional[Polygon]:
+    """Lag en karré med ett avskåret hjørne (chamfer / avskjæring).
+
+    Bygger først en vanlig U/O-form, deretter trimmer ett hjørne med 45° kutt.
+    Det avskårne hjørnet leser som "hjørnebygg mot plass" eller "hovedinngang".
+
+    chamfer_corner: "ne" | "nw" | "se" | "sw" — hvilket hjørne som kuttes
+    chamfer_size: lengde av kuttet langs hver side (meter)
+    """
+    base = _make_u_or_o_shape(outer, ring_depth, min_courtyard)
+    if base is None:
+        return None
+
+    minx, miny, maxx, maxy = outer.bounds
+    s = float(chamfer_size)
+
+    # Bygg en "cutter"-polygon (triangel som skjærer av hjørnet)
+    if chamfer_corner == "ne":
+        cutter = Polygon([(maxx - s, maxy), (maxx, maxy - s), (maxx + 1, maxy + 1)])
+    elif chamfer_corner == "nw":
+        cutter = Polygon([(minx + s, maxy), (minx, maxy - s), (minx - 1, maxy + 1)])
+    elif chamfer_corner == "se":
+        cutter = Polygon([(maxx - s, miny), (maxx, miny + s), (maxx + 1, miny - 1)])
+    elif chamfer_corner == "sw":
+        cutter = Polygon([(minx + s, miny), (minx, miny + s), (minx - 1, miny - 1)])
+    else:
+        return base  # ukjent hjørne → returner uendret
+
+    shape = base.difference(cutter)
+    if isinstance(shape, Polygon) and not shape.is_empty and shape.area > 0:
+        return shape.buffer(0)
+    return base  # fallback hvis chamfer feilet
+
+
 def _make_u_or_o_shape(outer: Polygon, ring_depth: float, min_courtyard: float) -> Optional[Polygon]:
     minx, miny, maxx, maxy = outer.bounds
     ow = maxx - minx
@@ -1613,6 +1678,21 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
         # U/O virker, men AI ba om alternativ — legg den til som kandidat
         _add_alt_shapes()
 
+    # Chamfered U/O: hvis AI ba om den, eller som frivillig variasjon når
+    # U/O virker og det er arkitektonisk interessant (store felter).
+    if uo_works and (ai_requested_shape == "uo_chamfered" or
+                     (outer.bounds[2] - outer.bounds[0]) >= 50):
+        # Velg hjørne: AI kan spesifisere via design_reasoning, ellers "ne"
+        # (nord-øst) er default — vendt mot offentlig side typisk.
+        chamfer_corner = "ne"
+        # Chamfer-størrelse som fraksjon av ring-depth
+        chamfer_size = max(8.0, ring_depth * 0.75)
+        chamfered = _make_chamfered_uo_shape(outer, ring_depth, min_cy,
+                                              chamfer_corner=chamfer_corner,
+                                              chamfer_size=chamfer_size)
+        if chamfered is not None and chamfered.area > 0:
+            candidates_shapes.append(("uo_chamfered", chamfered))
+
     if not candidates_shapes:
         return None
 
@@ -1641,6 +1721,7 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
         form = getattr(item, "_variant", "uo")
         form_penalty = {
             "uo": 0.0,
+            "uo_chamfered": field.target_bra * 0.02,  # mister bare ~5% areal
             "l": field.target_bra * 0.08,
             "t": field.target_bra * 0.05,
             "z": field.target_bra * 0.06,
