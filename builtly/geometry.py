@@ -1241,27 +1241,89 @@ def _varied_floors_for_cluster(
         return [clamp(base_floors)] * n_buildings
 
     if variation == "accent":
-        # Én aksent-bygg 2 etasjer høyere (hvis mulig)
-        accent_idx = n_buildings // 2  # midtbygget
-        result = [clamp(base_floors) for _ in range(n_buildings)]
+        # Én aksent-bygg 2 etasjer høyere, resten baseline minus litt for å
+        # kompensere slik at total BRA bevares.
+        accent_idx = n_buildings // 2
         accent_floors = clamp(base_floors + 2)
         if accent_floors == base_floors:
-            # Ikke plass til høyere, prøv lavere baseline i stedet
+            # Ikke plass til høyere: prøv lavere baseline + én på base
             new_base = clamp(base_floors - 1)
             if new_base < base_floors:
                 result = [clamp(new_base) for _ in range(n_buildings)]
                 result[accent_idx] = clamp(base_floors)
+                # Kompenser hvis summen ikke når target
+                target_sum = base_floors * n_buildings
+                current_sum = sum(result)
+                diff = target_sum - current_sum
+                while diff > 0:
+                    candidates = [(f, i) for i, f in enumerate(result) if f < floors_max]
+                    if not candidates:
+                        break
+                    _, idx = min(candidates)
+                    result[idx] += 1
+                    diff -= 1
+            else:
+                result = [clamp(base_floors)] * n_buildings
         else:
+            # Aksent gir +2, resten må kompenseres hvis mulig
+            bonus = accent_floors - base_floors  # vanligvis 2
+            result = [clamp(base_floors)] * n_buildings
             result[accent_idx] = accent_floors
+            # Kompenser: fordel -bonus etasjer på andre bygg
+            for _ in range(bonus):
+                candidates = [(f, i) for i, f in enumerate(result)
+                              if i != accent_idx and f > floors_min]
+                if not candidates:
+                    break
+                _, idx = max(candidates)
+                result[idx] -= 1
         return result
 
     if variation == "stepped":
-        # Trappet: fordeler fra base-1 til base+2
+        # Trappet: vi prøver å bevare total BRA ved å holde gjennomsnittet
+        # lik base_floors. Dette er viktig fordi ellers mister terraced-varianten
+        # 4-5% BRA vs. single.
+        #
+        # Strategi: trapp symmetrisk rundt base, f.eks.:
+        #   base=5, n=4 → [3, 4, 6, 7] (snitt=5)
+        #   base=5, n=3 → [4, 5, 6] (snitt=5)
+        # Begrensning av floors_min/floors_max kan gi litt asymmetri,
+        # men vi prøver å kompensere der.
+        if n_buildings == 1:
+            return [clamp(base_floors)]
+        if n_buildings == 2:
+            # To bygg: en lav, en høy rundt base
+            return [clamp(base_floors - 1), clamp(base_floors + 1)]
+        # 3+ bygg: trapp fra base-span/2 til base+span/2
+        # Velg span slik at klamping ikke kutter alt
+        span = min(3, floors_max - floors_min)
+        half = span / 2.0
         steps = []
         for i in range(n_buildings):
-            frac = i / max(1, n_buildings - 1)  # 0 → 1
-            floors = base_floors - 1 + int(frac * 3)
+            frac = i / (n_buildings - 1)  # 0 → 1
+            offset = -half + frac * span
+            floors = base_floors + round(offset)
             steps.append(clamp(floors))
+        # Hvis clamping har redusert summen, prøv å kompensere
+        current_sum = sum(steps)
+        target_sum = base_floors * n_buildings
+        diff = target_sum - current_sum
+        if diff > 0:
+            # Legg til etasjer på det laveste bygget først
+            for _ in range(diff):
+                candidates = [(f, i) for i, f in enumerate(steps) if f < floors_max]
+                if not candidates:
+                    break
+                _, idx = min(candidates)
+                steps[idx] += 1
+        elif diff < 0:
+            # Fjern etasjer fra høyeste-ikke-min bygg
+            for _ in range(-diff):
+                candidates = [(f, i) for i, f in enumerate(steps) if f > floors_min]
+                if not candidates:
+                    break
+                _, idx = max(candidates)
+                steps[idx] -= 1
         return steps
 
     if variation == "paired":
