@@ -108,7 +108,7 @@ def _should_retry_with_fallback(status_code: Optional[int], body: str) -> bool:
 def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], api_key: Optional[str] = None, model: Optional[str] = None, max_tokens: int = 1600) -> Optional[Dict[str, Any]]:
     enable_flag = str(os.environ.get("BUILTLY_ENABLE_NETWORK_AI", "")).lower()
     if enable_flag not in {"1", "true", "yes"}:
-        logger.info("AI-pass skipped: BUILTLY_ENABLE_NETWORK_AI=%r (må være 1/true/yes)", enable_flag)
+        logger.warning("AI-pass skipped: BUILTLY_ENABLE_NETWORK_AI=%r (må være 1/true/yes)", enable_flag)
         return None
     key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
     if not key:
@@ -134,7 +134,7 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
 
     primary_model = model or DEFAULT_MODEL
     tried = [primary_model]
-    logger.info("AI-pass starter: model=%s max_tokens=%s", primary_model, max_tokens)
+    logger.warning("AI-pass starter: model=%s max_tokens=%s", primary_model, max_tokens)
     try:
         resp = _post(primary_model)
         if resp.ok:
@@ -144,20 +144,20 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             if result is None:
                 logger.warning("AI-pass %s returnerte OK men kunne ikke parse JSON. Tekst: %r", primary_model, text[:300])
             else:
-                logger.info("AI-pass %s OK (parset JSON)", primary_model)
+                logger.warning("AI-pass %s OK (parset JSON)", primary_model)
             return result
         body = resp.text
         logger.warning("AI-pass %s HTTP %s body: %s", primary_model, resp.status_code, body[:400])
         if FALLBACK_MODEL and FALLBACK_MODEL != primary_model and _should_retry_with_fallback(resp.status_code, body):
             tried.append(FALLBACK_MODEL)
-            logger.info("Retrying med fallback-modell %s", FALLBACK_MODEL)
+            logger.warning("Retrying med fallback-modell %s", FALLBACK_MODEL)
             fallback_resp = _post(FALLBACK_MODEL)
             if fallback_resp.ok:
                 blocks = fallback_resp.json().get("content", [])
                 text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
                 result = _safe_json_from_text(text)
                 if result is not None:
-                    logger.info("AI-pass %s (fallback) OK", FALLBACK_MODEL)
+                    logger.warning("AI-pass %s (fallback) OK", FALLBACK_MODEL)
                 return result
             logger.warning("Fallback %s HTTP %s body: %s", FALLBACK_MODEL, fallback_resp.status_code, fallback_resp.text[:400])
             return None
@@ -405,6 +405,210 @@ def pass2_select_field_parameters(
 
 
 # ---------------------------------------------------------------------------
+# Pass 3 AI — design directives (NEW, optional layer before geometry)
+# ---------------------------------------------------------------------------
+
+
+_DESIGN_VARIANT_ALLOWED = {"single", "varied", "rotated"}
+_DESIGN_KARRE_SHAPE_ALLOWED = {"uo", "l", "t", "z"}
+_DESIGN_HEIGHT_PATTERN_ALLOWED = {"uniform", "accent", "stepped", "paired"}
+
+
+def _polygon_to_compact_dict(poly: Polygon) -> Dict[str, Any]:
+    """Reduser en polygon til et kompakt sammendrag AI kan resonnere over uten
+    koordinatstøy. Returnerer bounding-box, areal og sideforhold."""
+    if poly is None or poly.is_empty:
+        return {}
+    minx, miny, maxx, maxy = poly.bounds
+    w = maxx - minx
+    h = maxy - miny
+    return {
+        "width_m": round(w, 1),
+        "height_m": round(h, 1),
+        "area_m2": round(poly.area, 0),
+        "aspect_ratio": round(max(w, h) / max(1e-6, min(w, h)), 2),
+    }
+
+
+def pass3_design_directives(
+    base_fields: Sequence[Delfelt],
+    *,
+    buildable_poly: Optional[Polygon] = None,
+    latitude_deg: Optional[float] = None,
+    target_bra_m2: Optional[float] = None,
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Tuple[List[Delfelt], str]:
+    """AI-pass som berikger delfeltene med arkitektoniske designdirektiv.
+
+    Direktivene styrer hvordan motoren velger varianter (single/varied/rotert
+    lamell, U/O/L/T/Z karré, høydegradient for punkthus). AI får:
+    - Delfelt-sammendrag (form, størrelse, typologi, target_bra, orientering)
+    - Total tomtekontekst (bredde/lengde/areal)
+    - Latitude for solvinkel
+
+    AI returnerer JSON med design_* felt per delfelt. Hvis AI feiler/ikke er
+    tilgjengelig, beholder vi feltene uendret (motoren bruker sin egen default).
+
+    Returnerer (berikede delfelter, kilde-tag).
+    """
+    if not base_fields:
+        return list(base_fields), "empty"
+
+    # Bygg payload til AI
+    field_payload = []
+    for f in base_fields:
+        geom = _polygon_to_compact_dict(f.polygon)
+        field_payload.append({
+            "field_id": f.field_id,
+            "typology": f.typology.value,
+            "orientation_deg": round(f.orientation_deg, 1),
+            "floors_min": f.floors_min,
+            "floors_max": f.floors_max,
+            "target_bra": round(f.target_bra, 0),
+            "phase": f.phase,
+            "geometry": geom,
+        })
+
+    site_payload = _polygon_to_compact_dict(buildable_poly) if buildable_poly is not None else {}
+
+    payload = {
+        "task": "assign_design_directives",
+        "schema_version": 1,
+        "allowed": {
+            "design_variant": sorted(list(_DESIGN_VARIANT_ALLOWED)),
+            "design_karre_shape": sorted(list(_DESIGN_KARRE_SHAPE_ALLOWED)),
+            "design_height_pattern": sorted(list(_DESIGN_HEIGHT_PATTERN_ALLOWED)),
+            "design_rotation_deg_range": [-15, 15],
+        },
+        "site": site_payload,
+        "latitude_deg": latitude_deg,
+        "target_bra_m2": target_bra_m2,
+        "fields": field_payload,
+        "response_format": {
+            "df_directives": {
+                "<field_id>": {
+                    "design_variant": "single|varied|rotated (only for LAMELL)",
+                    "design_karre_shape": "uo|l|t|z (only for KARRE)",
+                    "design_height_pattern": "uniform|accent|stepped|paired (only for PUNKTHUS)",
+                    "design_rotation_deg": "number in [-15, 15] or null",
+                    "design_reasoning": "short string, one sentence"
+                }
+            },
+            "global_reasoning": "one paragraph"
+        },
+    }
+
+    system_prompt = (
+        "You are the design-directive AI for a Nordic masterplan engine. "
+        "For each delfelt you assign design variants that the deterministic "
+        "geometry engine will realize. Never invent field ids. Never generate "
+        "coordinates. Stay within the 'allowed' lists in the payload. "
+        "Think like a Nordic architect: prefer east-west lamell orientations "
+        "for sun, cluster punkthus rather than line them up, use varied "
+        "lengths and subtle rotations to break monotony on large fields, and "
+        "reserve L/T/Z karré shapes for narrow fields where O/U would not "
+        "fit. Keep rotations small (±3–8°). Return JSON only."
+    )
+
+    raw = _anthropic_json_call(
+        system_prompt=system_prompt,
+        user_payload=payload,
+        api_key=api_key,
+        model=model,
+        max_tokens=2400,
+    )
+    source = "anthropic_pass3" if raw else "fallback"
+
+    if not raw or "df_directives" not in raw:
+        logger.warning("Pass 3 design AI did not return directives — keeping motor defaults.")
+        return list(base_fields), source
+
+    directives = raw.get("df_directives") or {}
+    if not isinstance(directives, dict):
+        logger.warning("Pass 3 design AI returned non-dict df_directives — ignoring.")
+        return list(base_fields), "fallback"
+
+    enriched: List[Delfelt] = []
+    applied_count = 0
+    for f in base_fields:
+        dct = directives.get(f.field_id) or {}
+        if not isinstance(dct, dict):
+            enriched.append(f)
+            continue
+
+        # Sanitize alle felt
+        variant = dct.get("design_variant")
+        if variant is not None and variant not in _DESIGN_VARIANT_ALLOWED:
+            variant = None
+
+        karre_shape = dct.get("design_karre_shape")
+        if karre_shape is not None and karre_shape not in _DESIGN_KARRE_SHAPE_ALLOWED:
+            karre_shape = None
+
+        hp = dct.get("design_height_pattern")
+        if hp is not None and hp not in _DESIGN_HEIGHT_PATTERN_ALLOWED:
+            hp = None
+
+        rot = dct.get("design_rotation_deg")
+        try:
+            rot_val: Optional[float] = float(rot) if rot is not None else None
+            if rot_val is not None:
+                rot_val = max(-15.0, min(15.0, rot_val))
+        except (TypeError, ValueError):
+            rot_val = None
+
+        reasoning = dct.get("design_reasoning")
+        reasoning_str = str(reasoning)[:300] if reasoning else None
+
+        # Kun anvend direktiv som matcher typologi
+        if f.typology == Typology.LAMELL:
+            applied_variant = variant
+            applied_shape = None
+            applied_hp = None
+        elif f.typology == Typology.KARRE:
+            applied_variant = None
+            applied_shape = karre_shape
+            applied_hp = None
+        elif f.typology == Typology.PUNKTHUS:
+            applied_variant = None
+            applied_shape = None
+            applied_hp = hp
+        else:
+            applied_variant = None
+            applied_shape = None
+            applied_hp = None
+
+        new_field = Delfelt(
+            field_id=f.field_id,
+            polygon=f.polygon,
+            typology=f.typology,
+            orientation_deg=f.orientation_deg,
+            floors_min=f.floors_min,
+            floors_max=f.floors_max,
+            target_bra=f.target_bra,
+            courtyard_kind=f.courtyard_kind,
+            tower_size_m=f.tower_size_m,
+            phase=f.phase,
+            phase_label=f.phase_label,
+            design_variant=applied_variant,
+            design_karre_shape=applied_shape,
+            design_height_pattern=applied_hp,
+            design_rotation_deg=rot_val,
+            design_reasoning=reasoning_str,
+        )
+        enriched.append(new_field)
+        if applied_variant or applied_shape or applied_hp or rot_val is not None:
+            applied_count += 1
+
+    logger.warning(
+        "Pass 3 design directives: %d/%d fields got AI-specific direction (source=%s).",
+        applied_count, len(base_fields), source,
+    )
+    return enriched, source
+
+
+# ---------------------------------------------------------------------------
 # Pass 3 / 4 / 5 — deterministic core
 # ---------------------------------------------------------------------------
 
@@ -551,7 +755,24 @@ def plan_masterplan_geometry(
         ai_selector=ai_selector,
     )
 
-    buildings, bra_deficit = pass3_place_buildings(buildable_poly, configured_fields, rules, barnehage_config)
+    # AI-pass 3 design-direktiv: beriker delfelter med arkitektoniske
+    # variant-direktiver (rotert/varied lamell, L/T/Z karré, høydegradient).
+    # Motoren bruker disse som sterk preferanse i plassering. Hvis AI ikke er
+    # tilgjengelig eller returnerer ugyldige direktiv, beholder vi konfigurerte
+    # felt som de er — motoren faller da tilbake til sine default-valg.
+    try:
+        enriched_fields, pass3_design_source = pass3_design_directives(
+            configured_fields,
+            buildable_poly=buildable_poly,
+            latitude_deg=latitude_deg,
+            target_bra_m2=target_bra_m2,
+        )
+    except Exception as exc:
+        logger.warning("pass3_design_directives failed, keeping unmodified fields: %s", exc)
+        enriched_fields = configured_fields
+        pass3_design_source = "error"
+
+    buildings, bra_deficit = pass3_place_buildings(buildable_poly, enriched_fields, rules, barnehage_config)
     total_bra = sum(b.bra_m2 for b in buildings)
     total_bya = sum(b.footprint_m2 for b in buildings)
     units = int(round(total_bra / avg_unit_bra_m2)) if avg_unit_bra_m2 > 0 else 0
@@ -566,7 +787,7 @@ def plan_masterplan_geometry(
     )
     plan = Masterplan(
         concept_family=concept_family,
-        delfelt=list(configured_fields),
+        delfelt=list(enriched_fields),
         bygg=list(buildings),
         sol_report=sol_report,
         mua_report=MUAReport(),
