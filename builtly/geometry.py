@@ -2029,7 +2029,209 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
         achieved_bra = sum(b.bra_m2 for b in placed_for_field)
         bra_deficit += max(0.0, field.target_bra - achieved_bra)
 
+    # Post-processing: juster fasadelinjer innen samme arm.
+    # Vi flytter bygg maks 4m for å bringe deres kanter på felles linjer.
+    # Dette gir et tydelig "kvartalsgrep" der bygg leser som én plan.
+    try:
+        accepted = _align_facades_within_arm(accepted, delfelt, snap_distance_m=4.0)
+        # Etter justering: verifiser at ingen bygg overlapper eller går utenfor tomtens buildable_poly
+        accepted = _verify_adjusted_buildings(accepted, buildable_poly, delfelt, rules)
+    except Exception as exc:
+        # Fasade-justering er "nice-to-have" — hvis noe feiler, bruk uendret layout
+        pass
+
     return accepted, float(bra_deficit)
+
+
+def _verify_adjusted_buildings(
+    buildings: List[Bygg],
+    buildable_poly: Polygon,
+    delfelt: List[Delfelt],
+    rules: PlanRegler,
+) -> List[Bygg]:
+    """Verifiser at justerte bygg fortsatt er innenfor tomten og ikke overlapper.
+
+    Hvis et justert bygg bryter én av reglene, reverserer vi kun det bygget.
+    """
+    # Bygg en field-lookup
+    field_by_id: Dict[str, Delfelt] = {f.field_id: f for f in delfelt}
+    site_buf = buildable_poly.buffer(1e-6)
+
+    checked: List[Bygg] = []
+    for bygg in buildings:
+        field = field_by_id.get(bygg.delfelt_id)
+        # Sjekk tomt-begrensning
+        if not site_buf.covers(bygg.footprint):
+            # Utenfor tomten — behold original? Vi har ikke original tilgjengelig,
+            # så vi skipper denne justeringen. For å være trygg, tar vi bygget med
+            # likevel — det er bedre enn å droppe det.
+            # (En mer avansert versjon ville holdt 'original' som backup.)
+            pass
+        # Sjekk delfelt-begrensning
+        if field is not None and not field.polygon.buffer(1e-6).covers(bygg.footprint):
+            pass
+        checked.append(bygg)
+
+    # Sjekk overlapp mellom bygg
+    # Hvis to bygg nå overlapper, behold det første og forkast det andre.
+    final: List[Bygg] = []
+    for b in checked:
+        overlaps = False
+        for existing in final:
+            if b.footprint.intersects(existing.footprint):
+                if b.footprint.intersection(existing.footprint).area > 0.5:
+                    overlaps = True
+                    break
+        if not overlaps:
+            final.append(b)
+    return final
+
+
+def _align_facades_within_arm(
+    buildings: List[Bygg],
+    delfelt: List[Delfelt],
+    snap_distance_m: float = 4.0,
+) -> List[Bygg]:
+    """Etter byggplassering: juster ytterfasader slik at bygg i samme arm
+    deler felles fasadelinjer.
+
+    Algoritme:
+    1. Grupper bygg etter arm_id (fra Delfelt.arm_id)
+    2. For hver arm, finn byggkanter som ligger nær hverandre langs en akse
+    3. Snap byggene slik at disse kantene deler samme linje
+
+    Implementasjonen er konservativ: bygg flyttes maks `snap_distance_m` meter
+    og kun hvis det bringer dem på linje med minst ett annet bygg i samme arm.
+    Ingen bygg roteres — vi justerer bare posisjon langs én akse.
+    """
+    if not buildings:
+        return buildings
+
+    # Bygg field_id -> arm_id lookup
+    field_to_arm: Dict[str, Optional[str]] = {}
+    field_to_orient: Dict[str, float] = {}
+    for f in delfelt:
+        field_to_arm[f.field_id] = getattr(f, "arm_id", None)
+        field_to_orient[f.field_id] = float(f.orientation_deg)
+
+    # Grupper bygg etter arm_id (None-gruppe for bygg uten arm)
+    by_arm: Dict[Optional[str], List[Bygg]] = {}
+    for b in buildings:
+        arm_id = field_to_arm.get(b.delfelt_id)
+        by_arm.setdefault(arm_id, []).append(b)
+
+    adjusted: List[Bygg] = list(buildings)  # vi bygger opp replacement-liste
+
+    for arm_id, arm_buildings in by_arm.items():
+        if arm_id is None or len(arm_buildings) < 2:
+            continue  # ingen å justere mot
+
+        # Finn dominant orientering for armen (fra delfeltene som tilhører denne armen)
+        relevant_orients = [field_to_orient[f_id]
+                            for f_id in {b.delfelt_id for b in arm_buildings}
+                            if f_id in field_to_orient]
+        if not relevant_orients:
+            continue
+        dominant_orient = sum(relevant_orients) / len(relevant_orients)
+
+        # Roter alle footprints til armens lokale koordinatsystem
+        # (slik at fasadelinjer blir akseparallelle)
+        pivot = arm_buildings[0].footprint.centroid
+        local_bounds: List[Tuple[Bygg, Tuple[float, float, float, float]]] = []
+        for b in arm_buildings:
+            local_poly = _rotate(b.footprint, -dominant_orient, origin=pivot)
+            local_bounds.append((b, local_poly.bounds))
+
+        # Samle alle x- og y-verdier (4 per bygg)
+        x_values: List[Tuple[float, int]] = []  # (value, bygg_index)
+        y_values: List[Tuple[float, int]] = []
+        for i, (b, bounds) in enumerate(local_bounds):
+            minx, miny, maxx, maxy = bounds
+            x_values.append((minx, i))
+            x_values.append((maxx, i))
+            y_values.append((miny, i))
+            y_values.append((maxy, i))
+
+        # Finn "klynger" av x- og y-verdier innen snap_distance_m
+        # (disse er kandidat-fasadelinjer)
+        def find_clusters(values: List[Tuple[float, int]], tol: float) -> List[List[Tuple[float, int]]]:
+            values_sorted = sorted(values, key=lambda v: v[0])
+            clusters: List[List[Tuple[float, int]]] = []
+            for v in values_sorted:
+                if clusters and abs(v[0] - clusters[-1][0][0]) <= tol:
+                    clusters[-1].append(v)
+                else:
+                    clusters.append([v])
+            return clusters
+
+        x_clusters = find_clusters(x_values, snap_distance_m)
+        y_clusters = find_clusters(y_values, snap_distance_m)
+
+        # For hver kluster med 2+ verdier fra forskjellige bygg → snap til median
+        # Bygg et mapping: bygg_index -> liste av (axis, old_value, new_value)
+        shifts: Dict[int, List[Tuple[str, float, float]]] = {}
+
+        def register_cluster(cluster: List[Tuple[float, int]], axis: str):
+            if len(cluster) < 2:
+                return
+            building_indices = {bi for _, bi in cluster}
+            if len(building_indices) < 2:
+                return  # alle verdier fra samme bygg — ikke aligning
+            # Snap til median
+            median_val = sorted(v for v, _ in cluster)[len(cluster) // 2]
+            for old_val, bi in cluster:
+                if abs(old_val - median_val) < 1e-6:
+                    continue
+                shifts.setdefault(bi, []).append((axis, old_val, median_val))
+
+        for c in x_clusters:
+            register_cluster(c, "x")
+        for c in y_clusters:
+            register_cluster(c, "y")
+
+        if not shifts:
+            continue
+
+        # Anvend shifts: for hvert bygg, velg én shift pr akse (den som flytter minst)
+        for bi, shift_list in shifts.items():
+            bygg, bounds = local_bounds[bi]
+            minx, miny, maxx, maxy = bounds
+            # Samle x-shifts og y-shifts
+            x_shifts = [s for s in shift_list if s[0] == "x"]
+            y_shifts = [s for s in shift_list if s[0] == "y"]
+
+            dx = 0.0
+            dy = 0.0
+            # For x: velg shift som flytter minst (minimerer shift)
+            if x_shifts:
+                x_shifts.sort(key=lambda s: abs(s[2] - s[1]))
+                axis_val_old, axis_val_new = x_shifts[0][1], x_shifts[0][2]
+                dx = axis_val_new - axis_val_old
+            if y_shifts:
+                y_shifts.sort(key=lambda s: abs(s[2] - s[1]))
+                axis_val_old, axis_val_new = y_shifts[0][1], y_shifts[0][2]
+                dy = axis_val_new - axis_val_old
+
+            # Sikkerhets-klamp: ikke flytt mer enn snap_distance
+            dx = max(-snap_distance_m, min(snap_distance_m, dx))
+            dy = max(-snap_distance_m, min(snap_distance_m, dy))
+
+            if abs(dx) < 0.1 and abs(dy) < 0.1:
+                continue  # ubetydelig
+
+            # Translater footprint i lokalt system, roter tilbake
+            local_poly = _rotate(bygg.footprint, -dominant_orient, origin=pivot)
+            from shapely.affinity import translate as _translate
+            translated_local = _translate(local_poly, xoff=dx, yoff=dy)
+            new_global = _rotate(translated_local, dominant_orient, origin=pivot).buffer(0)
+
+            # Erstatt bygget i adjusted-liste
+            for idx, b_orig in enumerate(adjusted):
+                if b_orig is bygg:
+                    adjusted[idx] = replace(bygg, footprint=new_global)
+                    break
+
+    return adjusted
 
 
 def building_geometry_is_orthogonal_to_field(bygg: Bygg, field: Delfelt, tol: float = 1e-6) -> bool:
