@@ -1075,11 +1075,14 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                 footprints_single.append(rect)
 
             # Variant B: varierte lengder per rad (flere bygg med miks av lengder)
+            # Estetikk: hev minimum lengde til 30m for varied, slik at vi unngår
+            # for korte "stubbe-bygg" som ser arkitektonisk dårlige ut.
             footprints_varied: List[Polygon] = []
+            aesthetic_min_length = max(spec.length_m.min_m, 30.0)
             for off in offsets:
                 y0 = miny + off
                 rects = _fit_varied_lameller_in_segment(
-                    local_poly, y0, depth, spec.length_m.min_m, spec.length_m.max_m,
+                    local_poly, y0, depth, aesthetic_min_length, spec.length_m.max_m,
                     min_spacing=6.0,
                 )
                 footprints_varied.extend(rects)
@@ -1118,21 +1121,38 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
             # med varierte etasjer slik at silhuetten blir trappet. For en rad
             # med 2+ bygg gir dette visuell rytme. For 1 bygg faller det
             # tilbake til single.
+            # Character-bevisst: hvis feltet er 'neighborhood_edge', bruker vi
+            # neighbor_step_down slik at lavest etasje er mot nabosida.
+            # Hvis vi kjenner nabohøyden, klamper vi den laveste etasjen slik
+            # at vi ikke rager mye høyere enn naboen på den siden.
             footprints_terraced: List[Polygon] = []
             floors_terraced: List[int] = []
             valid_terraced = valid_single and len(footprints_single) >= 2
             if valid_terraced:
-                # Basis-etasjetall (samme som single ville ha fått)
                 total_fp = sum(p.area for p in footprints_single)
                 base_floors = int(round(field.target_bra / total_fp)) if field.target_bra > 0 and total_fp > 0 else field.floors_min
                 base_floors = max(field.floors_min, min(field.floors_max, base_floors))
-                # Trapp-mønster: stepped gir gradvis trapp (f.eks. 5-6-7 eller 7-6-5)
+                # Velg trapp-mønster basert på feltets character
+                field_char = getattr(field, "character", None)
+                # Beregn effektiv min-etasje basert på nabohøyde
+                # Regel: lavest tillatte etasje = max(floors_min, naboens etasjer + 1)
+                # Dette gjør at vi "møter" naboen uten å være betydelig høyere.
+                effective_floors_min = field.floors_min
+                max_neighbor_h = getattr(field, "max_neighbor_height_m", None)
+                if field_char == "neighborhood_edge" and max_neighbor_h is not None and max_neighbor_h > 0:
+                    neighbor_equivalent_floors = max(1, int(round(max_neighbor_h / 3.2)))
+                    # Vi kan være 1 etasje over naboen uten å dominere
+                    effective_floors_min = max(field.floors_min,
+                                                min(field.floors_max,
+                                                    neighbor_equivalent_floors + 1))
+                if field_char == "neighborhood_edge":
+                    variation_mode = "neighbor_step_up"
+                else:
+                    variation_mode = "stepped"
                 floors_terraced = _varied_floors_for_cluster(
                     len(footprints_single), base_floors,
-                    field.floors_min, field.floors_max, variation="stepped"
+                    effective_floors_min, field.floors_max, variation=variation_mode
                 )
-                # Hvis stepped-mønsteret er identisk (kun én etasjeverdi), faller
-                # det effektivt tilbake til single — da er det ikke meningsfullt
                 if len(set(floors_terraced)) < 2:
                     valid_terraced = False
                 else:
@@ -1211,7 +1231,28 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
         if design_variant is not None and variant == design_variant:
             directive_bonus = -(field.target_bra * 0.05)
 
-        return (bra_score + solar_penalty + variation_bonus + directive_bonus, -item.total_bra, len(item.footprints))
+        # Character-bonus: feltets kontekstuelle karakter påvirker hvilke
+        # varianter som foretrekkes (i tillegg til AI-direktiv). Liten bonus
+        # (3%) som bare virker som tie-breaker. Sum av ideelle bonuses per
+        # character:
+        #   street_facing → terraced/rotated (markant)
+        #   sheltered     → single (rolig)
+        #   neighborhood_edge → terraced (trapper mot naboen)
+        #   open_view     → ingen spesifikk preferanse for lamell
+        character_bonus = 0.0
+        field_char = getattr(field, "character", None)
+        if field_char == "street_facing":
+            if variant in ("terraced", "rotated") and len(item.footprints) >= 2:
+                character_bonus = -(field.target_bra * 0.03)
+        elif field_char == "sheltered":
+            if variant == "single":
+                character_bonus = -(field.target_bra * 0.03)
+        elif field_char == "neighborhood_edge":
+            if variant == "terraced" and len(item.footprints) >= 2:
+                character_bonus = -(field.target_bra * 0.04)
+
+        return (bra_score + solar_penalty + variation_bonus + directive_bonus + character_bonus,
+                -item.total_bra, len(item.footprints))
 
     return min(candidates, key=combined_score)
 
@@ -1230,8 +1271,12 @@ def _varied_floors_for_cluster(
       - "stepped":  trappet gradient (f.eks. 4-5-6-7)
       - "paired":   par av høyder (4-6-4-6)
       - "uniform":  alle samme som base_floors (fallback, ingen variasjon)
+      - "neighbor_step_down": trapper NED mot nabosida (bygg 0 lavest, siste høyest)
+        — brukes av neighborhood_edge-felt for å respondere i skala
+      - "neighbor_step_up": trapper OPP mot nabosida (bygg 0 høyest, siste lavest)
 
     Alle returnerte verdier er innenfor [floors_min, floors_max].
+    Total BRA bevares (sum ≈ base_floors * n_buildings).
     """
     if n_buildings <= 0:
         return []
@@ -1239,6 +1284,44 @@ def _varied_floors_for_cluster(
 
     if variation == "uniform" or n_buildings == 1:
         return [clamp(base_floors)] * n_buildings
+
+    if variation in ("neighbor_step_down", "neighbor_step_up"):
+        # Trapping med retning — identisk med 'stepped' men definert retning
+        # rather than ascending index.
+        if n_buildings == 2:
+            low, high = clamp(base_floors - 1), clamp(base_floors + 1)
+            return [low, high] if variation == "neighbor_step_down" else [high, low]
+        # 3+ bygg: symmetrisk trapp
+        span = min(3, floors_max - floors_min)
+        half = span / 2.0
+        steps = []
+        for i in range(n_buildings):
+            frac = i / (n_buildings - 1)
+            offset = -half + frac * span
+            floors = base_floors + round(offset)
+            steps.append(clamp(floors))
+        # Reverser hvis step_up (bygg 0 er nabosida, skal være høyest)
+        if variation == "neighbor_step_up":
+            steps = steps[::-1]
+        # BRA-bevaring (samme som 'stepped')
+        current_sum = sum(steps)
+        target_sum = base_floors * n_buildings
+        diff = target_sum - current_sum
+        if diff > 0:
+            for _ in range(diff):
+                candidates = [(f, i) for i, f in enumerate(steps) if f < floors_max]
+                if not candidates:
+                    break
+                _, idx = min(candidates)
+                steps[idx] += 1
+        elif diff < 0:
+            for _ in range(-diff):
+                candidates = [(f, i) for i, f in enumerate(steps) if f > floors_min]
+                if not candidates:
+                    break
+                _, idx = max(candidates)
+                steps[idx] -= 1
+        return steps
 
     if variation == "accent":
         # Én aksent-bygg 2 etasjer høyere, resten baseline minus litt for å
