@@ -88,6 +88,10 @@ class Delfelt:
     design_height_pattern: Optional[str] = None      # "uniform" | "accent" | "stepped" | "paired" — for PUNKTHUS
     design_rotation_deg: Optional[float] = None       # små vinkler, -15..+15
     design_reasoning: Optional[str] = None            # AI sin forklaring, for logging
+    # Pass 0 kontekst — tildelt av kontekstuell delfelt-inndeling
+    arm_id: Optional[str] = None                     # hvilken "arm" dette feltet tilhører
+    character: Optional[str] = None                  # FieldCharacter som string
+    max_neighbor_height_m: Optional[float] = None    # gjennomsnittshøyde av nabobygg nær dette feltet
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,6 +111,9 @@ class Delfelt:
             "design_height_pattern": self.design_height_pattern,
             "design_rotation_deg": self.design_rotation_deg,
             "design_reasoning": self.design_reasoning,
+            "arm_id": self.arm_id,
+            "character": self.character,
+            "max_neighbor_height_m": self.max_neighbor_height_m,
         }
 
     @classmethod
@@ -128,6 +135,9 @@ class Delfelt:
             design_height_pattern=data.get("design_height_pattern"),
             design_rotation_deg=data.get("design_rotation_deg"),
             design_reasoning=data.get("design_reasoning"),
+            arm_id=data.get("arm_id"),
+            character=data.get("character"),
+            max_neighbor_height_m=data.get("max_neighbor_height_m"),
         )
 
 
@@ -378,3 +388,145 @@ class Masterplan:
 
 class StructuredPassClient(Protocol):
     def __call__(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]: ...
+
+
+# =========================================================================
+# SiteContext — pass 0: tomtens "intelligens"
+# =========================================================================
+# Pass 0 analyserer tomtens geometri OG nabolagsdata før delfeltene lages.
+# Resultatet er en strukturert beskrivelse som pass 1 (delfeltinndeling),
+# pass 2 (parametervalg) og AI-pass 3 (designdirektiver) kan bruke for å
+# gi kontekstuelt gode svar i stedet for generiske.
+
+
+class EdgeCharacter(str, Enum):
+    """Karakteren av en tomtgrense — sett fra innsiden av tomten."""
+    STREET = "street"              # vender mot offentlig vei
+    NEIGHBOR_DENSE = "neighbor_dense"    # tett nabobebyggelse
+    NEIGHBOR_SPARSE = "neighbor_sparse"  # spredt nabobebyggelse
+    OPEN = "open"                  # åpen mark / park / ingenting
+    UNKNOWN = "unknown"            # kunne ikke bestemme
+
+
+class FieldCharacter(str, Enum):
+    """Kontekstuell karakter tildelt et delfelt etter pass 0."""
+    STREET_FACING = "street_facing"      # prominent mot vei/torg — bør ha markant form
+    NEIGHBORHOOD_EDGE = "neighborhood_edge"  # mot naboboliger — bør respondere i skala
+    SHELTERED = "sheltered"              # innvendig i tomt — rolig, kan eksperimentere
+    OPEN_VIEW = "open_view"              # mot åpen mark/park — kan ha lavere BYA
+    CORNER = "corner"                    # hjørne-posisjon — ofte ekstra markant
+
+
+@dataclass
+class SiteEdge:
+    """Én kant av tomtens yttergrense med retning og karakter."""
+    # Kantens to endepunkter
+    p0: Tuple[float, float]
+    p1: Tuple[float, float]
+    # Lengde (meter)
+    length_m: float
+    # Retning normalen peker i (utover fra tomten), grader 0-360 fra nord,
+    # klokkeretning (0=N, 90=Ø, 180=S, 270=V)
+    outward_bearing_deg: float
+    # Karakter — fastsatt fra naboanalyse
+    character: EdgeCharacter = EdgeCharacter.UNKNOWN
+    # Hvor mange nabobygg som "tilhører" denne kanten (innenfor 25m buffer)
+    neighbor_count: int = 0
+    # Gjennomsnittlig høyde på nabobygg langs denne kanten (meter)
+    # None = ingen naboer eller ikke tilgjengelig
+    avg_neighbor_height_m: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "p0": list(self.p0),
+            "p1": list(self.p1),
+            "length_m": round(self.length_m, 2),
+            "outward_bearing_deg": round(self.outward_bearing_deg, 1),
+            "character": self.character.value,
+            "neighbor_count": self.neighbor_count,
+            "avg_neighbor_height_m": (round(self.avg_neighbor_height_m, 1)
+                                       if self.avg_neighbor_height_m is not None else None),
+        }
+
+
+@dataclass
+class SiteArm:
+    """En "arm" av tomten — sammenhengende del etter decomposition.
+
+    For rektangler er det én arm. For L-former to, for T-former tre osv.
+    Hver arm har sitt eget senter, areal og retning — og kan tildeles
+    sin egen karakter.
+    """
+    arm_id: str                    # f.eks. "arm_north", "arm_south"
+    polygon: Optional[Polygon]     # armens egen polygon
+    centroid: Tuple[float, float]
+    area_m2: float
+    # Retningen armen peker i fra tomtens sentrum (grader fra nord)
+    bearing_from_site_center_deg: float
+    # Arm sin dominante akse-retning (for bygg-orientering)
+    dominant_axis_deg: float
+    # Aspect ratio: lengste / korteste utstrekning
+    aspect_ratio: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "arm_id": self.arm_id,
+            "polygon_wkt": _serialize_polygon(self.polygon),
+            "centroid": list(self.centroid),
+            "area_m2": round(self.area_m2, 1),
+            "bearing_from_site_center_deg": round(self.bearing_from_site_center_deg, 1),
+            "dominant_axis_deg": round(self.dominant_axis_deg, 1),
+            "aspect_ratio": round(self.aspect_ratio, 2),
+        }
+
+
+@dataclass
+class SiteContext:
+    """Komplett output fra pass 0 — beskriver tomten arkitektonisk."""
+    # Tomtens bounding geometri
+    site_area_m2: float
+    site_centroid: Tuple[float, float]
+    site_bearing_deg: float             # dominant akse av tomten (grader fra nord)
+
+    # Dekomposisjon
+    arms: List[SiteArm] = field(default_factory=list)
+    edges: List[SiteEdge] = field(default_factory=list)
+
+    # Oppsummering
+    is_rectangular: bool = True          # True hvis ~én rektangel (enkel tomt)
+    has_arms: bool = False               # True hvis L/T/U/kompleks form
+    n_neighbors: int = 0                 # totalt antall nabobygg registrert
+
+    # Kontekst-vurdering brukbar for AI
+    dominant_view_direction: Optional[str] = None  # "south", "southwest", osv.
+    access_bearing_deg: Optional[float] = None     # hvor kommer vei/adkomst inn
+    site_label: str = "unknown"          # fritekst: "narrow_rectangle" / "l_shape" / etc.
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "site_area_m2": round(self.site_area_m2, 0),
+            "site_centroid": list(self.site_centroid),
+            "site_bearing_deg": round(self.site_bearing_deg, 1),
+            "arms": [a.to_dict() for a in self.arms],
+            "edges": [e.to_dict() for e in self.edges],
+            "is_rectangular": self.is_rectangular,
+            "has_arms": self.has_arms,
+            "n_neighbors": self.n_neighbors,
+            "dominant_view_direction": self.dominant_view_direction,
+            "access_bearing_deg": (round(self.access_bearing_deg, 1)
+                                   if self.access_bearing_deg is not None else None),
+            "site_label": self.site_label,
+        }
+
+    @classmethod
+    def empty(cls, site_poly: Optional[Polygon] = None) -> "SiteContext":
+        """Fallback hvis analysen feiler — enkel rektangel-antagelse."""
+        if site_poly is None or not HAS_SHAPELY:
+            return cls(site_area_m2=0.0, site_centroid=(0.0, 0.0), site_bearing_deg=0.0)
+        c = site_poly.centroid
+        return cls(
+            site_area_m2=float(site_poly.area),
+            site_centroid=(c.x, c.y),
+            site_bearing_deg=0.0,
+            site_label="unknown",
+        )
