@@ -93,6 +93,11 @@ class Delfelt:
     character: Optional[str] = None                  # FieldCharacter som string
     max_neighbor_height_m: Optional[float] = None    # gjennomsnittshøyde av nabobygg nær dette feltet
 
+    # v9 komposisjonslag — tildelt av pass1_generate_delfelt_from_composition
+    role: Optional[str] = None                       # "frontage_primary" / "frontage_secondary" /
+                                                     # "courtyard_side" / "accent" / "cluster"
+    facing_frontage_idx: Optional[int] = None        # index til frontage som feltet står mot
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "field_id": self.field_id,
@@ -114,6 +119,8 @@ class Delfelt:
             "arm_id": self.arm_id,
             "character": self.character,
             "max_neighbor_height_m": self.max_neighbor_height_m,
+            "role": self.role,
+            "facing_frontage_idx": self.facing_frontage_idx,
         }
 
     @classmethod
@@ -138,6 +145,8 @@ class Delfelt:
             arm_id=data.get("arm_id"),
             character=data.get("character"),
             max_neighbor_height_m=data.get("max_neighbor_height_m"),
+            role=data.get("role"),
+            facing_frontage_idx=data.get("facing_frontage_idx"),
         )
 
 
@@ -376,6 +385,10 @@ class Masterplan:
     pass2_source: str = "fallback"
     pass6_source: str = "fallback"
 
+    # v9: Komposisjonslag og arkitektur-scores
+    composition_plan: Optional[Any] = None  # CompositionPlan eller None
+    architecture_scores: Optional[Dict[str, float]] = None  # Dict fra architecture_score()
+
     def iter_buildings_for_delfelt(self, field_id: str) -> Iterable[Bygg]:
         return (bygg for bygg in self.bygg if bygg.delfelt_id == field_id)
 
@@ -530,3 +543,60 @@ class SiteContext:
             site_bearing_deg=0.0,
             site_label="unknown",
         )
+
+
+# =========================================================================
+# CompositionPlan — pass 0.5: v9 komposisjonslag
+# =========================================================================
+# compose_plan() lager en rammeplan FØR bygg plasseres, med eksplisitte
+# gatekanter, gårdsrom, siktkorridorer og aksentposisjoner. Motoren bruker
+# dette som styringsverktøy i plasseringen.
+
+
+@dataclass
+class CompositionPlan:
+    """Rammeplan for et konsept — definerer romlig hierarki før plassering."""
+    # Gatekanter: LineStrings der bygg skal ha front. Første er primær.
+    street_frontages: List[Any] = field(default_factory=list)  # LineString
+
+    # Gårdsrom: Polygons som skal være ubebygd (bygg plasseres RUNDT disse)
+    courtyards: List[Any] = field(default_factory=list)  # Polygon
+
+    # Siktkorridorer: LineStrings som bygg ikke skal blokkere
+    sight_corridors: List[Any] = field(default_factory=list)  # LineString
+
+    # Aksentposisjoner: (Point, radius) for aksent-bygg
+    accent_points: List[Tuple[Any, float]] = field(default_factory=list)
+
+    # Konsept-label for debugging
+    concept_name: str = "generic"
+
+    # Konseptspesifikke regler (brukes av place_buildings)
+    concept_rules: Dict[str, Any] = field(default_factory=dict)
+
+    def has_composition(self) -> bool:
+        """True hvis minst én komposisjonselement er definert."""
+        return (bool(self.street_frontages) or bool(self.courtyards)
+                or bool(self.accent_points))
+
+    def to_dict(self) -> Dict[str, Any]:
+        def serialize_geom(g):
+            try:
+                return g.wkt if hasattr(g, "wkt") else None
+            except Exception:
+                return None
+        return {
+            "concept_name": self.concept_name,
+            "street_frontages": [serialize_geom(f) for f in self.street_frontages],
+            "courtyards": [serialize_geom(c) for c in self.courtyards],
+            "sight_corridors": [serialize_geom(s) for s in self.sight_corridors],
+            "accent_points": [
+                {"wkt": serialize_geom(p), "radius": r}
+                for p, r in self.accent_points
+            ],
+            "concept_rules": dict(self.concept_rules),
+        }
+
+    @classmethod
+    def empty(cls, concept_name: str = "generic") -> "CompositionPlan":
+        return cls(concept_name=concept_name)
