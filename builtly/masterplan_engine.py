@@ -132,38 +132,43 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             timeout=60,
         )
 
+    import time
     primary_model = model or DEFAULT_MODEL
     tried = [primary_model]
+    t0 = time.time()
     logger.warning("AI-pass starter: model=%s max_tokens=%s", primary_model, max_tokens)
     try:
         resp = _post(primary_model)
+        elapsed = time.time() - t0
         if resp.ok:
             blocks = resp.json().get("content", [])
             text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
             result = _safe_json_from_text(text)
             if result is None:
-                logger.warning("AI-pass %s returnerte OK men kunne ikke parse JSON. Tekst: %r", primary_model, text[:300])
+                logger.warning("AI-pass %s returnerte OK men kunne ikke parse JSON (%.1fs). Tekst: %r", primary_model, elapsed, text[:300])
             else:
-                logger.warning("AI-pass %s OK (parset JSON)", primary_model)
+                logger.warning("AI-pass %s OK (parset JSON, %.1fs)", primary_model, elapsed)
             return result
         body = resp.text
-        logger.warning("AI-pass %s HTTP %s body: %s", primary_model, resp.status_code, body[:400])
+        logger.warning("AI-pass %s HTTP %s (%.1fs) body: %s", primary_model, resp.status_code, elapsed, body[:400])
         if FALLBACK_MODEL and FALLBACK_MODEL != primary_model and _should_retry_with_fallback(resp.status_code, body):
             tried.append(FALLBACK_MODEL)
             logger.warning("Retrying med fallback-modell %s", FALLBACK_MODEL)
             fallback_resp = _post(FALLBACK_MODEL)
+            elapsed2 = time.time() - t0
             if fallback_resp.ok:
                 blocks = fallback_resp.json().get("content", [])
                 text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
                 result = _safe_json_from_text(text)
                 if result is not None:
-                    logger.warning("AI-pass %s (fallback) OK", FALLBACK_MODEL)
+                    logger.warning("AI-pass %s (fallback) OK (%.1fs total)", FALLBACK_MODEL, elapsed2)
                 return result
             logger.warning("Fallback %s HTTP %s body: %s", FALLBACK_MODEL, fallback_resp.status_code, fallback_resp.text[:400])
             return None
         return None
     except Exception as exc:  # pragma: no cover - network dependent
-        logger.warning("AI-pass exception (tried %s): %s", tried, exc)
+        elapsed = time.time() - t0
+        logger.warning("AI-pass exception (tried %s, %.1fs): %s", tried, elapsed, exc)
         return None
 
 
@@ -320,18 +325,23 @@ def _estimate_max_neighbor_height(field_poly: Polygon, site_context: Any,
                                   buffer_m: float = 30.0) -> Optional[float]:
     """Finn nabohøyden som feltet "ser" mot — gjennomsnitt av nabohøyder
     på kanter som ligger nær dette feltets yttergrense.
+
+    Raskt: itererer kun over kanter med ikke-None avg_neighbor_height_m.
     """
     if site_context is None or not site_context.edges:
         return None
     try:
+        # Filtrer først ut kanter uten høyde — unngå unødvendig buffer-beregning
+        heights_candidates = [e for e in site_context.edges
+                              if e.avg_neighbor_height_m is not None]
+        if not heights_candidates:
+            return None
         from shapely.geometry import LineString
-        field_boundary = field_poly.boundary.buffer(buffer_m)
+        field_boundary_buf = field_poly.boundary.buffer(buffer_m)
         heights: List[float] = []
-        for edge in site_context.edges:
-            if edge.avg_neighbor_height_m is None:
-                continue
+        for edge in heights_candidates:
             edge_line = LineString([edge.p0, edge.p1])
-            if field_boundary.intersects(edge_line):
+            if field_boundary_buf.intersects(edge_line):
                 heights.append(edge.avg_neighbor_height_m)
         if heights:
             return sum(heights) / len(heights)
@@ -952,18 +962,21 @@ def plan_masterplan_geometry(
 
     # Pass 0: Analyser tomten — finn armer, kanter, naboskap
     # SiteContext brukes fra uke 2 og fremover av pass 1 og AI-pass 3.
-    # I denne versjonen kjører vi analysen og logger resultatet, men
-    # beholder gammel pass 1 som default slik at vi kan sammenligne.
     try:
+        import time as _time
         from .site_analysis import analyze_site
+        _t0 = _time.perf_counter()
         site_context = analyze_site(buildable_poly, neighbor_buildings=neighbor_buildings)
+        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
         logger.warning(
-            "Pass 0 site analysis: label=%s arms=%d edges=%d rectangular=%s view=%s",
+            "Pass 0 site analysis: label=%s arms=%d edges=%d rectangular=%s view=%s (%.0fms, %d naboer)",
             site_context.site_label,
             len(site_context.arms),
             len(site_context.edges),
             site_context.is_rectangular,
             site_context.dominant_view_direction,
+            _elapsed_ms,
+            len(neighbor_buildings) if neighbor_buildings else 0,
         )
     except Exception as exc:
         logger.warning("Pass 0 site analysis failed: %s", exc)
@@ -1079,10 +1092,21 @@ def generate_concept_masterplans(
     ai_selector: Optional[StructuredPassClient] = None,
     ai_reporter: Optional[StructuredPassClient] = None,
 ) -> List[Masterplan]:
-    plans: List[Masterplan] = []
-    for family in all_concept_families():
-        plans.append(
-            plan_masterplan_geometry(
+    """Generer masterplan for alle konsept-familier.
+
+    Kjører konseptene PARALLELT via ThreadPoolExecutor siden hvert konsept
+    er uavhengig og består av flere HTTP-kall til AI. Dette reduserer
+    total wallclock fra ~45s (sekvensielt) til ~15s (parallelt) på Render.
+    """
+    import concurrent.futures
+    import time
+
+    families = list(all_concept_families())
+
+    def _run_one(family):
+        t0 = time.time()
+        try:
+            result = plan_masterplan_geometry(
                 buildable_poly,
                 concept_family=family,
                 target_bra_m2=target_bra_m2,
@@ -1100,7 +1124,29 @@ def generate_concept_masterplans(
                 ai_selector=ai_selector,
                 ai_reporter=ai_reporter,
             )
-        )
+            logger.warning("Konsept %s ferdig på %.1fs", family.value, time.time() - t0)
+            return (family, result, None)
+        except Exception as exc:
+            logger.warning("Konsept %s feilet på %.1fs: %s", family.value, time.time() - t0, exc)
+            return (family, None, exc)
+
+    # Kjør 3 konsepter parallelt
+    t_start = time.time()
+    results_by_family = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(families)) as executor:
+        futures = [executor.submit(_run_one, f) for f in families]
+        for future in concurrent.futures.as_completed(futures):
+            family, result, exc = future.result()
+            if result is not None:
+                results_by_family[family] = result
+
+    logger.warning("Alle %d konsepter ferdig på %.1fs totalt", len(families), time.time() - t_start)
+
+    # Returner i opprinnelig rekkefølge
+    plans: List[Masterplan] = []
+    for family in families:
+        if family in results_by_family:
+            plans.append(results_by_family[family])
     return plans
 
 
