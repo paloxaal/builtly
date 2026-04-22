@@ -409,8 +409,8 @@ def pass2_select_field_parameters(
 # ---------------------------------------------------------------------------
 
 
-_DESIGN_VARIANT_ALLOWED = {"single", "varied", "rotated"}
-_DESIGN_KARRE_SHAPE_ALLOWED = {"uo", "l", "t", "z"}
+_DESIGN_VARIANT_ALLOWED = {"single", "varied", "rotated", "terraced"}
+_DESIGN_KARRE_SHAPE_ALLOWED = {"uo", "uo_chamfered", "l", "t", "z"}
 _DESIGN_HEIGHT_PATTERN_ALLOWED = {"uniform", "accent", "stepped", "paired"}
 
 
@@ -516,10 +516,19 @@ def pass3_design_directives(
         "fields the rotation won't fit and the field falls back to fewer "
         "buildings. Only use on fields with lots of space. "
         "\n\n"
-        "STRATEGY: Default to 'single' for Lamell and 'uo' for Karré — these "
-        "maximize BRA. Only add variation where the field is genuinely large "
-        "(site_area > 3000 m², aspect near 1:1) or where arkitektonisk "
-        "repetition across phases would feel monotonous. "
+        "LOW-COST VARIANTS (use these for architectural variation without BRA loss): "
+        "(A) Karré shape='uo_chamfered' — U/O with one corner chamfered at 45°. "
+        "Loses only ~2% BRA but adds a strong architectural gesture, perfect "
+        "for fields facing a street intersection or public space. "
+        "(B) Lamell variant='terraced' — same footprints as 'single' but with "
+        "stepped heights (e.g. 5-6-7 floors or 7-6-5). Zero BRA loss, strong "
+        "visual rhythm. Use liberally on fields with 2+ lamell rows. "
+        "\n\n"
+        "STRATEGY: Default to 'terraced' for Lamell (good variation, no cost) "
+        "and 'uo_chamfered' for Karré on prominent street-facing fields. Only "
+        "use 'single' or 'uo' if the field is too small for rhythm (1-bygg field). "
+        "Use 'varied'/'rotated'/'l'/'t'/'z' only on genuinely large fields "
+        "(site_area > 3000 m²) where architectural eccentricity is justified. "
         "\n\n"
         "Nordic sun rules: prefer east-west lamell orientations (90° angle_offset). "
         "Cluster punkthus rather than line them up (use height_pattern='accent'). "
