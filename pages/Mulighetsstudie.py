@@ -8546,7 +8546,7 @@ SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
 if "project_data" not in st.session_state:
-    st.session_state.project_data = {
+    _default_project_data = {
         "p_name": "",
         "c_name": "",
         "p_desc": "",
@@ -8559,14 +8559,45 @@ if "project_data" not in st.session_state:
         "bta": 0,
         "land": "Norge",
     }
+    # Last fra Supabase hvis aktivt prosjekt er satt (samme flyt som Project.py).
+    # Fall tilbake til lokal ssot.json hvis Supabase ikke er tilgjengelig.
+    _loaded_from_db = False
+    _active_pid = st.session_state.get("active_project_id", "")
+    if _active_pid:
+        try:
+            from builtly_projects import get_project as _get_project
+            _proj = _get_project(_active_pid)
+            if _proj and _proj.get("ssot"):
+                st.session_state.project_data = dict(_proj["ssot"])
+                _loaded_from_db = True
+                # Oppdater lokal cache for bakoverkompatibilitet
+                try:
+                    DB_DIR.mkdir(parents=True, exist_ok=True)
+                    with open(SSOT_FILE, "w", encoding="utf-8") as _f:
+                        json.dump(st.session_state.project_data, _f, ensure_ascii=False, indent=4)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if not _loaded_from_db:
+        if SSOT_FILE.exists():
+            try:
+                with open(SSOT_FILE, "r", encoding="utf-8") as f:
+                    st.session_state.project_data = json.load(f)
+            except Exception:
+                st.session_state.project_data = _default_project_data.copy()
+        else:
+            st.session_state.project_data = _default_project_data.copy()
+    # Sørg for at alle default-nøkler finnes
+    for _k, _v in _default_project_data.items():
+        if _k not in st.session_state.project_data:
+            st.session_state.project_data[_k] = _v
+
 if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
-if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
-    with open(SSOT_FILE, "r", encoding="utf-8") as f:
-        st.session_state.project_data = json.load(f)
-
-if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+_pd = st.session_state.project_data or {}
+if _pd.get("p_name") in [None, "", "Nytt Prosjekt"]:
     logo_html = (
         f'<img src="{logo_data_uri()}" class="brand-logo">'
         if logo_data_uri()
