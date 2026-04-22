@@ -792,19 +792,67 @@ def _centered_offsets(count: int, item_size: float, gap: float, total_span: floa
 
 @dataclass
 class _PlacementCandidate:
+    """En plasseringskandidat: sett av bygg med geometri, høyde og rotasjon.
+
+    Feltene floors og angle_offset_deg er bakoverkompatible "fellesverdier" for
+    hele kandidaten. For kandidater med variasjon per bygg brukes de valgfrie
+    listene `floors_per_bygg` og `angle_offset_per_bygg` (samme lengde som
+    footprints). Når listene er satt, ignoreres fellesverdiene av kaller.
+    """
     footprints: List[Polygon]
     floors: int
     angle_offset_deg: float
     total_bra: float
     total_footprint: float
+    floors_per_bygg: Optional[List[int]] = None
+    angle_offset_per_bygg: Optional[List[float]] = None
+
+    def floors_at(self, idx: int) -> int:
+        if self.floors_per_bygg is not None and 0 <= idx < len(self.floors_per_bygg):
+            return self.floors_per_bygg[idx]
+        return self.floors
+
+    def angle_offset_at(self, idx: int) -> float:
+        if self.angle_offset_per_bygg is not None and 0 <= idx < len(self.angle_offset_per_bygg):
+            return self.angle_offset_per_bygg[idx]
+        return self.angle_offset_deg
 
 
-def _evaluate_candidate(footprints: List[Polygon], target_bra: float, floors_range: Tuple[int, int]) -> Optional[_PlacementCandidate]:
+def _evaluate_candidate(
+    footprints: List[Polygon],
+    target_bra: float,
+    floors_range: Tuple[int, int],
+    floors_per_bygg: Optional[List[int]] = None,
+    angle_offset_per_bygg: Optional[List[float]] = None,
+) -> Optional[_PlacementCandidate]:
+    """Bygg en _PlacementCandidate fra footprints og målverdier.
+
+    Hvis floors_per_bygg er satt, brukes den direkte (ingen beregning av
+    fellesfloors). Ellers beregnes floors fra target_bra / total_footprint
+    og klampes til floors_range som før.
+    """
     if not footprints:
         return None
     total_fp = sum(p.area for p in footprints)
     if total_fp <= 0:
         return None
+
+    if floors_per_bygg is not None and len(floors_per_bygg) == len(footprints):
+        # Per-bygg-floors: clamp hver til floors_range, beregn BRA direkte
+        clamped = [max(floors_range[0], min(floors_range[1], int(f))) for f in floors_per_bygg]
+        total_bra = sum(fp.area * fl for fp, fl in zip(footprints, clamped))
+        # Fellesfloors = avrundet gjennomsnitt, bare som "representativ" verdi
+        avg_floors = int(round(sum(clamped) / len(clamped)))
+        return _PlacementCandidate(
+            footprints=footprints,
+            floors=avg_floors,
+            angle_offset_deg=0.0,
+            total_bra=total_bra,
+            total_footprint=total_fp,
+            floors_per_bygg=clamped,
+            angle_offset_per_bygg=angle_offset_per_bygg,
+        )
+
     floors = int(round(target_bra / total_fp)) if target_bra > 0 else floors_range[0]
     floors = max(floors_range[0], min(floors_range[1], floors))
     return _PlacementCandidate(
@@ -813,7 +861,147 @@ def _evaluate_candidate(footprints: List[Polygon], target_bra: float, floors_ran
         angle_offset_deg=0.0,
         total_bra=total_fp * floors,
         total_footprint=total_fp,
+        floors_per_bygg=None,
+        angle_offset_per_bygg=angle_offset_per_bygg,
     )
+
+
+def _fit_varied_lameller_in_segment(
+    poly: Polygon,
+    y0: float,
+    depth_m: float,
+    min_length: float,
+    max_length: float,
+    min_spacing: float = 6.0,
+) -> List[Polygon]:
+    """Plasser flere lameller side om side i en horisontal strip.
+
+    I stedet for å plassere ett stort rektangel per rad (som _fit_rect_in_segment)
+    deler vi raden i mindre bygg. Dette gir variasjon i lengde som arkitekter
+    typisk foretrekker: blandet 30/45/55m i stedet for tre identiske 60m bygg.
+
+    Strategien:
+      1. Hent den tilgjengelige striplengden fra intersection med segmentet.
+      2. Velg et "målsett" av bygg-lengder som summerer opp til tilgjengelig
+         lengde, minus mellomrom.
+      3. Plasser byggene fortløpende fra venstre.
+    """
+    from shapely.geometry import box as _box
+    minx, miny, maxx, maxy = poly.bounds
+    strip = _box(minx - 1_000.0, y0, maxx + 1_000.0, y0 + depth_m)
+    inter = poly.intersection(strip)
+    pieces = _flatten_polygons(inter)
+    result: List[Polygon] = []
+
+    for piece in pieces:
+        px0, py0, px1, py1 = piece.bounds
+        avail_x = px1 - px0
+        if avail_x + 1e-6 < min_length:
+            continue
+
+        # Bestem hvor mange bygg som får plass + deres lengder
+        # Vi prøver å ha 1-3 bygg per rad, med varierte lengder der mulig.
+        lengths = _varied_lengths_for_strip(avail_x, min_length, max_length, min_spacing)
+        if not lengths:
+            # Fallback: ett rektangel som før
+            rect = _fit_rect_in_segment(piece, y0, depth_m, min_length, max_length)
+            if rect is not None:
+                result.append(rect)
+            continue
+
+        # Plasser byggene. Fordel ledig plass som mellomrom mellom dem.
+        total_building_length = sum(lengths)
+        total_gap = avail_x - total_building_length
+        n_gaps = max(1, len(lengths) - 1)
+        # Inntrukket fra kanter: bruk litt margin i endene og resten mellom bygg
+        edge_margin = max(0.0, min(total_gap * 0.3 / 2.0, 6.0))
+        between_gap = (total_gap - 2 * edge_margin) / n_gaps if n_gaps > 0 else 0.0
+        between_gap = max(min_spacing, between_gap)
+
+        x_cursor = px0 + edge_margin
+        piece_buf = piece.buffer(1e-6)
+        for L in lengths:
+            if x_cursor + L > px1 + 1e-6:
+                break
+            rect = _box(snap_value(x_cursor), y0, snap_value(x_cursor + L), y0 + depth_m)
+            if piece_buf.covers(rect):
+                result.append(rect)
+            x_cursor += L + between_gap
+    return result
+
+
+def _varied_lengths_for_strip(
+    available: float,
+    min_length: float,
+    max_length: float,
+    min_spacing: float,
+) -> List[float]:
+    """Foreslå varierte lamell-lengder som passer i en gitt lengde.
+
+    Returnerer en liste av 1–3 lengder. Hvis tilgjengelig plass er stor nok til
+    flere bygg, prøver vi å mikse lengder (short/medium/long) i stedet for å
+    gjenta samme lengde. Hvis plassen er knapp, returneres én lengde på
+    tilgjengelig størrelse.
+    """
+    if available + 1e-6 < min_length:
+        return []
+
+    short = min_length  # typisk 30m
+    long_ = max_length  # typisk 60m
+    medium = (short + long_) / 2.0  # typisk 45m
+
+    # 3 bygg: trenger plass til 3 × min + 2 × spacing
+    three_min = 3 * short + 2 * min_spacing
+    # 2 bygg: trenger plass til 2 × min + 1 × spacing
+    two_min = 2 * short + 1 * min_spacing
+
+    if available + 1e-6 >= three_min + (medium - short) * 2:
+        # Stor plass: 3 bygg med varierte lengder
+        # Velg lengder slik at sum + 2*spacing ≈ available
+        target_sum = available - 2 * min_spacing
+        # Prøv {short, medium, long} eller {short, long, medium}, velg beste fit
+        candidates = [
+            [short, medium, long_],
+            [short, long_, medium],
+            [medium, short, long_],
+        ]
+        best = None
+        best_waste = float("inf")
+        for combo in candidates:
+            total = sum(combo)
+            # Krymp lengdene proporsjonalt hvis for langt
+            if total > target_sum:
+                scale = target_sum / total
+                scaled = [max(short, L * scale) for L in combo]
+                total = sum(scaled)
+                if total > target_sum + 1e-6:
+                    continue
+                combo = scaled
+            waste = target_sum - total
+            if waste < best_waste:
+                best = combo
+                best_waste = waste
+        if best is not None:
+            return [snap_value(L) for L in best]
+
+    if available + 1e-6 >= two_min + (long_ - short) * 0.5:
+        # Middels plass: 2 bygg med varierte lengder
+        target_sum = available - min_spacing
+        # Prøv (short, long) eller (medium, medium)
+        if target_sum >= short + long_:
+            return [snap_value(short), snap_value(min(long_, target_sum - short))]
+        if target_sum >= 2 * medium:
+            return [snap_value(medium), snap_value(target_sum - medium)]
+        # Fallback: del i to like
+        half = target_sum / 2.0
+        if half >= short:
+            return [snap_value(half), snap_value(half)]
+
+    # Liten plass: ett bygg på maksimal lengde som passer
+    single_length = min(long_, available)
+    if single_length >= min_length:
+        return [snap_value(single_length)]
+    return []
 
 
 def _choose_best(candidates: List[_PlacementCandidate], target_bra: float) -> Optional[_PlacementCandidate]:
@@ -865,30 +1053,87 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
         width = maxx - minx
         height = maxy - miny
         depth = spec.depth_m.midpoint() if spec.depth_m else 13.0
-        spacing = max(8.0, spec.min_spacing_m * _height_for(Typology.LAMELL, field.floors_max))
+        # Legg på en liten margin (1m) i spacing for å unngå at snap-til-grid
+        # drar plasseringen under kravet i _building_spacing_ok. Uten dette
+        # vil snap runde ned 23.04 -> 23.0 og forkaste bygg nr 2.
+        spacing = max(8.0, spec.min_spacing_m * _height_for(Typology.LAMELL, field.floors_max) + 1.0)
         max_rows = max(1, min(4, int((height + spacing) // (depth + spacing))))
         for rows in range(1, max_rows + 1):
             offsets = _centered_offsets(rows, depth, spacing, height)
             if offsets is None:
                 continue
-            footprints: List[Polygon] = []
-            valid = True
+
+            # Variant A: én lang lamell per rad (klassisk sti, garantert BRA-maks)
+            footprints_single: List[Polygon] = []
+            valid_single = True
             for off in offsets:
                 y0 = miny + off
                 rect = _fit_rect_in_segment(local_poly, y0, depth, spec.length_m.min_m, spec.length_m.max_m)
                 if rect is None:
-                    valid = False
+                    valid_single = False
                     break
-                footprints.append(rect)
-            if not valid:
-                continue
-            if angle_offset == 90.0:
-                footprints = [_rotate(p, 90.0, origin=core.centroid) for p in footprints]
-            cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max))
-            if cand:
-                cand.angle_offset_deg = angle_offset
-                candidates.append(cand)
-    # Score med sol-hensyn: vi trenger global orientering for å score.
+                footprints_single.append(rect)
+
+            # Variant B: varierte lengder per rad (flere bygg med miks av lengder)
+            footprints_varied: List[Polygon] = []
+            for off in offsets:
+                y0 = miny + off
+                rects = _fit_varied_lameller_in_segment(
+                    local_poly, y0, depth, spec.length_m.min_m, spec.length_m.max_m,
+                    min_spacing=6.0,
+                )
+                footprints_varied.extend(rects)
+
+            # Variant C: roterte lameller — kun ETT bygg får en liten vinkel
+            # som en arkitektonisk aksent. Krever at det er ekstra buffer i
+            # spacing mellom byggene, siden rotasjon bringer hjørner nærmere
+            # hverandre. Som regel betyr dette at tomtene må ha plass til
+            # mer enn spacing-kravet, og rotasjons-aksenten er en "luksus".
+            footprints_rotated: List[Polygon] = []
+            angles_rotated: List[float] = []
+            # Beregn worst-case hjørneavstand ved 6° rotasjon av ett bygg.
+            # For 60m bygg rotert 6°: hjørnet beveger seg ~sin(6°)*30 = 3.1m mot nabo.
+            small_angle = 6.0
+            import math as _math
+            rotation_reach = _math.sin(_math.radians(small_angle)) * (spec.length_m.max_m / 2.0)
+            needed_gap = spacing + 2.0 * rotation_reach  # trenger ~4m ekstra
+            valid_rotated = (
+                footprints_single
+                and len(footprints_single) >= 2
+                and height >= 2 * depth + 2 * needed_gap  # nok plass til å rotere trygt
+            )
+            if valid_rotated:
+                accent_idx = 0
+                for i, fp in enumerate(footprints_single):
+                    angle = small_angle if i == accent_idx else 0.0
+                    if abs(angle) > 1e-3:
+                        rotated_fp = _rotate(fp, angle, origin=fp.centroid)
+                        if not local_poly.buffer(1e-6).covers(rotated_fp):
+                            valid_rotated = False
+                            break
+                    footprints_rotated.append(fp)
+                    angles_rotated.append(angle)
+
+            # Registrer alle varianter som kandidater
+            variants_to_register = [
+                ("single", footprints_single if valid_single else [], None),
+                ("varied", footprints_varied, None),
+                ("rotated", footprints_rotated if valid_rotated else [], angles_rotated if valid_rotated else None),
+            ]
+            for variant, footprints, angles in variants_to_register:
+                if not footprints:
+                    continue
+                if angle_offset == 90.0:
+                    footprints = [_rotate(p, 90.0, origin=core.centroid) for p in footprints]
+                cand = _evaluate_candidate(
+                    footprints, field.target_bra, (field.floors_min, field.floors_max),
+                    angle_offset_per_bygg=angles,
+                )
+                if cand:
+                    cand.angle_offset_deg = angle_offset
+                    cand._variant = variant
+                    candidates.append(cand)
+    # Score med sol-hensyn og liten preferanse for varierte lengder
     # field.orientation_deg er feltets hovedakse i globalt rom. For angle_offset=0,
     # er lamellens langfasade langs feltets hovedakse. For angle_offset=90,
     # er den vinkelrett på hovedaksen.
@@ -913,25 +1158,101 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
         # Solar penalty: for lamell/rekkehus, straffer nord-sør-orientering
         global_angle = (field.orientation_deg + item.angle_offset_deg) % 180.0
         solar_bonus = _solar_orientation_bonus(global_angle, typology)
-        # Solar penalty er opptil 20% av BRA-målet når solar_bonus=0 (dårligst)
-        # og 0% når solar_bonus=1 (beste). Dette betyr at BRA-forskjeller
-        # mellom orienteringer fortsatt dominerer, men solar-hensyn vipper
-        # valget når BRA er omtrent likt.
         solar_penalty = field.target_bra * 0.20 * (1.0 - solar_bonus)
 
-        return (bra_score + solar_penalty, -item.total_bra, len(item.footprints))
+        # Variasjons-bonus: foretrekk "varied" (blandede lengder) og "rotated"
+        # (per-bygg rotasjon) fremfor "single" (uniformt stort rektangel) når BRA
+        # er tilnærmet likt. Bonus er moderat (~5% av target_bra) slik at BRA
+        # fortsatt dominerer ved reelle forskjeller.
+        variant = getattr(item, "_variant", "single")
+        variation_bonus = 0.0
+        if variant == "varied" and len(item.footprints) >= 2:
+            variation_bonus = -(field.target_bra * 0.05)
+        elif variant == "rotated" and len(item.footprints) >= 2:
+            variation_bonus = -(field.target_bra * 0.04)
+
+        # AI-direktiv-bonus: hvis field.design_variant er satt (AI ba om en
+        # spesifikk variant), gi en sterk bonus til matchende kandidat. Bonus
+        # er 15% av target_bra — stor nok til å overstyre lette variasjons-
+        # fordeler, men ikke stor nok til å velge katastrofalt dårligere BRA.
+        directive_bonus = 0.0
+        design_variant = getattr(field, "design_variant", None)
+        if design_variant is not None and variant == design_variant:
+            directive_bonus = -(field.target_bra * 0.15)
+
+        return (bra_score + solar_penalty + variation_bonus + directive_bonus, -item.total_bra, len(item.footprints))
 
     return min(candidates, key=combined_score)
+
+
+def _varied_floors_for_cluster(
+    n_buildings: int,
+    base_floors: int,
+    floors_min: int,
+    floors_max: int,
+    variation: str = "accent",
+) -> List[int]:
+    """Gi variert etasjetall til en gruppe bygg for arkitektonisk variasjon.
+
+    variation-moduser:
+      - "accent":   én høy aksent (+2 et), resten baseline
+      - "stepped":  trappet gradient (f.eks. 4-5-6-7)
+      - "paired":   par av høyder (4-6-4-6)
+      - "uniform":  alle samme som base_floors (fallback, ingen variasjon)
+
+    Alle returnerte verdier er innenfor [floors_min, floors_max].
+    """
+    if n_buildings <= 0:
+        return []
+    clamp = lambda f: max(floors_min, min(floors_max, int(f)))
+
+    if variation == "uniform" or n_buildings == 1:
+        return [clamp(base_floors)] * n_buildings
+
+    if variation == "accent":
+        # Én aksent-bygg 2 etasjer høyere (hvis mulig)
+        accent_idx = n_buildings // 2  # midtbygget
+        result = [clamp(base_floors) for _ in range(n_buildings)]
+        accent_floors = clamp(base_floors + 2)
+        if accent_floors == base_floors:
+            # Ikke plass til høyere, prøv lavere baseline i stedet
+            new_base = clamp(base_floors - 1)
+            if new_base < base_floors:
+                result = [clamp(new_base) for _ in range(n_buildings)]
+                result[accent_idx] = clamp(base_floors)
+        else:
+            result[accent_idx] = accent_floors
+        return result
+
+    if variation == "stepped":
+        # Trappet: fordeler fra base-1 til base+2
+        steps = []
+        for i in range(n_buildings):
+            frac = i / max(1, n_buildings - 1)  # 0 → 1
+            floors = base_floors - 1 + int(frac * 3)
+            steps.append(clamp(floors))
+        return steps
+
+    if variation == "paired":
+        # Alternerer høy/lav
+        hi = clamp(base_floors + 1)
+        lo = clamp(base_floors - 1)
+        return [hi if i % 2 == 0 else lo for i in range(n_buildings)]
+
+    return [clamp(base_floors)] * n_buildings
 
 
 def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
     """Plasser punkthus i et delfelt. Vi genererer flere grid-layouts
     (1x1, 1x2, 2x1, 2x2, 2x3, 3x2, 3x3) og velger den som balanserer
-    BRA-oppnåelse med kompakt klynge-form.
+    BRA-oppnåelse med kompakt klynge-form og arkitektonisk variasjon.
 
     Et kvadratisk arrangement (cols≈rows) er arkitektonisk bedre enn en lang
     "togrekke" fordi klyngen får tydeligere fellesrom mellom tårnene. Vi scorer
     derfor cols×rows-konfigurasjoner med en klynge-bonus for forholdstall nær 1.
+
+    I tillegg gis hvert bygg varierte etasjetall (én aksent som stikker opp)
+    for å bryte monotoni. Aksenten plasseres i et sentralt bygg.
     """
     candidates: List[Tuple[_PlacementCandidate, int, int]] = []  # (cand, cols, rows)
     sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
@@ -961,7 +1282,27 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                         break
                 if not valid:
                     continue
-                cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max))
+                # Beregn base floors som i _evaluate_candidate (target_bra / total_fp)
+                total_fp_tmp = sum(p.area for p in footprints)
+                if total_fp_tmp <= 0:
+                    continue
+                base_floors = int(round(field.target_bra / total_fp_tmp)) if field.target_bra > 0 else field.floors_min
+                base_floors = max(field.floors_min, min(field.floors_max, base_floors))
+                # AI-direktiv kan overstyre default-variation. Ellers: accent hvis 3+ bygg.
+                ai_hp = getattr(field, "design_height_pattern", None)
+                if ai_hp in ("uniform", "accent", "stepped", "paired"):
+                    variation = ai_hp
+                else:
+                    variation = "accent" if len(footprints) >= 3 else "uniform"
+                floors_per_bygg = _varied_floors_for_cluster(
+                    len(footprints), base_floors, field.floors_min, field.floors_max, variation=variation
+                )
+                cand = _evaluate_candidate(
+                    footprints,
+                    field.target_bra,
+                    (field.floors_min, field.floors_max),
+                    floors_per_bygg=floors_per_bygg,
+                )
                 if cand:
                     candidates.append((cand, cols, rows))
 
@@ -980,9 +1321,6 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
             cluster_penalty = 0.0  # enkeltbygg, ikke relevant
         else:
             aspect = max(cols, rows) / min(cols, rows)
-            # aspect = 1.0 (kvadrat) -> 0.0 penalty
-            # aspect = 2.0 (f.eks. 2x1 eller 1x3) -> moderat penalty
-            # aspect = 3.0 (1x3) -> høy penalty
             cluster_penalty = field.target_bra * 0.12 * (aspect - 1.0)
 
         return (bra_score + cluster_penalty, -cand.total_bra, len(cand.footprints))
@@ -1143,7 +1481,88 @@ def _make_u_or_o_shape(outer: Polygon, ring_depth: float, min_courtyard: float) 
     return None
 
 
+def _make_l_shape(outer: Polygon, arm_depth: float) -> Optional[Polygon]:
+    """Lag en L-formet karré: én horisontal arm pluss én vertikal arm i hjørnet.
+
+    Passer for delfelter der O/U ikke får plass men en vinkel kan lages.
+    Armen i "hjørnet" sør-vest som standard — stuer vender mot gården som åpner
+    mot nord-øst.
+    """
+    minx, miny, maxx, maxy = outer.bounds
+    ow = maxx - minx
+    oh = maxy - miny
+    # L trenger bare nok plass til 2 armer og en åpning. Vi krever at minst
+    # én side har plass til minst 2× arm_depth (ellers er L ikke meningsfull).
+    if ow < arm_depth * 2.0 or oh < arm_depth * 2.0:
+        return None
+    # Nedre horisontal arm: hele bredden
+    bottom = box(minx, miny, maxx, miny + arm_depth)
+    # Venstre vertikal arm: fra bunn til topp, men kun bredden arm_depth
+    left = box(minx, miny, minx + arm_depth, maxy)
+    shape = unary_union([left, bottom]).buffer(0)
+    if isinstance(shape, Polygon) and not shape.is_empty:
+        return shape
+    return None
+
+
+def _make_t_shape(outer: Polygon, arm_depth: float) -> Optional[Polygon]:
+    """Lag en T-formet bebyggelse: horisontal topparm + vertikal sentrumsarm.
+
+    Gir tydelige front (topparm mot gate) og ryggarm som skaper to gårder.
+    """
+    minx, miny, maxx, maxy = outer.bounds
+    ow = maxx - minx
+    oh = maxy - miny
+    if ow < arm_depth * 3.0 or oh < arm_depth * 2.5:
+        return None
+    # Topparm: hele bredden, nordlige del
+    top = box(minx, maxy - arm_depth, maxx, maxy)
+    # Sentrumsarm: fra topp-arm ned til bunn, bredde arm_depth
+    cx = (minx + maxx) / 2.0
+    center = box(cx - arm_depth / 2.0, miny, cx + arm_depth / 2.0, maxy)
+    shape = unary_union([top, center]).buffer(0)
+    if isinstance(shape, Polygon) and not shape.is_empty:
+        return shape
+    return None
+
+
+def _make_z_shape(outer: Polygon, arm_depth: float) -> Optional[Polygon]:
+    """Lag en Z-formet bebyggelse: topp-arm + diagonal forbindelse + bunn-arm.
+
+    Ikke en faktisk diagonal (aksejustert kode), men en zigzag av tre rette
+    armer: topparm venstre side, nedover-arm i midten, bunnarm høyre side.
+    """
+    minx, miny, maxx, maxy = outer.bounds
+    ow = maxx - minx
+    oh = maxy - miny
+    if ow < arm_depth * 3.0 or oh < arm_depth * 3.0:
+        return None
+    # Topparm: venstre 2/3 av bredden, øvre del
+    top = box(minx, maxy - arm_depth, minx + ow * 0.66, maxy)
+    # Midtarm: vertikal, i midten, hele høyden
+    cx = minx + ow * 0.5
+    middle = box(cx - arm_depth / 2.0, miny + arm_depth, cx + arm_depth / 2.0, maxy - arm_depth)
+    # Bunnarm: høyre 2/3 av bredden, nedre del
+    bottom = box(minx + ow * 0.34, miny, maxx, miny + arm_depth)
+    shape = unary_union([top, middle, bottom]).buffer(0)
+    if isinstance(shape, Polygon) and not shape.is_empty:
+        return shape
+    return None
+
+
 def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Plasser Karré i delfeltet. Prøver flere karré-former (O, U, L, T, Z) og
+    velger den som gir best BRA/arkitektur-score.
+
+    Formvalg:
+      - O (lukket ring) — foretrekkes når indre gårdsrom er stort nok
+      - U (åpent mot sør) — når bare én side ikke kan lukkes
+      - L (hjørne) — når delfeltet er trangt; mindre BRA men lager vinkel
+      - T — for lange/smale delfelter, gir to gårdsrom
+      - Z — for store bredbente delfelter, bryter monotoni
+
+    O/U prioriteres. L/T/Z er reserve-former som gir variasjon.
+    """
     minx, miny, maxx, maxy = core.bounds
     width = min(maxx - minx, spec.max_block_length_m or (maxx - minx))
     height = min(maxy - miny, spec.max_block_length_m or (maxy - miny))
@@ -1151,13 +1570,86 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
     if outer is None:
         return None
     ring_depth = spec.segment_depth_m.midpoint() if spec.segment_depth_m else 13.0
-    shape = _make_u_or_o_shape(outer, ring_depth, spec.min_courtyard_side_m or 18.0)
-    if shape is None or not core.buffer(1e-6).covers(shape):
+    min_cy = spec.min_courtyard_side_m or 18.0
+
+    candidates_shapes: List[Tuple[str, Polygon]] = []
+
+    # Prøv O/U først (primær form — mest arealeffektiv)
+    uo_shape = _make_u_or_o_shape(outer, ring_depth, min_cy)
+    if uo_shape is not None:
+        candidates_shapes.append(("uo", uo_shape))
+
+    # L/T/Z er FALLBACK: brukes bare hvis U/O ikke fikk plass i core.
+    # Grunnen er at U/O alltid gir mer BRA. Vi vil ikke bytte til L for
+    # "variasjon" hvis det betyr at vi taper 40% volum.
+    # Unntak: hvis AI har satt design_karre_shape, legger vi til den formen
+    # som kandidat slik at AI-direktivet kan vurderes mot U/O i scoringen.
+    core_buf = core.buffer(1e-6)
+    uo_works = uo_shape is not None and core_buf.covers(uo_shape)
+
+    ai_requested_shape = getattr(field, "design_karre_shape", None)
+
+    def _add_alt_shapes():
+        l_shape = _make_l_shape(outer, ring_depth)
+        if l_shape is not None:
+            candidates_shapes.append(("l", l_shape))
+        ow = outer.bounds[2] - outer.bounds[0]
+        oh = outer.bounds[3] - outer.bounds[1]
+        aspect = max(ow, oh) / max(1e-6, min(ow, oh))
+        if aspect < 1.6:
+            t_shape = _make_t_shape(outer, ring_depth)
+            if t_shape is not None:
+                candidates_shapes.append(("t", t_shape))
+        if ow > 50 and oh > 50:
+            z_shape = _make_z_shape(outer, ring_depth)
+            if z_shape is not None:
+                candidates_shapes.append(("z", z_shape))
+
+    if not uo_works:
+        # U/O feilet: prøv L/T/Z som fallback
+        _add_alt_shapes()
+    elif ai_requested_shape in ("l", "t", "z"):
+        # U/O virker, men AI ba om alternativ — legg den til som kandidat
+        _add_alt_shapes()
+
+    if not candidates_shapes:
         return None
-    cand = _evaluate_candidate([shape], field.target_bra, (field.floors_min, field.floors_max))
-    if cand:
-        return cand
-    return None
+
+    # Bygg kandidater og velg beste
+    core_buf = core.buffer(1e-6)
+    placement_candidates: List[_PlacementCandidate] = []
+    for form_name, shape in candidates_shapes:
+        if not core_buf.covers(shape):
+            continue
+        cand = _evaluate_candidate([shape], field.target_bra, (field.floors_min, field.floors_max))
+        if cand:
+            cand._variant = form_name
+            placement_candidates.append(cand)
+
+    if not placement_candidates:
+        return None
+
+    # Score: primært BRA, men med liten preferanse for U/O som er den vanligste
+    # og mest arealeffektive karré-formen. AI-direktiv (field.design_karre_shape)
+    # gir en sterk bonus til matchende form.
+    def karre_score(item: _PlacementCandidate) -> Tuple[float, float]:
+        deficit = max(0.0, field.target_bra - item.total_bra)
+        overshoot = max(0.0, item.total_bra - field.target_bra)
+        bra_score = deficit + overshoot * 0.25
+        # Form-preferanse: U/O foretrukket, andre som fallback/variasjon
+        form = getattr(item, "_variant", "uo")
+        form_penalty = {
+            "uo": 0.0,
+            "l": field.target_bra * 0.08,
+            "t": field.target_bra * 0.05,
+            "z": field.target_bra * 0.06,
+        }.get(form, 0.0)
+        # AI-direktiv-bonus
+        ai_shape = getattr(field, "design_karre_shape", None)
+        directive_bonus = -(field.target_bra * 0.15) if ai_shape is not None and form == ai_shape else 0.0
+        return (bra_score + form_penalty + directive_bonus, -item.total_bra)
+
+    return min(placement_candidates, key=karre_score)
 
 
 def _place_single_core(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
@@ -1257,11 +1749,35 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
             continue
 
         placed_for_field: List[Bygg] = []
-        angle_global = (field.orientation_deg + candidate.angle_offset_deg) % 180.0
-        for footprint_local in candidate.footprints:
-            footprint_global = _rotate(footprint_local, field.orientation_deg, origin=field.polygon.centroid) if candidate.angle_offset_deg == 0.0 else _rotate(footprint_local, field.orientation_deg, origin=field.polygon.centroid)
-            footprint_global = footprint_global.buffer(0)
-            height_m = _height_for(field.typology, candidate.floors)
+        # Note: candidate.angle_offset_deg (fellesrotasjon) er allerede anvendt på
+        # footprints inne i _place_*_local-funksjonene (via _rotate på core.centroid).
+        # Vi legger derfor IKKE på fellesrotasjonen her, bare per-bygg-rotasjon
+        # fra angle_offset_per_bygg hvis den er satt.
+        for idx, footprint_local in enumerate(candidate.footprints):
+            # Per-bygg-floors
+            bygg_floors = candidate.floors_at(idx)
+
+            # Per-bygg rotasjon kun fra listen angle_offset_per_bygg (ikke fellesvinkelen).
+            # Hvis listen er None eller indeksen utenfor, er per-bygg-rotasjonen 0.
+            if candidate.angle_offset_per_bygg is not None and 0 <= idx < len(candidate.angle_offset_per_bygg):
+                per_bygg_angle = candidate.angle_offset_per_bygg[idx]
+            else:
+                per_bygg_angle = 0.0
+
+            # Global vinkel for spacing-sjekk = fellesrotasjon + per-bygg-rotasjon + feltrotasjon.
+            angle_global = (field.orientation_deg + candidate.angle_offset_deg + per_bygg_angle) % 180.0
+
+            # Hvis per-bygg-rotasjon er satt, rotere footprint rundt egen centroid
+            # før vi roterer tilbake til globalt system.
+            if abs(per_bygg_angle) > 1e-3:
+                footprint_in_field_local = _rotate(footprint_local, per_bygg_angle, origin=footprint_local.centroid)
+            else:
+                footprint_in_field_local = footprint_local
+            footprint_global = _rotate(
+                footprint_in_field_local, field.orientation_deg, origin=field.polygon.centroid
+            ).buffer(0)
+
+            height_m = _height_for(field.typology, bygg_floors)
             if not buildable_poly.buffer(1e-6).covers(footprint_global):
                 continue
             if not field.polygon.buffer(1e-6).covers(footprint_global):
@@ -1271,7 +1787,7 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
             bygg = Bygg(
                 bygg_id=f"B{build_counter}",
                 footprint=footprint_global,
-                floors=candidate.floors,
+                floors=bygg_floors,
                 height_m=height_m,
                 typology=field.typology,
                 delfelt_id=field.field_id,
