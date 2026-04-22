@@ -219,6 +219,117 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
 
 
+def pass1_generate_delfelt_from_composition(
+    buildable_poly: Polygon,
+    concept_family: ConceptFamily,
+    target_bra_m2: float,
+    composition: Any,  # CompositionPlan
+    site_context: Optional[Any] = None,
+) -> List[Delfelt]:
+    """Pass 1 v9 — delfelt-inndeling med role-tagger fra komposisjonsplan.
+
+    STRATEGI (revidert): Vi bruker IKKE komposisjonsplanen til å dele tomten
+    geometrisk. I stedet bruker vi eksisterende armbasert inndeling fra
+    kontekstuell pass 1 og TILDELER roles basert på feltets relasjon til
+    komposisjonens frontages/gårdsrom/aksenter.
+
+    Dette beholder god arealdekning (ingen tap pga courtyard-reservasjon)
+    men gir motoren informasjon om hvilke felter som møter gata,
+    hvilke som vender inn, og hvilke som er aksent.
+    """
+    from .composition import orientation_for_role as _orientation_for_role_v9
+
+    # Start med kontekstuell (armbasert) inndeling — dette virker godt i dag
+    base_fields = pass1_generate_delfelt_contextual(
+        buildable_poly, concept_family, target_bra_m2,
+        site_context=site_context,
+    )
+
+    # Hvis komposisjonen ikke har frontages eller courtyards, returner uendret
+    if not composition.street_frontages and not composition.courtyards:
+        return base_fields
+
+    # Tildel roles basert på hver felts posisjon relativt til komposisjonen
+    enriched: List[Delfelt] = []
+    for field in base_fields:
+        role, facing_idx = _assign_role_to_field(field, composition)
+
+        # Beregn ny orientering hvis role er frontage
+        new_orient = field.orientation_deg
+        if role and role != "generic":
+            new_orient = _orientation_for_role_v9(
+                field.polygon, role, facing_idx, composition,
+                fallback_deg=field.orientation_deg,
+            )
+
+        # Role-basert character
+        if role == "courtyard_side":
+            new_character = "sheltered"
+        elif role and role.startswith("frontage"):
+            new_character = "street_facing"
+        elif role == "accent":
+            new_character = "accent"
+        else:
+            new_character = field.character
+
+        # Erstatt feltet med role-beriket versjon
+        from dataclasses import replace as _replace
+        enriched.append(_replace(
+            field,
+            role=role,
+            facing_frontage_idx=facing_idx,
+            orientation_deg=new_orient,
+            character=new_character,
+            phase_label=f"Delfelt {field.phase} ({role or 'arm'})",
+        ))
+
+    return enriched
+
+
+def _assign_role_to_field(field: Delfelt, composition: Any) -> Tuple[Optional[str], Optional[int]]:
+    """Bestem role for et felt basert på dets posisjon relativt til
+    komposisjonens frontages, gårdsrom og aksenter.
+
+    Regel:
+    - Hvis feltet BERØRER (innen 3m) en frontage-linje: frontage_primary/secondary
+    - Hvis feltet er LENGRE UNNA frontage enn gårdsrommet: courtyard_side
+    - Hvis feltet inneholder et aksentpunkt: accent
+    - Ellers: None (ingen role)
+    """
+    field_poly = field.polygon
+
+    # Sjekk frontages først
+    if composition.street_frontages:
+        best_idx = 0
+        best_dist = float('inf')
+        for i, f in enumerate(composition.street_frontages):
+            dist = field_poly.distance(f)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        if best_dist < 3.0:
+            role = "frontage_primary" if best_idx == 0 else "frontage_secondary"
+            return (role, best_idx)
+
+    # Sjekk aksent
+    if composition.accent_points:
+        for i, (point, radius) in enumerate(composition.accent_points):
+            if field_poly.distance(point) < radius:
+                return ("accent", None)
+
+    # Sjekk om feltet er langt fra frontage (bak gårdsrom)
+    if composition.courtyards and composition.street_frontages:
+        fc = field_poly.centroid
+        courtyard = composition.courtyards[0]
+        dist_to_courtyard = fc.distance(courtyard)
+        dist_to_frontage = min(fc.distance(f) for f in composition.street_frontages)
+        if dist_to_courtyard < dist_to_frontage:
+            return ("courtyard_side", None)
+
+    return (None, None)
+
+
 def pass1_generate_delfelt_contextual(
     buildable_poly: Polygon,
     concept_family: ConceptFamily,
@@ -239,7 +350,6 @@ def pass1_generate_delfelt_contextual(
 
     Returnerer delfelter med arm_id og character fylt ut.
     """
-    del concept_family  # concept brukes i pass 2
     from .site_analysis import _cardinal_from_bearing
 
     # Fallback til gammel logikk hvis ikke kontekstdata eller enkel tomt
@@ -611,6 +721,11 @@ def pass3_design_directives(
             entry["arm_id"] = f.arm_id
         if f.character is not None:
             entry["character"] = f.character
+        # v9: role og facing_frontage_idx fra komposisjonslaget
+        if f.role is not None:
+            entry["role"] = f.role
+        if f.facing_frontage_idx is not None:
+            entry["facing_frontage_idx"] = f.facing_frontage_idx
         field_payload.append(entry)
 
     site_payload = _polygon_to_compact_dict(buildable_poly) if buildable_poly is not None else {}
@@ -723,6 +838,29 @@ def pass3_design_directives(
         "Nordic sun rules: prefer east-west lamell orientations (90° angle_offset). "
         "Cluster punkthus rather than line them up (use height_pattern='accent'). "
         "Keep rotations small (±3–6°) and only on one or two fields per concept. "
+        "\n\n"
+        "V9 COMPOSITION LAYER: Each field may have a 'role' that indicates its "
+        "function in the overall urban composition: "
+        "(1) 'frontage_primary' — the field borders the main street. It should "
+        "be the most PROMINENT: prefer uniform heights and a calm rhythm. "
+        "Terraced lamell with gentle 5-6-5 pattern works well. For karré, "
+        "use 'uo_chamfered' at the corner to mark arrival. NO rotation. "
+        "(2) 'frontage_secondary' — borders a smaller street. Can be slightly "
+        "lower in scale, use 'single' lamell or regular 'uo' karré. "
+        "(3) 'courtyard_side' — faces inward toward a shared green space. "
+        "This is the CALMEST part of the composition. Use 'single' lamell "
+        "only. Heights should step DOWN (neighbor_step_up pattern) to protect "
+        "courtyard light. Never rotate. "
+        "(4) 'accent' — marks a corner or significant hinge. This is where "
+        "you can use PUNKTHUS with height_pattern='accent' (one tower higher "
+        "than the others) or a slightly taller lamell. Small rotations (±3°) "
+        "can also work here to signal importance. "
+        "(5) 'cluster' — free arrangement around a park (for CLUSTER_PARK). "
+        "Use 'accent' height pattern for punkthus to create visual interest. "
+        "\n\n"
+        "WHEN ROLE IS SET: role-based guidance overrides generic arm/character "
+        "guidance above. Always respect the role. "
+        "\n\n"
         "Return JSON only."
     )
 
@@ -982,11 +1120,45 @@ def plan_masterplan_geometry(
         logger.warning("Pass 0 site analysis failed: %s", exc)
         site_context = None
 
+    # Pass 0.5: Komposisjonslag — lag rammeplan (frontages/gårdsrom/aksenter)
+    # FØR bygg plasseres. Dette gir romlig hierarki i stedet for "best bygg
+    # per felt" tankegang. v9 nytt lag.
+    try:
+        from .composition import compose_plan as _compose_plan_v9
+        import time as _time
+        _t0 = _time.perf_counter()
+        composition_plan = _compose_plan_v9(
+            buildable_poly, concept_family, target_bra_m2,
+            site_context=site_context,
+        )
+        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
+        logger.warning(
+            "Pass 0.5 composition: concept=%s frontages=%d courtyards=%d accents=%d (%.0fms)",
+            composition_plan.concept_name,
+            len(composition_plan.street_frontages),
+            len(composition_plan.courtyards),
+            len(composition_plan.accent_points),
+            _elapsed_ms,
+        )
+    except Exception as exc:
+        logger.warning("Pass 0.5 composition failed: %s", exc)
+        composition_plan = None
+
     # Pass 1: Delfelt-inndeling.
-    # Hvis site_context har armer (L/U/kompleks), bruker vi kontekstuell
-    # inndeling som snitter etter armene i stedet for generiske bånd.
-    # Ellers faller vi tilbake til gammel pass1_generate_delfelt.
-    if site_context is not None and site_context.has_arms:
+    # v9-order: hvis composition_plan er gyldig, bruk den for å dele tomten i
+    # felter med roles (frontage_primary, courtyard_side, etc).
+    # Ellers: kontekstuell (armer) eller generisk.
+    if composition_plan is not None and composition_plan.has_composition():
+        base_fields = pass1_generate_delfelt_from_composition(
+            buildable_poly, concept_family, target_bra_m2,
+            composition=composition_plan,
+            site_context=site_context,
+        )
+        logger.warning(
+            "Pass 1 composition: %d fields (concept=%s)",
+            len(base_fields), composition_plan.concept_name,
+        )
+    elif site_context is not None and site_context.has_arms:
         base_fields = pass1_generate_delfelt_contextual(
             buildable_poly, concept_family, target_bra_m2,
             site_context=site_context,
@@ -1071,6 +1243,27 @@ def plan_masterplan_geometry(
     plan.report_recommendation = narrative.recommendation
     plan.report_risks = list(narrative.risks)
     plan.pass6_source = narrative.source
+
+    # v9: fest composition og beregne arkitekturscore
+    plan.composition_plan = composition_plan
+    try:
+        from .architecture_score import architecture_score as _arch_score_v9
+        plan.architecture_scores = _arch_score_v9(plan, composition=composition_plan)
+        logger.warning(
+            "v9 architecture_score: frontage=%.2f courtyard=%.2f rhythm=%.2f "
+            "form=%.2f scale=%.2f hierarchy=%.2f → total=%.2f",
+            plan.architecture_scores.get("frontage_continuity", 0),
+            plan.architecture_scores.get("courtyard_clarity", 0),
+            plan.architecture_scores.get("rhythm", 0),
+            plan.architecture_scores.get("form_entropy", 0),
+            plan.architecture_scores.get("scale_consistency", 0),
+            plan.architecture_scores.get("hierarchy", 0),
+            plan.architecture_scores.get("total", 0),
+        )
+    except Exception as exc:
+        logger.warning("v9 architecture_score failed: %s", exc)
+        plan.architecture_scores = None
+
     return plan
 
 
