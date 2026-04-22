@@ -61,6 +61,17 @@ try:
 except Exception:
     genai = None
 
+# Google GenAI SDK (nytt unified SDK, erstatter google.generativeai)
+# https://ai.google.dev/gemini-api/docs/migrate
+try:
+    from google import genai as google_genai
+    from google.genai import types as google_genai_types
+    HAS_GOOGLE_GENAI = True
+except Exception:
+    google_genai = None
+    google_genai_types = None
+    HAS_GOOGLE_GENAI = False
+
 try:
     import fitz
 except ImportError:
@@ -110,12 +121,110 @@ st.set_page_config(
 )
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-llm_available = bool(google_key and genai is not None)
-if llm_available:
+llm_available = bool(google_key and (genai is not None or HAS_GOOGLE_GENAI))
+if llm_available and genai is not None:
     try:
         genai.configure(api_key=google_key)
     except Exception:
-        llm_available = False
+        # Gammel SDK feilet — hvis ny er tilgjengelig, er vi fortsatt OK
+        if not HAS_GOOGLE_GENAI:
+            llm_available = False
+
+
+def _generate_gemini_image(
+    prompt: str,
+    input_image: "Image.Image",
+    api_key: Optional[str] = None,
+    models: Optional[List[str]] = None,
+) -> Optional["Image.Image"]:
+    """Generer et bilde via Gemini med fallback mellom SDK-er og modeller.
+
+    Prøver først det nye google.genai SDK (anbefalt 2026), fallback til
+    gamle google.generativeai hvis nye ikke er installert. Prøver flere
+    modeller i rekkefølge til én gir bilde.
+
+    Returnerer PIL Image eller None ved feil.
+    """
+    if models is None:
+        models = ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview"]
+
+    key = api_key or os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        return None
+
+    # --- Forsøk 1: nytt google.genai SDK ---
+    if HAS_GOOGLE_GENAI and google_genai is not None:
+        try:
+            client = google_genai.Client(api_key=key)
+            config = google_genai_types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            )
+            last_err: Optional[str] = None
+            for model_name in models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[prompt, input_image],
+                        config=config,
+                    )
+                    # Parse responsen
+                    candidates = getattr(response, "candidates", None) or []
+                    for cand in candidates:
+                        content = getattr(cand, "content", None)
+                        if not content:
+                            continue
+                        parts = getattr(content, "parts", None) or []
+                        for part in parts:
+                            inline = getattr(part, "inline_data", None)
+                            if inline and getattr(inline, "data", None):
+                                return Image.open(io.BytesIO(inline.data))
+                    # Ingen bilde — logg tekst og prøv neste modell
+                    text_parts = []
+                    for cand in candidates:
+                        content = getattr(cand, "content", None)
+                        parts = (getattr(content, "parts", None) or []) if content else []
+                        for part in parts:
+                            if getattr(part, "text", None):
+                                text_parts.append(part.text)
+                    last_err = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata"
+                except Exception as model_err:
+                    last_err = str(model_err)[:300]
+                    continue
+            # Alle modeller feilet i nytt SDK — fortsett til gammel som fallback
+            if last_err:
+                import logging as _logging
+                _logging.getLogger("builtly").warning(
+                    "google.genai SDK ga ikke bilde: %s", last_err
+                )
+        except Exception as sdk_err:
+            import logging as _logging
+            _logging.getLogger("builtly").warning(
+                "google.genai SDK feilet: %s — prøver gammel SDK", str(sdk_err)[:200]
+            )
+
+    # --- Forsøk 2: gammel google.generativeai SDK ---
+    if genai is not None:
+        for model_name in models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    [prompt, input_image],
+                    generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+                )
+                candidates = getattr(response, "candidates", None) or []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        inline = getattr(part, "inline_data", None)
+                        if inline and getattr(inline, "data", None):
+                            return Image.open(io.BytesIO(inline.data))
+            except Exception:
+                continue
+
+    return None
 
 gdo = GeodataOnlineClient() if HAS_GEODATA_ONLINE else None
 geodata_token_ok = False
@@ -278,8 +387,8 @@ def generer_arkitekt_render(
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
 
-    if genai is None:
-        st.error("google-generativeai er ikke installert i miljøet.")
+    if genai is None and not HAS_GOOGLE_GENAI:
+        st.error("Hverken google.genai eller google.generativeai er installert i miljøet.")
         return None
 
     # 1. Sikre RGB og rimelig størrelse
@@ -467,42 +576,11 @@ def generer_arkitekt_render(
         )
 
     try:
-        # Prefer stabil modell først (Gemini 2.5 Flash Image / Nano Banana),
-        # fallback til preview hvis stabil av en eller annen grunn ikke er
-        # tilgjengelig. Preview-modeller (3.1-flash-image-preview) endrer seg
-        # oftere og kan være midlertidig utilgjengelige.
-        try:
-            model = genai.GenerativeModel("gemini-2.5-flash-image")
-        except Exception:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-
-        response = model.generate_content(
-            [prompt, safe_image],
-            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
-        )
-
-        # Hent ut bildet fra responsen
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if not content or not getattr(content, "parts", None):
-                    continue
-                for part in content.parts:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and getattr(inline, "data", None):
-                        return Image.open(io.BytesIO(inline.data))
-
-        # Hvis vi kommer hit fikk vi ikke noe bilde tilbake
-        text_parts = []
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if content and getattr(content, "parts", None):
-                    for part in content.parts:
-                        if getattr(part, "text", None):
-                            text_parts.append(part.text)
-        err_msg = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata i respons."
-        st.error(f"Gemini returnerte ikke et bilde: {err_msg}")
+        # Bruk felles helper med SDK-fallback (nytt google.genai først, så gammelt)
+        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
+        if result is not None:
+            return result
+        st.error("Gemini returnerte ikke et bilde. Sjekk loggen for detaljer.")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
     return None
@@ -523,8 +601,8 @@ def generer_utsiktsrender(
     if not api_key:
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
-    if genai is None:
-        st.error("google-generativeai er ikke installert.")
+    if genai is None and not HAS_GOOGLE_GENAI:
+        st.error("Hverken google.genai eller google.generativeai er installert.")
         return None
 
     safe_image = view_image.convert("RGB")
@@ -557,26 +635,10 @@ def generer_utsiktsrender(
     )
 
     try:
-        # Prefer stabil modell først (Gemini 2.5 Flash Image / Nano Banana),
-        # fallback til preview hvis stabil ikke er tilgjengelig.
-        try:
-            model = genai.GenerativeModel("gemini-2.5-flash-image")
-        except Exception:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-
-        response = model.generate_content(
-            [prompt, safe_image],
-            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
-        )
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if not content or not getattr(content, "parts", None):
-                    continue
-                for part in content.parts:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and getattr(inline, "data", None):
-                        return Image.open(io.BytesIO(inline.data))
+        # Bruk felles helper med SDK-fallback (nytt google.genai først, så gammelt)
+        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
+        if result is not None:
+            return result
         st.error("Gemini returnerte ikke et bilde for utsiktsvisualiseringen.")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
@@ -11449,7 +11511,7 @@ render();
     st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
     gemini_key = os.environ.get("GOOGLE_API_KEY", "")
     scene_imgs = st.session_state.get("ark_scene_images")
-    if scene_imgs and gemini_key and genai is not None:
+    if scene_imgs and gemini_key and (genai is not None or HAS_GOOGLE_GENAI):
         motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
         opt_names = [opt.name for opt in motor_options] if motor_options else []
         sel_render_name = st.selectbox(
