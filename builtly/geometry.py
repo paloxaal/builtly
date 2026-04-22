@@ -1172,13 +1172,14 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
             variation_bonus = -(field.target_bra * 0.04)
 
         # AI-direktiv-bonus: hvis field.design_variant er satt (AI ba om en
-        # spesifikk variant), gi en sterk bonus til matchende kandidat. Bonus
-        # er 15% av target_bra — stor nok til å overstyre lette variasjons-
-        # fordeler, men ikke stor nok til å velge katastrofalt dårligere BRA.
+        # spesifikk variant), gi en MODERAT bonus til matchende kandidat.
+        # Bonus er 5% av target_bra — bare en tie-breaker når BRA er nær likt.
+        # Tidligere (15%) kunne overstyre reelle BRA-tap. Vi lar heller motoren
+        # velge single/uo hvis de er klart best, selv om AI foreslo noe annet.
         directive_bonus = 0.0
         design_variant = getattr(field, "design_variant", None)
         if design_variant is not None and variant == design_variant:
-            directive_bonus = -(field.target_bra * 0.15)
+            directive_bonus = -(field.target_bra * 0.05)
 
         return (bra_score + solar_penalty + variation_bonus + directive_bonus, -item.total_bra, len(item.footprints))
 
@@ -1631,7 +1632,7 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
 
     # Score: primært BRA, men med liten preferanse for U/O som er den vanligste
     # og mest arealeffektive karré-formen. AI-direktiv (field.design_karre_shape)
-    # gir en sterk bonus til matchende form.
+    # gir en moderat bonus til matchende form (5% — bare tie-breaker).
     def karre_score(item: _PlacementCandidate) -> Tuple[float, float]:
         deficit = max(0.0, field.target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - field.target_bra)
@@ -1644,9 +1645,9 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
             "t": field.target_bra * 0.05,
             "z": field.target_bra * 0.06,
         }.get(form, 0.0)
-        # AI-direktiv-bonus
+        # AI-direktiv-bonus (moderat — tidligere 15% overstyrte BRA-tap)
         ai_shape = getattr(field, "design_karre_shape", None)
-        directive_bonus = -(field.target_bra * 0.15) if ai_shape is not None and form == ai_shape else 0.0
+        directive_bonus = -(field.target_bra * 0.05) if ai_shape is not None and form == ai_shape else 0.0
         return (bra_score + form_penalty + directive_bonus, -item.total_bra)
 
     return min(placement_candidates, key=karre_score)
