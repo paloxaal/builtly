@@ -1692,6 +1692,103 @@ def _make_u_or_o_shape(outer: Polygon, ring_depth: float, min_courtyard: float) 
     return None
 
 
+def _make_segmented_karre(
+    outer: Polygon,
+    ring_depth: float,
+    min_courtyard: float,
+    max_segment_length: float = 32.0,
+    min_segment_length: float = 18.0,
+    corner_gap: float = 4.0,
+    kind: str = "o",  # "o" (closed) or "u" (open south)
+) -> List[Polygon]:
+    """Bygg en karré av SEPARATE segmenter istedenfor ett sammenhengende ringbygg.
+
+    Eksempel: 60x50m karré med max 30m segmenter gir:
+    - Nord-side: 2 bygg (30m + 30m)
+    - Øst-side: 1 bygg (50m eller delt i 2 hvis > 32m)
+    - Sør-side: 2 bygg
+    - Vest-side: 1 eller 2 bygg
+    Total: 6-8 separate bygg i stedet for 1 ringbygg.
+
+    Dette matcher arkitektonisk norm: hver karré-side er flere hus, ikke
+    ett langt bygg.
+    """
+    minx, miny, maxx, maxy = outer.bounds
+    ow = maxx - minx
+    oh = maxy - miny
+    inner_w = ow - 2.0 * ring_depth
+    inner_h = oh - 2.0 * ring_depth
+
+    if inner_w < min_courtyard or inner_h < min_courtyard:
+        # Ikke plass til gårdsrom — returner tom liste (caller kan falle tilbake til alternativ)
+        return []
+
+    # Beregn segmenter per side: vi ønsker 1-3 bygg per side
+    def split_side(total_length: float) -> List[float]:
+        """Del en side-lengde i segmenter som er alle mellom min_segment og max_segment."""
+        if total_length <= max_segment_length:
+            return [total_length]
+        # Prøv 2 segmenter
+        if total_length / 2 >= min_segment_length:
+            return [total_length / 2, total_length / 2]
+        # Én segment — kaster excess
+        return [total_length]
+
+    # Nord-side (toppen)
+    north_length = ow  # full bredde
+    north_segments = split_side(north_length)
+    # Sør-side
+    south_length = ow
+    south_segments = split_side(south_length) if kind == "o" else []
+    # Øst/vest: starter etter nord og slutter før sør (eller tomt hvis U)
+    side_length = oh - 2 * ring_depth  # mellom nord-bygg og sør-bygg
+    east_segments = split_side(side_length)
+    west_segments = split_side(side_length)
+
+    footprints: List[Polygon] = []
+
+    # Nord-side: legg bygg langs topp
+    cursor_x = minx
+    for seg_len in north_segments:
+        fp = box(cursor_x + corner_gap / 2, maxy - ring_depth,
+                 cursor_x + seg_len - corner_gap / 2, maxy)
+        if fp.is_valid and fp.area > 0:
+            footprints.append(fp)
+        cursor_x += seg_len
+
+    # Sør-side (bare hvis O-karré)
+    if south_segments:
+        cursor_x = minx
+        for seg_len in south_segments:
+            fp = box(cursor_x + corner_gap / 2, miny,
+                     cursor_x + seg_len - corner_gap / 2, miny + ring_depth)
+            if fp.is_valid and fp.area > 0:
+                footprints.append(fp)
+            cursor_x += seg_len
+
+    # Øst-side: mellom nord og sør
+    east_y0 = miny + ring_depth + corner_gap / 2 if kind == "o" else miny + corner_gap / 2
+    cursor_y = east_y0
+    for seg_len in east_segments:
+        fp = box(maxx - ring_depth, cursor_y,
+                 maxx, cursor_y + seg_len - corner_gap)
+        if fp.is_valid and fp.area > 0:
+            footprints.append(fp)
+        cursor_y += seg_len
+
+    # Vest-side
+    cursor_y = east_y0
+    for seg_len in west_segments:
+        fp = box(minx, cursor_y,
+                 minx + ring_depth, cursor_y + seg_len - corner_gap)
+        if fp.is_valid and fp.area > 0:
+            footprints.append(fp)
+        cursor_y += seg_len
+
+    return footprints
+
+
+
 def _make_l_shape(outer: Polygon, arm_depth: float) -> Optional[Polygon]:
     """Lag en L-formet karré: én horisontal arm pluss én vertikal arm i hjørnet.
 
@@ -1866,7 +1963,7 @@ def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
         form = getattr(item, "_variant", "uo")
         form_penalty = {
             "uo": 0.0,
-            "uo_chamfered": field.target_bra * 0.02,  # mister bare ~5% areal
+            "uo_chamfered": field.target_bra * 0.02,
             "l": field.target_bra * 0.08,
             "t": field.target_bra * 0.05,
             "z": field.target_bra * 0.06,
