@@ -102,14 +102,30 @@ def _dominant_axis_of_polygon(poly: Polygon) -> float:
 # Steg 1: Analysere tomtens kanter
 # ---------------------------------------------------------------------------
 
-def extract_site_edges(site_poly: Polygon, min_edge_length_m: float = 3.0) -> List[SiteEdge]:
+def extract_site_edges(site_poly: Polygon, min_edge_length_m: float = 3.0,
+                       simplify_tolerance_m: float = 1.5) -> List[SiteEdge]:
     """Hent alle vesentlige kanter av tomten med orientering og normalretning.
 
-    Kanter kortere enn min_edge_length_m filtreres ut (sannsynligvis GIS-støy).
+    Tomtepolygonet forenkles først med simplify_tolerance_m for å fjerne
+    GIS-støy (kollinære punkter, små forskyvninger). Uten dette kan en
+    enkel L-form ha 20-30 kanter pga. vektordata-upresishet.
+
+    Kanter kortere enn min_edge_length_m filtreres ut etter simplify.
     """
     edges: List[SiteEdge] = []
     try:
-        coords = list(site_poly.exterior.coords)
+        # Forenkle polygonet for å redusere antall kanter (GIS-støy)
+        try:
+            simplified = site_poly.simplify(simplify_tolerance_m, preserve_topology=True)
+            # Faller tilbake hvis simplify ødelegger geometrien
+            if simplified.is_empty or not simplified.is_valid:
+                working_poly = site_poly
+            else:
+                working_poly = simplified
+        except Exception:
+            working_poly = site_poly
+
+        coords = list(working_poly.exterior.coords)
     except Exception:
         return edges
 
@@ -119,6 +135,7 @@ def extract_site_edges(site_poly: Polygon, min_edge_length_m: float = 3.0) -> Li
         length = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
         if length < min_edge_length_m:
             continue
+        # Normal-beregning gjøres mot originalt polygon (mer nøyaktig)
         nx, ny = _edge_normal_outward(p0, p1, site_poly)
         outward_bearing = _bearing_deg(nx, ny)
         edges.append(SiteEdge(
@@ -359,16 +376,9 @@ def classify_edges_from_neighbors(
 ) -> List[SiteEdge]:
     """Sett karakter på hver kant basert på nabobygg-tettheten inntil.
 
-    neighbor_buildings forventes å være en liste av dict med minst en
-    'geometry'-nøkkel (WKT eller shapely Polygon). Hvis dataen mangler eller
-    er tom, får alle kanter UNKNOWN.
-
-    Heuristikk:
-    - Tell hvor mange nabobygg som finnes innenfor buffer_m fra kanten
-    - 0 → OPEN
-    - 1-2 → NEIGHBOR_SPARSE
-    - 3+ → NEIGHBOR_DENSE
-    - STREET → ikke bestemt her (krever vei-data, som ikke er standard)
+    Optimalisert med STRtree for å unngå O(n*e) intersection-tester.
+    På Tyholt med 333 naboer + 26 kanter reduserer dette fra 8 658 tester
+    til ca 26 × log2(333) ≈ 220 tester.
     """
     if not neighbor_buildings:
         return edges
@@ -378,28 +388,86 @@ def classify_edges_from_neighbors(
     for nb in neighbor_buildings:
         geom = _normalize_neighbor_geom(nb)
         if geom is not None:
+            # Filtrer ut naboer som er inne på tomten (skal ikke skje,
+            # men håndterer edge cases fra Vantor-data)
+            try:
+                if site_poly.contains(geom.centroid):
+                    continue
+            except Exception:
+                continue
             neighbor_pairs.append((geom, nb if isinstance(nb, dict) else {}))
 
     if not neighbor_pairs:
         return edges
 
+    # Bygg spatial index for raskt oppslag
+    try:
+        from shapely.strtree import STRtree
+        neighbor_polys_only = [p for p, _ in neighbor_pairs]
+        tree = STRtree(neighbor_polys_only)
+        use_tree = True
+    except Exception:
+        tree = None
+        use_tree = False
+
     for edge in edges:
         edge_line = LineString([edge.p0, edge.p1])
         buffered = edge_line.buffer(buffer_m)
-        # Kun bygg som er UTENFOR tomten og INNEN buffer
         count = 0
         heights: List[float] = []
-        for npoly, nb_raw in neighbor_pairs:
+
+        if use_tree:
+            # STRtree.query returnerer kandidater som skjærer buffered-bbox
             try:
-                if site_poly.contains(npoly.centroid):
-                    continue
-                if buffered.intersects(npoly):
-                    count += 1
-                    h = _extract_neighbor_height(nb_raw)
-                    if h is not None and h > 0:
-                        heights.append(h)
+                candidate_indices = tree.query(buffered)
+                for idx in candidate_indices:
+                    try:
+                        npoly = neighbor_polys_only[idx]
+                        nb_raw = neighbor_pairs[idx][1]
+                    except (IndexError, TypeError):
+                        continue
+                    try:
+                        if buffered.intersects(npoly):
+                            count += 1
+                            h = _extract_neighbor_height(nb_raw)
+                            if h is not None and h > 0:
+                                heights.append(h)
+                    except Exception:
+                        continue
             except Exception:
-                continue
+                # STRtree returnerte annet enn indekser — fall tilbake til objektliste
+                try:
+                    candidates = tree.query(buffered)
+                    for npoly in candidates:
+                        # Finn matching nb_raw
+                        nb_raw = {}
+                        for p, raw in neighbor_pairs:
+                            if p is npoly:
+                                nb_raw = raw
+                                break
+                        try:
+                            if buffered.intersects(npoly):
+                                count += 1
+                                h = _extract_neighbor_height(nb_raw)
+                                if h is not None and h > 0:
+                                    heights.append(h)
+                        except Exception:
+                            continue
+                except Exception:
+                    use_tree = False
+
+        if not use_tree:
+            # Fallback: O(n) loop
+            for npoly, nb_raw in neighbor_pairs:
+                try:
+                    if buffered.intersects(npoly):
+                        count += 1
+                        h = _extract_neighbor_height(nb_raw)
+                        if h is not None and h > 0:
+                            heights.append(h)
+                except Exception:
+                    continue
+
         edge.neighbor_count = count
         if heights:
             edge.avg_neighbor_height_m = sum(heights) / len(heights)
@@ -475,23 +543,36 @@ def analyze_site(
     - Manglende eller tom site_poly
     - Manglende neighbor_buildings
     - Uregelmessige geometrier (faller tilbake til enkel rektangel-analyse)
+    - Polygoner med mange micro-kanter fra GIS-data (vi forenkler før analyse)
     """
     if site_poly is None or site_poly.is_empty:
         return SiteContext.empty(site_poly)
 
+    # Forenkle polygonet: fjern vertices som ligger på nesten rett linje.
+    # Toleranse 1.5m er liten nok til å bevare L/T/U-former men fjerner
+    # GIS-støy (micro-kanter < 1m som ofte finnes i tomteregistrering).
+    try:
+        simplified = site_poly.simplify(1.5, preserve_topology=True)
+        if isinstance(simplified, Polygon) and not simplified.is_empty and simplified.area > 0:
+            analysis_poly = simplified
+        else:
+            analysis_poly = site_poly
+    except Exception:
+        analysis_poly = site_poly
+
     try:
         # Grunnleggende geometri
-        c = site_poly.centroid
+        c = analysis_poly.centroid
         site_center = (c.x, c.y)
-        dom_axis = _dominant_axis_of_polygon(site_poly)
-        is_rect = _is_approx_rectangular(site_poly)
+        dom_axis = _dominant_axis_of_polygon(analysis_poly)
+        is_rect = _is_approx_rectangular(analysis_poly)
 
         # Armer
-        arms = decompose_to_arms(site_poly)
+        arms = decompose_to_arms(analysis_poly)
 
-        # Kanter
-        edges = extract_site_edges(site_poly)
-        edges = classify_edges_from_neighbors(site_poly, edges, neighbor_buildings)
+        # Kanter — bruk min-lengde 5m for å filtrere bort micro-kanter
+        edges = extract_site_edges(analysis_poly, min_edge_length_m=5.0)
+        edges = classify_edges_from_neighbors(analysis_poly, edges, neighbor_buildings)
 
         # Oppsummeringer
         n_neighbors = len([nb for nb in (neighbor_buildings or [])
