@@ -82,6 +82,12 @@ class Delfelt:
     tower_size_m: Optional[Literal[17, 21]] = None
     phase: int = 1
     phase_label: str = ""
+    # Pass 3 AI-designdirektiv — alle valgfrie, default er "ingen føring"
+    design_variant: Optional[str] = None            # "single" | "varied" | "rotated" — for LAMELL
+    design_karre_shape: Optional[str] = None         # "uo" | "l" | "t" | "z" — for KARRE
+    design_height_pattern: Optional[str] = None      # "uniform" | "accent" | "stepped" | "paired" — for PUNKTHUS
+    design_rotation_deg: Optional[float] = None       # små vinkler, -15..+15
+    design_reasoning: Optional[str] = None            # AI sin forklaring, for logging
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -96,6 +102,11 @@ class Delfelt:
             "tower_size_m": self.tower_size_m,
             "phase": int(self.phase),
             "phase_label": self.phase_label,
+            "design_variant": self.design_variant,
+            "design_karre_shape": self.design_karre_shape,
+            "design_height_pattern": self.design_height_pattern,
+            "design_rotation_deg": self.design_rotation_deg,
+            "design_reasoning": self.design_reasoning,
         }
 
     @classmethod
@@ -112,6 +123,11 @@ class Delfelt:
             tower_size_m=data.get("tower_size_m"),
             phase=int(data.get("phase", 1)),
             phase_label=str(data.get("phase_label", "")),
+            design_variant=data.get("design_variant"),
+            design_karre_shape=data.get("design_karre_shape"),
+            design_height_pattern=data.get("design_height_pattern"),
+            design_rotation_deg=data.get("design_rotation_deg"),
+            design_reasoning=data.get("design_reasoning"),
         )
 
 
