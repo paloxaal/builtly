@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-"""Core datatypes for the Builtly v8 masterplan engine.
+"""Core datatypes for the Builtly masterplan engine.
 
-Delivery 4 extends the deterministic geometry/sol/MUA foundation with:
-- concept-family level alternatives
-- AI-pass parameter selection hooks (pass 2)
-- AI/fallback report narratives (pass 6)
-- concept-level OptionResult integration
-
-The types remain intentionally compact and project-agnostic.
+This version adds an explicit intermediate composition layer:
+- FieldSkeleton: frontage lines, build bands, courtyard reserve, view corridors
+- FieldSkeletonSummary: serializable summary used by UI/report
+- ArchitectureMetrics: deterministic architectural quality score
 """
 
 from dataclasses import dataclass, field
@@ -16,11 +13,11 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Literal, Optional, Protocol, Tuple
 
 try:
-    from shapely.geometry import Polygon
+    from shapely.geometry import LineString, Point, Polygon
     from shapely import wkt as shapely_wkt
     HAS_SHAPELY = True
-except Exception:
-    Polygon = object  # type: ignore[assignment]
+except Exception:  # pragma: no cover
+    LineString = Point = Polygon = object  # type: ignore[assignment]
     shapely_wkt = None  # type: ignore[assignment]
     HAS_SHAPELY = False
 
@@ -50,23 +47,20 @@ class ComplianceState(str, Enum):
     IKKE_VURDERT = "IKKE VURDERT"
 
 
-def _serialize_polygon(poly: Optional[Polygon]) -> Optional[str]:
-    if poly is None:
+def _serialize_geom(geom: Any) -> Optional[str]:
+    if geom is None:
         return None
     if not HAS_SHAPELY:
         raise RuntimeError("Shapely is required to serialize geometry.")
-    return poly.wkt
+    return geom.wkt
 
 
-def _deserialize_polygon(text: Optional[str]) -> Optional[Polygon]:
+def _deserialize_geom(text: Optional[str]) -> Any:
     if not text:
         return None
     if not HAS_SHAPELY or shapely_wkt is None:
         raise RuntimeError("Shapely is required to deserialize geometry.")
-    geom = shapely_wkt.loads(text)
-    if not isinstance(geom, Polygon):
-        raise TypeError("Expected Polygon WKT.")
-    return geom
+    return shapely_wkt.loads(text)
 
 
 @dataclass
@@ -82,26 +76,34 @@ class Delfelt:
     tower_size_m: Optional[Literal[17, 21]] = None
     phase: int = 1
     phase_label: str = ""
-    # Pass 3 AI-designdirektiv — alle valgfrie, default er "ingen føring"
-    design_variant: Optional[str] = None            # "single" | "varied" | "rotated" — for LAMELL
-    design_karre_shape: Optional[str] = None         # "uo" | "l" | "t" | "z" — for KARRE
-    design_height_pattern: Optional[str] = None      # "uniform" | "accent" | "stepped" | "paired" — for PUNKTHUS
-    design_rotation_deg: Optional[float] = None       # små vinkler, -15..+15
-    design_reasoning: Optional[str] = None            # AI sin forklaring, for logging
-    # Pass 0 kontekst — tildelt av kontekstuell delfelt-inndeling
-    arm_id: Optional[str] = None                     # hvilken "arm" dette feltet tilhører
-    character: Optional[str] = None                  # FieldCharacter som string
-    max_neighbor_height_m: Optional[float] = None    # gjennomsnittshøyde av nabobygg nær dette feltet
-
-    # v9 komposisjonslag — tildelt av pass1_generate_delfelt_from_composition
-    role: Optional[str] = None                       # "frontage_primary" / "frontage_secondary" /
-                                                     # "courtyard_side" / "accent" / "cluster"
-    facing_frontage_idx: Optional[int] = None        # index til frontage som feltet står mot
+    field_role: str = ""
+    character: str = ""
+    arm_id: Optional[str] = None
+    design_variant: Optional[str] = None
+    design_karre_shape: Optional[str] = None
+    design_height_pattern: Optional[str] = None
+    target_bya_pct: Optional[float] = None
+    skeleton_mode: Optional[str] = None
+    frontage_mode: Optional[str] = None
+    micro_band_count: int = 0
+    view_corridor_count: int = 0
+    courtyard_reserve_ratio: float = 0.0
+    frontage_depth_m: Optional[float] = None
+    corridor_width_m: Optional[float] = None
+    max_neighbor_height_m: Optional[float] = None
+    min_neighbor_distance_m: Optional[float] = None
+    macro_structure: Optional[str] = None
+    micro_field_pattern: Optional[str] = None
+    symmetry_preference: Optional[str] = None
+    composition_strictness: float = 0.0
+    frontage_zone_ratio: float = 0.0
+    public_realm_ratio: float = 0.0
+    node_symmetry: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "field_id": self.field_id,
-            "polygon_wkt": _serialize_polygon(self.polygon),
+            "polygon_wkt": _serialize_geom(self.polygon),
             "typology": self.typology.value,
             "orientation_deg": float(self.orientation_deg),
             "floors_min": int(self.floors_min),
@@ -111,23 +113,36 @@ class Delfelt:
             "tower_size_m": self.tower_size_m,
             "phase": int(self.phase),
             "phase_label": self.phase_label,
+            "field_role": self.field_role,
+            "character": self.character,
+            "arm_id": self.arm_id,
             "design_variant": self.design_variant,
             "design_karre_shape": self.design_karre_shape,
             "design_height_pattern": self.design_height_pattern,
-            "design_rotation_deg": self.design_rotation_deg,
-            "design_reasoning": self.design_reasoning,
-            "arm_id": self.arm_id,
-            "character": self.character,
+            "target_bya_pct": self.target_bya_pct,
+            "skeleton_mode": self.skeleton_mode,
+            "frontage_mode": self.frontage_mode,
+            "micro_band_count": int(self.micro_band_count),
+            "view_corridor_count": int(self.view_corridor_count),
+            "courtyard_reserve_ratio": float(self.courtyard_reserve_ratio),
+            "frontage_depth_m": self.frontage_depth_m,
+            "corridor_width_m": self.corridor_width_m,
             "max_neighbor_height_m": self.max_neighbor_height_m,
-            "role": self.role,
-            "facing_frontage_idx": self.facing_frontage_idx,
+            "min_neighbor_distance_m": self.min_neighbor_distance_m,
+            "macro_structure": self.macro_structure,
+            "micro_field_pattern": self.micro_field_pattern,
+            "symmetry_preference": self.symmetry_preference,
+            "composition_strictness": float(self.composition_strictness),
+            "frontage_zone_ratio": float(self.frontage_zone_ratio),
+            "public_realm_ratio": float(self.public_realm_ratio),
+            "node_symmetry": bool(self.node_symmetry),
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Delfelt":
         return cls(
             field_id=str(data["field_id"]),
-            polygon=_deserialize_polygon(data.get("polygon_wkt")) or Polygon(),
+            polygon=_deserialize_geom(data.get("polygon_wkt")) or Polygon(),
             typology=Typology(data["typology"]),
             orientation_deg=float(data.get("orientation_deg", 0.0)),
             floors_min=int(data.get("floors_min", 1)),
@@ -137,16 +152,29 @@ class Delfelt:
             tower_size_m=data.get("tower_size_m"),
             phase=int(data.get("phase", 1)),
             phase_label=str(data.get("phase_label", "")),
+            field_role=str(data.get("field_role", "")),
+            character=str(data.get("character", "")),
+            arm_id=data.get("arm_id"),
             design_variant=data.get("design_variant"),
             design_karre_shape=data.get("design_karre_shape"),
             design_height_pattern=data.get("design_height_pattern"),
-            design_rotation_deg=data.get("design_rotation_deg"),
-            design_reasoning=data.get("design_reasoning"),
-            arm_id=data.get("arm_id"),
-            character=data.get("character"),
-            max_neighbor_height_m=data.get("max_neighbor_height_m"),
-            role=data.get("role"),
-            facing_frontage_idx=data.get("facing_frontage_idx"),
+            target_bya_pct=float(data["target_bya_pct"]) if data.get("target_bya_pct") is not None else None,
+            skeleton_mode=data.get("skeleton_mode"),
+            frontage_mode=data.get("frontage_mode"),
+            micro_band_count=int(data.get("micro_band_count", 0) or 0),
+            view_corridor_count=int(data.get("view_corridor_count", 0) or 0),
+            courtyard_reserve_ratio=float(data.get("courtyard_reserve_ratio", 0.0) or 0.0),
+            frontage_depth_m=float(data["frontage_depth_m"]) if data.get("frontage_depth_m") is not None else None,
+            corridor_width_m=float(data["corridor_width_m"]) if data.get("corridor_width_m") is not None else None,
+            max_neighbor_height_m=float(data["max_neighbor_height_m"]) if data.get("max_neighbor_height_m") is not None else None,
+            min_neighbor_distance_m=float(data["min_neighbor_distance_m"]) if data.get("min_neighbor_distance_m") is not None else None,
+            macro_structure=data.get("macro_structure"),
+            micro_field_pattern=data.get("micro_field_pattern"),
+            symmetry_preference=data.get("symmetry_preference"),
+            composition_strictness=float(data.get("composition_strictness", 0.0) or 0.0),
+            frontage_zone_ratio=float(data.get("frontage_zone_ratio", 0.0) or 0.0),
+            public_realm_ratio=float(data.get("public_realm_ratio", 0.0) or 0.0),
+            node_symmetry=bool(data.get("node_symmetry", False)),
         )
 
 
@@ -180,45 +208,6 @@ class Bygg:
     def tak_mua_m2(self) -> float:
         enabled = self.has_tak_mua if self.has_tak_mua is not None else self.floors >= 3
         return self.footprint_m2 * float(self.tak_mua_share) if enabled and self.floors >= 3 else 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "bygg_id": self.bygg_id,
-            "footprint_wkt": _serialize_polygon(self.footprint),
-            "floors": int(self.floors),
-            "height_m": float(self.height_m),
-            "typology": self.typology.value,
-            "delfelt_id": self.delfelt_id,
-            "phase": int(self.phase),
-            "barnehage_i_sokkel": bool(self.barnehage_i_sokkel),
-            "barnehage_inne_m2": float(self.barnehage_inne_m2),
-            "barnehage_ute_delfelt_id": self.barnehage_ute_delfelt_id,
-            "display_name": self.display_name,
-            "angle_deg": float(self.angle_deg),
-            "has_tak_mua": self.has_tak_mua,
-            "tak_mua_share": float(self.tak_mua_share),
-            "privat_mua_m2": float(self.privat_mua_m2),
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Bygg":
-        return cls(
-            bygg_id=str(data["bygg_id"]),
-            footprint=_deserialize_polygon(data.get("footprint_wkt")) or Polygon(),
-            floors=int(data.get("floors", 1)),
-            height_m=float(data.get("height_m", 0.0)),
-            typology=Typology(data["typology"]),
-            delfelt_id=str(data.get("delfelt_id", "")),
-            phase=int(data.get("phase", 1)),
-            barnehage_i_sokkel=bool(data.get("barnehage_i_sokkel", False)),
-            barnehage_inne_m2=float(data.get("barnehage_inne_m2", 0.0)),
-            barnehage_ute_delfelt_id=data.get("barnehage_ute_delfelt_id"),
-            display_name=str(data.get("display_name", "")),
-            angle_deg=float(data.get("angle_deg", 0.0)),
-            has_tak_mua=data.get("has_tak_mua"),
-            tak_mua_share=float(data.get("tak_mua_share", 0.30)),
-            privat_mua_m2=float(data.get("privat_mua_m2", 0.0)),
-        )
 
 
 @dataclass
@@ -290,12 +279,6 @@ class SolReport:
     def mua_sun_hours_eqx(self) -> float:
         return float(self.mua_soltimer_varjevndogn or 0.0)
 
-    def result_for(self, bygg_id: str) -> Optional[SolBuildingResult]:
-        for item in self.per_building:
-            if item.bygg_id == bygg_id:
-                return item
-        return None
-
 
 @dataclass
 class ComplianceCheck:
@@ -326,11 +309,69 @@ class MUAReport:
         relevant = [check for check in self.checks if check.status != ComplianceState.IKKE_VURDERT]
         return bool(relevant) and all(check.status == ComplianceState.JA for check in relevant)
 
-    def status_for(self, rule_key: str) -> ComplianceState:
-        for check in self.checks:
-            if check.rule_key == rule_key:
-                return check.status
-        return ComplianceState.IKKE_VURDERT
+
+@dataclass
+class SkeletonFrontage:
+    role: str = ""
+    line: Optional[LineString] = None
+
+
+@dataclass
+class FieldSkeleton:
+    field_id: str = ""
+    mode: str = ""
+    local_orientation_deg: float = 0.0
+    frontage_lines: List[SkeletonFrontage] = field(default_factory=list)
+    build_bands: List[Polygon] = field(default_factory=list)
+    courtyard_reserve: Optional[Polygon] = None
+    view_corridors: List[Polygon] = field(default_factory=list)
+    accent_nodes: List[Point] = field(default_factory=list)
+    open_edges: List[str] = field(default_factory=list)
+    frontage_depth_m: float = 0.0
+    corridor_width_m: float = 0.0
+    macro_axis: Optional[LineString] = None
+    symmetry_axis: Optional[LineString] = None
+    frontage_zones: List[Polygon] = field(default_factory=list)
+    micro_fields: List[Polygon] = field(default_factory=list)
+    public_realm: List[Polygon] = field(default_factory=list)
+    reserved_open_space: List[Polygon] = field(default_factory=list)
+
+
+@dataclass
+class FieldSkeletonSummary:
+    field_id: str = ""
+    skeleton_mode: str = ""
+    frontage_count: int = 0
+    micro_band_count: int = 0
+    courtyard_reserve_m2: float = 0.0
+    view_corridor_m2: float = 0.0
+    accent_node_count: int = 0
+    build_band_area_m2: float = 0.0
+    frontage_depth_m: float = 0.0
+    corridor_width_m: float = 0.0
+    macro_axis_m: float = 0.0
+    symmetry_axis_m: float = 0.0
+    frontage_zone_area_m2: float = 0.0
+    micro_field_count: int = 0
+    public_realm_m2: float = 0.0
+    reserved_open_space_m2: float = 0.0
+
+
+@dataclass
+class ArchitectureMetrics:
+    frontage_continuity: float = 0.0
+    courtyard_clarity: float = 0.0
+    axis_symmetry: float = 0.0
+    view_corridor_quality: float = 0.0
+    typology_purity: float = 0.0
+    building_entropy: float = 0.0
+    bya_fitness: float = 0.0
+    public_realm_clarity: float = 0.0
+    rhythm_score: float = 0.0
+    frontage_gap_penalty: float = 0.0
+    isolated_building_penalty: float = 0.0
+    total_score: float = 0.0
+    notes: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -344,6 +385,27 @@ class FieldParameterChoice:
     courtyard_kind: Optional[CourtyardKind] = None
     tower_size_m: Optional[Literal[17, 21]] = None
     rationale: str = ""
+    field_role: str = ""
+    character: str = ""
+    arm_id: Optional[str] = None
+    design_variant: Optional[str] = None
+    design_karre_shape: Optional[str] = None
+    design_height_pattern: Optional[str] = None
+    target_bya_pct: Optional[float] = None
+    skeleton_mode: Optional[str] = None
+    frontage_mode: Optional[str] = None
+    micro_band_count: int = 0
+    view_corridor_count: int = 0
+    courtyard_reserve_ratio: float = 0.0
+    frontage_depth_m: Optional[float] = None
+    corridor_width_m: Optional[float] = None
+    macro_structure: Optional[str] = None
+    micro_field_pattern: Optional[str] = None
+    symmetry_preference: Optional[str] = None
+    composition_strictness: float = 0.0
+    frontage_zone_ratio: float = 0.0
+    public_realm_ratio: float = 0.0
+    node_symmetry: bool = False
 
 
 @dataclass
@@ -384,10 +446,8 @@ class Masterplan:
     longitude_deg: float = 10.40
     pass2_source: str = "fallback"
     pass6_source: str = "fallback"
-
-    # v9: Komposisjonslag og arkitektur-scores
-    composition_plan: Optional[Any] = None  # CompositionPlan eller None
-    architecture_scores: Optional[Dict[str, float]] = None  # Dict fra architecture_score()
+    skeleton_summaries: List[FieldSkeletonSummary] = field(default_factory=list)
+    architecture_report: ArchitectureMetrics = field(default_factory=ArchitectureMetrics)
 
     def iter_buildings_for_delfelt(self, field_id: str) -> Iterable[Bygg]:
         return (bygg for bygg in self.bygg if bygg.delfelt_id == field_id)
@@ -401,202 +461,3 @@ class Masterplan:
 
 class StructuredPassClient(Protocol):
     def __call__(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]: ...
-
-
-# =========================================================================
-# SiteContext — pass 0: tomtens "intelligens"
-# =========================================================================
-# Pass 0 analyserer tomtens geometri OG nabolagsdata før delfeltene lages.
-# Resultatet er en strukturert beskrivelse som pass 1 (delfeltinndeling),
-# pass 2 (parametervalg) og AI-pass 3 (designdirektiver) kan bruke for å
-# gi kontekstuelt gode svar i stedet for generiske.
-
-
-class EdgeCharacter(str, Enum):
-    """Karakteren av en tomtgrense — sett fra innsiden av tomten."""
-    STREET = "street"              # vender mot offentlig vei
-    NEIGHBOR_DENSE = "neighbor_dense"    # tett nabobebyggelse
-    NEIGHBOR_SPARSE = "neighbor_sparse"  # spredt nabobebyggelse
-    OPEN = "open"                  # åpen mark / park / ingenting
-    UNKNOWN = "unknown"            # kunne ikke bestemme
-
-
-class FieldCharacter(str, Enum):
-    """Kontekstuell karakter tildelt et delfelt etter pass 0."""
-    STREET_FACING = "street_facing"      # prominent mot vei/torg — bør ha markant form
-    NEIGHBORHOOD_EDGE = "neighborhood_edge"  # mot naboboliger — bør respondere i skala
-    SHELTERED = "sheltered"              # innvendig i tomt — rolig, kan eksperimentere
-    OPEN_VIEW = "open_view"              # mot åpen mark/park — kan ha lavere BYA
-    CORNER = "corner"                    # hjørne-posisjon — ofte ekstra markant
-
-
-@dataclass
-class SiteEdge:
-    """Én kant av tomtens yttergrense med retning og karakter."""
-    # Kantens to endepunkter
-    p0: Tuple[float, float]
-    p1: Tuple[float, float]
-    # Lengde (meter)
-    length_m: float
-    # Retning normalen peker i (utover fra tomten), grader 0-360 fra nord,
-    # klokkeretning (0=N, 90=Ø, 180=S, 270=V)
-    outward_bearing_deg: float
-    # Karakter — fastsatt fra naboanalyse
-    character: EdgeCharacter = EdgeCharacter.UNKNOWN
-    # Hvor mange nabobygg som "tilhører" denne kanten (innenfor 25m buffer)
-    neighbor_count: int = 0
-    # Gjennomsnittlig høyde på nabobygg langs denne kanten (meter)
-    # None = ingen naboer eller ikke tilgjengelig
-    avg_neighbor_height_m: Optional[float] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "p0": list(self.p0),
-            "p1": list(self.p1),
-            "length_m": round(self.length_m, 2),
-            "outward_bearing_deg": round(self.outward_bearing_deg, 1),
-            "character": self.character.value,
-            "neighbor_count": self.neighbor_count,
-            "avg_neighbor_height_m": (round(self.avg_neighbor_height_m, 1)
-                                       if self.avg_neighbor_height_m is not None else None),
-        }
-
-
-@dataclass
-class SiteArm:
-    """En "arm" av tomten — sammenhengende del etter decomposition.
-
-    For rektangler er det én arm. For L-former to, for T-former tre osv.
-    Hver arm har sitt eget senter, areal og retning — og kan tildeles
-    sin egen karakter.
-    """
-    arm_id: str                    # f.eks. "arm_north", "arm_south"
-    polygon: Optional[Polygon]     # armens egen polygon
-    centroid: Tuple[float, float]
-    area_m2: float
-    # Retningen armen peker i fra tomtens sentrum (grader fra nord)
-    bearing_from_site_center_deg: float
-    # Arm sin dominante akse-retning (for bygg-orientering)
-    dominant_axis_deg: float
-    # Aspect ratio: lengste / korteste utstrekning
-    aspect_ratio: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "arm_id": self.arm_id,
-            "polygon_wkt": _serialize_polygon(self.polygon),
-            "centroid": list(self.centroid),
-            "area_m2": round(self.area_m2, 1),
-            "bearing_from_site_center_deg": round(self.bearing_from_site_center_deg, 1),
-            "dominant_axis_deg": round(self.dominant_axis_deg, 1),
-            "aspect_ratio": round(self.aspect_ratio, 2),
-        }
-
-
-@dataclass
-class SiteContext:
-    """Komplett output fra pass 0 — beskriver tomten arkitektonisk."""
-    # Tomtens bounding geometri
-    site_area_m2: float
-    site_centroid: Tuple[float, float]
-    site_bearing_deg: float             # dominant akse av tomten (grader fra nord)
-
-    # Dekomposisjon
-    arms: List[SiteArm] = field(default_factory=list)
-    edges: List[SiteEdge] = field(default_factory=list)
-
-    # Oppsummering
-    is_rectangular: bool = True          # True hvis ~én rektangel (enkel tomt)
-    has_arms: bool = False               # True hvis L/T/U/kompleks form
-    n_neighbors: int = 0                 # totalt antall nabobygg registrert
-
-    # Kontekst-vurdering brukbar for AI
-    dominant_view_direction: Optional[str] = None  # "south", "southwest", osv.
-    access_bearing_deg: Optional[float] = None     # hvor kommer vei/adkomst inn
-    site_label: str = "unknown"          # fritekst: "narrow_rectangle" / "l_shape" / etc.
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "site_area_m2": round(self.site_area_m2, 0),
-            "site_centroid": list(self.site_centroid),
-            "site_bearing_deg": round(self.site_bearing_deg, 1),
-            "arms": [a.to_dict() for a in self.arms],
-            "edges": [e.to_dict() for e in self.edges],
-            "is_rectangular": self.is_rectangular,
-            "has_arms": self.has_arms,
-            "n_neighbors": self.n_neighbors,
-            "dominant_view_direction": self.dominant_view_direction,
-            "access_bearing_deg": (round(self.access_bearing_deg, 1)
-                                   if self.access_bearing_deg is not None else None),
-            "site_label": self.site_label,
-        }
-
-    @classmethod
-    def empty(cls, site_poly: Optional[Polygon] = None) -> "SiteContext":
-        """Fallback hvis analysen feiler — enkel rektangel-antagelse."""
-        if site_poly is None or not HAS_SHAPELY:
-            return cls(site_area_m2=0.0, site_centroid=(0.0, 0.0), site_bearing_deg=0.0)
-        c = site_poly.centroid
-        return cls(
-            site_area_m2=float(site_poly.area),
-            site_centroid=(c.x, c.y),
-            site_bearing_deg=0.0,
-            site_label="unknown",
-        )
-
-
-# =========================================================================
-# CompositionPlan — pass 0.5: v9 komposisjonslag
-# =========================================================================
-# compose_plan() lager en rammeplan FØR bygg plasseres, med eksplisitte
-# gatekanter, gårdsrom, siktkorridorer og aksentposisjoner. Motoren bruker
-# dette som styringsverktøy i plasseringen.
-
-
-@dataclass
-class CompositionPlan:
-    """Rammeplan for et konsept — definerer romlig hierarki før plassering."""
-    # Gatekanter: LineStrings der bygg skal ha front. Første er primær.
-    street_frontages: List[Any] = field(default_factory=list)  # LineString
-
-    # Gårdsrom: Polygons som skal være ubebygd (bygg plasseres RUNDT disse)
-    courtyards: List[Any] = field(default_factory=list)  # Polygon
-
-    # Siktkorridorer: LineStrings som bygg ikke skal blokkere
-    sight_corridors: List[Any] = field(default_factory=list)  # LineString
-
-    # Aksentposisjoner: (Point, radius) for aksent-bygg
-    accent_points: List[Tuple[Any, float]] = field(default_factory=list)
-
-    # Konsept-label for debugging
-    concept_name: str = "generic"
-
-    # Konseptspesifikke regler (brukes av place_buildings)
-    concept_rules: Dict[str, Any] = field(default_factory=dict)
-
-    def has_composition(self) -> bool:
-        """True hvis minst én komposisjonselement er definert."""
-        return (bool(self.street_frontages) or bool(self.courtyards)
-                or bool(self.accent_points))
-
-    def to_dict(self) -> Dict[str, Any]:
-        def serialize_geom(g):
-            try:
-                return g.wkt if hasattr(g, "wkt") else None
-            except Exception:
-                return None
-        return {
-            "concept_name": self.concept_name,
-            "street_frontages": [serialize_geom(f) for f in self.street_frontages],
-            "courtyards": [serialize_geom(c) for c in self.courtyards],
-            "sight_corridors": [serialize_geom(s) for s in self.sight_corridors],
-            "accent_points": [
-                {"wkt": serialize_geom(p), "radius": r}
-                for p, r in self.accent_points
-            ],
-            "concept_rules": dict(self.concept_rules),
-        }
-
-    @classmethod
-    def empty(cls, concept_name: str = "generic") -> "CompositionPlan":
-        return cls(concept_name=concept_name)
