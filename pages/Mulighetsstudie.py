@@ -469,13 +469,22 @@ def generer_arkitekt_render(
         mp_ref = geometry.get("masterplan_ref")
         if mp_ref is not None and getattr(mp_ref, "building_phases", None):
             n_phases = len(mp_ref.building_phases)
-            # Sjekk om det er næring eller barnehage i prosjektet
+
+            # Defensiv henting av programs_included — V13/V14 legacy_page_bridge
+            # returnerer building_phases som dicts uten programs_included-nøkkel,
+            # mens eldre versjoner ga objekter med .programs_included. Vi støtter
+            # begge via get_programs-helper slik at koden ikke krasjer.
+            def _get_programs(phase: Any) -> list:
+                if isinstance(phase, dict):
+                    return phase.get("programs_included", []) or []
+                return getattr(phase, "programs_included", []) or []
+
             has_naering = any(
-                "naering" in (p.programs_included or [])
+                "naering" in _get_programs(p)
                 for p in mp_ref.building_phases
             )
             has_barnehage = any(
-                "barnehage" in (p.programs_included or [])
+                "barnehage" in _get_programs(p)
                 for p in mp_ref.building_phases
             )
 
@@ -7218,23 +7227,33 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
 
     pdf.set_font(PDF_FONT, "", 8)
     pdf.set_text_color(30, 30, 30)
+
+    def _phase_attr(phase: Any, attr: str, default: Any = None) -> Any:
+        """Støtt både objekter og dicts for phase-lookup."""
+        if isinstance(phase, dict):
+            return phase.get(attr, default)
+        return getattr(phase, attr, default)
+
     for phase in masterplan.building_phases:
-        progs = ", ".join(phase.programs_included) if phase.programs_included else "bolig"
+        _progs = _phase_attr(phase, "programs_included", None) or []
+        progs = ", ".join(_progs) if _progs else "bolig"
         if len(progs) > 22:
             progs = progs[:20] + "…"
-        p_fase = ",".join(str(p) for p in phase.parking_served_by) or "-"
-        status = "OK" if phase.standalone_habitable else "Merknad"
+        _pb = _phase_attr(phase, "parking_served_by", []) or []
+        p_fase = ",".join(str(p) for p in _pb) or "-"
+        status = "OK" if _phase_attr(phase, "standalone_habitable", True) else "Merknad"
         row = [
-            f"T{phase.phase_number}",
-            f"{phase.actual_bra:,.0f}".replace(",", " "),
-            f"{phase.units_estimate}",
+            f"T{_phase_attr(phase, 'phase_number', _phase_attr(phase, 'phase', '?'))}",
+            f"{_phase_attr(phase, 'actual_bra', _phase_attr(phase, 'bra_m2', 0)):,.0f}".replace(",", " "),
+            f"{_phase_attr(phase, 'units_estimate', 0)}",
             progs,
             f"P{p_fase}",
-            f"{phase.standalone_outdoor_m2:,.0f}".replace(",", " "),
+            f"{_phase_attr(phase, 'standalone_outdoor_m2', 0):,.0f}".replace(",", " "),
             status,
         ]
         pdf.set_x(x_start)
-        fill = phase.phase_number % 2 == 0
+        _phase_num = _phase_attr(phase, "phase_number", _phase_attr(phase, "phase", 0)) or 0
+        fill = _phase_num % 2 == 0
         if fill:
             pdf.set_fill_color(247, 249, 252)
         for val, w in zip(row, widths):
@@ -7260,8 +7279,9 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
         month_schedule = {}
         cur = 0
         for p in masterplan.building_phases:
-            dur = p.estimated_duration_months or DEFAULT_DUR
-            month_schedule[p.phase_number] = (cur, cur + dur)
+            dur = _phase_attr(p, "estimated_duration_months", None) or DEFAULT_DUR
+            _pn = _phase_attr(p, "phase_number", _phase_attr(p, "phase", 0)) or 0
+            month_schedule[_pn] = (cur, cur + dur)
             cur += max(1, dur - 6)
         total_months = max(e for _, e in month_schedule.values()) if month_schedule else DEFAULT_DUR
 
@@ -7272,20 +7292,24 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
         pdf.set_line_width(0.15)
         for i, phase in enumerate(masterplan.building_phases):
             y = gantt_y + i * (row_h + 1.5)
+            _pn = _phase_attr(phase, "phase_number", _phase_attr(phase, "phase", i + 1)) or (i + 1)
+            _pbra = _phase_attr(phase, "actual_bra", _phase_attr(phase, "bra_m2", 0)) or 0
             # Label
             pdf.set_xy(25, y)
             pdf.set_font(PDF_FONT, "", 7.5)
             pdf.set_text_color(80, 80, 90)
-            pdf.cell(18, row_h, clean_pdf_text(f"T{phase.phase_number}"), 0, 0, "L")
+            pdf.cell(18, row_h, clean_pdf_text(f"T{_pn}"), 0, 0, "L")
             # Bakgrunnsstripe
             pdf.set_fill_color(240, 243, 248)
             pdf.rect(gantt_x0, y, gantt_w, row_h, style="F")
             # Selve trinn-stripen
-            s, e = month_schedule[phase.phase_number]
+            if _pn not in month_schedule:
+                continue
+            s, e = month_schedule[_pn]
             left = gantt_x0 + (s / total_months) * gantt_w
             width = ((e - s) / total_months) * gantt_w
             # Fase-farge (hex → RGB)
-            hex_color = PHASE_COLORS_HEX[(phase.phase_number - 1) % len(PHASE_COLORS_HEX)]
+            hex_color = PHASE_COLORS_HEX[(_pn - 1) % len(PHASE_COLORS_HEX)]
             r = int(hex_color[1:3], 16)
             g = int(hex_color[3:5], 16)
             b = int(hex_color[5:7], 16)
@@ -7295,7 +7319,7 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
             pdf.set_xy(left + 1.5, y + 0.3)
             pdf.set_font(PDF_FONT, "B", 6.5)
             pdf.set_text_color(15, 25, 45)
-            pdf.cell(max(10, width - 3), row_h, clean_pdf_text(f"{phase.actual_bra:,.0f}".replace(",", " ") + " m²"), 0, 0, "L")
+            pdf.cell(max(10, width - 3), row_h, clean_pdf_text(f"{_pbra:,.0f}".replace(",", " ") + " m²"), 0, 0, "L")
         # Parkeringsfaser — tegn på egen rad, grå
         last_row_y = gantt_y + len(masterplan.building_phases) * (row_h + 1.5)
         for pp in masterplan.parking_phases:
@@ -7351,8 +7375,17 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
 
         for i, phase in enumerate(page_phases):
             card_y = card_y_start + i * (card_h + 4)
+            # Defensiv henting — støtt både dict og objekt
+            _phase_num = _phase_attr(phase, "phase_number", _phase_attr(phase, "phase", i + 1)) or (i + 1)
+            _phase_label = _phase_attr(phase, "label", f"Trinn {_phase_num}")
+            _phase_bra = _phase_attr(phase, "actual_bra", _phase_attr(phase, "bra_m2", 0)) or 0
+            _phase_units = _phase_attr(phase, "units_estimate", 0) or 0
+            _phase_outdoor = _phase_attr(phase, "standalone_outdoor_m2", 0) or 0
+            _phase_parking = _phase_attr(phase, "parking_served_by", []) or []
+            _phase_progs = _phase_attr(phase, "programs_included", None) or []
+
             # Fase-farge-bånd til venstre
-            hex_color = PHASE_COLORS_HEX[(phase.phase_number - 1) % len(PHASE_COLORS_HEX)]
+            hex_color = PHASE_COLORS_HEX[(_phase_num - 1) % len(PHASE_COLORS_HEX)]
             r = int(hex_color[1:3], 16)
             g = int(hex_color[3:5], 16)
             b = int(hex_color[5:7], 16)
@@ -7368,17 +7401,17 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
             pdf.set_xy(card_x + 8, card_y + 3)
             pdf.set_font(PDF_FONT, "B", 11)
             pdf.set_text_color(31, 43, 61)
-            pdf.cell(card_w - 12, 5, clean_pdf_text(phase.label or f"Trinn {phase.phase_number}"), 0, 0, "L")
+            pdf.cell(card_w - 12, 5, clean_pdf_text(_phase_label or f"Trinn {_phase_num}"), 0, 0, "L")
 
             # Key metrics (horisontal)
             pdf.set_xy(card_x + 8, card_y + 10)
             pdf.set_font(PDF_FONT, "", 8.5)
             pdf.set_text_color(80, 80, 90)
             metrics_text = (
-                f"BRA: {phase.actual_bra:,.0f} m²   |   "
-                f"Boliger: {phase.units_estimate}   |   "
-                f"Uterom: {phase.standalone_outdoor_m2:,.0f} m²   |   "
-                f"P-fase: {','.join(str(p) for p in phase.parking_served_by) or '-'}"
+                f"BRA: {_phase_bra:,.0f} m²   |   "
+                f"Boliger: {_phase_units}   |   "
+                f"Uterom: {_phase_outdoor:,.0f} m²   |   "
+                f"P-fase: {','.join(str(p) for p in _phase_parking) or '-'}"
             ).replace(",", " ")
             pdf.cell(card_w - 12, 4.5, clean_pdf_text(metrics_text), 0, 0, "L")
 
@@ -7388,7 +7421,7 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
             pdf.set_text_color(31, 43, 61)
             pdf.cell(26, 4, clean_pdf_text("Programmer:"), 0, 0, "L")
             # Ikoner for hvert program
-            progs_list = list(phase.programs_included) if phase.programs_included else ["bolig"]
+            progs_list = list(_phase_progs) if _phase_progs else ["bolig"]
             icon_x = card_x + 34
             icon_y = card_y + 15.8
             _draw_program_icons(pdf, icon_x, icon_y, progs_list, size=3.5, spacing=1.2)
@@ -7407,30 +7440,33 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
             pdf.cell(26, 4, clean_pdf_text("Avhengigheter:"), 0, 0, "L")
             pdf.set_font(PDF_FONT, "", 8)
             pdf.set_text_color(30, 30, 30)
-            deps = (", ".join(f"T{d}" for d in phase.depends_on_phases)
-                    if phase.depends_on_phases else "Ingen (kan starte først)")
+            _phase_deps = _phase_attr(phase, "depends_on_phases", []) or []
+            deps = (", ".join(f"T{d}" for d in _phase_deps)
+                    if _phase_deps else "Ingen (kan starte først)")
             pdf.cell(card_w - 38, 4, clean_pdf_text(deps), 0, 0, "L")
 
             # Status (med ikon)
+            _phase_habitable = _phase_attr(phase, "standalone_habitable", True)
             _draw_status_icon(pdf, card_x + 8, card_y + 25.8,
-                              is_ok=phase.standalone_habitable, size=3.8)
+                              is_ok=_phase_habitable, size=3.8)
             pdf.set_xy(card_x + 14, card_y + 26)
             pdf.set_font(PDF_FONT, "B", 8)
-            status_color = (46, 139, 87) if phase.standalone_habitable else (200, 120, 0)
+            status_color = (46, 139, 87) if _phase_habitable else (200, 120, 0)
             pdf.set_text_color(*status_color)
             status_label = (
                 "Standalone-bomiljø: OK"
-                if phase.standalone_habitable
+                if _phase_habitable
                 else "Standalone-bomiljø: Merknader"
             )
             pdf.cell(card_w - 18, 4, clean_pdf_text(status_label), 0, 0, "L")
 
             # Merknader/issues
-            if phase.standalone_issues:
+            _phase_issues = _phase_attr(phase, "standalone_issues", []) or []
+            if _phase_issues:
                 pdf.set_xy(card_x + 8, card_y + 31)
                 pdf.set_font(PDF_FONT, "I", 7.5)
                 pdf.set_text_color(130, 90, 40)
-                issues_text = " · ".join(phase.standalone_issues[:3])
+                issues_text = " · ".join(_phase_issues[:3])
                 if len(issues_text) > 110:
                     issues_text = issues_text[:108] + "…"
                 pdf.cell(card_w - 12, 3.5, clean_pdf_text(issues_text), 0, 0, "L")
@@ -7439,9 +7475,10 @@ def _render_masterplan_phases_page(pdf: Any, masterplan: Any, site: Optional["Si
             pdf.set_xy(card_x + 8, card_y + 38)
             pdf.set_font(PDF_FONT, "", 7.5)
             pdf.set_text_color(120, 125, 135)
-            vol_ids = phase.volume_ids[:8]
-            if len(phase.volume_ids) > 8:
-                vol_text = f"Volumer: {', '.join(vol_ids)} (+{len(phase.volume_ids)-8} til)"
+            _phase_vols = _phase_attr(phase, "volume_ids", []) or []
+            vol_ids = _phase_vols[:8]
+            if len(_phase_vols) > 8:
+                vol_text = f"Volumer: {', '.join(vol_ids)} (+{len(_phase_vols)-8} til)"
             else:
                 vol_text = f"Volumer: {', '.join(vol_ids)}"
             pdf.cell(card_w - 12, 3.5, clean_pdf_text(vol_text), 0, 0, "L")
