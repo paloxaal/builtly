@@ -5,38 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box
-from shapely.ops import unary_union
 
 from .masterplan_integration import OptionResult as V8OptionResult, run_concept_options
 from .masterplan_types import BarnehageConfig, Masterplan, PlanRegler
 from .plan_regler_presets import GENERISK_TEK17_NORGE, TRONDHEIM_KPA_2022_SONE_2
 
 PHASE_COLORS_HEX = ["#38bdf8", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#60a5fa"]
-
-
-def _flatten_polygons(geom: Any) -> List[Polygon]:
-    if geom is None or getattr(geom, "is_empty", True):
-        return []
-    if isinstance(geom, Polygon):
-        return [geom.buffer(0)]
-    if isinstance(geom, MultiPolygon):
-        return [g.buffer(0) for g in geom.geoms if not g.is_empty]
-    if isinstance(geom, GeometryCollection):
-        parts: List[Polygon] = []
-        for g in geom.geoms:
-            parts.extend(_flatten_polygons(g))
-        return parts
-    return []
-
-
-def _normalize_site_geometry(geom: Any) -> Any:
-    parts = _flatten_polygons(geom)
-    if not parts:
-        return None
-    if len(parts) == 1:
-        return parts[0]
-    return unary_union(parts).buffer(0)
-
 
 @dataclass
 class PhasingConfig:
@@ -82,20 +56,39 @@ class LegacyMasterplanBundle:
         return phases
 
     def __getattr__(self, name: str) -> Any:
-        # Skjerm dunder-attributter. copy.deepcopy og dataclasses.asdict spør
-        # etter __setstate__, __reduce__, __getstate__ m.fl. Hvis __getattr__
-        # delegerer disse til self.best_plan ender Python i uendelig rekursjon.
-        if name.startswith('__') and name.endswith('__'):
+        if name.startswith("__"):
             raise AttributeError(name)
-        return getattr(self.best_plan, name)
+        best_plan = self.__dict__.get("best_plan")
+        if best_plan is None:
+            raise AttributeError(name)
+        return getattr(best_plan, name)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "concept_family": getattr(self.best_plan, "concept_family", None),
+            "display_title": getattr(self.best_plan, "display_title", ""),
+            "display_subtitle": getattr(self.best_plan, "display_subtitle", ""),
+            "total_bra_m2": float(getattr(self.best_plan, "total_bra_m2", 0.0) or 0.0),
+            "total_bya_m2": float(getattr(self.best_plan, "total_bya_m2", 0.0) or 0.0),
+            "antall_boliger": int(getattr(self.best_plan, "antall_boliger", 0) or 0),
+            "score": float(getattr(self.best_plan, "score", 0.0) or 0.0),
+            "phase_count": len(getattr(self, "building_phases", []) or []),
+            "field_count": len(getattr(self.best_plan, "delfelt", []) or []),
+        }
 
 def _coord_groups(poly: Any) -> List[List[List[float]]]:
-    groups: List[List[List[float]]] = []
-    for part in _flatten_polygons(poly):
-        ext = [[float(x), float(y)] for x, y in list(part.exterior.coords)]
-        if ext:
-            groups.append(ext)
-    return groups
+    if poly is None or getattr(poly, "is_empty", True):
+        return []
+    if isinstance(poly, Polygon):
+        return [[[float(x), float(y)] for x, y in list(poly.exterior.coords)]]
+    if isinstance(poly, MultiPolygon):
+        return [[ [float(x), float(y)] for x, y in list(part.exterior.coords) ] for part in poly.geoms if not part.is_empty]
+    if isinstance(poly, GeometryCollection):
+        groups: List[List[List[float]]] = []
+        for g in poly.geoms:
+            groups.extend(_coord_groups(g))
+        return groups
+    return []
 
 def _pick_plan_regler(byggesone: str) -> PlanRegler:
     if str(byggesone) == "2":
@@ -127,12 +120,14 @@ def _neighbor_buildings_from_context(geodata_context: Optional[Dict[str, Any]]) 
         out.append({"coords": coords, "height_m": h})
     return out
 
-def _poly_from_context(site: Any, geodata_context: Optional[Dict[str, Any]]) -> Any:
+def _poly_from_context(site: Any, geodata_context: Optional[Dict[str, Any]]) -> Polygon:
     gc = geodata_context or {}
     for key in ("buildable_polygon", "site_polygon"):
-        poly = _normalize_site_geometry(gc.get(key))
-        if poly is not None and not poly.is_empty:
-            return poly
+        poly = gc.get(key)
+        if isinstance(poly, Polygon) and not poly.is_empty:
+            return poly.buffer(0)
+        if isinstance(poly, MultiPolygon) and not poly.is_empty:
+            return poly.buffer(0)
     return box(0, 0, float(getattr(site, "site_width_m", 50.0)), float(getattr(site, "site_depth_m", 50.0))).buffer(0)
 
 def run_masterplan_from_site_inputs(*, site: Any, geodata_context: Optional[Dict[str, Any]], phasing_config: PhasingConfig, target_bra_m2: float, include_barnehage: bool = False, include_naering: bool = False, byggesone: str = "2"):
@@ -141,26 +136,12 @@ def run_masterplan_from_site_inputs(*, site: Any, geodata_context: Optional[Dict
         buildable_poly = _poly_from_context(site, geodata_context)
         regler = _pick_plan_regler(byggesone)
         barnehage = BarnehageConfig(enabled=bool(include_barnehage), inne_m2=1279.0 if include_barnehage else 0.0, ute_m2=2448.0 if include_barnehage else 0.0)
-
-        # KRITISK: phasing_config.requested_delfelt_count kan være satt av UI
-        # basert på et preview-target (ofte brukerens "Ønsket BTA") som ikke
-        # samsvarer med faktisk target_bra_m2. Hvis antallet er for høyt for
-        # det faktiske volumet, ender v8 opp med mange tomme delfelter.
-        # Vi beregner auto-anbefaling mot det faktiske målet, og tar min av
-        # brukerens valg og denne anbefalingen.
-        _auto_cfg = PhasingConfig()  # uten requested_delfelt_count
-        auto_count_for_actual = _auto_cfg.resolve_phase_count(float(target_bra_m2))
-        if phasing_config.requested_delfelt_count and phasing_config.requested_delfelt_count > auto_count_for_actual:
-            effective_delfelt_count = auto_count_for_actual
-        else:
-            effective_delfelt_count = phasing_config.requested_delfelt_count
-
         options = run_concept_options(
             buildable_poly,
             target_bra_m2=float(target_bra_m2),
             plan_regler=regler,
-            requested_delfelt_count=effective_delfelt_count,
-            avg_unit_bra_m2=55.0,
+            requested_delfelt_count=phasing_config.requested_delfelt_count,
+            avg_unit_bra_m2=float(getattr(site, "efficiency_ratio", 0.78) and getattr(site, "desired_bta_m2", 0.0) and 55.0 or 55.0),
             barnehage_config=barnehage,
             latitude_deg=float(getattr(site, "latitude_deg", 63.42)),
             longitude_deg=float((geodata_context or {}).get("longitude_deg", 10.43)),
