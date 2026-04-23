@@ -37,3 +37,6 @@ stripe
 resend>=2.0.0
 pvlib
 numpy
+scipy>=1.12
+networkx>=3.2
+trimesh>=4.4
