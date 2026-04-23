@@ -99,12 +99,26 @@ HAS_AI_PLANNER = False
 ai_site_planner = None  # type: ignore[assignment]
 
 # Masterplan-motor (Builtly v8 via /builtly)
+_MASTERPLAN_IMPORT_ERROR: Optional[str] = None
 try:
     from builtly import masterplan_engine  # noqa: F401
     from builtly import legacy_page_bridge as masterplan_integration
     from builtly.legacy_page_bridge import PhasingConfig
     HAS_MASTERPLAN = True
-except Exception:
+except Exception as _mp_imp_err:
+    # Lagre feilmeldingen slik at den kan vises til brukeren. Uten dette
+    # får man bare "masterplanmotoren kunne ikke importeres" uten å vite HVORFOR.
+    import traceback as _mp_traceback
+    _MASTERPLAN_IMPORT_ERROR = f"{type(_mp_imp_err).__name__}: {_mp_imp_err}"
+    try:
+        import logging as _mp_logging
+        _mp_logging.getLogger("builtly").error(
+            "Masterplan-import feilet: %s\n%s",
+            _MASTERPLAN_IMPORT_ERROR,
+            _mp_traceback.format_exc(),
+        )
+    except Exception:
+        pass
     masterplan_engine = None  # type: ignore
     masterplan_integration = None  # type: ignore
     PhasingConfig = None  # type: ignore
@@ -9364,10 +9378,33 @@ if run_analysis:
         # V15-cleanup: masterplanmotoren er eneste volumgenerator.
         # Legacy A-F-generator er deaktivert. Hvis masterplan-importen feiler
         # (HAS_MASTERPLAN=False), ender vi her med tom options-liste.
+        _err_tail = f"\n\n**Import-feil**: `{_MASTERPLAN_IMPORT_ERROR}`" if _MASTERPLAN_IMPORT_ERROR else ""
         st.error(
             "Builtly V15-cleanup: masterplanmotoren kunne ikke importeres fra builtly/. "
             "Legacy A-F-generator er deaktivert. Sjekk imports og deploy av builtly-mappen."
+            + _err_tail
         )
+        # Vis detaljert diagnostikk for feilsøking
+        with st.expander("🔍 Import-diagnostikk (builtly-pakke)", expanded=True):
+            st.code(
+                f"HAS_MASTERPLAN: {HAS_MASTERPLAN}\n"
+                f"Import-feil: {_MASTERPLAN_IMPORT_ERROR or 'ingen'}\n\n"
+                "Kontroller at /builtly-mappen er deployet og inneholder:\n"
+                "  - __init__.py\n"
+                "  - masterplan_engine.py\n"
+                "  - legacy_page_bridge.py\n"
+                "  - masterplan_types.py\n"
+                "  - masterplan_integration.py\n"
+                "  - geometry.py\n"
+                "  - concept_families.py\n"
+                "  - keepalive.py\n"
+                "  - mua.py, sol.py, typology_library.py, plan_regler_presets.py, svg_diagrams.py\n\n"
+                "Vanlige årsaker til import-feil:\n"
+                "  - Gamle filer (site_analysis.py, composition.py, architecture_score.py) fra tidligere deploy ligger igjen\n"
+                "  - Manglende dependency (shapely, numpy, requests)\n"
+                "  - Filene ble lastet opp i feil mappe (f.eks. pages/builtly/ istedenfor repo-root/builtly/)",
+                language="text",
+            )
         options = []
         st.session_state["_current_masterplan"] = None
 
