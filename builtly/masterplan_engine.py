@@ -28,9 +28,10 @@ from shapely.geometry import Polygon
 
 from .concept_families import all_concept_families, get_strategy
 from .geometry import (
+    build_field_skeleton_summaries,
     building_geometry_is_orthogonal_to_field,
     buildings_do_not_overlap,
-    orientation_for_field,
+    compute_architecture_metrics,
     place_buildings_for_fields,
     pca_site_axes,
     resolve_delfelt_count,
@@ -106,13 +107,10 @@ def _should_retry_with_fallback(status_code: Optional[int], body: str) -> bool:
 
 
 def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], api_key: Optional[str] = None, model: Optional[str] = None, max_tokens: int = 1600) -> Optional[Dict[str, Any]]:
-    enable_flag = str(os.environ.get("BUILTLY_ENABLE_NETWORK_AI", "")).lower()
-    if enable_flag not in {"1", "true", "yes"}:
-        logger.warning("AI-pass skipped: BUILTLY_ENABLE_NETWORK_AI=%r (må være 1/true/yes)", enable_flag)
+    if str(os.environ.get("BUILTLY_ENABLE_NETWORK_AI", "")).lower() not in {"1", "true", "yes"}:
         return None
     key = api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY")
     if not key:
-        logger.warning("AI-pass skipped: ingen API-nøkkel funnet i ANTHROPIC_API_KEY eller CLAUDE_API_KEY")
         return None
 
     def _post(model_name: str) -> requests.Response:
@@ -126,49 +124,36 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
             json={
                 "model": model_name,
                 "max_tokens": max_tokens,
+                "temperature": 0.2,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}],
             },
             timeout=60,
         )
 
-    import time
     primary_model = model or DEFAULT_MODEL
     tried = [primary_model]
-    t0 = time.time()
-    logger.warning("AI-pass starter: model=%s max_tokens=%s", primary_model, max_tokens)
     try:
         resp = _post(primary_model)
-        elapsed = time.time() - t0
         if resp.ok:
             blocks = resp.json().get("content", [])
             text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
-            result = _safe_json_from_text(text)
-            if result is None:
-                logger.warning("AI-pass %s returnerte OK men kunne ikke parse JSON (%.1fs). Tekst: %r", primary_model, elapsed, text[:300])
-            else:
-                logger.warning("AI-pass %s OK (parset JSON, %.1fs)", primary_model, elapsed)
-            return result
+            return _safe_json_from_text(text)
         body = resp.text
-        logger.warning("AI-pass %s HTTP %s (%.1fs) body: %s", primary_model, resp.status_code, elapsed, body[:400])
         if FALLBACK_MODEL and FALLBACK_MODEL != primary_model and _should_retry_with_fallback(resp.status_code, body):
             tried.append(FALLBACK_MODEL)
-            logger.warning("Retrying med fallback-modell %s", FALLBACK_MODEL)
+            logger.warning("Anthropic primary model %s failed (%s). Retrying once with fallback model %s.", primary_model, resp.status_code, FALLBACK_MODEL)
             fallback_resp = _post(FALLBACK_MODEL)
-            elapsed2 = time.time() - t0
             if fallback_resp.ok:
                 blocks = fallback_resp.json().get("content", [])
                 text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
-                result = _safe_json_from_text(text)
-                if result is not None:
-                    logger.warning("AI-pass %s (fallback) OK (%.1fs total)", FALLBACK_MODEL, elapsed2)
-                return result
-            logger.warning("Fallback %s HTTP %s body: %s", FALLBACK_MODEL, fallback_resp.status_code, fallback_resp.text[:400])
+                return _safe_json_from_text(text)
+            logger.warning("Anthropic fallback model %s failed (%s).", FALLBACK_MODEL, fallback_resp.status_code)
             return None
+        logger.warning("Anthropic primary model %s failed without retry (%s).", primary_model, resp.status_code)
         return None
     except Exception as exc:  # pragma: no cover - network dependent
-        elapsed = time.time() - t0
-        logger.warning("AI-pass exception (tried %s, %.1fs): %s", tried, elapsed, exc)
+        logger.warning("Anthropic pass call failed for models %s: %s", tried, exc)
         return None
 
 
@@ -177,27 +162,17 @@ def _anthropic_json_call(*, system_prompt: str, user_payload: Dict[str, Any], ap
 # ---------------------------------------------------------------------------
 
 
-def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float, fallback_orientation_deg: float) -> List[Delfelt]:
-    """Seed delfelter med orientering bestemt av hvert delfelt selv.
-
-    Tidligere brukte vi tomtens PCA-theta som orientering for alle delfelter.
-    Det ble feil etter at subdivide_buildable_polygon fikk lov å bytte til
-    aksejustert split for konkave tomter (L-former etc.) — delfeltene er da
-    aksejusterte selv om tomtens PCA peker diagonalt. Vi kaller derfor
-    orientation_for_field for hvert delfelt og faller tilbake til tomtens PCA
-    bare hvis helperen ikke kan bestemme noe.
-    """
+def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float, orientation_deg: float) -> List[Delfelt]:
     total_area = sum(p.area for p in field_polygons) or 1.0
     out: List[Delfelt] = []
     for idx, poly in enumerate(field_polygons, start=1):
         share = poly.area / total_area
-        orient = orientation_for_field(poly, fallback_deg=fallback_orientation_deg)
         out.append(
             Delfelt(
                 field_id=f"DF{idx}",
                 polygon=poly.buffer(0),
                 typology=Typology.LAMELL,
-                orientation_deg=orient,
+                orientation_deg=orientation_deg,
                 floors_min=4,
                 floors_max=5,
                 target_bra=float(target_bra_m2 * share),
@@ -211,253 +186,27 @@ def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float
 
 
 def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamily, target_bra_m2: float, requested_count: Optional[int] = None) -> List[Delfelt]:
-    del concept_family  # concept is applied in pass 2, not pass 1.
     axes = pca_site_axes(buildable_poly)
     count = resolve_delfelt_count(buildable_poly, requested_count=requested_count)
+    area = max(float(buildable_poly.area), 1.0)
+    density = float(target_bra_m2) / area if target_bra_m2 > 0 else 0.0
+    if requested_count is None:
+        if density >= 1.0:
+            count += 1
+        if density >= 1.15 and concept_family == ConceptFamily.COURTYARD_URBAN:
+            count += 1
+        # Makro/mikro-prinsipp: vi holder makro-delfelt moderate og lar
+        # mikrofeltene bære detaljrikdommen. Dette gir roligere, mer arkitektmessig
+        # feltstruktur enn å presse opp makro-antallet for langt.
+        if concept_family == ConceptFamily.LINEAR_MIXED:
+            count = max(4, min(count, 5 if density < 1.15 else 6))
+        elif concept_family == ConceptFamily.CLUSTER_PARK:
+            count = max(4, min(count, 6))
+        else:  # COURTYARD_URBAN
+            count = max(4, min(count, 7))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
-
-
-def pass1_generate_delfelt_from_composition(
-    buildable_poly: Polygon,
-    concept_family: ConceptFamily,
-    target_bra_m2: float,
-    composition: Any,  # CompositionPlan
-    site_context: Optional[Any] = None,
-) -> List[Delfelt]:
-    """Pass 1 v9 — delfelt-inndeling med role-tagger fra komposisjonsplan.
-
-    STRATEGI (revidert): Vi bruker IKKE komposisjonsplanen til å dele tomten
-    geometrisk. I stedet bruker vi eksisterende armbasert inndeling fra
-    kontekstuell pass 1 og TILDELER roles basert på feltets relasjon til
-    komposisjonens frontages/gårdsrom/aksenter.
-
-    Dette beholder god arealdekning (ingen tap pga courtyard-reservasjon)
-    men gir motoren informasjon om hvilke felter som møter gata,
-    hvilke som vender inn, og hvilke som er aksent.
-    """
-    from .composition import orientation_for_role as _orientation_for_role_v9
-
-    # Start med kontekstuell (armbasert) inndeling — dette virker godt i dag
-    base_fields = pass1_generate_delfelt_contextual(
-        buildable_poly, concept_family, target_bra_m2,
-        site_context=site_context,
-    )
-
-    # Hvis komposisjonen ikke har frontages eller courtyards, returner uendret
-    if not composition.street_frontages and not composition.courtyards:
-        return base_fields
-
-    # Tildel roles basert på hver felts posisjon relativt til komposisjonen
-    enriched: List[Delfelt] = []
-    for field in base_fields:
-        role, facing_idx = _assign_role_to_field(field, composition)
-
-        # Beregn ny orientering hvis role er frontage
-        new_orient = field.orientation_deg
-        if role and role != "generic":
-            new_orient = _orientation_for_role_v9(
-                field.polygon, role, facing_idx, composition,
-                fallback_deg=field.orientation_deg,
-            )
-
-        # Role-basert character
-        if role == "courtyard_side":
-            new_character = "sheltered"
-        elif role and role.startswith("frontage"):
-            new_character = "street_facing"
-        elif role == "accent":
-            new_character = "accent"
-        else:
-            new_character = field.character
-
-        # Erstatt feltet med role-beriket versjon
-        from dataclasses import replace as _replace
-        enriched.append(_replace(
-            field,
-            role=role,
-            facing_frontage_idx=facing_idx,
-            orientation_deg=new_orient,
-            character=new_character,
-            phase_label=f"Delfelt {field.phase} ({role or 'arm'})",
-        ))
-
-    return enriched
-
-
-def _assign_role_to_field(field: Delfelt, composition: Any) -> Tuple[Optional[str], Optional[int]]:
-    """Bestem role for et felt basert på dets posisjon relativt til
-    komposisjonens frontages, gårdsrom og aksenter.
-
-    Regel:
-    - Hvis feltet BERØRER (innen 3m) en frontage-linje: frontage_primary/secondary
-    - Hvis feltet er LENGRE UNNA frontage enn gårdsrommet: courtyard_side
-    - Hvis feltet inneholder et aksentpunkt: accent
-    - Ellers: None (ingen role)
-    """
-    field_poly = field.polygon
-
-    # Sjekk frontages først
-    if composition.street_frontages:
-        best_idx = 0
-        best_dist = float('inf')
-        for i, f in enumerate(composition.street_frontages):
-            dist = field_poly.distance(f)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
-
-        if best_dist < 3.0:
-            role = "frontage_primary" if best_idx == 0 else "frontage_secondary"
-            return (role, best_idx)
-
-    # Sjekk aksent
-    if composition.accent_points:
-        for i, (point, radius) in enumerate(composition.accent_points):
-            if field_poly.distance(point) < radius:
-                return ("accent", None)
-
-    # Sjekk om feltet er langt fra frontage (bak gårdsrom)
-    if composition.courtyards and composition.street_frontages:
-        fc = field_poly.centroid
-        courtyard = composition.courtyards[0]
-        dist_to_courtyard = fc.distance(courtyard)
-        dist_to_frontage = min(fc.distance(f) for f in composition.street_frontages)
-        if dist_to_courtyard < dist_to_frontage:
-            return ("courtyard_side", None)
-
-    return (None, None)
-
-
-def pass1_generate_delfelt_contextual(
-    buildable_poly: Polygon,
-    concept_family: ConceptFamily,
-    target_bra_m2: float,
-    site_context: Optional[Any] = None,
-    requested_count: Optional[int] = None,
-) -> List[Delfelt]:
-    """Pass 1 v2 — kontekstuell delfelt-inndeling basert på SiteContext.
-
-    Strategi:
-    - Hvis site_context har 2+ armer, bruker vi armene som grunndelfelt
-    - Store armer (>6000 m²) deles videre i 2 delfelt langs sin egen akse
-    - Små armer er 1 delfelt (rekkehus passer ofte her)
-    - Hvert delfelt får en FieldCharacter basert på armens retning og
-      nabolaget langs armens kanter
-    - Fallback: hvis pass 0 feilet eller tomten er rektangulær, bruker vi
-      gammel pass1_generate_delfelt
-
-    Returnerer delfelter med arm_id og character fylt ut.
-    """
-    from .site_analysis import _cardinal_from_bearing
-
-    # Fallback til gammel logikk hvis ikke kontekstdata eller enkel tomt
-    if site_context is None or not site_context.has_arms:
-        return pass1_generate_delfelt(buildable_poly, concept_family,
-                                       target_bra_m2, requested_count)
-
-    arms = site_context.arms
-    total_arm_area = sum(a.area_m2 for a in arms) or 1.0
-
-    # Inndeling: hver arm blir 1-2 delfelt avhengig av størrelse
-    field_polys_with_meta: List[Tuple[Polygon, str, str, float]] = []
-    # tuple: (polygon, arm_id, character, target_bra_share)
-
-    for arm in arms:
-        arm_share = arm.area_m2 / total_arm_area
-        arm_target = target_bra_m2 * arm_share
-        arm_poly = arm.polygon
-
-        if arm_poly is None:
-            continue
-
-        # Bestem karakter basert på armens retning fra tomtens senter
-        card = _cardinal_from_bearing(arm.bearing_from_site_center_deg)
-        # Sør-arm: street_facing (typisk hovedadkomst)
-        # Nord-arm: sheltered (innvendig)
-        # Øst/vest: neighborhood_edge
-        character_map = {
-            "south": "street_facing",
-            "southeast": "street_facing",
-            "southwest": "street_facing",
-            "north": "sheltered",
-            "northeast": "neighborhood_edge",
-            "northwest": "neighborhood_edge",
-            "east": "neighborhood_edge",
-            "west": "neighborhood_edge",
-        }
-        character = character_map.get(card, "sheltered")
-
-        # Splitt store armer i 2 delfelt langs armens egen akse
-        if arm.area_m2 > 6000 and arm.aspect_ratio > 1.4:
-            sub_polys = subdivide_buildable_polygon(
-                arm_poly, count=2, orientation_deg=arm.dominant_axis_deg
-            )
-            for i, sub in enumerate(sub_polys):
-                share = sub.area / arm.area_m2
-                field_polys_with_meta.append(
-                    (sub.buffer(0), arm.arm_id, character, arm_target * share)
-                )
-        else:
-            # Små armer er 1 delfelt
-            field_polys_with_meta.append(
-                (arm_poly.buffer(0), arm.arm_id, character, arm_target)
-            )
-
-    # Bygg Delfelt-objekter
-    out: List[Delfelt] = []
-    for idx, (poly, arm_id, character, target) in enumerate(field_polys_with_meta, start=1):
-        orient = orientation_for_field(poly, fallback_deg=0.0)
-        # Beregn max nabohøyde for dette feltet ved å finne kantene som ligger
-        # nær feltets yttergrense og lese av deres avg_neighbor_height_m.
-        max_neighbor_h = _estimate_max_neighbor_height(poly, site_context)
-        out.append(Delfelt(
-            field_id=f"DF{idx}",
-            polygon=poly,
-            typology=Typology.LAMELL,  # pass 2 setter riktig typologi
-            orientation_deg=orient,
-            floors_min=4,
-            floors_max=5,
-            target_bra=float(target),
-            courtyard_kind=CourtyardKind.FELLES_BOLIG,
-            tower_size_m=None,
-            phase=idx,
-            phase_label=f"Delfelt {idx} ({arm_id})",
-            arm_id=arm_id,
-            character=character,
-            max_neighbor_height_m=max_neighbor_h,
-        ))
-    return out
-
-
-def _estimate_max_neighbor_height(field_poly: Polygon, site_context: Any,
-                                  buffer_m: float = 30.0) -> Optional[float]:
-    """Finn nabohøyden som feltet "ser" mot — gjennomsnitt av nabohøyder
-    på kanter som ligger nær dette feltets yttergrense.
-
-    Raskt: itererer kun over kanter med ikke-None avg_neighbor_height_m.
-    """
-    if site_context is None or not site_context.edges:
-        return None
-    try:
-        # Filtrer først ut kanter uten høyde — unngå unødvendig buffer-beregning
-        heights_candidates = [e for e in site_context.edges
-                              if e.avg_neighbor_height_m is not None]
-        if not heights_candidates:
-            return None
-        from shapely.geometry import LineString
-        field_boundary_buf = field_poly.boundary.buffer(buffer_m)
-        heights: List[float] = []
-        for edge in heights_candidates:
-            edge_line = LineString([edge.p0, edge.p1])
-            if field_boundary_buf.intersects(edge_line):
-                heights.append(edge.avg_neighbor_height_m)
-        if heights:
-            return sum(heights) / len(heights)
-    except Exception:
-        pass
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +232,27 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 target_bra=float(choice.target_bra),
                 courtyard_kind=choice.courtyard_kind,
                 tower_size_m=choice.tower_size_m,
+                field_role=choice.field_role or field.field_role,
+                character=choice.character or field.character,
+                arm_id=choice.arm_id or field.arm_id,
+                design_variant=choice.design_variant,
+                design_karre_shape=choice.design_karre_shape,
+                design_height_pattern=choice.design_height_pattern,
+                target_bya_pct=choice.target_bya_pct,
+                skeleton_mode=choice.skeleton_mode,
+                frontage_mode=choice.frontage_mode,
+                micro_band_count=int(choice.micro_band_count or 0),
+                view_corridor_count=int(choice.view_corridor_count or 0),
+                courtyard_reserve_ratio=float(choice.courtyard_reserve_ratio or 0.0),
+                frontage_depth_m=choice.frontage_depth_m,
+                corridor_width_m=choice.corridor_width_m,
+                macro_structure=choice.macro_structure,
+                micro_field_pattern=choice.micro_field_pattern,
+                symmetry_preference=choice.symmetry_preference,
+                composition_strictness=float(choice.composition_strictness or 0.0),
+                frontage_zone_ratio=float(choice.frontage_zone_ratio or 0.0),
+                public_realm_ratio=float(choice.public_realm_ratio or 0.0),
+                node_symmetry=bool(choice.node_symmetry),
             )
         )
     return out
@@ -567,6 +337,27 @@ def _normalize_choices(
                 courtyard_kind=courtyard_kind,
                 tower_size_m=tower_size_m,
                 rationale=str(raw_field.get("rationale", "") or fb.rationale),
+                field_role=fb.field_role,
+                character=fb.character,
+                arm_id=fb.arm_id,
+                design_variant=fb.design_variant,
+                design_karre_shape=fb.design_karre_shape,
+                design_height_pattern=fb.design_height_pattern,
+                target_bya_pct=fb.target_bya_pct,
+                skeleton_mode=fb.skeleton_mode,
+                frontage_mode=fb.frontage_mode,
+                micro_band_count=fb.micro_band_count,
+                view_corridor_count=fb.view_corridor_count,
+                courtyard_reserve_ratio=fb.courtyard_reserve_ratio,
+                frontage_depth_m=fb.frontage_depth_m,
+                corridor_width_m=fb.corridor_width_m,
+                macro_structure=fb.macro_structure,
+                micro_field_pattern=fb.micro_field_pattern,
+                symmetry_preference=fb.symmetry_preference,
+                composition_strictness=fb.composition_strictness,
+                frontage_zone_ratio=fb.frontage_zone_ratio,
+                public_realm_ratio=fb.public_realm_ratio,
+                node_symmetry=fb.node_symmetry,
             )
         )
 
@@ -651,317 +442,6 @@ def pass2_select_field_parameters(
 
 
 # ---------------------------------------------------------------------------
-# Pass 3 AI — design directives (NEW, optional layer before geometry)
-# ---------------------------------------------------------------------------
-
-
-_DESIGN_VARIANT_ALLOWED = {"single", "varied", "rotated", "terraced"}
-_DESIGN_KARRE_SHAPE_ALLOWED = {"uo", "uo_chamfered", "l", "t", "z"}
-_DESIGN_HEIGHT_PATTERN_ALLOWED = {"uniform", "accent", "stepped", "paired"}
-
-
-def _polygon_to_compact_dict(poly: Polygon) -> Dict[str, Any]:
-    """Reduser en polygon til et kompakt sammendrag AI kan resonnere over uten
-    koordinatstøy. Returnerer bounding-box, areal og sideforhold."""
-    if poly is None or poly.is_empty:
-        return {}
-    minx, miny, maxx, maxy = poly.bounds
-    w = maxx - minx
-    h = maxy - miny
-    return {
-        "width_m": round(w, 1),
-        "height_m": round(h, 1),
-        "area_m2": round(poly.area, 0),
-        "aspect_ratio": round(max(w, h) / max(1e-6, min(w, h)), 2),
-    }
-
-
-def pass3_design_directives(
-    base_fields: Sequence[Delfelt],
-    *,
-    buildable_poly: Optional[Polygon] = None,
-    latitude_deg: Optional[float] = None,
-    target_bra_m2: Optional[float] = None,
-    site_context: Optional[Any] = None,
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
-) -> Tuple[List[Delfelt], str]:
-    """AI-pass som berikger delfeltene med arkitektoniske designdirektiv.
-
-    Direktivene styrer hvordan motoren velger varianter (single/varied/rotert
-    lamell, U/O/L/T/Z karré, høydegradient for punkthus). AI får:
-    - Delfelt-sammendrag (form, størrelse, typologi, target_bra, orientering)
-    - Total tomtekontekst (bredde/lengde/areal)
-    - Latitude for solvinkel
-
-    AI returnerer JSON med design_* felt per delfelt. Hvis AI feiler/ikke er
-    tilgjengelig, beholder vi feltene uendret (motoren bruker sin egen default).
-
-    Returnerer (berikede delfelter, kilde-tag).
-    """
-    if not base_fields:
-        return list(base_fields), "empty"
-
-    # Bygg payload til AI
-    field_payload = []
-    for f in base_fields:
-        geom = _polygon_to_compact_dict(f.polygon)
-        entry = {
-            "field_id": f.field_id,
-            "typology": f.typology.value,
-            "orientation_deg": round(f.orientation_deg, 1),
-            "floors_min": f.floors_min,
-            "floors_max": f.floors_max,
-            "target_bra": round(f.target_bra, 0),
-            "phase": f.phase,
-            "geometry": geom,
-        }
-        # Legg til kontekst fra pass 0 hvis tilgjengelig
-        if f.arm_id is not None:
-            entry["arm_id"] = f.arm_id
-        if f.character is not None:
-            entry["character"] = f.character
-        # v9: role og facing_frontage_idx fra komposisjonslaget
-        if f.role is not None:
-            entry["role"] = f.role
-        if f.facing_frontage_idx is not None:
-            entry["facing_frontage_idx"] = f.facing_frontage_idx
-        field_payload.append(entry)
-
-    site_payload = _polygon_to_compact_dict(buildable_poly) if buildable_poly is not None else {}
-
-    # Utvid site_payload med SiteContext-informasjon hvis tilgjengelig
-    if site_context is not None:
-        site_payload["label"] = site_context.site_label
-        site_payload["has_arms"] = site_context.has_arms
-        site_payload["n_arms"] = len(site_context.arms)
-        site_payload["dominant_axis_deg"] = round(site_context.site_bearing_deg, 1)
-        if site_context.dominant_view_direction:
-            site_payload["dominant_view_direction"] = site_context.dominant_view_direction
-        # Armer som kompakt liste
-        if site_context.arms:
-            site_payload["arms"] = [
-                {
-                    "arm_id": a.arm_id,
-                    "area_m2": round(a.area_m2, 0),
-                    "bearing_from_center_deg": round(a.bearing_from_site_center_deg, 0),
-                    "dominant_axis_deg": round(a.dominant_axis_deg, 0),
-                    "aspect_ratio": round(a.aspect_ratio, 1),
-                }
-                for a in site_context.arms
-            ]
-        # Edges som sammendrag (hvilke retninger har naboer/åpning)
-        if site_context.edges:
-            edge_summary = {"neighbor_dense": [], "neighbor_sparse": [], "open": []}
-            from .site_analysis import _cardinal_from_bearing
-            for e in site_context.edges:
-                card = _cardinal_from_bearing(e.outward_bearing_deg)
-                key = e.character.value if hasattr(e.character, 'value') else str(e.character)
-                if key in edge_summary:
-                    if card not in edge_summary[key]:
-                        edge_summary[key].append(card)
-            site_payload["edge_summary"] = edge_summary
-
-    payload = {
-        "task": "assign_design_directives",
-        "schema_version": 1,
-        "allowed": {
-            "design_variant": sorted(list(_DESIGN_VARIANT_ALLOWED)),
-            "design_karre_shape": sorted(list(_DESIGN_KARRE_SHAPE_ALLOWED)),
-            "design_height_pattern": sorted(list(_DESIGN_HEIGHT_PATTERN_ALLOWED)),
-            "design_rotation_deg_range": [-15, 15],
-        },
-        "site": site_payload,
-        "latitude_deg": latitude_deg,
-        "target_bra_m2": target_bra_m2,
-        "fields": field_payload,
-        "response_format": {
-            "df_directives": {
-                "<field_id>": {
-                    "design_variant": "single|varied|rotated (only for LAMELL)",
-                    "design_karre_shape": "uo|l|t|z (only for KARRE)",
-                    "design_height_pattern": "uniform|accent|stepped|paired (only for PUNKTHUS)",
-                    "design_rotation_deg": "number in [-15, 15] or null",
-                    "design_reasoning": "short string, one sentence"
-                }
-            },
-            "global_reasoning": "one paragraph"
-        },
-    }
-
-    system_prompt = (
-        "You are the design-directive AI for a Nordic masterplan engine. "
-        "For each delfelt you assign design variants that the deterministic "
-        "geometry engine will realize. Never invent field ids. Never generate "
-        "coordinates. Stay within the 'allowed' lists in the payload. "
-        "\n\n"
-        "SITE CONTEXT: The 'site' object may contain 'arms' (L/U/T-shaped sites "
-        "are decomposed into arms), an 'edge_summary' (which compass directions "
-        "have dense neighbors vs open views), and 'label' (rectangle/narrow_rectangle/"
-        "multi_arm_N/irregular). Each field may have 'arm_id' and 'character': "
-        "(a) 'street_facing' fields should be ARCHITECTURALLY MARKANT — prefer "
-        "uo_chamfered karré or terraced lamell with a subtle rotation toward the "
-        "dominant access direction. "
-        "(b) 'sheltered' fields (inner/enclosed) should be CALM — prefer single "
-        "lamell or plain uo karré with modest variation. "
-        "(c) 'neighborhood_edge' fields should RESPOND TO SCALE — avoid rotations "
-        "and L-shapes that could feel aggressive toward neighbors. Keep heights "
-        "uniform or stepping DOWN toward the neighbor side. "
-        "(d) 'open_view' fields can use taller punkthus or height_pattern='accent' "
-        "to exploit the view. "
-        "\n\n"
-        "CRITICAL CONSTRAINTS: Volume (BRA) matters as much as design. "
-        "The following variants typically COST BRA on constrained fields: "
-        "(1) Karré shape='l' costs ~30% BRA vs 'uo' — use only on fields too "
-        "narrow for U/O, or when site context demands it. "
-        "(2) Lamell variant='varied' splits rows into shorter buildings and "
-        "can cost 10-25% BRA on narrow fields — only use on fields wider than "
-        "120m where variation is architecturally meaningful. "
-        "(3) Lamell variant='rotated' needs extra spacing buffer — on tight "
-        "fields the rotation won't fit and the field falls back to fewer "
-        "buildings. Only use on fields with lots of space. "
-        "\n\n"
-        "LOW-COST VARIANTS (use these for architectural variation without BRA loss): "
-        "(A) Karré shape='uo_chamfered' — U/O with one corner chamfered at 45°. "
-        "Loses only ~2% BRA but adds a strong architectural gesture, perfect "
-        "for fields facing a street intersection or public space. "
-        "(B) Lamell variant='terraced' — same footprints as 'single' but with "
-        "stepped heights (e.g. 5-6-7 floors or 7-6-5). Zero BRA loss, strong "
-        "visual rhythm. Use liberally on fields with 2+ lamell rows. "
-        "\n\n"
-        "STRATEGY: Default to 'terraced' for Lamell (good variation, no cost) "
-        "and 'uo_chamfered' for Karré on prominent street-facing fields. Only "
-        "use 'single' or 'uo' if the field is too small for rhythm (1-bygg field). "
-        "Use 'varied'/'rotated'/'l'/'t'/'z' only on genuinely large fields "
-        "(site_area > 3000 m²) where architectural eccentricity is justified. "
-        "\n\n"
-        "Nordic sun rules: prefer east-west lamell orientations (90° angle_offset). "
-        "Cluster punkthus rather than line them up (use height_pattern='accent'). "
-        "Keep rotations small (±3–6°) and only on one or two fields per concept. "
-        "\n\n"
-        "V9 COMPOSITION LAYER: Each field may have a 'role' that indicates its "
-        "function in the overall urban composition: "
-        "(1) 'frontage_primary' — the field borders the main street. It should "
-        "be the most PROMINENT: prefer uniform heights and a calm rhythm. "
-        "Terraced lamell with gentle 5-6-5 pattern works well. For karré, "
-        "use 'uo_chamfered' at the corner to mark arrival. NO rotation. "
-        "(2) 'frontage_secondary' — borders a smaller street. Can be slightly "
-        "lower in scale, use 'single' lamell or regular 'uo' karré. "
-        "(3) 'courtyard_side' — faces inward toward a shared green space. "
-        "This is the CALMEST part of the composition. Use 'single' lamell "
-        "only. Heights should step DOWN (neighbor_step_up pattern) to protect "
-        "courtyard light. Never rotate. "
-        "(4) 'accent' — marks a corner or significant hinge. This is where "
-        "you can use PUNKTHUS with height_pattern='accent' (one tower higher "
-        "than the others) or a slightly taller lamell. Small rotations (±3°) "
-        "can also work here to signal importance. "
-        "(5) 'cluster' — free arrangement around a park (for CLUSTER_PARK). "
-        "Use 'accent' height pattern for punkthus to create visual interest. "
-        "\n\n"
-        "WHEN ROLE IS SET: role-based guidance overrides generic arm/character "
-        "guidance above. Always respect the role. "
-        "\n\n"
-        "Return JSON only."
-    )
-
-    raw = _anthropic_json_call(
-        system_prompt=system_prompt,
-        user_payload=payload,
-        api_key=api_key,
-        model=model,
-        max_tokens=2400,
-    )
-    source = "anthropic_pass3" if raw else "fallback"
-
-    if not raw or "df_directives" not in raw:
-        logger.warning("Pass 3 design AI did not return directives — keeping motor defaults.")
-        return list(base_fields), source
-
-    directives = raw.get("df_directives") or {}
-    if not isinstance(directives, dict):
-        logger.warning("Pass 3 design AI returned non-dict df_directives — ignoring.")
-        return list(base_fields), "fallback"
-
-    enriched: List[Delfelt] = []
-    applied_count = 0
-    for f in base_fields:
-        dct = directives.get(f.field_id) or {}
-        if not isinstance(dct, dict):
-            enriched.append(f)
-            continue
-
-        # Sanitize alle felt
-        variant = dct.get("design_variant")
-        if variant is not None and variant not in _DESIGN_VARIANT_ALLOWED:
-            variant = None
-
-        karre_shape = dct.get("design_karre_shape")
-        if karre_shape is not None and karre_shape not in _DESIGN_KARRE_SHAPE_ALLOWED:
-            karre_shape = None
-
-        hp = dct.get("design_height_pattern")
-        if hp is not None and hp not in _DESIGN_HEIGHT_PATTERN_ALLOWED:
-            hp = None
-
-        rot = dct.get("design_rotation_deg")
-        try:
-            rot_val: Optional[float] = float(rot) if rot is not None else None
-            if rot_val is not None:
-                rot_val = max(-15.0, min(15.0, rot_val))
-        except (TypeError, ValueError):
-            rot_val = None
-
-        reasoning = dct.get("design_reasoning")
-        reasoning_str = str(reasoning)[:300] if reasoning else None
-
-        # Kun anvend direktiv som matcher typologi
-        if f.typology == Typology.LAMELL:
-            applied_variant = variant
-            applied_shape = None
-            applied_hp = None
-        elif f.typology == Typology.KARRE:
-            applied_variant = None
-            applied_shape = karre_shape
-            applied_hp = None
-        elif f.typology == Typology.PUNKTHUS:
-            applied_variant = None
-            applied_shape = None
-            applied_hp = hp
-        else:
-            applied_variant = None
-            applied_shape = None
-            applied_hp = None
-
-        new_field = Delfelt(
-            field_id=f.field_id,
-            polygon=f.polygon,
-            typology=f.typology,
-            orientation_deg=f.orientation_deg,
-            floors_min=f.floors_min,
-            floors_max=f.floors_max,
-            target_bra=f.target_bra,
-            courtyard_kind=f.courtyard_kind,
-            tower_size_m=f.tower_size_m,
-            phase=f.phase,
-            phase_label=f.phase_label,
-            design_variant=applied_variant,
-            design_karre_shape=applied_shape,
-            design_height_pattern=applied_hp,
-            design_rotation_deg=rot_val,
-            design_reasoning=reasoning_str,
-        )
-        enriched.append(new_field)
-        if applied_variant or applied_shape or applied_hp or rot_val is not None:
-            applied_count += 1
-
-    logger.warning(
-        "Pass 3 design directives: %d/%d fields got AI-specific direction (source=%s).",
-        applied_count, len(base_fields), source,
-    )
-    return enriched, source
-
-
-# ---------------------------------------------------------------------------
 # Pass 3 / 4 / 5 — deterministic core
 # ---------------------------------------------------------------------------
 
@@ -993,12 +473,14 @@ def _fallback_narrative(plan: Masterplan, target_bra_m2: float) -> ReportNarrati
         f"{title} fordeler bebyggelsen i {len(plan.delfelt)} delfelt med "
         f"{', '.join(typology_mix)} som bærende typologier. "
         f"Planen oppnår ca. {fit_pct:.0f}% av mål-BRA, estimerer {plan.antall_boliger} boliger "
-        f"og har solscore {plan.sol_report.total_sol_score:.0f}/100."
+        f"og har solscore {plan.sol_report.total_sol_score:.0f}/100. "
+        f"Arkitekturscore {plan.architecture_report.total_score:.0f}/100."
     )
     arch = (
         f"Grepet leses som {plan.concept_family.value} med tydelig feltorientering og "
-        f"deterministisk, ortogonal geometri. Planen {mua_state} MUA-kravene og "
-        f"har BRA-avvik på {plan.bra_deficit:.0f} m²."
+        f"deterministisk, ortogonal geometri. Arkitekturvurderingen scorer "
+        f"{plan.architecture_report.total_score:.0f}/100, og planen {mua_state} MUA-kravene med "
+        f"BRA-avvik på {plan.bra_deficit:.0f} m²."
     )
     recommendation = (
         "Anbefales som utgangspunkt hvis utvikler ønsker et reproduserbart konseptgrep "
@@ -1029,6 +511,11 @@ def pass6_generate_report_text(plan: Masterplan, target_bra_m2: float, ai_report
             "bra_deficit": plan.bra_deficit,
             "field_count": len(plan.delfelt),
             "typology_mix": sorted({b.typology.value for b in plan.bygg}),
+            "architecture_score": plan.architecture_report.total_score,
+            "frontage_continuity": plan.architecture_report.frontage_continuity,
+            "courtyard_clarity": plan.architecture_report.courtyard_clarity,
+            "axis_symmetry": plan.architecture_report.axis_symmetry,
+            "view_corridor_quality": plan.architecture_report.view_corridor_quality,
         },
         "requirements": {
             "return_json_only": True,
@@ -1098,80 +585,7 @@ def plan_masterplan_geometry(
         raise ValueError("buildable_poly mangler eller er tom")
     rules = plan_regler or PlanRegler()
 
-    # Pass 0: Analyser tomten — finn armer, kanter, naboskap
-    # SiteContext brukes fra uke 2 og fremover av pass 1 og AI-pass 3.
-    try:
-        import time as _time
-        from .site_analysis import analyze_site
-        _t0 = _time.perf_counter()
-        site_context = analyze_site(buildable_poly, neighbor_buildings=neighbor_buildings)
-        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-        logger.warning(
-            "Pass 0 site analysis: label=%s arms=%d edges=%d rectangular=%s view=%s (%.0fms, %d naboer)",
-            site_context.site_label,
-            len(site_context.arms),
-            len(site_context.edges),
-            site_context.is_rectangular,
-            site_context.dominant_view_direction,
-            _elapsed_ms,
-            len(neighbor_buildings) if neighbor_buildings else 0,
-        )
-    except Exception as exc:
-        logger.warning("Pass 0 site analysis failed: %s", exc)
-        site_context = None
-
-    # Pass 0.5: Komposisjonslag — lag rammeplan (frontages/gårdsrom/aksenter)
-    # FØR bygg plasseres. Dette gir romlig hierarki i stedet for "best bygg
-    # per felt" tankegang. v9 nytt lag.
-    try:
-        from .composition import compose_plan as _compose_plan_v9
-        import time as _time
-        _t0 = _time.perf_counter()
-        composition_plan = _compose_plan_v9(
-            buildable_poly, concept_family, target_bra_m2,
-            site_context=site_context,
-        )
-        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-        logger.warning(
-            "Pass 0.5 composition: concept=%s frontages=%d courtyards=%d accents=%d (%.0fms)",
-            composition_plan.concept_name,
-            len(composition_plan.street_frontages),
-            len(composition_plan.courtyards),
-            len(composition_plan.accent_points),
-            _elapsed_ms,
-        )
-    except Exception as exc:
-        logger.warning("Pass 0.5 composition failed: %s", exc)
-        composition_plan = None
-
-    # Pass 1: Delfelt-inndeling.
-    # v9-order: hvis composition_plan er gyldig, bruk den for å dele tomten i
-    # felter med roles (frontage_primary, courtyard_side, etc).
-    # Ellers: kontekstuell (armer) eller generisk.
-    if composition_plan is not None and composition_plan.has_composition():
-        base_fields = pass1_generate_delfelt_from_composition(
-            buildable_poly, concept_family, target_bra_m2,
-            composition=composition_plan,
-            site_context=site_context,
-        )
-        logger.warning(
-            "Pass 1 composition: %d fields (concept=%s)",
-            len(base_fields), composition_plan.concept_name,
-        )
-    elif site_context is not None and site_context.has_arms:
-        base_fields = pass1_generate_delfelt_contextual(
-            buildable_poly, concept_family, target_bra_m2,
-            site_context=site_context,
-            requested_count=requested_delfelt_count,
-        )
-        logger.warning(
-            "Pass 1 contextual: %d fields from %d arms",
-            len(base_fields), len(site_context.arms),
-        )
-    else:
-        base_fields = pass1_generate_delfelt(
-            buildable_poly, concept_family, target_bra_m2, requested_delfelt_count
-        )
+    base_fields = pass1_generate_delfelt(buildable_poly, concept_family, target_bra_m2, requested_delfelt_count)
     configured_fields, pass2_source = pass2_select_field_parameters(
         concept_family,
         base_fields,
@@ -1181,25 +595,7 @@ def plan_masterplan_geometry(
         ai_selector=ai_selector,
     )
 
-    # AI-pass 3 design-direktiv: beriker delfelter med arkitektoniske
-    # variant-direktiver (rotert/varied lamell, L/T/Z karré, høydegradient).
-    # Motoren bruker disse som sterk preferanse i plassering. Hvis AI ikke er
-    # tilgjengelig eller returnerer ugyldige direktiv, beholder vi konfigurerte
-    # felt som de er — motoren faller da tilbake til sine default-valg.
-    try:
-        enriched_fields, pass3_design_source = pass3_design_directives(
-            configured_fields,
-            buildable_poly=buildable_poly,
-            latitude_deg=latitude_deg,
-            target_bra_m2=target_bra_m2,
-            site_context=site_context,  # ny: gir kontekst til AI
-        )
-    except Exception as exc:
-        logger.warning("pass3_design_directives failed, keeping unmodified fields: %s", exc)
-        enriched_fields = configured_fields
-        pass3_design_source = "error"
-
-    buildings, bra_deficit = pass3_place_buildings(buildable_poly, enriched_fields, rules, barnehage_config)
+    buildings, bra_deficit = pass3_place_buildings(buildable_poly, configured_fields, rules, barnehage_config)
     total_bra = sum(b.bra_m2 for b in buildings)
     total_bya = sum(b.footprint_m2 for b in buildings)
     units = int(round(total_bra / avg_unit_bra_m2)) if avg_unit_bra_m2 > 0 else 0
@@ -1214,7 +610,7 @@ def plan_masterplan_geometry(
     )
     plan = Masterplan(
         concept_family=concept_family,
-        delfelt=list(enriched_fields),
+        delfelt=list(configured_fields),
         bygg=list(buildings),
         sol_report=sol_report,
         mua_report=MUAReport(),
@@ -1235,6 +631,8 @@ def plan_masterplan_geometry(
         pass2_source=pass2_source,
     )
     plan.mua_report = pass5_calculate_mua(plan, rules)
+    plan.skeleton_summaries = build_field_skeleton_summaries(plan.delfelt, rules)
+    plan.architecture_report = compute_architecture_metrics(plan)
     narrative = pass6_generate_report_text(plan, target_bra_m2, ai_reporter=ai_reporter)
     plan.display_title = narrative.title
     plan.display_subtitle = _FALLBACK_SUBTITLES[concept_family]
@@ -1243,27 +641,6 @@ def plan_masterplan_geometry(
     plan.report_recommendation = narrative.recommendation
     plan.report_risks = list(narrative.risks)
     plan.pass6_source = narrative.source
-
-    # v9: fest composition og beregne arkitekturscore
-    plan.composition_plan = composition_plan
-    try:
-        from .architecture_score import architecture_score as _arch_score_v9
-        plan.architecture_scores = _arch_score_v9(plan, composition=composition_plan)
-        logger.warning(
-            "v9 architecture_score: frontage=%.2f courtyard=%.2f rhythm=%.2f "
-            "form=%.2f scale=%.2f hierarchy=%.2f → total=%.2f",
-            plan.architecture_scores.get("frontage_continuity", 0),
-            plan.architecture_scores.get("courtyard_clarity", 0),
-            plan.architecture_scores.get("rhythm", 0),
-            plan.architecture_scores.get("form_entropy", 0),
-            plan.architecture_scores.get("scale_consistency", 0),
-            plan.architecture_scores.get("hierarchy", 0),
-            plan.architecture_scores.get("total", 0),
-        )
-    except Exception as exc:
-        logger.warning("v9 architecture_score failed: %s", exc)
-        plan.architecture_scores = None
-
     return plan
 
 
@@ -1285,21 +662,10 @@ def generate_concept_masterplans(
     ai_selector: Optional[StructuredPassClient] = None,
     ai_reporter: Optional[StructuredPassClient] = None,
 ) -> List[Masterplan]:
-    """Generer masterplan for alle konsept-familier.
-
-    Kjører konseptene PARALLELT via ThreadPoolExecutor siden hvert konsept
-    er uavhengig og består av flere HTTP-kall til AI. Dette reduserer
-    total wallclock fra ~45s (sekvensielt) til ~15s (parallelt) på Render.
-    """
-    import concurrent.futures
-    import time
-
-    families = list(all_concept_families())
-
-    def _run_one(family):
-        t0 = time.time()
-        try:
-            result = plan_masterplan_geometry(
+    plans: List[Masterplan] = []
+    for family in all_concept_families():
+        plans.append(
+            plan_masterplan_geometry(
                 buildable_poly,
                 concept_family=family,
                 target_bra_m2=target_bra_m2,
@@ -1317,29 +683,7 @@ def generate_concept_masterplans(
                 ai_selector=ai_selector,
                 ai_reporter=ai_reporter,
             )
-            logger.warning("Konsept %s ferdig på %.1fs", family.value, time.time() - t0)
-            return (family, result, None)
-        except Exception as exc:
-            logger.warning("Konsept %s feilet på %.1fs: %s", family.value, time.time() - t0, exc)
-            return (family, None, exc)
-
-    # Kjør 3 konsepter parallelt
-    t_start = time.time()
-    results_by_family = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(families)) as executor:
-        futures = [executor.submit(_run_one, f) for f in families]
-        for future in concurrent.futures.as_completed(futures):
-            family, result, exc = future.result()
-            if result is not None:
-                results_by_family[family] = result
-
-    logger.warning("Alle %d konsepter ferdig på %.1fs totalt", len(families), time.time() - t_start)
-
-    # Returner i opprinnelig rekkefølge
-    plans: List[Masterplan] = []
-    for family in families:
-        if family in results_by_family:
-            plans.append(results_by_family[family])
+        )
     return plans
 
 
