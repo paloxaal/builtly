@@ -82,16 +82,18 @@ try:
 except ImportError:
     HAS_SITE_INTELLIGENCE = False
 
-# AI-plassering via legacy ai_site_planner er deaktivert i V15-cleanup.
-# All volumgenerering skal gå gjennom Builtly v8-masterplanmotoren.
-HAS_AI_PLANNER = False
-ai_site_planner = None  # type: ignore[assignment]
-
-# Masterplan-motor (Builtly v8 via /builtly)
 try:
-    from builtly import masterplan_engine  # noqa: F401
-    from builtly import legacy_page_bridge as masterplan_integration
-    from builtly.legacy_page_bridge import PhasingConfig
+    import ai_site_planner
+    HAS_AI_PLANNER = bool(ai_site_planner.is_available())
+except ImportError:
+    HAS_AI_PLANNER = False
+    ai_site_planner = None  # type: ignore[assignment]
+
+# Masterplan-motor (ny 6-pass arkitektur - erstatter A/B/C-alternativflyt)
+try:
+    import masterplan_engine
+    import masterplan_integration
+    from masterplan_types import PhasingConfig
     HAS_MASTERPLAN = True
 except Exception:
     masterplan_engine = None  # type: ignore
@@ -2593,7 +2595,6 @@ def _typology_polygon_fill(
 
 
 def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context: Optional[Dict[str, Any]] = None) -> List[OptionResult]:
-    """Legacy A-F-generator. Deaktivert i V15-cleanup, beholdt kun for historikk/dev."""
     geodata_context = geodata_context or prepare_site_context(site, None, 0.0)
     limits = derive_limits(site, geodata_context)
     site_polygon = geodata_context["site_polygon"]
@@ -8742,12 +8743,14 @@ if HAS_MASTERPLAN:
         st.session_state["_masterplan_include_naering"] = _include_naering
         st.session_state["_masterplan_byggesone"] = _byggesone
 
-        # V15-cleanup: masterplan-motoren er eneste volumgenerator.
-        st.session_state["_use_masterplan"] = True
-        st.info(
-            "Builtly V15-cleanup: klassisk A-F-generator er deaktivert. "
-            "Volumstudien kjøres nå kun via V8-masterplanmotoren i builtly/."
+        # Toggle for å slå av masterplan og falle tilbake til klassisk A/B/C
+        _use_mp = st.checkbox(
+            "Bruk masterplan-motor (ny 6-pass arkitektur)",
+            value=True,
+            key="mp_use_masterplan",
+            help="Slå av for å bruke klassisk A/B/C-alternativflyt (fallback).",
         )
+        st.session_state["_use_masterplan"] = _use_mp
 
 with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
     st.markdown("##### 1. Hent eiendom fra matrikkel")
@@ -9171,7 +9174,7 @@ if run_analysis:
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
 
-    # V15-cleanup: masterplan-motoren er eneste volumgenerator
+    # Masterplan-motor eller klassisk A/B/C basert på toggle
     _use_masterplan_now = HAS_MASTERPLAN and st.session_state.get("_use_masterplan", True)
     if _use_masterplan_now:
         _phasing_config = st.session_state.get("_masterplan_phasing_config") or PhasingConfig()
@@ -9236,8 +9239,8 @@ if run_analysis:
                 )
 
             st.info(
-                "Masterplanmotoren er nå eneste volumgenerator. Juster input eller "
-                "fikse builtly/-modulene dersom motoren feiler."
+                "Tips: Du kan slå av masterplan-motoren i seksjon 2C og bruke klassisk "
+                "A/B/C-flyt i stedet. Eller juster input og prøv igjen."
             )
             options = []
             st.session_state["_current_masterplan"] = None
@@ -9247,11 +9250,9 @@ if run_analysis:
             )
             st.session_state["_current_masterplan"] = _masterplan
     else:
-        st.error(
-            "Builtly V15-cleanup: masterplanmotoren kunne ikke importeres fra builtly/. "
-            "Legacy A-F-generator er deaktivert. Sjekk imports og deploy av builtly-mappen."
-        )
-        options = []
+        # Klassisk A/B/C-flyt (fallback)
+        with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+            options = generate_options(site, mix_inputs, geodata_context=geodata_context)
         st.session_state["_current_masterplan"] = None
 
     # Diagnostikk — lagre i session_state for visning i resultatene
