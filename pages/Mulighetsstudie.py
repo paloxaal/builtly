@@ -61,17 +61,6 @@ try:
 except Exception:
     genai = None
 
-# Google GenAI SDK (nytt unified SDK, erstatter google.generativeai)
-# https://ai.google.dev/gemini-api/docs/migrate
-try:
-    from google import genai as google_genai
-    from google.genai import types as google_genai_types
-    HAS_GOOGLE_GENAI = True
-except Exception:
-    google_genai = None
-    google_genai_types = None
-    HAS_GOOGLE_GENAI = False
-
 try:
     import fitz
 except ImportError:
@@ -121,110 +110,12 @@ st.set_page_config(
 )
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-llm_available = bool(google_key and (genai is not None or HAS_GOOGLE_GENAI))
-if llm_available and genai is not None:
+llm_available = bool(google_key and genai is not None)
+if llm_available:
     try:
         genai.configure(api_key=google_key)
     except Exception:
-        # Gammel SDK feilet — hvis ny er tilgjengelig, er vi fortsatt OK
-        if not HAS_GOOGLE_GENAI:
-            llm_available = False
-
-
-def _generate_gemini_image(
-    prompt: str,
-    input_image: "Image.Image",
-    api_key: Optional[str] = None,
-    models: Optional[List[str]] = None,
-) -> Optional["Image.Image"]:
-    """Generer et bilde via Gemini med fallback mellom SDK-er og modeller.
-
-    Prøver først det nye google.genai SDK (anbefalt 2026), fallback til
-    gamle google.generativeai hvis nye ikke er installert. Prøver flere
-    modeller i rekkefølge til én gir bilde.
-
-    Returnerer PIL Image eller None ved feil.
-    """
-    if models is None:
-        models = ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview"]
-
-    key = api_key or os.environ.get("GOOGLE_API_KEY")
-    if not key:
-        return None
-
-    # --- Forsøk 1: nytt google.genai SDK ---
-    if HAS_GOOGLE_GENAI and google_genai is not None:
-        try:
-            client = google_genai.Client(api_key=key)
-            config = google_genai_types.GenerateContentConfig(
-                response_modalities=["TEXT", "IMAGE"],
-            )
-            last_err: Optional[str] = None
-            for model_name in models:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=[prompt, input_image],
-                        config=config,
-                    )
-                    # Parse responsen
-                    candidates = getattr(response, "candidates", None) or []
-                    for cand in candidates:
-                        content = getattr(cand, "content", None)
-                        if not content:
-                            continue
-                        parts = getattr(content, "parts", None) or []
-                        for part in parts:
-                            inline = getattr(part, "inline_data", None)
-                            if inline and getattr(inline, "data", None):
-                                return Image.open(io.BytesIO(inline.data))
-                    # Ingen bilde — logg tekst og prøv neste modell
-                    text_parts = []
-                    for cand in candidates:
-                        content = getattr(cand, "content", None)
-                        parts = (getattr(content, "parts", None) or []) if content else []
-                        for part in parts:
-                            if getattr(part, "text", None):
-                                text_parts.append(part.text)
-                    last_err = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata"
-                except Exception as model_err:
-                    last_err = str(model_err)[:300]
-                    continue
-            # Alle modeller feilet i nytt SDK — fortsett til gammel som fallback
-            if last_err:
-                import logging as _logging
-                _logging.getLogger("builtly").warning(
-                    "google.genai SDK ga ikke bilde: %s", last_err
-                )
-        except Exception as sdk_err:
-            import logging as _logging
-            _logging.getLogger("builtly").warning(
-                "google.genai SDK feilet: %s — prøver gammel SDK", str(sdk_err)[:200]
-            )
-
-    # --- Forsøk 2: gammel google.generativeai SDK ---
-    if genai is not None:
-        for model_name in models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    [prompt, input_image],
-                    generation_config={"response_modalities": ["TEXT", "IMAGE"]},
-                )
-                candidates = getattr(response, "candidates", None) or []
-                for cand in candidates:
-                    content = getattr(cand, "content", None)
-                    if not content:
-                        continue
-                    parts = getattr(content, "parts", None) or []
-                    for part in parts:
-                        inline = getattr(part, "inline_data", None)
-                        if inline and getattr(inline, "data", None):
-                            return Image.open(io.BytesIO(inline.data))
-            except Exception:
-                continue
-
-    return None
+        llm_available = False
 
 gdo = GeodataOnlineClient() if HAS_GEODATA_ONLINE else None
 geodata_token_ok = False
@@ -333,6 +224,28 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _safe_option_record(option: Any) -> Dict[str, Any]:
+    if option is None:
+        return {}
+    if hasattr(option, "to_dict") and callable(option.to_dict):
+        try:
+            return option.to_dict()
+        except Exception:
+            pass
+    try:
+        if hasattr(option, "__dict__"):
+            record = dict(option.__dict__)
+            record.pop("best_plan", None)
+            record.pop("masterplan", None)
+            return record
+    except Exception:
+        pass
+    try:
+        return asdict(option)
+    except Exception:
+        return {"repr": repr(option), "type": type(option).__name__}
+
+
 def normalize_norwegian_text(text: str) -> str:
     """Normaliser tekst for regex-matching — behold originaltekst men gjør case-insensitive."""
     return text or ""
@@ -387,8 +300,8 @@ def generer_arkitekt_render(
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
 
-    if genai is None and not HAS_GOOGLE_GENAI:
-        st.error("Hverken google.genai eller google.generativeai er installert i miljøet.")
+    if genai is None:
+        st.error("google-generativeai er ikke installert i miljøet.")
         return None
 
     # 1. Sikre RGB og rimelig størrelse
@@ -576,11 +489,40 @@ def generer_arkitekt_render(
         )
 
     try:
-        # Bruk felles helper med SDK-fallback (nytt google.genai først, så gammelt)
-        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
-        if result is not None:
-            return result
-        st.error("Gemini returnerte ikke et bilde. Sjekk loggen for detaljer.")
+        # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
+        try:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
+        except Exception:
+            # Fallback til 2.5 hvis 3.1 ikke tilgjengelig
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
+
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+        )
+
+        # Hent ut bildet fra responsen
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
+
+        # Hvis vi kommer hit fikk vi ikke noe bilde tilbake
+        text_parts = []
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if content and getattr(content, "parts", None):
+                    for part in content.parts:
+                        if getattr(part, "text", None):
+                            text_parts.append(part.text)
+        err_msg = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata i respons."
+        st.error(f"Gemini returnerte ikke et bilde: {err_msg}")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
     return None
@@ -601,8 +543,8 @@ def generer_utsiktsrender(
     if not api_key:
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
-    if genai is None and not HAS_GOOGLE_GENAI:
-        st.error("Hverken google.genai eller google.generativeai er installert.")
+    if genai is None:
+        st.error("google-generativeai er ikke installert.")
         return None
 
     safe_image = view_image.convert("RGB")
@@ -635,10 +577,24 @@ def generer_utsiktsrender(
     )
 
     try:
-        # Bruk felles helper med SDK-fallback (nytt google.genai først, så gammelt)
-        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
-        if result is not None:
-            return result
+        try:
+            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
+        except Exception:
+            model = genai.GenerativeModel("gemini-2.5-flash-image")
+
+        response = model.generate_content(
+            [prompt, safe_image],
+            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+        )
+        if response and getattr(response, "candidates", None):
+            for cand in response.candidates:
+                content = getattr(cand, "content", None)
+                if not content or not getattr(content, "parts", None):
+                    continue
+                for part in content.parts:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        return Image.open(io.BytesIO(inline.data))
         st.error("Gemini returnerte ikke et bilde for utsiktsvisualiseringen.")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
@@ -1057,16 +1013,10 @@ def utm_crs_from_lonlat(lon: float, lat: float) -> Optional[CRS]:
     return CRS.from_epsg(epsg)
 
 
-def transform_polygon(poly: Any, src_crs: Optional[CRS], dst_crs: Optional[CRS]) -> Any:
+def transform_polygon(poly: Polygon, src_crs: Optional[CRS], dst_crs: Optional[CRS]) -> Polygon:
     if poly is None or src_crs is None or dst_crs is None or src_crs == dst_crs or not HAS_PYPROJ:
         return poly
     transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
-    if isinstance(poly, MultiPolygon):
-        parts = []
-        for part in poly.geoms:
-            coords = [transformer.transform(x, y) for x, y in list(part.exterior.coords)]
-            parts.append(Polygon(coords).buffer(0))
-        return unary_union(parts).buffer(0)
     coords = [transformer.transform(x, y) for x, y in list(poly.exterior.coords)]
     return Polygon(coords).buffer(0)
 
@@ -5877,7 +5827,7 @@ def render_view_from_building(
     components.iframe(viewer_url, height=height_px, scrolling=False)
 
 def option_to_record(option: OptionResult) -> Dict[str, Any]:
-    record = asdict(option)
+    record = _safe_option_record(option)
     record["mix_counts"] = json.dumps(option.mix_counts, ensure_ascii=False)
     record["notes"] = " | ".join(option.notes)
     record.pop("geometry", None)
@@ -8612,7 +8562,7 @@ SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
 if "project_data" not in st.session_state:
-    _default_project_data = {
+    st.session_state.project_data = {
         "p_name": "",
         "c_name": "",
         "p_desc": "",
@@ -8625,45 +8575,14 @@ if "project_data" not in st.session_state:
         "bta": 0,
         "land": "Norge",
     }
-    # Last fra Supabase hvis aktivt prosjekt er satt (samme flyt som Project.py).
-    # Fall tilbake til lokal ssot.json hvis Supabase ikke er tilgjengelig.
-    _loaded_from_db = False
-    _active_pid = st.session_state.get("active_project_id", "")
-    if _active_pid:
-        try:
-            from builtly_projects import get_project as _get_project
-            _proj = _get_project(_active_pid)
-            if _proj and _proj.get("ssot"):
-                st.session_state.project_data = dict(_proj["ssot"])
-                _loaded_from_db = True
-                # Oppdater lokal cache for bakoverkompatibilitet
-                try:
-                    DB_DIR.mkdir(parents=True, exist_ok=True)
-                    with open(SSOT_FILE, "w", encoding="utf-8") as _f:
-                        json.dump(st.session_state.project_data, _f, ensure_ascii=False, indent=4)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    if not _loaded_from_db:
-        if SSOT_FILE.exists():
-            try:
-                with open(SSOT_FILE, "r", encoding="utf-8") as f:
-                    st.session_state.project_data = json.load(f)
-            except Exception:
-                st.session_state.project_data = _default_project_data.copy()
-        else:
-            st.session_state.project_data = _default_project_data.copy()
-    # Sørg for at alle default-nøkler finnes
-    for _k, _v in _default_project_data.items():
-        if _k not in st.session_state.project_data:
-            st.session_state.project_data[_k] = _v
-
 if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
-_pd = st.session_state.project_data or {}
-if _pd.get("p_name") in [None, "", "Nytt Prosjekt"]:
+if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
+    with open(SSOT_FILE, "r", encoding="utf-8") as f:
+        st.session_state.project_data = json.load(f)
+
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = (
         f'<img src="{logo_data_uri()}" class="brand-logo">'
         if logo_data_uri()
@@ -8704,7 +8623,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.7</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.5</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -8864,8 +8783,14 @@ if HAS_MASTERPLAN:
         st.session_state["_masterplan_include_naering"] = _include_naering
         st.session_state["_masterplan_byggesone"] = _byggesone
 
-        # Masterplan-motor (v8) er alltid aktiv. Legacy A/B/C-flyten er avviklet.
-        st.session_state["_use_masterplan"] = True
+        # Toggle for å slå av masterplan og falle tilbake til klassisk A/B/C
+        _use_mp = st.checkbox(
+            "Bruk masterplan-motor (ny 6-pass arkitektur)",
+            value=True,
+            key="mp_use_masterplan",
+            help="Slå av for å bruke klassisk A/B/C-alternativflyt (fallback).",
+        )
+        st.session_state["_use_masterplan"] = _use_mp
 
 with st.expander("2B. Ekte tomtepolygon, nabohøyder og terreng", expanded=True):
     st.markdown("##### 1. Hent eiendom fra matrikkel")
@@ -9289,86 +9214,86 @@ if run_analysis:
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
 
-    # Masterplan-motor (v8) er nå eneste sti. Legacy A/B/C er avviklet.
-    if not HAS_MASTERPLAN:
-        st.error(
-            "Masterplan-motoren (builtly.v8) er ikke tilgjengelig. "
-            "Kan ikke generere volumalternativer. Kontakt administrator."
-        )
-        st.stop()
+    # Masterplan-motor eller klassisk A/B/C basert på toggle
+    _use_masterplan_now = HAS_MASTERPLAN and st.session_state.get("_use_masterplan", True)
+    if _use_masterplan_now:
+        _phasing_config = st.session_state.get("_masterplan_phasing_config") or PhasingConfig()
+        _include_barnehage = st.session_state.get("_masterplan_include_barnehage", False)
+        _include_naering = st.session_state.get("_masterplan_include_naering", False)
+        _byggesone = st.session_state.get("_masterplan_byggesone", "2")
 
-    _phasing_config = st.session_state.get("_masterplan_phasing_config") or PhasingConfig()
-    _include_barnehage = st.session_state.get("_masterplan_include_barnehage", False)
-    _include_naering = st.session_state.get("_masterplan_include_naering", False)
-    _byggesone = st.session_state.get("_masterplan_byggesone", "2")
+        # target_bra: prioritering %-BRA > max_bra_m2 > estimat fra BTA
+        if site.utnyttelsesgrad_bra_pct > 0:
+            _target_bra = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
+        elif site.max_bra_m2 > 0:
+            _target_bra = site.max_bra_m2
+        else:
+            _target_bra = site.desired_bta_m2 * site.efficiency_ratio
 
-    # target_bra: prioritering %-BRA > max_bra_m2 > estimat fra BTA
-    if site.utnyttelsesgrad_bra_pct > 0:
-        _target_bra = site.site_area_m2 * site.utnyttelsesgrad_bra_pct / 100.0
-    elif site.max_bra_m2 > 0:
-        _target_bra = site.max_bra_m2
+        _phase_count = _phasing_config.resolve_phase_count(_target_bra)
+        with st.spinner(
+            f"Bygger masterplan: {_target_bra:,.0f} m² BRA i {_phase_count} byggetrinn{ai_label}{bra_label} ..."
+        ):
+            _masterplan, _mp_error = masterplan_integration.run_masterplan_from_site_inputs(
+                site=site,
+                geodata_context=geodata_context,
+                phasing_config=_phasing_config,
+                target_bra_m2=_target_bra,
+                include_barnehage=_include_barnehage,
+                include_naering=_include_naering,
+                byggesone=_byggesone,
+            )
+        if _masterplan is None:
+            err_detail = _mp_error or "Ukjent feil"
+            st.error(f"Masterplan-generering feilet: {err_detail}")
+
+            # Debug-info for feilsøking
+            with st.expander("🔍 Debug-info (inputs til masterplan-motoren)"):
+                _sp = geodata_context.get("site_polygon")
+                _bp = geodata_context.get("buildable_polygon")
+                _nb = geodata_context.get("neighbors", [])
+                st.code(
+                    f"site_polygon.area:     {float(_sp.area) if _sp else 'None':.1f} m²\n"
+                    f"buildable_polygon.area:{float(_bp.area) if _bp else 'None':.1f} m²\n"
+                    f"target_bra:            {_target_bra:.1f} m²\n"
+                    f"max_floors:            {site.max_floors}\n"
+                    f"max_height_m:          {site.max_height_m}\n"
+                    f"max_bya_pct:           {site.max_bya_pct}\n"
+                    f"neighbors:             {len(_nb)} bygg\n"
+                    f"phase_count_resolved:  {_phase_count}\n"
+                    f"phasing_mode:          {_phasing_config.phasing_mode}\n"
+                    f"parking_mode:          {_phasing_config.parking_mode}\n"
+                    f"include_barnehage:     {_include_barnehage}\n"
+                    f"include_naering:       {_include_naering}\n"
+                    f"byggesone:             {_byggesone}\n",
+                    language="text",
+                )
+                # Maks teoretisk BRA for sammenligning
+                _bp_area = float(_bp.area) if _bp else 0
+                _max_theo = _bp_area * (site.max_bya_pct / 100.0) * site.max_floors * 0.85
+                st.caption(
+                    f"Maks teoretisk BRA: {_max_theo:.0f} m² "
+                    f"(byggbart × BYA × etasjer × 0.85). "
+                    f"Mål-BRA er {_target_bra/_max_theo*100:.0f}% av dette."
+                    if _max_theo > 0 else "Maks teoretisk BRA: ikke beregnet"
+                )
+
+            st.info(
+                "Tips: Du kan slå av masterplan-motoren i seksjon 2C og bruke klassisk "
+                "A/B/C-flyt i stedet. Eller juster input og prøv igjen."
+            )
+            options = []
+            st.session_state["_current_masterplan"] = None
+        else:
+            options = masterplan_integration.masterplan_to_option_results(
+                _masterplan, site, geodata_context, OptionResult, mix_specs=mix_inputs
+            )
+            st.session_state["_current_masterplan"] = _masterplan
     else:
-        _target_bra = site.desired_bta_m2 * site.efficiency_ratio
-
-    _phase_count = _phasing_config.resolve_phase_count(_target_bra)
-    with st.spinner(
-        f"Bygger masterplan: {_target_bra:,.0f} m² BRA i {_phase_count} byggetrinn{ai_label}{bra_label} ..."
-    ):
-        _masterplan, _mp_error = masterplan_integration.run_masterplan_from_site_inputs(
-            site=site,
-            geodata_context=geodata_context,
-            phasing_config=_phasing_config,
-            target_bra_m2=_target_bra,
-            include_barnehage=_include_barnehage,
-            include_naering=_include_naering,
-            byggesone=_byggesone,
-        )
-    if _masterplan is None:
-        err_detail = _mp_error or "Ukjent feil"
-        st.error(f"Masterplan-generering feilet: {err_detail}")
-
-        # Debug-info for feilsøking
-        with st.expander("🔍 Debug-info (inputs til masterplan-motoren)"):
-            _sp = geodata_context.get("site_polygon")
-            _bp = geodata_context.get("buildable_polygon")
-            _nb = geodata_context.get("neighbors", [])
-            st.code(
-                f"site_polygon.area:     {float(_sp.area) if _sp else 'None':.1f} m²\n"
-                f"buildable_polygon.area:{float(_bp.area) if _bp else 'None':.1f} m²\n"
-                f"target_bra:            {_target_bra:.1f} m²\n"
-                f"max_floors:            {site.max_floors}\n"
-                f"max_height_m:          {site.max_height_m}\n"
-                f"max_bya_pct:           {site.max_bya_pct}\n"
-                f"neighbors:             {len(_nb)} bygg\n"
-                f"phase_count_resolved:  {_phase_count}\n"
-                f"phasing_mode:          {_phasing_config.phasing_mode}\n"
-                f"parking_mode:          {_phasing_config.parking_mode}\n"
-                f"include_barnehage:     {_include_barnehage}\n"
-                f"include_naering:       {_include_naering}\n"
-                f"byggesone:             {_byggesone}\n",
-                language="text",
-            )
-            # Maks teoretisk BRA for sammenligning
-            _bp_area = float(_bp.area) if _bp else 0
-            _max_theo = _bp_area * (site.max_bya_pct / 100.0) * site.max_floors * 0.85
-            st.caption(
-                f"Maks teoretisk BRA: {_max_theo:.0f} m² "
-                f"(byggbart × BYA × etasjer × 0.85). "
-                f"Mål-BRA er {_target_bra/_max_theo*100:.0f}% av dette."
-                if _max_theo > 0 else "Maks teoretisk BRA: ikke beregnet"
-            )
-
-        st.info(
-            "Juster input (BYA, etasjer, polygon) og prøv igjen. "
-            "Hvis feilen gjentas, kontakt support med debug-info over."
-        )
-        options = []
+        # Klassisk A/B/C-flyt (fallback)
+        with st.spinner(f"Regner volumalternativer{ai_label}{bra_label} ..."):
+            options = generate_options(site, mix_inputs, geodata_context=geodata_context)
         st.session_state["_current_masterplan"] = None
-    else:
-        options = masterplan_integration.masterplan_to_option_results(
-            _masterplan, site, geodata_context, OptionResult, mix_specs=mix_inputs
-        )
-        st.session_state["_current_masterplan"] = _masterplan
 
     # Diagnostikk — lagre i session_state for visning i resultatene
     if site.utnyttelsesgrad_bra_pct > 0:
@@ -9380,7 +9305,7 @@ if run_analysis:
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
         diag_parts = [
-            f"v9.7 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"v9.6 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         ]
@@ -9516,7 +9441,7 @@ if run_analysis:
                     }
             analysis_payload = {
                 "site": asdict(site),
-                "alternatives": [asdict(option) | {"geometry": None} for option in options],
+                "alternatives": [_safe_option_record(option) | {"geometry": None} for option in options],
                 "parsed_regulation_hints": parsed,
                 "visual_input_count": len(images_for_context),
                 "geocoding_source": geo_source,
@@ -9623,7 +9548,7 @@ KRAV:
 
     st.session_state.analysis_results = {
         "site": asdict(site),
-        "options": [asdict(option) for option in options],
+        "options": [_safe_option_record(option) for option in options],
         "report_text": final_report_text,
         "geo_source": geo_source,
         "option_images": option_images,
@@ -9740,59 +9665,6 @@ if "analysis_results" in st.session_state:
         meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
     if meta_lines:
         st.caption(" · ".join(meta_lines))
-
-    # v9: Arkitekturkvalitet — vises hvis masterplan har scores
-    _mp_v9 = st.session_state.get("_current_masterplan")
-    if _mp_v9 is not None and getattr(_mp_v9, "architecture_scores", None):
-        scores = _mp_v9.architecture_scores
-        composition = getattr(_mp_v9, "composition_plan", None)
-        concept_label = composition.concept_name if composition else "—"
-        st.markdown(
-            "<div class='section-header'>Arkitekturkvalitet (v9)</div>",
-            unsafe_allow_html=True,
-        )
-        a1, a2, a3, a4 = st.columns(4)
-        def _fmt(v):
-            return f"{float(v):.2f}"
-        with a1:
-            st.markdown(
-                f"<div class='kpi-card'><div class='metric-title'>Totalscore</div>"
-                f"<div class='metric-value'>{_fmt(scores.get('total', 0))}</div></div>",
-                unsafe_allow_html=True,
-            )
-        with a2:
-            st.markdown(
-                f"<div class='kpi-card'><div class='metric-title'>Gatelinje</div>"
-                f"<div class='metric-value'>{_fmt(scores.get('frontage_continuity', 0))}</div></div>",
-                unsafe_allow_html=True,
-            )
-        with a3:
-            st.markdown(
-                f"<div class='kpi-card'><div class='metric-title'>Gårdsrom</div>"
-                f"<div class='metric-value'>{_fmt(scores.get('courtyard_clarity', 0))}</div></div>",
-                unsafe_allow_html=True,
-            )
-        with a4:
-            st.markdown(
-                f"<div class='kpi-card'><div class='metric-title'>Hierarki</div>"
-                f"<div class='metric-value'>{_fmt(scores.get('hierarchy', 0))}</div></div>",
-                unsafe_allow_html=True,
-            )
-        # Andre rad med flere metrikker i en expander
-        with st.expander("Flere arkitekturmetrikker (v9)", expanded=False):
-            st.write(f"**Komposisjonskonsept**: {concept_label}")
-            if composition:
-                st.write(f"- Frontages: {len(composition.street_frontages)}")
-                st.write(f"- Gårdsrom: {len(composition.courtyards)}")
-                st.write(f"- Aksentposisjoner: {len(composition.accent_points)}")
-            st.write(f"**Rytme (høyder)**: {_fmt(scores.get('rhythm', 0))} — "
-                     "andel bygg innen ±1 etasje fra dominant-høyde")
-            st.write(f"**Form-entropi**: {_fmt(scores.get('form_entropy', 0))} — "
-                     "variasjon i byggstørrelser (sweet spot: 3-5 ulike)")
-            st.write(f"**Skala-konsistens**: {_fmt(scores.get('scale_consistency', 0))} — "
-                     "hvor jevn byggstørrelse er på tvers av delfelt")
-            st.caption("v9 arkitekturscore er en objektiv måling av planens "
-                       "komposisjon — gatelinje, gårdsrom, rytme, hierarki. Alle skala 0-1.")
 
     # Motor-diagnostikk (persistent)
     diag = st.session_state.get("_motor_diag")
@@ -10222,9 +10094,8 @@ if "analysis_results" in st.session_state:
   <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
   <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
 </div>
-<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;flex-wrap:wrap;max-width:calc(100% - 24px);">
+<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
-  <button onclick="duplicateBuilding()" style="background:rgba(168,130,240,0.85);border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">⧉ Dupliser valgt</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
   <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
   <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
@@ -10232,18 +10103,6 @@ if "analysis_results" in st.session_state:
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
-</div>
-<div id="dimensionEditor" style="position:absolute;top:12px;left:12px;display:none;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:10px 12px;font-family:Inter,sans-serif;">
-  <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-weight:600;">Valgt bygg — dimensjoner</div>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <label style="color:#9fb0c3;font-size:12px;">Bredde:</label>
-    <input id="inputW" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
-    <span style="color:#9fb0c3;font-size:12px;">m</span>
-    <label style="color:#9fb0c3;font-size:12px;margin-left:8px;">Dybde:</label>
-    <input id="inputD" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
-    <span style="color:#9fb0c3;font-size:12px;">m</span>
-  </div>
-  <div style="color:#7a8b9c;font-size:10px;margin-top:6px;">Skriv inn eksakt bredde og dybde. Endringer lagres automatisk.</div>
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
@@ -10464,56 +10323,10 @@ window.addBuilding = function() {
   const cy = (minY + maxY) / 2 + (Math.random() - 0.5) * spanY * 0.3;
   buildings.push({ cx, cy, w: 40, d: 14, angle: 0, floors: defaultFloors, name: 'Bygg ' + String.fromCharCode(65 + buildings.length) });
   selectedIdx = buildings.length - 1;
-  updateDimensionEditor();
   render();
 };
 
-window.duplicateBuilding = function() {
-  if (selectedIdx < 0 || selectedIdx >= buildings.length) {
-    alert('Velg et bygg først (klikk på det).');
-    return;
-  }
-  const src = buildings[selectedIdx];
-  // Offset kopien 8m til høyre og ned slik at det blir synlig
-  const offset = 8;
-  const copy = {
-    cx: src.cx + offset,
-    cy: src.cy - offset,
-    w: src.w,
-    d: src.d,
-    angle: src.angle,
-    floors: src.floors,
-    name: 'Bygg ' + String.fromCharCode(65 + buildings.length),
-  };
-  buildings.push(copy);
-  selectedIdx = buildings.length - 1;
-  updateDimensionEditor();
-  render();
-};
-
-window.updateDimensions = function() {
-  if (selectedIdx < 0) return;
-  const wInput = document.getElementById('inputW');
-  const dInput = document.getElementById('inputD');
-  const newW = parseFloat(wInput.value);
-  const newD = parseFloat(dInput.value);
-  if (isFinite(newW) && newW >= 8 && newW <= 200) buildings[selectedIdx].w = newW;
-  if (isFinite(newD) && newD >= 8 && newD <= 200) buildings[selectedIdx].d = newD;
-  render();
-};
-
-function updateDimensionEditor() {
-  const panel = document.getElementById('dimensionEditor');
-  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
-    panel.style.display = 'block';
-    document.getElementById('inputW').value = Math.round(buildings[selectedIdx].w * 10) / 10;
-    document.getElementById('inputD').value = Math.round(buildings[selectedIdx].d * 10) / 10;
-  } else {
-    panel.style.display = 'none';
-  }
-}
-
-window.clearAll = function() { buildings = []; selectedIdx = -1; updateDimensionEditor(); render(); };
+window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
 
 window.setFloors = function() {
   defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
@@ -10638,12 +10451,10 @@ canvas.addEventListener('mousedown', e => {
     dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy];
     dragging = true;
     document.getElementById('floorSelect').value = buildings[idx].floors;
-    updateDimensionEditor();
     render();
     return;
   }
   selectedIdx = -1;
-  updateDimensionEditor();
   render();
 });
 
@@ -10661,11 +10472,6 @@ canvas.addEventListener('mousemove', e => {
     const dx = wx - b.cx, dy = wy - b.cy;
     b.w = Math.max(8, Math.abs(dx) * 2);
     b.d = Math.max(8, Math.abs(dy) * 2);
-    // Oppdater input-feltene live
-    const wInput = document.getElementById('inputW');
-    const dInput = document.getElementById('inputD');
-    if (wInput) wInput.value = Math.round(b.w * 10) / 10;
-    if (dInput) dInput.value = Math.round(b.d * 10) / 10;
     render();
   } else {
     // Cursor hint
@@ -10708,7 +10514,7 @@ render();
 })();
 </script>
 """.replace("__PAYLOAD__", editor_payload)
-    components.html(editor_html, height=720, scrolling=False)
+    components.html(editor_html, height=680, scrolling=False)
 
     # --- SKISSE TIL MOTOR ---
     with st.expander("Kjør motor fra manuell skisse", expanded=False):
@@ -11511,7 +11317,7 @@ render();
     st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
     gemini_key = os.environ.get("GOOGLE_API_KEY", "")
     scene_imgs = st.session_state.get("ark_scene_images")
-    if scene_imgs and gemini_key and (genai is not None or HAS_GOOGLE_GENAI):
+    if scene_imgs and gemini_key and genai is not None:
         motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
         opt_names = [opt.name for opt in motor_options] if motor_options else []
         sel_render_name = st.selectbox(
