@@ -61,6 +61,17 @@ try:
 except Exception:
     genai = None
 
+# Google GenAI SDK (nytt unified SDK, erstatter google.generativeai)
+# https://ai.google.dev/gemini-api/docs/migrate
+try:
+    from google import genai as google_genai
+    from google.genai import types as google_genai_types
+    HAS_GOOGLE_GENAI = True
+except Exception:
+    google_genai = None
+    google_genai_types = None
+    HAS_GOOGLE_GENAI = False
+
 try:
     import fitz
 except ImportError:
@@ -120,12 +131,14 @@ except Exception:
     pass
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-llm_available = bool(google_key and genai is not None)
-if llm_available:
+llm_available = bool(google_key and (genai is not None or HAS_GOOGLE_GENAI))
+if llm_available and genai is not None:
     try:
         genai.configure(api_key=google_key)
     except Exception:
-        llm_available = False
+        # Gammel SDK feilet — hvis ny er tilgjengelig, er vi fortsatt OK
+        if not HAS_GOOGLE_GENAI:
+            llm_available = False
 
 gdo = GeodataOnlineClient() if HAS_GEODATA_ONLINE else None
 geodata_token_ok = False
@@ -135,6 +148,99 @@ if gdo is not None and gdo.is_available():
         geodata_token_ok = True
     except Exception:
         geodata_token_ok = False
+
+
+def _generate_gemini_image(
+    prompt: str,
+    input_image: "Image.Image",
+    api_key: Optional[str] = None,
+    models: Optional[List[str]] = None,
+) -> Optional["Image.Image"]:
+    """Generer et bilde via Gemini med fallback mellom SDK-er og modeller.
+
+    Prøver først det nye google.genai SDK (anbefalt 2026), fallback til
+    gamle google.generativeai hvis nye ikke er installert. Prøver flere
+    modeller i rekkefølge til én gir bilde.
+
+    Returnerer PIL Image eller None ved feil.
+    """
+    if models is None:
+        models = ["gemini-2.5-flash-image", "gemini-3.1-flash-image-preview"]
+
+    key = api_key or os.environ.get("GOOGLE_API_KEY")
+    if not key:
+        return None
+
+    # --- Forsøk 1: nytt google.genai SDK ---
+    if HAS_GOOGLE_GENAI and google_genai is not None:
+        try:
+            client = google_genai.Client(api_key=key)
+            config = google_genai_types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            )
+            last_err: Optional[str] = None
+            for model_name in models:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[prompt, input_image],
+                        config=config,
+                    )
+                    candidates = getattr(response, "candidates", None) or []
+                    for cand in candidates:
+                        content = getattr(cand, "content", None)
+                        if not content:
+                            continue
+                        parts = getattr(content, "parts", None) or []
+                        for part in parts:
+                            inline = getattr(part, "inline_data", None)
+                            if inline and getattr(inline, "data", None):
+                                return Image.open(io.BytesIO(inline.data))
+                    text_parts = []
+                    for cand in candidates:
+                        content = getattr(cand, "content", None)
+                        parts = (getattr(content, "parts", None) or []) if content else []
+                        for part in parts:
+                            if getattr(part, "text", None):
+                                text_parts.append(part.text)
+                    last_err = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata"
+                except Exception as model_err:
+                    last_err = str(model_err)[:300]
+                    continue
+            if last_err:
+                import logging as _logging
+                _logging.getLogger("builtly").warning(
+                    "google.genai SDK ga ikke bilde: %s", last_err
+                )
+        except Exception as sdk_err:
+            import logging as _logging
+            _logging.getLogger("builtly").warning(
+                "google.genai SDK feilet: %s — prøver gammel SDK", str(sdk_err)[:200]
+            )
+
+    # --- Forsøk 2: gammel google.generativeai SDK ---
+    if genai is not None:
+        for model_name in models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    [prompt, input_image],
+                    generation_config={"response_modalities": ["TEXT", "IMAGE"]},
+                )
+                candidates = getattr(response, "candidates", None) or []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    if not content:
+                        continue
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        inline = getattr(part, "inline_data", None)
+                        if inline and getattr(inline, "data", None):
+                            return Image.open(io.BytesIO(inline.data))
+            except Exception:
+                continue
+
+    return None
 
 
 # --- 2. HJELPEFUNKSJONER ---
@@ -310,8 +416,8 @@ def generer_arkitekt_render(
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
 
-    if genai is None:
-        st.error("google-generativeai er ikke installert i miljøet.")
+    if genai is None and not HAS_GOOGLE_GENAI:
+        st.error("Hverken google.genai eller google.generativeai er installert i miljøet.")
         return None
 
     # 1. Sikre RGB og rimelig størrelse
@@ -499,40 +605,11 @@ def generer_arkitekt_render(
         )
 
     try:
-        # Gemini 3.1 Flash Image (Nano Banana 2) via google.generativeai SDK
-        try:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-        except Exception:
-            # Fallback til 2.5 hvis 3.1 ikke tilgjengelig
-            model = genai.GenerativeModel("gemini-2.5-flash-image")
-
-        response = model.generate_content(
-            [prompt, safe_image],
-            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
-        )
-
-        # Hent ut bildet fra responsen
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if not content or not getattr(content, "parts", None):
-                    continue
-                for part in content.parts:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and getattr(inline, "data", None):
-                        return Image.open(io.BytesIO(inline.data))
-
-        # Hvis vi kommer hit fikk vi ikke noe bilde tilbake
-        text_parts = []
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if content and getattr(content, "parts", None):
-                    for part in content.parts:
-                        if getattr(part, "text", None):
-                            text_parts.append(part.text)
-        err_msg = " ".join(text_parts)[:300] if text_parts else "Ingen bildedata i respons."
-        st.error(f"Gemini returnerte ikke et bilde: {err_msg}")
+        # Bruk felles helper med SDK-fallback (nytt google.genai først, så gammelt)
+        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
+        if result is not None:
+            return result
+        st.error("Gemini returnerte ikke et bilde. Sjekk loggen for detaljer.")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
     return None
@@ -553,8 +630,8 @@ def generer_utsiktsrender(
     if not api_key:
         st.error("Mangler GOOGLE_API_KEY i miljøvariablene.")
         return None
-    if genai is None:
-        st.error("google-generativeai er ikke installert.")
+    if genai is None and not HAS_GOOGLE_GENAI:
+        st.error("Hverken google.genai eller google.generativeai er installert.")
         return None
 
     safe_image = view_image.convert("RGB")
@@ -587,24 +664,10 @@ def generer_utsiktsrender(
     )
 
     try:
-        try:
-            model = genai.GenerativeModel("gemini-3.1-flash-image-preview")
-        except Exception:
-            model = genai.GenerativeModel("gemini-2.5-flash-image")
-
-        response = model.generate_content(
-            [prompt, safe_image],
-            generation_config={"response_modalities": ["TEXT", "IMAGE"]},
-        )
-        if response and getattr(response, "candidates", None):
-            for cand in response.candidates:
-                content = getattr(cand, "content", None)
-                if not content or not getattr(content, "parts", None):
-                    continue
-                for part in content.parts:
-                    inline = getattr(part, "inline_data", None)
-                    if inline and getattr(inline, "data", None):
-                        return Image.open(io.BytesIO(inline.data))
+        # Bruk felles helper med SDK-fallback
+        result = _generate_gemini_image(prompt, safe_image, api_key=api_key)
+        if result is not None:
+            return result
         st.error("Gemini returnerte ikke et bilde for utsiktsvisualiseringen.")
     except Exception as e:
         st.error(f"Feil ved Gemini-kall: {str(e)[:300]}")
@@ -8633,7 +8696,7 @@ st.markdown(
 st.markdown(
     "<p style='color: var(--muted); font-size: 1.1rem; margin-bottom: 1.5rem;'>"
     "Volumstudie og tomteanalyse med faktisk tomtepolygon, nabohøyder, terreng og AI-plassering."
-    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v9.5</span>"
+    " <span style='color:rgba(56,189,248,0.5);font-size:0.75rem;'>v13.0</span>"
     "</p>",
     unsafe_allow_html=True,
 )
@@ -9315,7 +9378,7 @@ if run_analysis:
         target_bta_diag = target_bra_diag / max(site.efficiency_ratio, 0.6)
         best_bta = max((o.gross_bta_m2 for o in options), default=0) if options else 0
         diag_parts = [
-            f"v9.6 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
+            f"v13.0 | tomteareal={site.site_area_m2:.0f} m² | site_poly={sp_area:.0f} m² | "
             f"buildable_poly={bp_area:.0f} m² | maks_fotavtrykk={limits_diag['max_footprint']:.0f} m² | "
             f"mål_BRA={target_bra_diag:.0f} m² | mål_BTA={target_bta_diag:.0f} m² | oppnådd_BTA={best_bta:.0f} m²"
         ]
@@ -9675,6 +9738,86 @@ if "analysis_results" in st.session_state:
         meta_lines.append(f"Fall: {best.terrain_slope_pct:.1f}%")
     if meta_lines:
         st.caption(" · ".join(meta_lines))
+
+    # v13: Arkitekturkvalitet — vises hvis masterplan har ArchitectureMetrics.
+    # V13 har 14 detaljerte metrikker via plan.architecture_report.
+    _mp_v13 = st.session_state.get("_current_masterplan")
+    _arc_report = getattr(_mp_v13, "architecture_report", None) if _mp_v13 is not None else None
+    if _arc_report is not None:
+        st.markdown(
+            "<div class='section-header'>Arkitekturkvalitet (v13)</div>",
+            unsafe_allow_html=True,
+        )
+
+        def _fmt(v: float) -> str:
+            try:
+                return f"{float(v):.0f}"
+            except Exception:
+                return "-"
+
+        # Øverste rad: 4 mest viktige KPI-er (total + tre hovedakser)
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Arkitekturscore</div>"
+                f"<div class='metric-value'>{_fmt(_arc_report.total_score)}/100</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a2:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Gatelinje</div>"
+                f"<div class='metric-value'>{_fmt(_arc_report.frontage_continuity)}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a3:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Gårdsrom</div>"
+                f"<div class='metric-value'>{_fmt(_arc_report.courtyard_clarity)}</div></div>",
+                unsafe_allow_html=True,
+            )
+        with a4:
+            st.markdown(
+                f"<div class='kpi-card'><div class='metric-title'>Typologirenhet</div>"
+                f"<div class='metric-value'>{_fmt(_arc_report.typology_purity)}</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        with st.expander("Flere arkitekturmetrikker (v13)", expanded=False):
+            # Rad 1
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                st.write(f"**Gatelinje-regularitet:** {_fmt(_arc_report.frontage_regularity)}")
+                st.write(f"**Gatelinje-gap:** {_fmt(_arc_report.frontage_gap_penalty)}")
+            with b2:
+                st.write(f"**Gårdsrom-innlukking:** {_fmt(_arc_report.courtyard_enclosure)}")
+                st.write(f"**Siktkorridor-kvalitet:** {_fmt(_arc_report.view_corridor_quality)}")
+            with b3:
+                st.write(f"**Mikrofelt-utnyttelse:** {_fmt(_arc_report.microfield_utilization)}")
+                st.write(f"**Isolerte bygg-straff:** {_fmt(_arc_report.isolated_building_penalty)}")
+
+            # Rad 2
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.write(f"**Aksesymmetri:** {_fmt(_arc_report.axis_symmetry)}")
+                st.write(f"**Rytme:** {_fmt(_arc_report.rhythm_score)}")
+            with c2:
+                st.write(f"**Bygnings-entropi:** {_fmt(_arc_report.building_entropy)}")
+                st.write(f"**BYA-treff:** {_fmt(_arc_report.bya_fitness)}")
+            with c3:
+                st.write(f"**Offentlig rom:** {_fmt(_arc_report.public_realm_clarity)}")
+
+            # Notater fra scoringen
+            notes = getattr(_arc_report, "notes", None) or []
+            if notes:
+                st.markdown("**Diagnosenotater:**")
+                for note in notes[:8]:
+                    st.caption(f"• {note}")
+
+            st.caption(
+                "v13 arkitekturscore måler planens komposisjon objektivt — "
+                "gatelinje, gårdsrom, symmetri, rytme og offentlig rom. "
+                "Alle delmål er på skala 0-100."
+            )
 
     # Motor-diagnostikk (persistent)
     diag = st.session_state.get("_motor_diag")
@@ -10104,8 +10247,9 @@ if "analysis_results" in st.session_state:
   <div id="hudUnits" style="color:#c8d3df;font-size:12px;">Boliger: 0</div>
   <div id="hudBuildings" style="color:#9fb0c3;font-size:11px;margin-top:4px;">Bygg: 0</div>
 </div>
-<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;">
+<div id="editorToolbar" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;flex-wrap:wrap;max-width:calc(100% - 24px);">
   <button onclick="addBuilding()" style="background:linear-gradient(135deg,rgba(56,194,201,0.9),rgba(120,220,225,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">+ Legg til bygg</button>
+  <button onclick="duplicateBuilding()" style="background:rgba(168,130,240,0.85);border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">⧉ Dupliser valgt</button>
   <button onclick="clearAll()" style="background:rgba(255,255,255,0.08);border:1px solid rgba(120,145,170,0.3);color:#f5f7fb;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">Tøm alt</button>
   <button onclick="exportSketch()" style="background:linear-gradient(135deg,rgba(250,180,60,0.9),rgba(245,158,11,0.9));border:none;color:#041018;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">📋 Kopier skisse</button>
   <button onclick="lockAndRunSketch()" style="background:linear-gradient(135deg,rgba(34,197,94,0.9),rgba(22,163,74,0.9));border:none;color:#fff;font-weight:700;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;">🔒 Lås og kjør motor</button>
@@ -10113,6 +10257,18 @@ if "analysis_results" in st.session_state:
     <option value="2">2 etasjer</option><option value="3">3 etasjer</option><option value="4" selected>4 etasjer</option>
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
+</div>
+<div id="dimensionEditor" style="position:absolute;top:12px;left:12px;display:none;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:10px 12px;font-family:Inter,sans-serif;">
+  <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-weight:600;">Valgt bygg — dimensjoner</div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label style="color:#9fb0c3;font-size:12px;">Bredde:</label>
+    <input id="inputW" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
+    <span style="color:#9fb0c3;font-size:12px;">m</span>
+    <label style="color:#9fb0c3;font-size:12px;margin-left:8px;">Dybde:</label>
+    <input id="inputD" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
+    <span style="color:#9fb0c3;font-size:12px;">m</span>
+  </div>
+  <div style="color:#7a8b9c;font-size:10px;margin-top:6px;">Skriv inn eksakt bredde og dybde. Endringer lagres automatisk.</div>
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
@@ -10333,10 +10489,57 @@ window.addBuilding = function() {
   const cy = (minY + maxY) / 2 + (Math.random() - 0.5) * spanY * 0.3;
   buildings.push({ cx, cy, w: 40, d: 14, angle: 0, floors: defaultFloors, name: 'Bygg ' + String.fromCharCode(65 + buildings.length) });
   selectedIdx = buildings.length - 1;
+  updateDimensionEditor();
   render();
 };
 
-window.clearAll = function() { buildings = []; selectedIdx = -1; render(); };
+window.duplicateBuilding = function() {
+  if (selectedIdx < 0 || selectedIdx >= buildings.length) {
+    alert('Velg et bygg først (klikk på det).');
+    return;
+  }
+  const src = buildings[selectedIdx];
+  // Offset kopien 8m til høyre og ned slik at det blir synlig
+  const offset = 8;
+  const copy = {
+    cx: src.cx + offset,
+    cy: src.cy - offset,
+    w: src.w,
+    d: src.d,
+    angle: src.angle,
+    floors: src.floors,
+    name: 'Bygg ' + String.fromCharCode(65 + buildings.length),
+  };
+  buildings.push(copy);
+  selectedIdx = buildings.length - 1;
+  updateDimensionEditor();
+  render();
+};
+
+window.updateDimensions = function() {
+  if (selectedIdx < 0) return;
+  const wInput = document.getElementById('inputW');
+  const dInput = document.getElementById('inputD');
+  const newW = parseFloat(wInput.value);
+  const newD = parseFloat(dInput.value);
+  if (isFinite(newW) && newW >= 8 && newW <= 200) buildings[selectedIdx].w = newW;
+  if (isFinite(newD) && newD >= 8 && newD <= 200) buildings[selectedIdx].d = newD;
+  render();
+};
+
+function updateDimensionEditor() {
+  const panel = document.getElementById('dimensionEditor');
+  if (!panel) return;
+  if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    panel.style.display = 'block';
+    document.getElementById('inputW').value = Math.round(buildings[selectedIdx].w * 10) / 10;
+    document.getElementById('inputD').value = Math.round(buildings[selectedIdx].d * 10) / 10;
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+window.clearAll = function() { buildings = []; selectedIdx = -1; updateDimensionEditor(); render(); };
 
 window.setFloors = function() {
   defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
@@ -10461,10 +10664,12 @@ canvas.addEventListener('mousedown', e => {
     dragOff = [wx - buildings[idx].cx, wy - buildings[idx].cy];
     dragging = true;
     document.getElementById('floorSelect').value = buildings[idx].floors;
+    updateDimensionEditor();
     render();
     return;
   }
   selectedIdx = -1;
+  updateDimensionEditor();
   render();
 });
 
@@ -10482,6 +10687,11 @@ canvas.addEventListener('mousemove', e => {
     const dx = wx - b.cx, dy = wy - b.cy;
     b.w = Math.max(8, Math.abs(dx) * 2);
     b.d = Math.max(8, Math.abs(dy) * 2);
+    // Oppdater input-feltene live
+    const wInput = document.getElementById('inputW');
+    const dInput = document.getElementById('inputD');
+    if (wInput) wInput.value = Math.round(b.w * 10) / 10;
+    if (dInput) dInput.value = Math.round(b.d * 10) / 10;
     render();
   } else {
     // Cursor hint
@@ -10524,7 +10734,7 @@ render();
 })();
 </script>
 """.replace("__PAYLOAD__", editor_payload)
-    components.html(editor_html, height=680, scrolling=False)
+    components.html(editor_html, height=720, scrolling=False)
 
     # --- SKISSE TIL MOTOR ---
     with st.expander("Kjør motor fra manuell skisse", expanded=False):
@@ -11327,7 +11537,7 @@ render();
     st.markdown("<div class='section-header'>Fotorealistisk visualisering</div>", unsafe_allow_html=True)
     gemini_key = os.environ.get("GOOGLE_API_KEY", "")
     scene_imgs = st.session_state.get("ark_scene_images")
-    if scene_imgs and gemini_key and genai is not None:
+    if scene_imgs and gemini_key and (genai is not None or HAS_GOOGLE_GENAI):
         motor_options = [OptionResult(**opt) if isinstance(opt, dict) else opt for opt in result.get("options", [])]
         opt_names = [opt.name for opt in motor_options] if motor_options else []
         sel_render_name = st.selectbox(
@@ -11394,8 +11604,8 @@ render();
                 st.warning("Ingen alternativer tilgjengelig for visualisering.")
     elif not gemini_key:
         st.caption("Legg til GOOGLE_API_KEY i Render Secrets for å aktivere fotorealistisk visualisering.")
-    elif genai is None:
-        st.caption("google-generativeai-pakken er ikke installert. Legg til i requirements.txt.")
+    elif genai is None and not HAS_GOOGLE_GENAI:
+        st.caption("Hverken google.genai eller google.generativeai er installert. Legg til google-genai i requirements.txt.")
     elif not scene_imgs:
         st.caption("3D-scener må genereres først (se seksjonen ovenfor) før fotorealistisk visualisering kan kjøres.")
 
