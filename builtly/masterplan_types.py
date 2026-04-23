@@ -99,6 +99,14 @@ class Delfelt:
     frontage_zone_ratio: float = 0.0
     public_realm_ratio: float = 0.0
     node_symmetry: bool = False
+    frontage_primary_side: Optional[str] = None
+    frontage_secondary_side: Optional[str] = None
+    lamell_rhythm_mode: Optional[str] = None
+    node_layout_mode: Optional[str] = None
+    courtyard_open_side: Optional[str] = None
+    target_building_count: int = 0
+    frontage_emphasis: float = 0.0
+    rhythm_strength: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,6 +144,14 @@ class Delfelt:
             "frontage_zone_ratio": float(self.frontage_zone_ratio),
             "public_realm_ratio": float(self.public_realm_ratio),
             "node_symmetry": bool(self.node_symmetry),
+            "frontage_primary_side": self.frontage_primary_side,
+            "frontage_secondary_side": self.frontage_secondary_side,
+            "lamell_rhythm_mode": self.lamell_rhythm_mode,
+            "node_layout_mode": self.node_layout_mode,
+            "courtyard_open_side": self.courtyard_open_side,
+            "target_building_count": int(self.target_building_count),
+            "frontage_emphasis": float(self.frontage_emphasis),
+            "rhythm_strength": float(self.rhythm_strength),
         }
 
     @classmethod
@@ -175,6 +191,14 @@ class Delfelt:
             frontage_zone_ratio=float(data.get("frontage_zone_ratio", 0.0) or 0.0),
             public_realm_ratio=float(data.get("public_realm_ratio", 0.0) or 0.0),
             node_symmetry=bool(data.get("node_symmetry", False)),
+            frontage_primary_side=data.get("frontage_primary_side"),
+            frontage_secondary_side=data.get("frontage_secondary_side"),
+            lamell_rhythm_mode=data.get("lamell_rhythm_mode"),
+            node_layout_mode=data.get("node_layout_mode"),
+            courtyard_open_side=data.get("courtyard_open_side"),
+            target_building_count=int(data.get("target_building_count", 0) or 0),
+            frontage_emphasis=float(data.get("frontage_emphasis", 0.0) or 0.0),
+            rhythm_strength=float(data.get("rhythm_strength", 0.0) or 0.0),
         )
 
 
@@ -335,6 +359,10 @@ class FieldSkeleton:
     micro_fields: List[Polygon] = field(default_factory=list)
     public_realm: List[Polygon] = field(default_factory=list)
     reserved_open_space: List[Polygon] = field(default_factory=list)
+    frontage_primary_side: Optional[str] = None
+    frontage_secondary_side: Optional[str] = None
+    build_slots: List[Polygon] = field(default_factory=list)
+    node_layout_mode: Optional[str] = None
 
 
 @dataclass
@@ -355,6 +383,7 @@ class FieldSkeletonSummary:
     micro_field_count: int = 0
     public_realm_m2: float = 0.0
     reserved_open_space_m2: float = 0.0
+    build_slot_count: int = 0
 
 
 @dataclass
@@ -370,6 +399,9 @@ class ArchitectureMetrics:
     rhythm_score: float = 0.0
     frontage_gap_penalty: float = 0.0
     isolated_building_penalty: float = 0.0
+    frontage_regularity: float = 0.0
+    courtyard_enclosure: float = 0.0
+    microfield_utilization: float = 0.0
     total_score: float = 0.0
     notes: List[str] = field(default_factory=list)
 
@@ -406,6 +438,14 @@ class FieldParameterChoice:
     frontage_zone_ratio: float = 0.0
     public_realm_ratio: float = 0.0
     node_symmetry: bool = False
+    frontage_primary_side: Optional[str] = None
+    frontage_secondary_side: Optional[str] = None
+    lamell_rhythm_mode: Optional[str] = None
+    node_layout_mode: Optional[str] = None
+    courtyard_open_side: Optional[str] = None
+    target_building_count: int = 0
+    frontage_emphasis: float = 0.0
+    rhythm_strength: float = 0.0
 
 
 @dataclass

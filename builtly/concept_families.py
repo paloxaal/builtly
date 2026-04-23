@@ -40,6 +40,14 @@ class FieldEnvelope:
     frontage_zone_ratio: float = 0.0
     public_realm_ratio: float = 0.0
     node_symmetry: bool = False
+    frontage_primary_side: Optional[str] = None
+    frontage_secondary_side: Optional[str] = None
+    lamell_rhythm_mode: Optional[str] = None
+    node_layout_mode: Optional[str] = None
+    courtyard_open_side: Optional[str] = None
+    target_building_count: int = 0
+    frontage_emphasis: float = 0.0
+    rhythm_strength: float = 0.0
 
 
 class ConceptStrategy:
@@ -97,6 +105,14 @@ class ConceptStrategy:
                 frontage_zone_ratio=env.frontage_zone_ratio,
                 public_realm_ratio=env.public_realm_ratio,
                 node_symmetry=env.node_symmetry,
+                frontage_primary_side=env.frontage_primary_side,
+                frontage_secondary_side=env.frontage_secondary_side,
+                lamell_rhythm_mode=env.lamell_rhythm_mode,
+                node_layout_mode=env.node_layout_mode,
+                courtyard_open_side=env.courtyard_open_side,
+                target_building_count=env.target_building_count,
+                frontage_emphasis=env.frontage_emphasis,
+                rhythm_strength=env.rhythm_strength,
             ))
         return out
 
@@ -140,23 +156,29 @@ class LinearMixedStrategy(ConceptStrategy):
             courtyard_kind=CourtyardKind.FELLES_BOLIG,
             field_role=field_role,
             character=("open_view" if edge else "street_facing"),
-            design_variant=("terraced" if edge else "varied"),
+            design_variant=("terraced" if edge else "rhythmic"),
             design_height_pattern=("neighbor_step_down" if edge else "stepped"),
-            target_bya_pct=24.0,
+            target_bya_pct=26.0,
             skeleton_mode="linear_bands",
             frontage_mode=("single" if edge else "double"),
-            micro_band_count=(3 if edge else 4),
-            view_corridor_count=1,
-            courtyard_reserve_ratio=(0.10 if edge else 0.12),
-            frontage_depth_m=12.0,
-            corridor_width_m=10.0,
+            micro_band_count=(4 if edge else 5),
+            view_corridor_count=(1 if edge else 2),
+            courtyard_reserve_ratio=(0.08 if edge else 0.10),
+            frontage_depth_m=12.5,
+            corridor_width_m=8.5,
             macro_structure="spine",
             micro_field_pattern="parallel_bands",
             symmetry_preference="bilateral",
-            composition_strictness=0.85,
-            frontage_zone_ratio=0.18,
-            public_realm_ratio=0.12,
+            composition_strictness=0.92,
+            frontage_zone_ratio=0.22,
+            public_realm_ratio=0.10,
             node_symmetry=True,
+            frontage_primary_side="south",
+            frontage_secondary_side=("north" if not edge else None),
+            lamell_rhythm_mode=("paired" if edge else "mirrored"),
+            target_building_count=(2 if edge else 3),
+            frontage_emphasis=0.90,
+            rhythm_strength=0.90,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
@@ -202,21 +224,27 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             design_karre_shape=("uo_chamfered" if edge else "uo"),
             design_height_pattern=("neighbor_step_down" if (field and field.character == "neighborhood_edge") else "stepped"),
             design_variant=(None if use_karre else "terraced"),
-            target_bya_pct=27.0,
+            target_bya_pct=29.0,
             skeleton_mode="courtyard_frontage",
             frontage_mode=("quad" if edge else "ring"),
             micro_band_count=4,
             view_corridor_count=(1 if edge else 0),
-            courtyard_reserve_ratio=(0.30 if edge else 0.34),
-            frontage_depth_m=13.0,
-            corridor_width_m=10.0,
+            courtyard_reserve_ratio=(0.28 if edge else 0.32),
+            frontage_depth_m=13.5,
+            corridor_width_m=8.0,
             macro_structure="perimeter_block",
             micro_field_pattern="frontage_ring",
             symmetry_preference="axial",
-            composition_strictness=0.95,
-            frontage_zone_ratio=0.24,
-            public_realm_ratio=0.18,
+            composition_strictness=0.98,
+            frontage_zone_ratio=0.26,
+            public_realm_ratio=0.16,
             node_symmetry=True,
+            frontage_primary_side=("south" if edge else None),
+            frontage_secondary_side=("east" if edge else None),
+            courtyard_open_side=("south" if edge else None),
+            target_building_count=(1 if use_karre else 2),
+            frontage_emphasis=0.96,
+            rhythm_strength=0.82,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
@@ -261,21 +289,27 @@ class ClusterParkStrategy(ConceptStrategy):
             character=("open_view" if use_punkthus else "sheltered"),
             design_variant=(None if use_punkthus else "varied"),
             design_height_pattern=("accent" if use_punkthus else "stepped"),
-            target_bya_pct=20.0,
+            target_bya_pct=22.0,
             skeleton_mode=("park_nodes" if use_punkthus else "park_bands"),
-            frontage_mode=("node" if use_punkthus else "single"),
-            micro_band_count=(0 if use_punkthus else 2),
+            frontage_mode=("node" if use_punkthus else "edge"),
+            micro_band_count=(0 if use_punkthus else 3),
             view_corridor_count=(2 if use_punkthus else 1),
-            courtyard_reserve_ratio=0.38,
-            frontage_depth_m=11.0,
-            corridor_width_m=14.0,
+            courtyard_reserve_ratio=0.40,
+            frontage_depth_m=11.5,
+            corridor_width_m=11.0,
             macro_structure="park_cluster",
             micro_field_pattern=("node_cluster" if use_punkthus else "park_bands"),
-            symmetry_preference="radial",
-            composition_strictness=0.78,
-            frontage_zone_ratio=0.14,
-            public_realm_ratio=0.24,
+            symmetry_preference="bilateral",
+            composition_strictness=0.86,
+            frontage_zone_ratio=0.18,
+            public_realm_ratio=0.26,
             node_symmetry=use_punkthus,
+            frontage_primary_side=(None if use_punkthus else "west"),
+            frontage_secondary_side=(None if use_punkthus else "east"),
+            node_layout_mode=("paired_edges" if use_punkthus else None),
+            target_building_count=(2 if use_punkthus else 3),
+            frontage_emphasis=0.72,
+            rhythm_strength=0.70,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:

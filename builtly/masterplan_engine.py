@@ -193,17 +193,18 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     if requested_count is None:
         if density >= 1.0:
             count += 1
-        if density >= 1.15 and concept_family == ConceptFamily.COURTYARD_URBAN:
+        if density >= 1.15:
             count += 1
-        # Makro/mikro-prinsipp: vi holder makro-delfelt moderate og lar
-        # mikrofeltene bære detaljrikdommen. Dette gir roligere, mer arkitektmessig
-        # feltstruktur enn å presse opp makro-antallet for langt.
+        if density >= 1.28 and concept_family != ConceptFamily.COURTYARD_URBAN:
+            count += 1
+        # Makro/mikro-prinsipp: hold makrofeltene rolige, men gi lineære og parkgrep
+        # nok armer til å bygge rytme. Karré-grep holdes strammere for å unngå for små blokker.
         if concept_family == ConceptFamily.LINEAR_MIXED:
-            count = max(4, min(count, 5 if density < 1.15 else 6))
+            count = max(5, min(count, 7 if density < 1.18 else 8))
         elif concept_family == ConceptFamily.CLUSTER_PARK:
-            count = max(4, min(count, 6))
+            count = max(5, min(count, 7))
         else:  # COURTYARD_URBAN
-            count = max(4, min(count, 7))
+            count = max(4, min(count, 6 if density < 1.18 else 7))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -253,6 +254,14 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 frontage_zone_ratio=float(choice.frontage_zone_ratio or 0.0),
                 public_realm_ratio=float(choice.public_realm_ratio or 0.0),
                 node_symmetry=bool(choice.node_symmetry),
+                frontage_primary_side=choice.frontage_primary_side,
+                frontage_secondary_side=choice.frontage_secondary_side,
+                lamell_rhythm_mode=choice.lamell_rhythm_mode,
+                node_layout_mode=choice.node_layout_mode,
+                courtyard_open_side=choice.courtyard_open_side,
+                target_building_count=int(choice.target_building_count or 0),
+                frontage_emphasis=float(choice.frontage_emphasis or 0.0),
+                rhythm_strength=float(choice.rhythm_strength or 0.0),
             )
         )
     return out
@@ -358,6 +367,14 @@ def _normalize_choices(
                 frontage_zone_ratio=fb.frontage_zone_ratio,
                 public_realm_ratio=fb.public_realm_ratio,
                 node_symmetry=fb.node_symmetry,
+                frontage_primary_side=fb.frontage_primary_side,
+                frontage_secondary_side=fb.frontage_secondary_side,
+                lamell_rhythm_mode=fb.lamell_rhythm_mode,
+                node_layout_mode=fb.node_layout_mode,
+                courtyard_open_side=fb.courtyard_open_side,
+                target_building_count=fb.target_building_count,
+                frontage_emphasis=fb.frontage_emphasis,
+                rhythm_strength=fb.rhythm_strength,
             )
         )
 

@@ -32,6 +32,9 @@ class OptionResult:
     architecture_score: float = 0.0
     public_realm_score: float = 0.0
     rhythm_score: float = 0.0
+    frontage_regularity: float = 0.0
+    courtyard_enclosure: float = 0.0
+    microfield_utilization: float = 0.0
     summary: str = ""
     recommendation: str = ""
     risks: List[str] = field(default_factory=list)
@@ -104,7 +107,25 @@ def score_masterplan(plan: Masterplan, target_bra_m2: float) -> float:
     bya = _bya_score(plan)
     dominance = _dominance_score(plan)
     arch = float(plan.architecture_report.total_score)
-    score = 0.20 * fit + 0.12 * sol + 0.12 * mua + 0.08 * geo + 0.12 * bya + 0.10 * dominance + 0.26 * arch
+    public_realm = float(plan.architecture_report.public_realm_clarity)
+    rhythm = float(plan.architecture_report.rhythm_score)
+    frontage_reg = float(plan.architecture_report.frontage_regularity)
+    courtyard_encl = float(plan.architecture_report.courtyard_enclosure)
+    micro_util = float(plan.architecture_report.microfield_utilization)
+    score = (
+        0.18 * fit +
+        0.10 * sol +
+        0.10 * mua +
+        0.06 * geo +
+        0.12 * bya +
+        0.08 * dominance +
+        0.24 * arch +
+        0.04 * public_realm +
+        0.03 * rhythm +
+        0.03 * frontage_reg +
+        0.01 * courtyard_encl +
+        0.01 * micro_util
+    )
     return max(0.0, min(100.0, score))
 
 
@@ -131,6 +152,9 @@ def masterplan_to_option_result(plan: Masterplan, target_bra_m2: float) -> Optio
         architecture_score=plan.architecture_report.total_score,
         public_realm_score=plan.architecture_report.public_realm_clarity,
         rhythm_score=plan.architecture_report.rhythm_score,
+        frontage_regularity=plan.architecture_report.frontage_regularity,
+        courtyard_enclosure=plan.architecture_report.courtyard_enclosure,
+        microfield_utilization=plan.architecture_report.microfield_utilization,
         summary=plan.report_summary,
         recommendation=plan.report_recommendation,
         risks=list(plan.report_risks),

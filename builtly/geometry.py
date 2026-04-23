@@ -1969,28 +1969,78 @@ def _split_poly_evenly(poly: Polygon, count: int, axis: str = "x") -> List[Polyg
     return parts
 
 
+def _preferred_frontage_sides(field: Delfelt, default_primary: str = "south", default_secondary: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    primary = getattr(field, "frontage_primary_side", None) or default_primary
+    secondary = getattr(field, "frontage_secondary_side", None) or default_secondary
+    if secondary == primary:
+        secondary = None
+    return str(primary), (str(secondary) if secondary else None)
+
+
+def _split_band_symmetric(band: Polygon, splits: int, axis: str) -> List[Polygon]:
+    pieces = _split_poly_evenly(band, splits, axis=axis)
+    if len(pieces) <= 1:
+        return pieces
+    minx, miny, maxx, maxy = band.bounds
+    if axis == "x":
+        center = (minx + maxx) / 2.0
+        pieces.sort(key=lambda p: (abs(p.centroid.x - center), round(p.centroid.y, 3), round(p.centroid.x, 3)))
+    else:
+        center = (miny + maxy) / 2.0
+        pieces.sort(key=lambda p: (abs(p.centroid.y - center), round(p.centroid.x, 3), round(p.centroid.y, 3)))
+    return pieces
+
+
+def _slot_count_for_band(band: Polygon, count_hint: int, pattern: Optional[str]) -> Tuple[int, str]:
+    minx, miny, maxx, maxy = band.bounds
+    width = maxx - minx
+    height = maxy - miny
+    axis = "x" if width >= height else "y"
+    long_span = max(width, height)
+    if pattern == "parallel_bands":
+        if long_span >= 120:
+            splits = 3
+        elif long_span >= 72:
+            splits = 2
+        else:
+            splits = 1
+        if count_hint >= 6 and long_span >= 95:
+            splits = max(splits, 3 if long_span >= 120 else 2)
+    elif pattern == "frontage_ring":
+        if axis == "x":
+            splits = 2 if width >= 72 else 1
+        else:
+            splits = 2 if height >= 84 else 1
+    elif pattern == "park_bands":
+        splits = 2 if long_span >= 84 else 1
+    elif pattern == "node_cluster":
+        splits = 1
+    else:
+        splits = 2 if long_span >= 80 and count_hint >= 4 else 1
+    return max(1, splits), axis
+
+
 def _build_micro_fields_from_bands(bands: Sequence[Polygon], count_hint: int, pattern: Optional[str], symmetry: Optional[str]) -> List[Polygon]:
     micro: List[Polygon] = []
     for band in bands:
-        minx, miny, maxx, maxy = band.bounds
-        width = maxx - minx
-        height = maxy - miny
-        axis = "x" if width >= height else "y"
-        if pattern in {"parallel_bands", "frontage_ring", "park_bands"}:
-            if axis == "x":
-                splits = 2 if width > 72 else (1 if width < 42 else min(2, max(1, count_hint // max(len(bands), 1))))
-            else:
-                splits = 1
-        elif pattern == "node_cluster":
-            splits = 1
-        else:
-            splits = 1 if width < 48 else 2
-        pieces = _split_poly_evenly(band, splits, axis=axis)
-        micro.extend(pieces if pieces else [band])
-    if symmetry == "bilateral" and len(micro) >= 4:
+        splits, axis = _slot_count_for_band(band, count_hint, pattern)
+        pieces = _split_band_symmetric(band, splits, axis) or [band]
+        micro.extend(pieces)
+    if not micro:
+        return []
+    # Stabil, symmetrisk sortering på tvers av alle slots
+    minx = min(p.bounds[0] for p in micro)
+    miny = min(p.bounds[1] for p in micro)
+    maxx = max(p.bounds[2] for p in micro)
+    maxy = max(p.bounds[3] for p in micro)
+    cx = (minx + maxx) / 2.0
+    cy = (miny + maxy) / 2.0
+    if symmetry == "bilateral":
+        micro.sort(key=lambda p: (round(p.centroid.y, 3), abs(p.centroid.x - cx), round(p.centroid.x, 3)))
+    elif symmetry == "axial":
+        micro.sort(key=lambda p: (abs(p.centroid.y - cy), round(p.centroid.x, 3), round(p.centroid.y, 3)))
+    else:
         micro.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
-    elif symmetry == "axial" and len(micro) >= 4:
-        micro.sort(key=lambda p: (round(p.centroid.x, 3), round(p.centroid.y, 3)))
     return [m for m in micro if m.area > 60.0]
 
 
@@ -1998,74 +2048,77 @@ def _compose_linear_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
     height = maxy - miny
-    band_count = max(2, int(getattr(field, "micro_band_count", 0) or 3))
+    band_count = max(2, int(getattr(field, "micro_band_count", 0) or 4))
     corridor_count = max(1, int(getattr(field, "view_corridor_count", 0) or 1))
-    corridor_w = float(getattr(field, "corridor_width_m", None) or 10.0)
-    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 12.0)
-    strictness = float(getattr(field, "composition_strictness", 0.85) or 0.85)
-    public_realm_ratio = float(getattr(field, "public_realm_ratio", 0.12) or 0.12)
-    frontage_zone_ratio = float(getattr(field, "frontage_zone_ratio", 0.18) or 0.18)
+    corridor_w = float(getattr(field, "corridor_width_m", None) or 8.5)
+    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 12.5)
+    public_realm_ratio = float(getattr(field, "public_realm_ratio", 0.10) or 0.10)
+    frontage_zone_ratio = float(getattr(field, "frontage_zone_ratio", 0.22) or 0.22)
+    primary_side, secondary_side = _preferred_frontage_sides(field, "south", "north" if getattr(field, "frontage_mode", None) == "double" else None)
 
-    total_gap_h = max(0.0, (band_count - 1) * corridor_w)
-    band_h = max(frontage_depth, (height - total_gap_h) / max(1, band_count))
-    band_h = max(10.0, min(band_h, height / max(1, band_count)))
-    y_start = miny + max(0.0, (height - (band_count * band_h + total_gap_h)) / 2.0)
+    # 1) Frontage-soner langs prioriterte sider
+    frontage_zones: List[Polygon] = []
+    frontages: List[SkeletonFrontage] = []
+    frontage_build_bands: List[Polygon] = []
+    for side in [primary_side, secondary_side]:
+        if not side:
+            continue
+        line = _line_from_bounds(core, side)
+        if line is not None:
+            frontages.append(SkeletonFrontage(role=f"{side}_frontage", line=line))
+        zone = _strip_from_side(core, side, max(frontage_depth, height * frontage_zone_ratio))
+        if zone is not None and not zone.is_empty:
+            parts = [p for p in _flatten_polygons(zone) if p.area > 80.0]
+            frontage_zones.extend(parts)
+            frontage_build_bands.extend(parts)
 
+    # 2) Siktkorridorer som symmetriske vertikale snitt gjennom feltet
     corridor_polys: List[Polygon] = []
-    usable_w = max(0.0, width - corridor_count * corridor_w)
-    step = usable_w / max(corridor_count + 1, 1)
-    for i in range(corridor_count):
-        cx = minx + step * (i + 1) + corridor_w * i + corridor_w / 2.0
-        corridor = box(cx - corridor_w / 2.0, miny - 1.0, cx + corridor_w / 2.0, maxy + 1.0)
-        clipped = core.intersection(corridor).buffer(0)
-        corridor_polys.extend([p for p in _flatten_polygons(clipped) if p.area > 40.0])
+    if corridor_count > 0:
+        usable_w = max(0.0, width - corridor_count * corridor_w)
+        step = usable_w / max(corridor_count + 1, 1)
+        for i in range(corridor_count):
+            cx = minx + step * (i + 1) + corridor_w * i + corridor_w / 2.0
+            corridor = box(cx - corridor_w / 2.0, miny - 1.0, cx + corridor_w / 2.0, maxy + 1.0)
+            clipped = core.intersection(corridor).buffer(0)
+            corridor_polys.extend([p for p in _flatten_polygons(clipped) if p.area > 40.0])
 
-    bands: List[Polygon] = []
-    public_realm: List[Polygon] = []
-    y = y_start
-    for i in range(band_count):
-        band_rect = box(minx - 1.0, y, maxx + 1.0, y + band_h)
-        band = core.intersection(band_rect).buffer(0)
-        for corridor in corridor_polys:
-            if not corridor.is_empty:
-                band = band.difference(corridor).buffer(0)
-        parts = [p for p in _flatten_polygons(band) if p.area > 80.0]
-        bands.extend(parts)
-        y += band_h
-        if i < band_count - 1:
-            gap_rect = box(minx - 1.0, y, maxx + 1.0, y + corridor_w)
-            gap = core.intersection(gap_rect).buffer(0)
-            for corridor in corridor_polys:
-                gap = gap.difference(corridor).buffer(0)
-            public_realm.extend([p for p in _flatten_polygons(gap) if p.area > 80.0])
-            y += corridor_w
+    # 3) Midtbånd / interne byggebaner mellom frontagene
+    subtractor = unary_union(frontage_zones + corridor_polys).buffer(0) if (frontage_zones or corridor_polys) else None
+    remaining = core.difference(subtractor).buffer(0) if subtractor is not None else core
+    remaining_parts = [p for p in _flatten_polygons(remaining) if p.area > 100.0]
+    interior_bands: List[Polygon] = []
+    desired_interior = max(1, band_count - len(frontage_build_bands))
+    if remaining_parts:
+        target = max(remaining_parts, key=lambda g: g.area)
+        split_axis = "y" if (target.bounds[3] - target.bounds[1]) > (target.bounds[2] - target.bounds[0]) else "x"
+        split_parts = _split_poly_evenly(target, desired_interior, axis=split_axis) or [target]
+        interior_bands.extend([p for p in split_parts if p.area > 90.0])
 
-    public_realm.extend(corridor_polys)
+    bands = frontage_build_bands + interior_bands
+    bands = [p for band in bands for p in _flatten_polygons(band.difference(unary_union(corridor_polys)).buffer(0))] if corridor_polys else bands
+    bands = [p for p in bands if p.area > 90.0]
+
+    # 4) Offentlig rom = korridorer + sentralt restrom
+    public_realm: List[Polygon] = list(corridor_polys)
+    residual = core.difference(unary_union(bands).buffer(0)).buffer(0) if bands else core
+    residual_parts = [p for p in _flatten_polygons(residual) if p.area > core.area * public_realm_ratio * 0.2]
+    public_realm.extend(residual_parts)
     courtyard = max(public_realm, key=lambda g: g.area).buffer(0) if public_realm else None
 
-    frontage_roles = ["south_frontage"]
-    if getattr(field, "frontage_mode", None) == "double":
-        frontage_roles.append("north_frontage")
-    frontages: List[SkeletonFrontage] = []
-    frontage_zones: List[Polygon] = []
-    for role, side in [("south_frontage", "south"), ("north_frontage", "north")]:
-        if role in frontage_roles:
-            line = _line_from_bounds(core, side)
-            if line is not None:
-                frontages.append(SkeletonFrontage(role=role, line=line))
-                zone = _strip_from_side(core, side, max(frontage_depth, height * frontage_zone_ratio))
-                if zone is not None and not zone.is_empty:
-                    frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
+    micro_fields = _build_micro_fields_from_bands(
+        bands,
+        max(2, int(getattr(field, "target_building_count", 0) or band_count)),
+        getattr(field, "micro_field_pattern", None),
+        getattr(field, "symmetry_preference", None),
+    )
+    build_slots = list(micro_fields)
+    if getattr(field, "composition_strictness", 0.0) >= 0.90 and len(build_slots) > max(6, int(getattr(field, "target_building_count", 0) or 0) * 2):
+        build_slots = build_slots[: max(6, int(getattr(field, "target_building_count", 0) or 0) * 2)]
 
-    micro_fields = _build_micro_fields_from_bands(bands, max(2, band_count), getattr(field, "micro_field_pattern", None), getattr(field, "symmetry_preference", None))
-    if strictness >= 0.9 and len(micro_fields) > 6:
-        micro_fields = micro_fields[:6]
     macro_axis = _axis_line(core, axis="x")
     symmetry_axis = _axis_line(core, axis="y")
     reserved_open_space = [p for p in (public_realm + ([courtyard] if courtyard is not None else [])) if p is not None and not getattr(p, 'is_empty', True)]
-    if public_realm_ratio > 0 and reserved_open_space:
-        reserved_open_space = [p for p in reserved_open_space if p.area >= core.area * public_realm_ratio * 0.15]
-
     return FieldSkeleton(
         field_id=field.field_id,
         mode="linear_bands",
@@ -2075,7 +2128,7 @@ def _compose_linear_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         courtyard_reserve=courtyard if isinstance(courtyard, Polygon) else _largest_polygon(courtyard),
         view_corridors=[c for c in corridor_polys if not c.is_empty and c.area > 40.0],
         accent_nodes=[],
-        open_edges=["south"],
+        open_edges=[primary_side] + ([secondary_side] if secondary_side else []),
         frontage_depth_m=frontage_depth,
         corridor_width_m=corridor_w,
         macro_axis=macro_axis,
@@ -2084,6 +2137,10 @@ def _compose_linear_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         micro_fields=micro_fields,
         public_realm=public_realm,
         reserved_open_space=reserved_open_space,
+        frontage_primary_side=primary_side,
+        frontage_secondary_side=secondary_side,
+        build_slots=build_slots,
+        node_layout_mode=getattr(field, "node_layout_mode", None),
     )
 
 
@@ -2091,61 +2148,63 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
     height = maxy - miny
-    reserve_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.34) or 0.34)
-    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 13.0)
-    corridor_w = float(getattr(field, "corridor_width_m", None) or 10.0)
-    scale = max(0.42, min(0.76, reserve_ratio ** 0.5))
+    reserve_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.32) or 0.32)
+    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 13.5)
+    corridor_w = float(getattr(field, "corridor_width_m", None) or 8.0)
+    primary_side, secondary_side = _preferred_frontage_sides(field, getattr(field, "courtyard_open_side", None) or "south", None)
+    open_edges: List[str] = []
+    if getattr(field, "courtyard_open_side", None):
+        open_edges = [str(getattr(field, "courtyard_open_side"))]
+    elif getattr(field, "design_karre_shape", None) in {"uo", "uo_chamfered"}:
+        open_edges = [primary_side]
+
+    scale = max(0.44, min(0.78, reserve_ratio ** 0.5))
     courtyard = _safe_center_rect(core, width * scale, height * scale)
     if courtyard is None:
-        courtyard = _safe_center_rect(core, width * 0.55, height * 0.55)
+        courtyard = _safe_center_rect(core, width * 0.56, height * 0.56)
     if courtyard is None:
-        return FieldSkeleton(field_id=field.field_id, mode="courtyard_frontage", build_bands=[core], micro_fields=[core])
+        return FieldSkeleton(field_id=field.field_id, mode="courtyard_frontage", build_bands=[core], micro_fields=[core], build_slots=[core], frontage_primary_side=primary_side)
 
     cminx, cminy, cmaxx, cmaxy = courtyard.bounds
-    north = core.intersection(box(minx - 1.0, cmaxy, maxx + 1.0, maxy + 1.0)).buffer(0)
-    south = core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, cminy)).buffer(0)
-    west = core.intersection(box(minx - 1.0, cminy, cminx, cmaxy)).buffer(0)
-    east = core.intersection(box(cmaxx, cminy, maxx + 1.0, cmaxy)).buffer(0)
-    ring_parts = [north, south, west, east]
-    open_edges: List[str] = []
-    karre_shape = getattr(field, "design_karre_shape", None) or "uo"
-    if karre_shape in {"uo", "uo_chamfered"}:
-        open_edges = ["south"] if getattr(field, "character", "") == "street_facing" else []
-    elif getattr(field, "character", "") == "neighborhood_edge":
-        open_edges = ["west"]
+    side_geoms = {
+        "north": core.intersection(box(minx - 1.0, cmaxy, maxx + 1.0, maxy + 1.0)).buffer(0),
+        "south": core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, cminy)).buffer(0),
+        "west": core.intersection(box(minx - 1.0, cminy, cminx, cmaxy)).buffer(0),
+        "east": core.intersection(box(cmaxx, cminy, maxx + 1.0, cmaxy)).buffer(0),
+    }
 
     bands: List[Polygon] = []
-    for role, geom in zip(["north", "south", "west", "east"], ring_parts):
-        if role in open_edges:
+    frontage_zones: List[Polygon] = []
+    frontages: List[SkeletonFrontage] = []
+    for side, geom in side_geoms.items():
+        if side in open_edges:
             continue
-        bands.extend([p for p in _flatten_polygons(geom) if p.area > 80.0])
+        parts = [p for p in _flatten_polygons(geom) if p.area > 80.0]
+        bands.extend(parts)
+        line = _line_from_bounds(core, side)
+        if line is not None:
+            frontages.append(SkeletonFrontage(role=f"{side}_frontage", line=line))
+        zone = _strip_from_side(core, side, frontage_depth)
+        if zone is not None and not zone.is_empty:
+            frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
 
     corridors: List[Polygon] = []
-    if int(getattr(field, "view_corridor_count", 0) or 0) > 0:
+    if int(getattr(field, "view_corridor_count", 0) or 0) > 0 and primary_side in {"south", "north"}:
         cx = (cminx + cmaxx) / 2.0
         cor = core.intersection(box(cx - corridor_w / 2.0, miny - 1.0, cx + corridor_w / 2.0, maxy + 1.0)).buffer(0)
         corridors.extend([p for p in _flatten_polygons(cor) if p.area > 40.0])
         if corridors:
             bands = [p for band in bands for p in _flatten_polygons(band.difference(unary_union(corridors)).buffer(0)) if p.area > 70.0]
 
-    frontages: List[SkeletonFrontage] = []
-    frontage_zones: List[Polygon] = []
-    for role, side in [("street_edge", "south"), ("park_edge", "north"), ("urban_side", "west"), ("urban_side", "east")]:
-        if side in open_edges and role != "street_edge":
-            continue
-        line = _line_from_bounds(core, side)
-        if line is not None:
-            frontages.append(SkeletonFrontage(role=role, line=line))
-            zone = _strip_from_side(core, side, frontage_depth)
-            if zone is not None and not zone.is_empty:
-                frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
-
     micro_fields: List[Polygon] = []
     for band in bands:
-        minbx, minby, maxbx, maxby = band.bounds
-        axis = "x" if (maxbx - minbx) >= (maxby - minby) else "y"
-        split_count = 2 if axis == "x" and (maxbx - minbx) > 52 else 1
-        micro_fields.extend(_split_poly_evenly(band, split_count, axis=axis) or [band])
+        bminx, bminy, bmaxx, bmaxy = band.bounds
+        horizontal = (bmaxx - bminx) >= (bmaxy - bminy)
+        split_count = 2 if horizontal and (bmaxx - bminx) >= 78 else 1
+        if getattr(field, "composition_strictness", 0.0) >= 0.95 and horizontal and (bmaxx - bminx) >= 110:
+            split_count = 3
+        micro_fields.extend(_split_band_symmetric(band, split_count, axis=("x" if horizontal else "y")) or [band])
+    build_slots = [m for m in micro_fields if m.area > 60.0]
     public_realm = [courtyard] + corridors
     reserved_open_space = [courtyard] + corridors
     macro_axis = _axis_line(courtyard, axis="y") or _axis_line(core, axis="y")
@@ -2165,9 +2224,13 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         macro_axis=macro_axis,
         symmetry_axis=symmetry_axis,
         frontage_zones=frontage_zones,
-        micro_fields=[m for m in micro_fields if m.area > 60.0],
+        micro_fields=build_slots,
         public_realm=public_realm,
         reserved_open_space=reserved_open_space,
+        frontage_primary_side=primary_side,
+        frontage_secondary_side=secondary_side,
+        build_slots=build_slots,
+        node_layout_mode=getattr(field, "node_layout_mode", None),
     )
 
 
@@ -2175,13 +2238,14 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
     height = maxy - miny
-    reserve_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.38) or 0.38)
-    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 11.0)
-    corridor_w = float(getattr(field, "corridor_width_m", None) or 14.0)
-    scale = max(0.50, min(0.80, reserve_ratio ** 0.5))
+    reserve_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.40) or 0.40)
+    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 11.5)
+    corridor_w = float(getattr(field, "corridor_width_m", None) or 11.0)
+    primary_side, secondary_side = _preferred_frontage_sides(field, "west", "east")
+    scale = max(0.52, min(0.80, reserve_ratio ** 0.5))
     park = _safe_center_rect(core, width * scale, height * scale)
     if park is None:
-        park = _safe_center_rect(core, width * 0.55, height * 0.55)
+        park = _safe_center_rect(core, width * 0.56, height * 0.56)
     if park is None:
         park = _largest_polygon(core.buffer(-4.0)) or core
     pminx, pminy, pmaxx, pmaxy = park.bounds
@@ -2195,32 +2259,47 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         corridors.extend([p for p in _flatten_polygons(cor_x) if p.area > 40.0])
         corridors.extend([p for p in _flatten_polygons(cor_y) if p.area > 40.0])
 
-    north = core.intersection(box(minx - 1.0, pmaxy, maxx + 1.0, maxy + 1.0)).buffer(0)
-    south = core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, pminy)).buffer(0)
-    west = core.intersection(box(minx - 1.0, pminy, pminx, pmaxy)).buffer(0)
-    east = core.intersection(box(pmaxx, pminy, maxx + 1.0, pmaxy)).buffer(0)
-    bands = [p for g in [north, south, west, east] for p in _flatten_polygons(g) if p.area > 80.0]
+    side_geoms = {
+        "north": core.intersection(box(minx - 1.0, pmaxy, maxx + 1.0, maxy + 1.0)).buffer(0),
+        "south": core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, pminy)).buffer(0),
+        "west": core.intersection(box(minx - 1.0, pminy, pminx, pmaxy)).buffer(0),
+        "east": core.intersection(box(pmaxx, pminy, maxx + 1.0, pmaxy)).buffer(0),
+    }
+    bands = [p for side, g in side_geoms.items() for p in _flatten_polygons(g) if p.area > 80.0]
     if corridors:
         bands = [p for band in bands for p in _flatten_polygons(band.difference(unary_union(corridors)).buffer(0)) if p.area > 70.0]
 
     frontages: List[SkeletonFrontage] = []
     frontage_zones: List[Polygon] = []
-    for role, side in [("park_front", "north"), ("street_front", "south"), ("park_front", "west"), ("park_front", "east")]:
+    for side in [primary_side, secondary_side, "north", "south"]:
+        if not side:
+            continue
         line = _line_from_bounds(core, side)
         if line is not None:
-            frontages.append(SkeletonFrontage(role=role, line=line))
-            zone = _strip_from_side(core, side, frontage_depth)
-            if zone is not None and not zone.is_empty:
-                frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
+            frontages.append(SkeletonFrontage(role=f"{side}_frontage", line=line))
+        zone = _strip_from_side(core, side, frontage_depth)
+        if zone is not None and not zone.is_empty:
+            frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
 
+    node_layout = getattr(field, "node_layout_mode", None) or ("paired_edges" if getattr(field, "node_symmetry", False) else "corners")
     nodes: List[Point] = []
-    for x in (pminx, pmaxx):
-        for y in (pminy, pmaxy):
-            nodes.append(Point(x, y))
-    if getattr(field, "node_symmetry", False):
-        nodes = sorted(nodes, key=lambda pt: (round(pt.y, 3), round(pt.x, 3)))
+    if node_layout == "paired_edges":
+        nodes = [
+            Point((pminx + pmaxx) / 2.0, pmaxy),
+            Point((pminx + pmaxx) / 2.0, pminy),
+            Point(pminx, (pminy + pmaxy) / 2.0),
+            Point(pmaxx, (pminy + pmaxy) / 2.0),
+        ]
+    else:
+        nodes = [Point(pminx, pminy), Point(pminx, pmaxy), Point(pmaxx, pminy), Point(pmaxx, pmaxy)]
 
-    micro_fields = _build_micro_fields_from_bands(bands, max(2, int(getattr(field, "micro_band_count", 0) or 2)), getattr(field, "micro_field_pattern", None), getattr(field, "symmetry_preference", None))
+    micro_fields = _build_micro_fields_from_bands(
+        bands,
+        max(2, int(getattr(field, "target_building_count", 0) or getattr(field, "micro_band_count", 0) or 2)),
+        getattr(field, "micro_field_pattern", None),
+        getattr(field, "symmetry_preference", None),
+    )
+    build_slots = [m for m in micro_fields if m.area > 60.0]
     public_realm = [park] + corridors
     reserved_open_space = [park] + corridors
     macro_axis = _axis_line(park, axis="x") if (pmaxx - pminx) >= (pmaxy - pminy) else _axis_line(park, axis="y")
@@ -2240,9 +2319,13 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         macro_axis=macro_axis,
         symmetry_axis=symmetry_axis,
         frontage_zones=frontage_zones,
-        micro_fields=[m for m in micro_fields if m.area > 60.0],
+        micro_fields=build_slots,
         public_realm=public_realm,
         reserved_open_space=reserved_open_space,
+        frontage_primary_side=primary_side,
+        frontage_secondary_side=secondary_side,
+        build_slots=build_slots,
+        node_layout_mode=node_layout,
     )
 
 
@@ -2276,55 +2359,148 @@ def _lamell_length_palette(field: Delfelt, spec: BaseTypologySpec, pieces: Seque
     return out or [min_len]
 
 
-def _place_lameller_in_bands(skeleton: FieldSkeleton, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
-    pieces = skeleton.micro_fields or skeleton.build_bands
-    if not pieces:
+def _fit_rect_in_slot(piece: Polygon, depth_m: float, preferred_length: float, min_length: float, max_length: float, anchor_side: str = "center") -> Optional[Polygon]:
+    minx, miny, maxx, maxy = piece.bounds
+    width = maxx - minx
+    height = maxy - miny
+    if width < min_length or height < depth_m * 0.85:
         return None
-    pieces = [p for p in pieces if not p.is_empty and p.area > 60.0]
-    pieces.sort(key=_band_sort_key)
-    strictness = float(getattr(field, "composition_strictness", 0.85) or 0.85)
-    variant = getattr(field, "design_variant", None) or ("terraced" if strictness > 0.88 else "varied")
-    palette = _lamell_length_palette(field, spec, pieces)
-    depth = spec.depth_m.midpoint() if spec.depth_m else 13.0
-    footprints: List[Polygon] = []
-    target_count = min(len(pieces), max(2, int(getattr(field, "micro_band_count", 0) or 2)))
+    piece_buf = piece.buffer(1e-6)
+    lengths = []
+    for L in (preferred_length, preferred_length + 6.0, preferred_length - 6.0, max_length, min_length):
+        LL = snap_value(max(min_length, min(max_length, L)))
+        if LL not in lengths:
+            lengths.append(LL)
+    if anchor_side == "south":
+        y_candidates = [miny, (miny + maxy) / 2.0 - depth_m / 2.0]
+    elif anchor_side == "north":
+        y_candidates = [maxy - depth_m, (miny + maxy) / 2.0 - depth_m / 2.0]
+    elif anchor_side == "west":
+        y_candidates = [(miny + maxy) / 2.0 - depth_m / 2.0]
+    else:
+        y_candidates = [(miny + maxy) / 2.0 - depth_m / 2.0]
+    best = None
+    best_score = float("inf")
+    center_x = (minx + maxx) / 2.0
+    for y0 in y_candidates:
+        for length in lengths:
+            if length > width + 1e-6:
+                continue
+            x_lo = minx + length / 2.0
+            x_hi = maxx - length / 2.0
+            if x_hi < x_lo:
+                continue
+            scan = 7 if (x_hi - x_lo) > 1.0 else 1
+            xs = [x_lo + (x_hi - x_lo) * i / max(scan - 1, 1) for i in range(scan)]
+            for xc in xs:
+                sx0 = snap_value(xc - length / 2.0)
+                rect = box(sx0, y0, snap_value(sx0 + length), y0 + depth_m)
+                if not piece_buf.covers(rect):
+                    continue
+                score = abs(length - preferred_length) * 0.25 + abs(xc - center_x) * 0.02
+                if score < best_score:
+                    best = rect
+                    best_score = score
+    return best
 
-    for idx, piece in enumerate(pieces):
-        bminx, bminy, bmaxx, bmaxy = piece.bounds
-        if (bmaxy - bminy) < depth * 0.9:
-            continue
-        y0 = (bminy + bmaxy) / 2.0 - depth / 2.0
-        preferred = palette[min(idx, len(palette) - 1)]
-        if getattr(field, "symmetry_preference", None) in {"bilateral", "axial"}:
-            mirror_idx = min(idx, len(pieces) - 1 - idx)
-            preferred = palette[min(mirror_idx, len(palette) - 1)]
-        rect = _fit_rect_in_segment(piece, y0, depth, max(spec.length_m.min_m, preferred * 0.92), min(spec.length_m.max_m, preferred * 1.05))
-        if rect is None and variant in {"varied", "terraced"}:
-            rects = _fit_varied_lameller_in_segment(piece, y0, depth, max(spec.length_m.min_m, 30.0), spec.length_m.max_m, min_spacing=6.0)
-            if rects:
-                footprints.extend(rects[:1])
-            continue
+
+def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton) -> List[Polygon]:
+    pieces = [p for p in slots if not p.is_empty and p.area > 60.0]
+    if not pieces:
+        return []
+    if skeleton.symmetry_axis is None:
+        return sorted(pieces, key=_band_sort_key)
+    ax = skeleton.symmetry_axis
+    vertical = abs(ax.coords[0][0] - ax.coords[-1][0]) < abs(ax.coords[0][1] - ax.coords[-1][1])
+    if vertical:
+        cx = ax.coords[0][0]
+        return sorted(pieces, key=lambda p: (round(p.centroid.y, 3), abs(p.centroid.x - cx), round(p.centroid.x, 3)))
+    cy = ax.coords[0][1]
+    return sorted(pieces, key=lambda p: (abs(p.centroid.y - cy), round(p.centroid.x, 3), round(p.centroid.y, 3)))
+
+
+def _lamell_rhythm_sequence(palette: Sequence[float], count: int, mode: Optional[str]) -> List[float]:
+    if not palette:
+        return []
+    palette = list(sorted(palette))
+    if count <= 1:
+        return [palette[-1]]
+    if mode == "uniform":
+        return [palette[min(len(palette) - 1, len(palette) // 2)]] * count
+    # mirrored/paired: lengst i midten, kortere mot kantene
+    result = [palette[0]] * count
+    center = (count - 1) / 2.0
+    max_rank = max(abs(i - center) for i in range(count)) or 1.0
+    for i in range(count):
+        rank = 1.0 - abs(i - center) / max_rank
+        idx = min(len(palette) - 1, max(0, int(round(rank * (len(palette) - 1)))))
+        result[i] = palette[idx]
+    return result
+
+
+def _slot_anchor_side(slot: Polygon, skeleton: FieldSkeleton) -> str:
+    primary = skeleton.frontage_primary_side or "south"
+    secondary = skeleton.frontage_secondary_side
+    if not secondary:
+        return primary
+    all_polys = skeleton.build_slots or skeleton.micro_fields or skeleton.build_bands
+    if not all_polys:
+        return primary
+    minx = min(p.bounds[0] for p in all_polys)
+    miny = min(p.bounds[1] for p in all_polys)
+    maxx = max(p.bounds[2] for p in all_polys)
+    maxy = max(p.bounds[3] for p in all_polys)
+    if {primary, secondary} == {"south", "north"}:
+        cy = (miny + maxy) / 2.0
+        return secondary if slot.centroid.y > cy else primary
+    if {primary, secondary} == {"west", "east"}:
+        cx = (minx + maxx) / 2.0
+        return secondary if slot.centroid.x > cx else primary
+    return primary
+
+
+def _place_lameller_in_bands(skeleton: FieldSkeleton, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    slots = skeleton.build_slots or skeleton.micro_fields or skeleton.build_bands
+    slots = _ordered_slots_for_lamell(slots, skeleton)
+    if not slots:
+        return None
+    strictness = float(getattr(field, "composition_strictness", 0.90) or 0.90)
+    variant = getattr(field, "design_variant", None) or ("terraced" if strictness > 0.90 else "rhythmic")
+    rhythm_mode = getattr(field, "lamell_rhythm_mode", None) or ("mirrored" if strictness >= 0.85 else "uniform")
+    palette = _lamell_length_palette(field, spec, slots)
+    depth = spec.depth_m.midpoint() if spec.depth_m else 13.0
+    target_count = int(getattr(field, "target_building_count", 0) or max(2, min(len(slots), int(getattr(field, "micro_band_count", 0) or 2))))
+    target_count = max(2 if strictness >= 0.80 else 1, min(target_count, len(slots)))
+    selected = [p for p in slots if p.area > 80.0]
+    if len(selected) > target_count:
+        selected = sorted(selected, key=lambda p: (-p.area, round(p.centroid.y, 3), round(p.centroid.x, 3)))[:target_count]
+        selected = _ordered_slots_for_lamell(selected, skeleton)
+    lengths = _lamell_rhythm_sequence(palette, len(selected), rhythm_mode)
+
+    footprints: List[Polygon] = []
+    for slot, preferred in zip(selected, lengths):
+        anchor_side = _slot_anchor_side(slot, skeleton)
+        rect = _fit_rect_in_slot(slot, depth, preferred, max(spec.length_m.min_m, 30.0), spec.length_m.max_m, anchor_side=anchor_side)
         if rect is not None:
             footprints.append(rect)
 
-    if len(footprints) < target_count:
-        fallback_rects: List[Polygon] = []
+    if len(footprints) < target_count and strictness < 0.95:
+        # fallback: prøv en sentrert plassering i de største bandene
         for band in skeleton.build_bands:
+            if len(footprints) >= target_count:
+                break
             bminx, bminy, bmaxx, bmaxy = band.bounds
             if (bmaxy - bminy) < depth * 0.9:
                 continue
-            y0 = (bminy + bmaxy) / 2.0 - depth / 2.0
-            rect = _fit_rect_in_segment(band, y0, depth, spec.length_m.min_m, spec.length_m.max_m)
+            rect = _fit_rect_in_segment(band, (bminy + bmaxy) / 2.0 - depth / 2.0, depth, max(spec.length_m.min_m, 30.0), spec.length_m.max_m)
             if rect is not None:
-                fallback_rects.append(rect)
-        if len(fallback_rects) > len(footprints):
-            footprints = fallback_rects
+                footprints.append(rect)
 
     if len(footprints) < (2 if strictness >= 0.75 else 1):
         return None
 
     floors_per = None
-    if variant == "terraced" and len(footprints) >= 2:
+    if variant in {"terraced", "rhythmic"} and len(footprints) >= 2:
         total_fp = sum(p.area for p in footprints)
         base_f = int(round(field.target_bra / max(total_fp, 1.0))) if field.target_bra > 0 else field.floors_min
         base_f = max(field.floors_min, min(field.floors_max, base_f))
@@ -2406,7 +2582,8 @@ def _place_punkthus_on_nodes(skeleton: FieldSkeleton, field: Delfelt, spec: Base
     if not skeleton.accent_nodes:
         return None
     sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
-    strictness = float(getattr(field, "composition_strictness", 0.78) or 0.78)
+    strictness = float(getattr(field, "composition_strictness", 0.80) or 0.80)
+    layout_mode = getattr(field, "node_layout_mode", None) or skeleton.node_layout_mode or ("paired_edges" if getattr(field, "node_symmetry", False) else "corners")
     candidates: List[_PlacementCandidate] = []
 
     def _ordered_nodes() -> List[Point]:
@@ -2415,15 +2592,17 @@ def _place_punkthus_on_nodes(skeleton: FieldSkeleton, field: Delfelt, spec: Base
             return nodes
         ax = skeleton.symmetry_axis
         if abs(ax.coords[0][0] - ax.coords[-1][0]) < abs(ax.coords[0][1] - ax.coords[-1][1]):
-            # vertical symmetry axis: order by y then |x-axis|
             cx = ax.coords[0][0]
-            nodes.sort(key=lambda pt: (round(pt.y, 3), abs(pt.x - cx)))
+            nodes.sort(key=lambda pt: (abs(pt.x - cx), round(pt.y, 3), round(pt.x, 3)))
         else:
             cy = ax.coords[0][1]
-            nodes.sort(key=lambda pt: (round(pt.x, 3), abs(pt.y - cy)))
+            nodes.sort(key=lambda pt: (abs(pt.y - cy), round(pt.x, 3), round(pt.y, 3)))
         return nodes
 
     ordered_nodes = _ordered_nodes()
+    if layout_mode == "paired_edges" and len(ordered_nodes) > 4:
+        ordered_nodes = ordered_nodes[:4]
+
     for size in sizes:
         fps: List[Polygon] = []
         for node in ordered_nodes:
@@ -2437,11 +2616,9 @@ def _place_punkthus_on_nodes(skeleton: FieldSkeleton, field: Delfelt, spec: Base
             fps.append(rect)
         filtered: List[Polygon] = []
         for rect in fps:
-            if all(rect.distance(other) >= max(15.0, float(size)) * 0.85 for other in filtered):
+            if all(rect.distance(other) >= max(15.0, float(size)) * 0.95 for other in filtered):
                 filtered.append(rect)
-        if getattr(field, "node_symmetry", False) and len(filtered) > 2:
-            # keep most symmetric subset of four or fewer towers
-            filtered.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
+        if getattr(field, "node_symmetry", False) and len(filtered) > 4:
             filtered = filtered[:4]
         if filtered:
             total_fp = sum(p.area for p in filtered)
@@ -2450,7 +2627,7 @@ def _place_punkthus_on_nodes(skeleton: FieldSkeleton, field: Delfelt, spec: Base
             floors_per = _varied_floors_for_cluster(len(filtered), base_f, field.floors_min, field.floors_max, variation=getattr(field, "design_height_pattern", None) or "accent")
             cand = _evaluate_candidate(filtered, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per)
             if cand is not None:
-                cand._variant = "symmetric_nodes" if getattr(field, "node_symmetry", False) else "node_cluster"
+                cand._variant = layout_mode
                 candidates.append(cand)
     return _choose_best(candidates, field.target_bra)
 
@@ -2468,7 +2645,7 @@ def _skeleton_summary(skeleton: FieldSkeleton) -> FieldSkeletonSummary:
         micro_band_count=len([b for b in skeleton.build_bands if not b.is_empty]),
         courtyard_reserve_m2=float(getattr(skeleton.courtyard_reserve, "area", 0.0) or 0.0),
         view_corridor_m2=float(sum(getattr(c, "area", 0.0) for c in skeleton.view_corridors)),
-        accent_node_count=len(skeleton.accent_nodes),
+        accent_node_count=len([n for n in skeleton.accent_nodes if n is not None]),
         build_band_area_m2=float(sum(getattr(b, "area", 0.0) for b in skeleton.build_bands)),
         frontage_depth_m=float(skeleton.frontage_depth_m),
         corridor_width_m=float(skeleton.corridor_width_m),
@@ -2478,6 +2655,7 @@ def _skeleton_summary(skeleton: FieldSkeleton) -> FieldSkeletonSummary:
         micro_field_count=len([m for m in skeleton.micro_fields if not m.is_empty]),
         public_realm_m2=public_realm_area,
         reserved_open_space_m2=reserved_open_space_area,
+        build_slot_count=len([s for s in skeleton.build_slots if not s.is_empty]),
     )
 
 
@@ -2551,11 +2729,11 @@ def _isolated_building_penalty_local(buildings_local: Sequence[Polygon], span_re
 
 
 def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
-    notes: List[str] = []
     if not plan.delfelt:
-        return ArchitectureMetrics(notes=["Ingen delfelt å evaluere."])
-    field_scores = []
-    total_area = sum(max(f.polygon.area, 1.0) for f in plan.delfelt) or 1.0
+        return ArchitectureMetrics(total_score=0.0, notes=["Ingen delfelt i plan."])
+    field_scores: List[Tuple[float, float, float, float, float, float, float, float, float, float, float, float, float, float, float]] = []
+    notes: List[str] = []
+    total_area = sum(max(field.polygon.area, 1.0) for field in plan.delfelt)
     typology_matches = 0
     typology_total = 0
     for field in plan.delfelt:
@@ -2568,8 +2746,10 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
 
         frontage_covs = [_sample_line_coverage(f.line, union_local) for f in skeleton.frontage_lines if f.line is not None]
         frontage = sum(frontage_covs) / max(len(frontage_covs), 1) if frontage_covs else 0.45
+        frontage_regularity = 1.0 - min(1.0, float(np.std(frontage_covs)) / 0.25) if len(frontage_covs) > 1 else frontage
 
         courtyard = 0.55
+        courtyard_enclosure = 0.55
         if skeleton.courtyard_reserve is not None and skeleton.courtyard_reserve.area > 10.0:
             built_overlap = float((union_local.intersection(skeleton.courtyard_reserve).area if union_local else 0.0))
             free_ratio = max(0.0, 1.0 - built_overlap / max(skeleton.courtyard_reserve.area, 1.0))
@@ -2579,6 +2759,14 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
                     occupied_frontage += 1
             band_factor = min(1.0, occupied_frontage / max(1, len(skeleton.frontage_zones) or len(skeleton.build_bands)))
             courtyard = 0.55 * free_ratio + 0.45 * band_factor
+            required_edges = max(1, 4 - len(skeleton.open_edges or []))
+            enclosing_edges = 0
+            for band in skeleton.build_bands:
+                if band.area <= 0:
+                    continue
+                if band.buffer(1.0).intersects(skeleton.courtyard_reserve):
+                    enclosing_edges += 1
+            courtyard_enclosure = min(1.0, enclosing_edges / required_edges)
 
         view_q = 0.7
         if skeleton.view_corridors:
@@ -2615,23 +2803,34 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
         target_bya = float(field.target_bya_pct or 20.0)
         bya_fit = max(0.0, 1.0 - abs(bya_actual - target_bya) / max(target_bya, 1.0))
 
+        slot_count = len([s for s in skeleton.build_slots if not s.is_empty])
+        used_slots = 0
+        if slot_count > 0 and union_local is not None:
+            for slot in skeleton.build_slots:
+                if union_local.intersection(slot).area > 20.0:
+                    used_slots += 1
+        micro_util = used_slots / max(slot_count, 1) if slot_count else 0.6
+
         gap_penalty = max(0.0, 1.0 - frontage)
         span_ref = max(local_field.bounds[2] - local_field.bounds[0], local_field.bounds[3] - local_field.bounds[1], 1.0)
         isolated_pen = _isolated_building_penalty_local(local_buildings, span_ref)
 
         field_total = (
-            0.20 * frontage +
-            0.18 * courtyard +
-            0.14 * symmetry +
+            0.17 * frontage +
+            0.10 * frontage_regularity +
+            0.15 * courtyard +
+            0.08 * courtyard_enclosure +
+            0.12 * symmetry +
             0.12 * rhythm +
-            0.10 * view_q +
-            0.10 * public_realm +
-            0.08 * purity +
+            0.09 * view_q +
+            0.08 * public_realm +
+            0.05 * purity +
             0.04 * entropy +
-            0.04 * bya_fit
-        ) - (0.06 * gap_penalty + 0.06 * isolated_pen)
+            0.05 * bya_fit +
+            0.05 * micro_util
+        ) - (0.05 * gap_penalty + 0.05 * isolated_pen)
 
-        field_scores.append((field_total, field.polygon.area, frontage, courtyard, symmetry, view_q, entropy, bya_fit, public_realm, rhythm, gap_penalty, isolated_pen))
+        field_scores.append((field_total, field.polygon.area, frontage, courtyard, symmetry, view_q, entropy, bya_fit, public_realm, rhythm, gap_penalty, isolated_pen, frontage_regularity, courtyard_enclosure, micro_util))
 
     weighted = lambda idx: sum(item[idx] * item[1] for item in field_scores) / total_area if field_scores else 0.0
     frontage = weighted(2)
@@ -2644,30 +2843,42 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
     rhythm = weighted(9)
     gap_penalty = weighted(10)
     isolated_pen = weighted(11)
+    frontage_regularity = weighted(12)
+    courtyard_enclosure = weighted(13)
+    micro_util = weighted(14)
     typ_purity = typology_matches / max(typology_total, 1)
     total = max(0.0, min(100.0, 100.0 * (
-        0.20 * frontage +
-        0.18 * courtyard +
-        0.14 * symmetry +
+        0.17 * frontage +
+        0.10 * frontage_regularity +
+        0.15 * courtyard +
+        0.08 * courtyard_enclosure +
+        0.12 * symmetry +
         0.12 * rhythm +
-        0.10 * view_q +
-        0.10 * public_realm +
-        0.08 * typ_purity +
+        0.09 * view_q +
+        0.08 * public_realm +
+        0.05 * typ_purity +
         0.04 * entropy +
-        0.04 * bya_fit -
-        0.06 * gap_penalty -
-        0.06 * isolated_pen
+        0.05 * bya_fit +
+        0.05 * micro_util -
+        0.05 * gap_penalty -
+        0.05 * isolated_pen
     )))
-    if frontage < 0.58:
-        notes.append("Frontage-kontinuiteten er svak; byggene definerer ikke gatelinjer tydelig nok.")
+    if frontage < 0.60:
+        notes.append("Frontage-kontinuiteten er fortsatt for svak; byggene definerer ikke gatelinjer tydelig nok.")
+    if frontage_regularity < 0.58:
+        notes.append("Frontage-linjene mangler rytme og regelmessighet.")
     if courtyard < 0.58:
         notes.append("Gårdsrommene er for uklare eller delvis spist opp av byggvolumer.")
+    if courtyard_enclosure < 0.55:
+        notes.append("Kvartalene omslutter ikke gårdsrommene tydelig nok.")
     if public_realm < 0.58:
         notes.append("Det offentlige/felles byrommet er for fragmentert eller delvis blokkert.")
     if view_q < 0.56:
         notes.append("Siktkorridorene er for svake eller delvis blokkert av bygg.")
-    if symmetry < 0.50 or rhythm < 0.52:
-        notes.append("Plasseringen mangler rytme og symmetri i feltaksene.")
+    if symmetry < 0.52 or rhythm < 0.55:
+        notes.append("Plasseringen mangler nok rytme og symmetri i feltaksene.")
+    if micro_util < 0.50:
+        notes.append("For få mikrofelt tas i bruk; delfeltene er fortsatt underkomponert.")
     if isolated_pen > 0.20:
         notes.append("Enkelte bygg ligger for isolert og leses ikke som del av en klar helhet.")
     return ArchitectureMetrics(
@@ -2682,6 +2893,9 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
         rhythm_score=100.0 * rhythm,
         frontage_gap_penalty=100.0 * gap_penalty,
         isolated_building_penalty=100.0 * isolated_pen,
+        frontage_regularity=100.0 * frontage_regularity,
+        courtyard_enclosure=100.0 * courtyard_enclosure,
+        microfield_utilization=100.0 * micro_util,
         total_score=total,
         notes=notes,
     )
