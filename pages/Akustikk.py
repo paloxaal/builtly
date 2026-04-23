@@ -651,9 +651,12 @@ def fetch_stoykart_image_utm(easting, northing, width=800, height=600, buffer_m=
         gdo = GeodataOnlineClient()
         if not gdo.is_available(): return None, "Geodata Online ikke tilgjengelig"
         token = gdo.get_token()
-        dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+        dok_url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapForurensning/MapServer"
         basemap_url = "https://services.geodataonline.no/arcgis/rest/services/Geocache_UTM33_EUREF89/GeocacheGraatone/MapServer"
-        STOEY_LAYERS = "show:201,202,211,212,203,204,205,206,213,214,207,208"
+        # Ny struktur: 0=Støy (gruppe), 1=Skyteanlegg, 2=Veg, 3=Jernbane, 4=Lufthavn,
+        # 5=Forsvarets flyplasser, 6=Forsvarets skyte/øvingsfelt,
+        # 20=Støykart EU-rapportering, 21=Veg dagtid, 22=Veg natt, 23=Fly dagtid, 24=Fly natt
+        STOEY_LAYERS = "show:0,1,2,3,4,5,6,20,21,22,23,24"
         base_params = {"bbox": f"{xmin},{ymin},{xmax},{ymax}", "bboxSR": "25833", "imageSR": "25833",
                        "size": f"{width},{height}", "f": "image", "token": token}
         basemap_img = None
@@ -681,19 +684,22 @@ def fetch_stoykart_image_utm(easting, northing, width=800, height=600, buffer_m=
 
 
 def fetch_stoykart_contours_utm(easting, northing, buffer_m=500):
-    """Hent støykontur-features fra DOK Forurensning."""
+    """Hent støykontur-features fra Geodata Forurensning (ny tjeneste)."""
     try:
         from geodata_client import GeodataOnlineClient
         gdo = GeodataOnlineClient()
         if not gdo.is_available(): return []
         token = gdo.get_token()
     except Exception: return []
-    url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapDOKForurensning/MapServer"
+    url = "https://services.geodataonline.no/arcgis/rest/services/Geomap_UTM33_EUREF89/GeomapForurensning/MapServer"
     params = {"geometry": f"{easting-buffer_m},{northing-buffer_m},{easting+buffer_m},{northing+buffer_m}",
               "geometryType": "esriGeometryEnvelope", "inSR": "25833", "outSR": "25833",
               "spatialRel": "esriSpatialRelIntersects", "outFields": "*", "returnGeometry": "false", "f": "json", "token": token}
     contours = []
-    for lid in [211, 212, 203, 204, 205, 206, 213, 214, 207, 208]:
+    # Nye lag-IDer: 1=Skyteanlegg, 2=Veg, 3=Jernbane, 4=Lufthavn,
+    # 5=Forsvarets flyplasser, 6=Forsvarets skyte/øvingsfelt,
+    # 21=Veg dagtid, 22=Veg natt, 23=Fly dagtid, 24=Fly natt
+    for lid in [1, 2, 3, 4, 5, 6, 21, 22, 23, 24]:
         try:
             r = requests.get(f"{url}/{lid}/query", params=params, timeout=8)
             if r.status_code == 200:
@@ -701,7 +707,13 @@ def fetch_stoykart_contours_utm(easting, northing, buffer_m=500):
                     a = feat.get("attributes", {})
                     for k in ["stoysonekategori", "DB_LOW", "Lden", "dB", "stoyniva"]:
                         if k in a and a[k] is not None:
-                            contours.append({"layer": lid, "db": str(a[k]), "kilde": a.get("stoykilde", "")}); break
+                            contours.append({
+                                "layer": lid, 
+                                "db": str(a[k]), 
+                                "kilde": a.get("stoykilde", a.get("stoykildenavn", "")),
+                                "kommune": a.get("kommune", a.get("kommunenavn", "")),
+                            })
+                            break
         except Exception: continue
     return contours
 
@@ -1130,7 +1142,7 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
     stoy_buffer = st.number_input("Buffer (m)", value=500, min_value=100, max_value=2000, key="stoy_buffer")
     
     if st.button("📡 Hent støykart fra Geodata", key="fetch_stoykart", use_container_width=True, disabled=not utm.get("ok")):
-        with st.spinner("Henter støykart fra DOK Forurensning..."):
+        with st.spinner("Henter støykart fra Geodata Forurensning..."):
             stoy_img, stoy_err = fetch_stoykart_image_utm(utm["easting"], utm["northing"], buffer_m=stoy_buffer)
             if stoy_img:
                 st.session_state["stoykart_image"] = stoy_img.convert("RGB")
@@ -1142,7 +1154,7 @@ with st.expander("3. Visuelt Grunnlag & Støykart", expanded=True):
                 st.session_state["stoykart_contours"] = contours
     
     if "stoykart_image" in st.session_state:
-        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online (DOK Forurensning T-1442)", use_container_width=True)
+        st.image(st.session_state["stoykart_image"], caption="Støykart fra Geodata Online (Forurensning — støy fra veg, bane, luftfart m.m.)", use_container_width=True)
     
     st.markdown("##### Tegninger fra prosjektet")
     saved_images = []
