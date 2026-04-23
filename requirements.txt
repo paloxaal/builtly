@@ -40,3 +40,4 @@ numpy
 scipy>=1.12
 networkx>=3.2
 trimesh>=4.4
+ortools>=9.10
