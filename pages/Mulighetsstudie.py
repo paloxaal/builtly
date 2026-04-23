@@ -9673,8 +9673,24 @@ KRAV:
             solar_3d_snapshots=st.session_state.get("solar_3d_snapshots") or None,
             masterplan=st.session_state.get("_current_masterplan"),
         )
+        # Fjern ev. feilmelding fra forrige run
+        st.session_state.pop("pdf_generation_error", None)
     except Exception as pdf_exc:
-        st.warning(f"PDF-generering feilet: {pdf_exc}")
+        import traceback as _pdf_tb
+        _pdf_err_detail = f"{type(pdf_exc).__name__}: {pdf_exc}"
+        st.warning(f"PDF-generering feilet: {_pdf_err_detail}")
+        # Lagre feilen slik at vi kan vise den i Nedlasting-seksjonen også
+        st.session_state["pdf_generation_error"] = _pdf_err_detail
+        # Logg full traceback til server-logg for feilsøking
+        try:
+            import logging as _pdf_logging
+            _pdf_logging.getLogger("builtly").error(
+                "PDF-generering feilet: %s\n%s",
+                _pdf_err_detail,
+                _pdf_tb.format_exc(),
+            )
+        except Exception:
+            pass
         pdf_bytes = b""
 
     if "pending_reviews" not in st.session_state:
@@ -9713,17 +9729,41 @@ KRAV:
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
 
-    # Save report to user dashboard
-    try:
-        from builtly_auth import save_report
-        save_report(
-            project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
-            report_name=f"Mulighetsstudie — {p_name}",
-            module="Mulighetsstudie",
-            file_path=st.session_state.generated_ark_filename,
-        )
-    except ImportError:
-        pass  # Frontpage not available (standalone run)
+    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
+    # Primær API: pass pdf_bytes slik at filen lastes opp til Supabase Storage.
+    # Uten pdf_bytes lagres bare metadata (navn) — da blir ikke selve PDF-en
+    # søkbar/nedlastbar fra dashboardet.
+    if pdf_bytes:
+        try:
+            from builtly_auth import save_report
+            _sr_result = save_report(
+                project_name=st.session_state.get("project_data", {}).get("p_name", p_name),
+                report_name=f"Mulighetsstudie — {p_name}",
+                module="Mulighetsstudie",
+                pdf_bytes=pdf_bytes,
+                content_type="application/pdf",
+            )
+            # Logg resultat: save_report returnerer True hvis metadata ble lagret
+            # _report_save_debug settes i session med detaljer om storage-upload + DB-insert
+            try:
+                import logging as _sr_logging
+                _debug_msg = st.session_state.get("_report_save_debug", "")
+                _sr_logging.getLogger("builtly").info(
+                    "save_report returned %s — %s", _sr_result, _debug_msg
+                )
+            except Exception:
+                pass
+        except ImportError:
+            pass  # Frontpage not available (standalone run)
+        except Exception as _sr_err:
+            # Supabase/auth-feil skal ikke stoppe hele flyten
+            try:
+                import logging as _sr_logging
+                _sr_logging.getLogger("builtly").warning(
+                    "save_report feilet: %s", _sr_err
+                )
+            except Exception:
+                pass
 
     st.rerun()
 
@@ -10335,17 +10375,24 @@ if "analysis_results" in st.session_state:
     <option value="5">5 etasjer</option><option value="6">6 etasjer</option><option value="7">7 etasjer</option><option value="8">8 etasjer</option>
   </select>
 </div>
-<div id="dimensionEditor" style="position:absolute;top:12px;left:12px;display:none;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:10px 12px;font-family:Inter,sans-serif;">
+<div id="dimensionEditor" style="position:absolute;top:12px;left:12px;display:none;background:rgba(6,17,26,0.92);border:1px solid rgba(56,189,248,0.3);border-radius:10px;padding:10px 12px;font-family:Inter,sans-serif;min-width:260px;">
   <div style="color:#38bdf8;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;font-weight:600;">Valgt bygg — dimensjoner</div>
-  <div style="display:flex;gap:8px;align-items:center;">
-    <label style="color:#9fb0c3;font-size:12px;">Bredde:</label>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+    <label style="color:#9fb0c3;font-size:12px;min-width:42px;">Bredde:</label>
     <input id="inputW" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
     <span style="color:#9fb0c3;font-size:12px;">m</span>
-    <label style="color:#9fb0c3;font-size:12px;margin-left:8px;">Dybde:</label>
+    <label style="color:#9fb0c3;font-size:12px;margin-left:8px;min-width:42px;">Dybde:</label>
     <input id="inputD" type="number" min="8" max="200" step="1" onchange="updateDimensions()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
     <span style="color:#9fb0c3;font-size:12px;">m</span>
   </div>
-  <div style="color:#7a8b9c;font-size:10px;margin-top:6px;">Skriv inn eksakt bredde og dybde. Endringer lagres automatisk.</div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label style="color:#9fb0c3;font-size:12px;min-width:42px;">Etasjer:</label>
+    <input id="inputFloors" type="number" min="1" max="20" step="1" onchange="updateFloorsInput()" style="width:64px;background:#0d1824;border:1px solid rgba(120,145,170,0.4);color:#fff;padding:4px 6px;border-radius:4px;font-size:12px;">
+    <span style="color:#9fb0c3;font-size:12px;">etg</span>
+    <span style="color:#7a8b9c;font-size:11px;margin-left:8px;">Høyde:</span>
+    <span id="computedHeight" style="color:#38bdf8;font-size:12px;font-weight:600;">0.0 m</span>
+  </div>
+  <div style="color:#7a8b9c;font-size:10px;margin-top:6px;">Skriv inn eksakte mål og antall etasjer. Endringer lagres automatisk.</div>
 </div>
 <div id="exportOverlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(6,17,26,0.96);border:1px solid rgba(56,189,248,0.4);border-radius:12px;padding:20px;z-index:10;max-width:90%;text-align:center;">
   <div style="color:#38bdf8;font-weight:700;font-size:14px;margin-bottom:8px;">Skisse kopiert til utklippstavle!</div>
@@ -10421,10 +10468,13 @@ function drawBuilding(b, idx) {
   drawPoly(corners, c + alpha, sel ? '#fff' : c, sel ? 2.5 : 1.5);
   // Label
   const sc = toScreen(b.cx, b.cy);
+  const totalHeightM = (b.floors || 1) * (P.floor_height || 3.0);
   ctx.fillStyle = '#fff'; ctx.font = 'bold 12px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(b.name || ('B'+(idx+1)), sc[0], sc[1] - 8);
+  ctx.fillText(b.name || ('B'+(idx+1)), sc[0], sc[1] - 12);
   ctx.font = '10px Inter'; ctx.fillStyle = '#c8d3df';
-  ctx.fillText(b.floors + ' etg | ' + Math.round(b.w * b.d) + ' m²', sc[0], sc[1] + 8);
+  ctx.fillText(b.floors + ' etg · ' + totalHeightM.toFixed(1) + ' m', sc[0], sc[1] + 2);
+  ctx.font = '9px Inter'; ctx.fillStyle = '#9fb0c3';
+  ctx.fillText(Math.round(b.w * b.d) + ' m²', sc[0], sc[1] + 14);
 
   // Veggmål — bredde og dybde langs kanter
   const s0 = toScreen(corners[0][0], corners[0][1]);
@@ -10530,16 +10580,20 @@ function render() {
     const nc = flatCoords(n.coords || []);
     if (!nc.length) return;
     drawPoly(nc, 'rgba(100,100,120,0.25)', 'rgba(150,150,170,0.4)', 1);
-    // Høyde-label — diskret, alltid synlig
+    // Høyde-label — tydelig synlig med bakgrunnsbrikke
     const h = n.height_m || 0;
     if (h > 0 && nc.length >= 3) {
       let sx = 0, sy = 0;
       nc.forEach(p => { const s = toScreen(p[0], p[1]); sx += s[0]; sy += s[1]; });
       sx /= nc.length; sy /= nc.length;
-      ctx.font = '9px Inter, sans-serif';
+      ctx.font = 'bold 10px Inter, sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const txt = h.toFixed(0) + 'm';
-      ctx.fillStyle = 'rgba(150,155,170,0.7)';
+      const txt = h.toFixed(1) + ' m';
+      const tw = ctx.measureText(txt).width;
+      // Bakgrunnsbrikke for god lesbarhet
+      ctx.fillStyle = 'rgba(20,25,35,0.82)';
+      ctx.fillRect(sx - tw/2 - 4, sy - 7, tw + 8, 13);
+      ctx.fillStyle = 'rgba(200,210,225,0.95)';
       ctx.fillText(txt, sx, sy);
     }
   });
@@ -10604,13 +10658,36 @@ window.updateDimensions = function() {
   render();
 };
 
+window.updateFloorsInput = function() {
+  if (selectedIdx < 0) return;
+  const fInput = document.getElementById('inputFloors');
+  const newF = parseInt(fInput.value);
+  if (isFinite(newF) && newF >= 1 && newF <= 20) {
+    buildings[selectedIdx].floors = newF;
+    // Synk med dropdown
+    const sel = document.getElementById('floorSelect');
+    if (sel && newF >= 2 && newF <= 8) {
+      sel.value = String(newF);
+    }
+    updateDimensionEditor();  // oppdater høyde-label
+    render();
+  }
+};
+
 function updateDimensionEditor() {
   const panel = document.getElementById('dimensionEditor');
   if (!panel) return;
   if (selectedIdx >= 0 && selectedIdx < buildings.length) {
+    const b = buildings[selectedIdx];
     panel.style.display = 'block';
-    document.getElementById('inputW').value = Math.round(buildings[selectedIdx].w * 10) / 10;
-    document.getElementById('inputD').value = Math.round(buildings[selectedIdx].d * 10) / 10;
+    document.getElementById('inputW').value = Math.round(b.w * 10) / 10;
+    document.getElementById('inputD').value = Math.round(b.d * 10) / 10;
+    const fInput = document.getElementById('inputFloors');
+    if (fInput) fInput.value = b.floors;
+    // Beregnet høyde i meter (etasjer × floor_height fra payload)
+    const floorH = P.floor_height || 3.0;
+    const hEl = document.getElementById('computedHeight');
+    if (hEl) hEl.textContent = (b.floors * floorH).toFixed(1) + ' m';
   } else {
     panel.style.display = 'none';
   }
@@ -10620,7 +10697,11 @@ window.clearAll = function() { buildings = []; selectedIdx = -1; updateDimension
 
 window.setFloors = function() {
   defaultFloors = parseInt(document.getElementById('floorSelect').value) || 4;
-  if (selectedIdx >= 0) { buildings[selectedIdx].floors = defaultFloors; render(); }
+  if (selectedIdx >= 0) {
+    buildings[selectedIdx].floors = defaultFloors;
+    updateDimensionEditor();  // synk input og høyde-label
+    render();
+  }
 };
 
 window.exportSketch = function() {
@@ -11693,6 +11774,7 @@ render();
     st.markdown("<div class='section-header'>Nedlasting</div>", unsafe_allow_html=True)
     pdf_data = st.session_state.get("generated_ark_pdf")
     pdf_name = st.session_state.get("generated_ark_filename", "Builtly_ARK_rapport.pdf")
+    pdf_error = st.session_state.get("pdf_generation_error")
     if pdf_data:
         st.download_button(
             "Last ned mulighetsstudie (PDF)",
@@ -11701,6 +11783,14 @@ render();
             mime="application/pdf",
             type="primary",
             use_container_width=True,
+        )
+    elif pdf_error:
+        # PDF-gen ble forsøkt men feilet — vis faktisk årsak
+        st.error(
+            f"**PDF-generering feilet:** {pdf_error}\n\n"
+            "Tomtestudien er kjørt og volumene er generert, men rapport-PDF-en "
+            "kunne ikke bygges. Prøv å kjøre tomtestudien på nytt, eller send "
+            "feilmeldingen til support."
         )
     else:
         st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
