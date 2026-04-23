@@ -1,4 +1,4 @@
-´from __future__ import annotations
+from __future__ import annotations
 
 """Deterministic geometry for Builtly v8 delivery 2.
 
