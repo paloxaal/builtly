@@ -109,6 +109,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# --- WebSocket keep-alive (felles Builtly-modul) ---
+# Hindrer at Render dropper idle-koblingen og brukeren mister session state.
+# Se builtly/keepalive.py for detaljer.
+try:
+    from builtly.keepalive import inject_keepalive
+    inject_keepalive()
+except Exception:
+    # Hvis modulen ikke finnes (f.eks. eldre deploy), bare fortsett.
+    pass
+
 google_key = os.environ.get("GOOGLE_API_KEY")
 llm_available = bool(google_key and genai is not None)
 if llm_available:
