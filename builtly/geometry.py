@@ -271,6 +271,13 @@ def convex_hull_ratio(poly: Polygon) -> float:
 
 
 def _reflex_vertices(local_poly: Polygon) -> List[Tuple[float, float]]:
+    # Defensiv: hvis local_poly er en MultiPolygon, velg den største delen.
+    # Dette kan skje hvis buffer/intersection splittet polygonet.
+    if isinstance(local_poly, MultiPolygon):
+        parts = [g for g in local_poly.geoms if not g.is_empty]
+        if not parts:
+            return []
+        local_poly = max(parts, key=lambda g: g.area)
     coords = list(local_poly.exterior.coords)[:-1]
     if len(coords) < 4:
         return []
