@@ -7,42 +7,10 @@ architectural envelope that the deterministic geometry pass must follow.
 """
 
 from dataclasses import dataclass
+import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .masterplan_types import ConceptFamily, CourtyardKind, Delfelt, FieldParameterChoice, PlanRegler, Typology
-
-
-def _scale_building_count_by_area(
-    field: Optional[Delfelt],
-    *,
-    default_small: int,
-    area_per_building_m2: float,
-    min_count: int = 1,
-    max_count: int = 12,
-) -> int:
-    """Skalér target_building_count proporsjonalt med feltets areal.
-
-    Bakgrunn: Tidligere returnerte strategiene et fast tall (f.eks. 1 karré
-    per felt). På store delfelt (8 000+ m²) ble resultatet arkitektonisk
-    urealistisk — én kjempe-karré istedenfor flere mindre. Arkitektonisk
-    rettesnor (hentet fra referanseprosjekter):
-
-    - Karré: 1 volum per ~3 500 m² (lar seg bryte ned i 2-4 karreer per felt)
-    - Lamell: 1 volum per ~1 100 m² (10-14m dype, 30-60m lange)
-    - Punkthus: 1 volum per ~1 500 m² (kvadratiske 20-25m sider)
-
-    Hvis `field` er None eller areal = 0, faller vi tilbake til `default_small`.
-    """
-    if field is None:
-        return max(min_count, default_small)
-    try:
-        area = float(field.polygon.area)
-    except Exception:
-        return max(min_count, default_small)
-    if area <= 0 or area_per_building_m2 <= 0:
-        return max(min_count, default_small)
-    scaled = int(round(area / area_per_building_m2))
-    return max(min_count, min(max_count, max(default_small, scaled)))
 
 
 @dataclass(frozen=True)
@@ -83,6 +51,123 @@ class FieldEnvelope:
     rhythm_strength: float = 0.0
 
 
+# Feltstørrelse per bygg/volum. Store delfelt skal kunne romme flere bygg,
+# ikke bare ett enkelt objekt. Retningslinjene følger referansebildene:
+# - Karré:    1 karré per ~3 500-5 000 m² felt
+# - Lamell:   1 lamell per   ~800-1 500 m² felt
+# - Punkthus: 1 punkthus per ~1 200-2 000 m² felt
+_AREA_PER_BUILDING_RULES: Dict[Typology, Tuple[float, float]] = {
+    Typology.KARRE: (3500.0, 5000.0),
+    Typology.LAMELL: (800.0, 1500.0),
+    Typology.PUNKTHUS: (1200.0, 2000.0),
+    Typology.REKKEHUS: (350.0, 700.0),
+}
+
+_COUNT_CEILINGS: Dict[Typology, int] = {
+    Typology.KARRE: 4,
+    Typology.LAMELL: 12,
+    Typology.PUNKTHUS: 8,
+    Typology.REKKEHUS: 16,
+}
+
+
+def _count_bounds_for_field_area(field_area_m2: float, typology: Typology) -> Tuple[int, int]:
+    min_area, max_area = _AREA_PER_BUILDING_RULES.get(typology, (1200.0, 2200.0))
+    if field_area_m2 <= 0:
+        return 1, 1
+
+    # Nedre grense: hva feltet minst bør romme dersom byggene ligger i den
+    # romslige enden av intervallet. Dette skal treffe brukerens eksempler,
+    # f.eks. 8 750 m² -> minst 6 lameller og minst 5 punkthus.
+    min_count = max(1, int(math.ceil(field_area_m2 / max_area)))
+
+    # Øvre grense er typologiavhengig. For lamell og punkthus ønsker vi et
+    # troverdig tett øvre spenn, ikke ren teoretisk maks. For karré tillater vi
+    # fortsatt tak-opprunding slik at 8 750 m² kan vurderes som 2-3 blokker.
+    if typology == Typology.KARRE:
+        max_count = max(min_count, int(math.ceil(field_area_m2 / min_area)))
+    else:
+        max_count = max(min_count, int(math.floor(field_area_m2 / min_area)))
+        if max_count == min_count and (field_area_m2 / max(min_area, 1.0)) > (max_count + 0.40):
+            max_count += 1
+
+    ceiling = _COUNT_CEILINGS.get(typology, 12)
+    return min(min_count, ceiling), min(max_count, ceiling)
+
+
+def _recommended_building_count(
+    *,
+    field_area_m2: float,
+    typology: Typology,
+    target_bra_m2: float,
+    floors_range: Tuple[int, int],
+    fallback_count: int,
+) -> int:
+    min_count, max_count = _count_bounds_for_field_area(field_area_m2, typology)
+    mid_area = sum(_AREA_PER_BUILDING_RULES.get(typology, (1200.0, 2200.0))) / 2.0
+    target = max(1, int(round(field_area_m2 / max(mid_area, 1.0))))
+
+    density = float(target_bra_m2 or 0.0) / max(field_area_m2, 1.0)
+    fmin, fmax = floors_range
+    avg_f = max(1.0, (float(fmin) + float(fmax)) / 2.0)
+    if typology == Typology.LAMELL:
+        typical_bra_per_building = 44.0 * 13.5 * avg_f
+    elif typology == Typology.PUNKTHUS:
+        typical_bra_per_building = 20.0 * 20.0 * avg_f
+    elif typology == Typology.KARRE:
+        # Ett karrégrep er et helt kvartal/cluster, ikke én enkelt arm.
+        typical_bra_per_building = 1500.0 * avg_f
+    else:
+        typical_bra_per_building = 6.5 * 10.0 * avg_f
+
+    if typical_bra_per_building > 0 and typology == Typology.LAMELL:
+        bra_based = max(1, int(round(float(target_bra_m2 or 0.0) / typical_bra_per_building)))
+        target = max(target, bra_based)
+
+    if typology != Typology.KARRE:
+        if density >= 1.18 and target < max_count:
+            target += 1
+        elif density <= 0.72 and target > min_count:
+            target -= 1
+
+    if fallback_count > 0 and field_area_m2 <= mid_area * 1.15:
+        target = max(target, fallback_count)
+
+    return max(min_count, min(max_count, target))
+
+
+def _scaled_micro_band_count(base_count: int, typology: Typology, target_count: int) -> int:
+    base = max(1, int(base_count or 0))
+    if typology == Typology.LAMELL:
+        return max(base, min(8, int(math.ceil(target_count / 2.0)) + 1))
+    if typology == Typology.PUNKTHUS:
+        return max(base, min(6, int(math.ceil(target_count / 2.5)) + 1))
+    if typology == Typology.KARRE:
+        return max(base, min(5, target_count + 1))
+    return max(base, target_count)
+
+
+def _scaled_view_corridor_count(base_count: int, typology: Typology, target_count: int) -> int:
+    base = max(0, int(base_count or 0))
+    if typology == Typology.LAMELL:
+        return max(base, min(3, int(math.ceil(target_count / 3.0))))
+    if typology == Typology.PUNKTHUS:
+        return max(base, min(3, int(math.ceil(target_count / 4.0))))
+    if typology == Typology.KARRE:
+        return max(base, min(2, max(0, target_count - 1)))
+    return base
+
+
+def _scaled_node_layout_mode(base_mode: Optional[str], typology: Typology, target_count: int) -> Optional[str]:
+    if typology != Typology.PUNKTHUS:
+        return base_mode
+    if target_count >= 7:
+        return 'perimeter_ring_dense'
+    if target_count >= 5:
+        return 'perimeter_ring'
+    return base_mode or 'paired_edges'
+
+
 class ConceptStrategy:
     family: ConceptFamily
     ui_label: str
@@ -107,43 +192,77 @@ class ConceptStrategy:
         for idx, field in enumerate(delfelt):
             env = self.envelope_for_field(idx, len(delfelt), field)
             floors_min, floors_max = self._clamp_floors(env.default_floors, plan_regler)
+            field_target_bra = float(target_bra_m2 * shares[idx])
+            field_area_m2 = float(getattr(field.polygon, 'area', 0.0) or 0.0)
+            target_building_count = _recommended_building_count(
+                field_area_m2=field_area_m2,
+                typology=env.default_typology,
+                target_bra_m2=field_target_bra,
+                floors_range=(floors_min, floors_max),
+                fallback_count=env.target_building_count,
+            )
+            micro_band_count = _scaled_micro_band_count(env.micro_band_count, env.default_typology, target_building_count)
+            view_corridor_count = _scaled_view_corridor_count(env.view_corridor_count, env.default_typology, target_building_count)
+            node_layout_mode = _scaled_node_layout_mode(env.node_layout_mode, env.default_typology, target_building_count)
+            tower_size_m = env.tower_size_m
+            design_variant = env.design_variant
+            micro_field_pattern = env.micro_field_pattern
+            composition_strictness = env.composition_strictness
+            rationale = self._field_rationale(idx, len(delfelt), env)
+
+            if env.default_typology == Typology.LAMELL and target_building_count >= 6:
+                design_variant = design_variant or 'rhythmic'
+                micro_field_pattern = 'dense_parallel_bands'
+                composition_strictness = min(0.96, max(composition_strictness, 0.88))
+                rationale += f" Feltet er stort nok for {target_building_count} lameller; skeleton og plassering vris derfor mot tett, rytmisk radstruktur."
+            elif env.default_typology == Typology.PUNKTHUS:
+                if target_building_count >= 6:
+                    tower_size_m = 17
+                    rationale += f" Feltet er stort nok for {target_building_count} punkthus; motoren bruker mindre tårnstørrelse og ringnoder rundt parkrommet."
+                elif target_building_count >= 5:
+                    tower_size_m = tower_size_m or 17
+                    rationale += f" Feltet prioriteres som fler-nodig parkfelt med {target_building_count} punkthus."
+            elif env.default_typology == Typology.KARRE and target_building_count >= 2:
+                micro_field_pattern = 'clustered_frontage_ring'
+                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, ikke bare ett stort volum."
+
             out.append(FieldParameterChoice(
                 field_id=field.field_id,
                 typology=env.default_typology,
                 orientation_deg=(field.orientation_deg + env.default_orientation_offset_deg) % 180.0,
                 floors_min=floors_min,
                 floors_max=floors_max,
-                target_bra=float(target_bra_m2 * shares[idx]),
+                target_bra=field_target_bra,
                 courtyard_kind=env.courtyard_kind,
-                tower_size_m=env.tower_size_m,
-                rationale=self._field_rationale(idx, len(delfelt), env),
+                tower_size_m=tower_size_m,
+                rationale=rationale,
                 field_role=env.field_role or field.field_role,
                 character=env.character or field.character,
                 arm_id=field.arm_id,
-                design_variant=env.design_variant,
+                design_variant=design_variant,
                 design_karre_shape=env.design_karre_shape,
                 design_height_pattern=env.design_height_pattern,
                 target_bya_pct=env.target_bya_pct,
                 skeleton_mode=env.skeleton_mode,
                 frontage_mode=env.frontage_mode,
-                micro_band_count=env.micro_band_count,
-                view_corridor_count=env.view_corridor_count,
+                micro_band_count=micro_band_count,
+                view_corridor_count=view_corridor_count,
                 courtyard_reserve_ratio=env.courtyard_reserve_ratio,
                 frontage_depth_m=env.frontage_depth_m,
                 corridor_width_m=env.corridor_width_m,
                 macro_structure=env.macro_structure,
-                micro_field_pattern=env.micro_field_pattern,
+                micro_field_pattern=micro_field_pattern,
                 symmetry_preference=env.symmetry_preference,
-                composition_strictness=env.composition_strictness,
+                composition_strictness=composition_strictness,
                 frontage_zone_ratio=env.frontage_zone_ratio,
                 public_realm_ratio=env.public_realm_ratio,
                 node_symmetry=env.node_symmetry,
                 frontage_primary_side=env.frontage_primary_side,
                 frontage_secondary_side=env.frontage_secondary_side,
                 lamell_rhythm_mode=env.lamell_rhythm_mode,
-                node_layout_mode=env.node_layout_mode,
+                node_layout_mode=node_layout_mode,
                 courtyard_open_side=env.courtyard_open_side,
-                target_building_count=env.target_building_count,
+                target_building_count=target_building_count,
                 frontage_emphasis=env.frontage_emphasis,
                 rhythm_strength=env.rhythm_strength,
             ))
@@ -209,11 +328,7 @@ class LinearMixedStrategy(ConceptStrategy):
             frontage_primary_side="south",
             frontage_secondary_side=("north" if not edge else None),
             lamell_rhythm_mode=("paired" if edge else "mirrored"),
-            target_building_count=_scale_building_count_by_area(
-                field, default_small=(2 if edge else 3),
-                area_per_building_m2=1100.0,
-                min_count=2, max_count=10,
-            ),
+            target_building_count=(2 if edge else 3),
             frontage_emphasis=0.90,
             rhythm_strength=0.90,
         )
@@ -279,11 +394,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             frontage_primary_side=("south" if edge else None),
             frontage_secondary_side=("east" if edge else None),
             courtyard_open_side=("south" if edge else None),
-            target_building_count=_scale_building_count_by_area(
-                field, default_small=(1 if use_karre else 2),
-                area_per_building_m2=3500.0 if use_karre else 1200.0,
-                min_count=1, max_count=8,
-            ),
+            target_building_count=(1 if use_karre else 2),
             frontage_emphasis=0.96,
             rhythm_strength=0.82,
         )
@@ -348,11 +459,7 @@ class ClusterParkStrategy(ConceptStrategy):
             frontage_primary_side=(None if use_punkthus else "west"),
             frontage_secondary_side=(None if use_punkthus else "east"),
             node_layout_mode=("paired_edges" if use_punkthus else None),
-            target_building_count=_scale_building_count_by_area(
-                field, default_small=(2 if use_punkthus else 3),
-                area_per_building_m2=1500.0 if use_punkthus else 1300.0,
-                min_count=2, max_count=8,
-            ),
+            target_building_count=(2 if use_punkthus else 3),
             frontage_emphasis=0.72,
             rhythm_strength=0.70,
         )
