@@ -715,7 +715,10 @@ def _adjust_floors_to_target(
 ) -> None:
     """Juster etasjer trinnvis for å nærme seg target BRA.
 
-    Cap: innenfor ±10% av target, innenfor [floors_min, floors_max+2].
+    Cap: strikt [floors_min, floors_max]. Hvis target ikke kan nås innenfor
+    dette, stopper vi på max og registrerer note. Bedre at BRA er litt
+    under mål enn å bryte plan-regler (max-etasjer er en hard constraint
+    fra reguleringen).
     """
     if target_bra_m2 <= 0 or not plan.bygninger:
         return
@@ -723,21 +726,27 @@ def _adjust_floors_to_target(
     def total_bra() -> float:
         return sum(b.footprint_m2 * b.floors for b in plan.bygninger)
 
-    # Øk etasjer hvis under 90% av target
+    # Øk etasjer hvis under 90% av target — men STOPP ved floors_max
     cur = total_bra()
-    max_allowed = floors_max + 2
     iterations = 0
     while cur < target_bra_m2 * 0.90 and iterations < 20:
         iterations += 1
         increased_any = False
         for b in plan.bygninger:
-            if b.floors < max_allowed:
+            if b.floors < floors_max:
                 b.floors += 1
                 increased_any = True
                 cur = total_bra()
                 if cur >= target_bra_m2 * 0.95:
                     return
         if not increased_any:
+            # Alle bygg står på floors_max. BRA blir under target.
+            deficit_pct = (target_bra_m2 - cur) / target_bra_m2 * 100
+            if deficit_pct > 10:
+                plan.notes.append(
+                    f"⚠ BRA-mangel: {deficit_pct:.0f}% under mål. "
+                    f"Alle bygg på floors_max={floors_max}. Vurder høyere reg.plan."
+                )
             break
 
     # Reduser etasjer hvis over 110% av target
@@ -761,7 +770,7 @@ def _adjust_floors_to_target(
 # ---------------------------------------------------------------------------
 
 
-def _karre_dimensions_fit(field_poly: Polygon, params: KvartalParameters) -> Tuple[bool, str]:
+def karre_dimensions_fit(field_poly: Polygon, params: KvartalParameters) -> Tuple[bool, str]:
     """Sjekk om feltets bbox rommer minst én karré-ramme.
 
     Krav (fra Pål): minimum 58×45m (ramme) for én karré med 4m setback rundt.
@@ -786,6 +795,77 @@ def _karre_dimensions_fit(field_poly: Polygon, params: KvartalParameters) -> Tup
         return (False,
                 f"Kortside {short_side:.0f}m < minimum {min_short:.0f}m for karré")
     return (True, f"Bbox {w:.0f}×{h:.0f}m rommer karré")
+
+
+def lamell_field_fit_possible(
+    field_poly: Polygon,
+    params: Optional[LamellParameters] = None,
+    *args,
+    profile: MasterplanProfile = MasterplanProfile.FORSTAD,
+    **kwargs,
+) -> Tuple[bool, str]:
+    """Sjekk om feltets bbox rommer minst én lamell.
+
+    Krav (fra Pål): lamell er 55-65m lang × 12-14m dyp. Minste rektangel
+    som rommer én lamell: length_min_m + 2×setback × depth_preferred_m
+    + 2×setback.
+
+    Fleksibel signatur:
+      - lamell_field_fit_possible(polygon)
+      - lamell_field_fit_possible(polygon, params)
+      - lamell_field_fit_possible(polygon, profile=URBAN)
+      - lamell_field_fit_possible(polygon, LamellParameters(...), profile=...)
+
+    Returnerer (passer, begrunnelse).
+    """
+    if field_poly is None or field_poly.is_empty:
+        return (False, "Felt er tomt")
+    p = params if params is not None else PROFILE_LAMELL[profile]
+    minx, miny, maxx, maxy = field_poly.bounds
+    w = maxx - minx
+    h = maxy - miny
+    long_side = max(w, h)
+    short_side = min(w, h)
+    min_long = p.length_min_m + 2 * p.setback_m       # 45 + 8 = 53m FORSTAD
+    min_short = p.depth_preferred_m + 2 * p.setback_m # 13 + 8 = 21m FORSTAD
+    if long_side < min_long:
+        return (False,
+                f"Langside {long_side:.0f}m < minimum {min_long:.0f}m for lamell")
+    if short_side < min_short:
+        return (False,
+                f"Kortside {short_side:.0f}m < minimum {min_short:.0f}m for lamell")
+    return (True, f"Bbox {w:.0f}×{h:.0f}m rommer lamell")
+
+
+def punkthus_field_fit_possible(
+    field_poly: Polygon,
+    params: Optional[PunkthusParameters] = None,
+    *args,
+    profile: MasterplanProfile = MasterplanProfile.FORSTAD,
+    **kwargs,
+) -> Tuple[bool, str]:
+    """Sjekk om feltets bbox rommer minst ett punkthus.
+
+    Krav: 20×20m + 6m setback = 32×32m minimum.
+    """
+    if field_poly is None or field_poly.is_empty:
+        return (False, "Felt er tomt")
+    p = params if params is not None else PROFILE_PUNKTHUS[profile]
+    minx, miny, maxx, maxy = field_poly.bounds
+    w = maxx - minx
+    h = maxy - miny
+    min_side = p.side_m + 2 * p.setback_m  # 20 + 12 = 32m FORSTAD
+    if min(w, h) < min_side:
+        return (False,
+                f"Minste side {min(w, h):.0f}m < minimum {min_side:.0f}m for punkthus")
+    return (True, f"Bbox {w:.0f}×{h:.0f}m rommer punkthus")
+
+
+# Bakoverkompatible aliaser — samme funksjon med eldre/underscore-navn.
+# Dette er pga at noen steder i codebase kaller _lamell_field_fit_possible osv.
+_lamell_field_fit_possible = lamell_field_fit_possible
+_punkthus_field_fit_possible = punkthus_field_fit_possible
+_karre_dimensions_fit = karre_dimensions_fit
 
 
 def select_typology_for_field(
@@ -825,7 +905,7 @@ def select_typology_for_field(
     field_area = field_poly.area
     karre_params = PROFILE_KVARTAL[profile]
     density = target_bra_m2 / max(field_area, 1.0) if target_bra_m2 > 0 else 0.0
-    karre_fits, karre_reason = _karre_dimensions_fit(field_poly, karre_params)
+    karre_fits, karre_reason = karre_dimensions_fit(field_poly, karre_params)
 
     # Eksplisitt requested
     if requested == TypologiKind.KARRE:
@@ -1287,5 +1367,8 @@ def typologiplan_to_bygg_list(
             delfelt_id=field_id,
             phase=phase,
             display_name=f"{field_id} {b.bygg_id}",
+            # Propagere arkitektoniske dimensjoner til Bygg for UI-visning
+            length_m_explicit=float(b.length_m),
+            depth_m_explicit=float(b.depth_m),
         ))
     return bygg_list

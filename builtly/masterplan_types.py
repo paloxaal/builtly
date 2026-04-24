@@ -73,7 +73,7 @@ class Delfelt:
     floors_max: int
     target_bra: float
     courtyard_kind: Optional[CourtyardKind] = None
-    tower_size_m: Optional[Literal[17, 20, 21]] = None
+    tower_size_m: Optional[Literal[17, 21]] = None
     phase: int = 1
     phase_label: str = ""
     field_role: str = ""
@@ -219,6 +219,10 @@ class Bygg:
     has_tak_mua: Optional[bool] = None
     tak_mua_share: float = 0.30
     privat_mua_m2: float = 0.0
+    # Arkitektoniske dimensjoner (valgfrie — settes eksplisitt av
+    # typologi_primitiver, ellers beregnes fra footprint via properties).
+    length_m_explicit: Optional[float] = None
+    depth_m_explicit: Optional[float] = None
 
     @property
     def footprint_m2(self) -> float:
@@ -232,6 +236,59 @@ class Bygg:
     def tak_mua_m2(self) -> float:
         enabled = self.has_tak_mua if self.has_tak_mua is not None else self.floors >= 3
         return self.footprint_m2 * float(self.tak_mua_share) if enabled and self.floors >= 3 else 0.0
+
+    @property
+    def length_m(self) -> float:
+        """Lang side (lengde) av bygget. Fra eksplisitt felt hvis satt,
+        ellers fra minimum rotated rectangle av footprint.
+
+        Merk: for ring-formede karré-bygg vil footprint være en polygon
+        med hull (O-form), og bounding-box gir dermed dimensjoner av
+        HELE karréen (ytre ramme), ikke armens faktiske bredde.
+        """
+        explicit = getattr(self, "length_m_explicit", None)
+        if explicit is not None:
+            return float(explicit)
+        return _compute_bbox_dims(self.footprint)[0]
+
+    @property
+    def depth_m(self) -> float:
+        """Kort side (dybde) av bygget. Se length_m."""
+        explicit = getattr(self, "depth_m_explicit", None)
+        if explicit is not None:
+            return float(explicit)
+        return _compute_bbox_dims(self.footprint)[1]
+
+    @property
+    def dimension_label(self) -> str:
+        """Menneskelig-lesbar dim-label: '52×13m × 6et / 18.6m' """
+        return f"{self.length_m:.0f}×{self.depth_m:.0f}m × {self.floors}et / {self.height_m:.1f}m"
+
+
+def _compute_bbox_dims(footprint: Polygon) -> Tuple[float, float]:
+    """Returnér (lang_side, kort_side) fra polygonets minimum rotated rectangle.
+
+    For roterte bygg gir shapely bounds aksejusterte mål som er feil; vi
+    bruker `minimum_rotated_rectangle` for å få riktig lengde og bredde.
+    """
+    if footprint is None or footprint.is_empty:
+        return (0.0, 0.0)
+    try:
+        mrr = footprint.minimum_rotated_rectangle
+        coords = list(mrr.exterior.coords)
+        if len(coords) < 4:
+            return (0.0, 0.0)
+        # MRR har 5 punkter (lukket). Beregn sidelengder.
+        import math as _m
+        side_a = _m.hypot(coords[1][0] - coords[0][0], coords[1][1] - coords[0][1])
+        side_b = _m.hypot(coords[2][0] - coords[1][0], coords[2][1] - coords[1][1])
+        return (max(side_a, side_b), min(side_a, side_b))
+    except Exception:
+        # Fallback: aksejustert bbox
+        minx, miny, maxx, maxy = footprint.bounds
+        w = maxx - minx
+        h = maxy - miny
+        return (max(w, h), min(w, h))
 
 
 @dataclass
@@ -327,17 +384,11 @@ class MUAReport:
     open_ground_area: float = 0.0
     checks: List[ComplianceCheck] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
-    mode: str = "strict"
-    effective_requirement_factor: float = 1.0
-    score_weight: float = 1.0
-    advisory_override: bool = False
 
     @property
     def compliant(self) -> bool:
         relevant = [check for check in self.checks if check.status != ComplianceState.IKKE_VURDERT]
-        if not relevant:
-            return True
-        return all(check.status == ComplianceState.JA for check in relevant)
+        return bool(relevant) and all(check.status == ComplianceState.JA for check in relevant)
 
 
 @dataclass
@@ -421,7 +472,7 @@ class FieldParameterChoice:
     floors_max: int
     target_bra: float
     courtyard_kind: Optional[CourtyardKind] = None
-    tower_size_m: Optional[Literal[17, 20, 21]] = None
+    tower_size_m: Optional[Literal[17, 21]] = None
     rationale: str = ""
     field_role: str = ""
     character: str = ""
@@ -494,6 +545,20 @@ class Masterplan:
     pass6_source: str = "fallback"
     skeleton_summaries: List[FieldSkeletonSummary] = field(default_factory=list)
     architecture_report: ArchitectureMetrics = field(default_factory=ArchitectureMetrics)
+    # --- Masterplan-struktur (uke 1 av arkitektkvalitet-løftet) ---
+    # Bevisst løse felter (ikke en MasterplanAxes-referanse) for å unngå
+    # sirkulær import mellom masterplan_structure og masterplan_types.
+    axes_primary_line: Optional[LineString] = None
+    axes_secondary_line: Optional[LineString] = None
+    axes_corridor_polygons: List[Polygon] = field(default_factory=list)
+    axes_torg_polygons: List[Polygon] = field(default_factory=list)
+    axes_torg_points: List[Point] = field(default_factory=list)
+    axes_type: str = ""              # "diagonal" | "orthogonal" | "none" | ""
+    axes_profile: str = ""           # "FORSTAD" | "URBAN"
+    axes_rationale: str = ""
+    axes_elongation: float = 0.0
+    axes_neighbor_asymmetry: float = 0.0
+    axes_primary_orientation_deg: float = 0.0
 
     def iter_buildings_for_delfelt(self, field_id: str) -> Iterable[Bygg]:
         return (bygg for bygg in self.bygg if bygg.delfelt_id == field_id)
