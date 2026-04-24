@@ -22,10 +22,14 @@ class BaseTypologySpec:
     min_courtyard_side_m: Optional[float] = None
 
 _SPECS = {
-    Typology.LAMELL: BaseTypologySpec(Typology.LAMELL, length_m=DimRange(32, 62), depth_m=DimRange(12, 15), min_spacing_m=0.85),
-    Typology.PUNKTHUS: BaseTypologySpec(Typology.PUNKTHUS, length_m=DimRange(18, 24), depth_m=DimRange(18, 24), min_spacing_m=10.0, allowed_tower_sizes_m=(17, 21)),
+    # Brukerens siste styringsmål:
+    # - Lamell: ca. 55-65 m lengde og 12-14 m dybde
+    # - Punkthus: 20 x 20 m
+    # - Karré: ytre bredde rundt 50 m, sider 25-30 m og bygningsdybde ca. 12 m
+    Typology.LAMELL: BaseTypologySpec(Typology.LAMELL, length_m=DimRange(48, 65), depth_m=DimRange(12, 14), min_spacing_m=8.0),
+    Typology.PUNKTHUS: BaseTypologySpec(Typology.PUNKTHUS, length_m=DimRange(20, 20), depth_m=DimRange(20, 20), min_spacing_m=10.0, allowed_tower_sizes_m=(20,)),
     Typology.REKKEHUS: BaseTypologySpec(Typology.REKKEHUS, length_m=DimRange(5.5, 7.5), depth_m=DimRange(8, 11), min_spacing_m=8.0),
-    Typology.KARRE: BaseTypologySpec(Typology.KARRE, length_m=DimRange(38, 65), depth_m=DimRange(38, 65), segment_depth_m=DimRange(12, 15), min_spacing_m=8.0, max_block_length_m=72.0, min_courtyard_side_m=18.0),
+    Typology.KARRE: BaseTypologySpec(Typology.KARRE, length_m=DimRange(48, 52), depth_m=DimRange(48, 54), segment_depth_m=DimRange(12, 12), min_spacing_m=10.0, max_block_length_m=56.0, min_courtyard_side_m=24.0),
 }
 
 def get_typology_spec(typology: Typology | str) -> BaseTypologySpec:
