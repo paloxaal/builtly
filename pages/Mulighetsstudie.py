@@ -6754,41 +6754,44 @@ def render_arkitekturdiagram_svg(
         py = height_px - ((y - miny) * scale + offset_y)
         return (px, py)
 
-    # Stilkonfigurasjon — to moduser
+    # Stilkonfigurasjon — tre moduser
     if style == "felt":
-        # Hvit bakgrunn, tydelige felt-omriss (som detaljregulering)
-        bg_color = "#ffffff"
-        neighbor_fill = "#b8b4ad"
-        neighbor_stroke = "#8c887f"
+        # Builtly mørkt tema — matcher resten av appens designsystem.
+        # Feltene får duse beige-brune fargetoner (delsempede palettfarger
+        # fra Builtly-designet) mot en mørkeblå bakgrunn. Typografi er
+        # hvit Inter med lett letter-spacing for lesbarhet.
+        bg_color = "#0b1420"              # builtly mørk bakgrunn
+        neighbor_fill = "#2a3447"         # dus gråblå (nabobygg)
+        neighbor_stroke = "#3c4a5e"
         neighbor_opacity = "0.88"
-        site_stroke = "#d03838"
-        site_stroke_width = "1.2"
-        field_fill = "#ede4cc"         # beige felt-vask
-        field_stroke = "#1c1c1c"       # solid svart kant
-        field_stroke_width = "1.8"
-        field_dasharray = ""           # ingen stipling
-        public_fill = "#c6cfa8"
+        site_stroke = "#f87171"           # rød-oransje tomtegrense
+        site_stroke_width = "1.6"
+        field_fill = "#3a3224"            # mørk beige-brun felt-vask
+        field_stroke = "#c8a876"          # varm lys-beige kant
+        field_stroke_width = "1.4"
+        field_dasharray = ""
+        public_fill = "#1e4d3c"           # mørk grønn offentlig rom
         public_opacity = "0.55"
-        courtyard_fill = "#d8dfc4"
-        courtyard_opacity = "0.58"
-        corridor_fill = "#ecdf9e"
-        corridor_opacity = "0.35"
-        building_stroke = "#111111"
+        courtyard_fill = "#2a4a3c"        # mørk grønn gårdsrom
+        courtyard_opacity = "0.48"
+        corridor_fill = "#4a3e1a"         # mørk okergul siktkorridor
+        corridor_opacity = "0.32"
+        building_stroke = "#e8dcc0"       # lys beige bygning-kant
         building_stroke_width = "0.6"
-        label_color = "#111111"
-        label_size_field = 22
-        label_size_building = 10
-        label_weight_field = "800"
+        label_color = "#ffffff"           # hvit label
+        label_size_field = 14             # mindre, mer elegant
+        label_size_building = 9
+        label_weight_field = "700"
         # Masterplan-akser (uke 1): diskret grønn stripe i felt-stil
-        axis_corridor_fill = "#c6d4a8"
-        axis_corridor_opacity = "0.62"
-        axis_corridor_stroke = "#7a8a5c"
-        axis_line_stroke = "#5a6b40"
+        axis_corridor_fill = "#4a5c38"
+        axis_corridor_opacity = "0.48"
+        axis_corridor_stroke = "#7a9a5c"
+        axis_line_stroke = "#a8c78c"
         axis_line_width = "0.8"
         axis_line_dasharray = "3,2"
-        torg_fill = "#dbe5c0"
-        torg_stroke = "#7a8a5c"
-        torg_opacity = "0.78"
+        torg_fill = "#5a7248"
+        torg_stroke = "#8aa66c"
+        torg_opacity = "0.65"
     else:
         # "oversikt" — varm konseptmodus
         bg_color = "#f2efe7"
@@ -6828,6 +6831,12 @@ def render_arkitekturdiagram_svg(
     svg.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width_px} {height_px}" '
         f'width="{width_px}" height="{height_px}" style="background:{bg_color};font-family:Inter,-apple-system,sans-serif;">'
+    )
+    # Eksplisitt bakgrunnsrektangel — style="background:..." rendres ikke
+    # konsistent i alle SVG-viewere (f.eks. cairosvg og noen PDF-konvertere
+    # ignorerer det). Derfor tegner vi en full-size rect i stedet.
+    svg.append(
+        f'<rect x="0" y="0" width="{width_px}" height="{height_px}" fill="{bg_color}"/>'
     )
 
     # ---- Lag 1: Nabobygg (grå kontekst) ----
@@ -6970,29 +6979,86 @@ def render_arkitekturdiagram_svg(
 
     # ---- Lag 8: Labels ----
     if show_labels:
-        # Felt-labels (FELT 1, FELT 2, ...)
+        # Felt-labels (FELT 1, FELT 2, ...) med collision-avoidance.
+        # Problem: når felt er små eller nær hverandre, havner label-
+        # posisjonene (centroider) oppå hverandre og blir uleselige.
+        # Løsning: samle alle labels først, beregn collision-bokser,
+        # og push labels vekk fra hverandre iterativt.
+
+        # Samle label-kandidater
+        field_labels: List[Dict[str, Any]] = []
         for f in (geometry.get("field_polygons") or []):
             rings = _arkdiag_flatten(f.get("coords") or [])
             if not rings:
                 continue
             cx, cy = _arkdiag_centroid_px(rings[0], to_px)
             label = f.get("label") or f.get("field_id", "")
-            # Komprimer label til "FELT N" hvis mulig
             short = label
             if label.lower().startswith("delfelt "):
                 short = f"FELT {label.split()[-1]}"
             elif label.startswith("DF"):
                 short = f"FELT {label[2:]}"
+            # Estimert bredde: ~0.58 × font-size per tegn for sans-serif
+            est_w = len(short) * label_size_field * 0.58
+            est_h = label_size_field * 1.2
+            field_labels.append({
+                "short": short,
+                "cx": cx,
+                "cy": cy,
+                "w": est_w,
+                "h": est_h,
+            })
+
+        # Enkel force-based displacement: iterer noen runder, push overlappende
+        # bokser fra hverandre.
+        def _boxes_overlap(a, b, margin: float = 4.0) -> bool:
+            ax1, ay1 = a["cx"] - a["w"]/2 - margin, a["cy"] - a["h"]/2 - margin
+            ax2, ay2 = a["cx"] + a["w"]/2 + margin, a["cy"] + a["h"]/2 + margin
+            bx1, by1 = b["cx"] - b["w"]/2 - margin, b["cy"] - b["h"]/2 - margin
+            bx2, by2 = b["cx"] + b["w"]/2 + margin, b["cy"] + b["h"]/2 + margin
+            return not (ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1)
+
+        for _iteration in range(60):
+            moved = False
+            for i in range(len(field_labels)):
+                for j in range(i + 1, len(field_labels)):
+                    a, b = field_labels[i], field_labels[j]
+                    if _boxes_overlap(a, b, margin=6.0):
+                        # Push a og b fra hverandre langs vektor mellom sentre
+                        dx = b["cx"] - a["cx"]
+                        dy = b["cy"] - a["cy"]
+                        dist = max((dx*dx + dy*dy) ** 0.5, 0.01)
+                        # Normaliser og skalér push
+                        push = 3.5
+                        a["cx"] -= (dx / dist) * push
+                        a["cy"] -= (dy / dist) * push
+                        b["cx"] += (dx / dist) * push
+                        b["cy"] += (dy / dist) * push
+                        moved = True
+            if not moved:
+                break
+
+        # Tegn labels med halo/skygge for lesbarhet mot mørk bakgrunn
+        for lbl in field_labels:
+            cx, cy, short = lbl["cx"], lbl["cy"], lbl["short"]
             if style == "felt":
-                # Stor svart tekst, ingen transparens (som referanse 2)
+                # Mørk tema: hvit tekst med subtil skygge/halo
+                # Dobbel SVG <text>: først mørk halo, så hvit tekst oppå
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="#0b1420" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" dominant-baseline="middle" '
+                    f'letter-spacing="0.08em" stroke="#0b1420" stroke-width="3.5" '
+                    f'stroke-linejoin="round" opacity="0.85">{short}</text>'
+                )
                 svg.append(
                     f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
                     f'fill="{label_color}" font-size="{label_size_field}" '
                     f'font-weight="{label_weight_field}" dominant-baseline="middle" '
-                    f'letter-spacing="0.04em">{short}</text>'
+                    f'letter-spacing="0.08em">{short}</text>'
                 )
             else:
-                # Diskret, sparset
+                # Oversikt-stil: diskret, sparset
                 svg.append(
                     f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
                     f'fill="{label_color}" font-size="{label_size_field}" '
