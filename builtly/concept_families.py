@@ -115,44 +115,22 @@ def _karre_shape_support(poly: Any) -> float:
 
 
 def _lamell_field_fit_possible(poly: Any) -> bool:
-    """Return whether a field can plausibly host a lamell building.
-
-    This is intentionally permissive for infill projects, but rejects tiny rest
-    polygons where lamell logic would obviously fail.
-    """
-    area_m2 = float(getattr(poly, 'area', 0.0) or 0.0)
     major, minor = _minimum_rotated_dims(poly)
-    if area_m2 < 450.0:
-        return False
-    if major >= 48.0 and minor >= 12.0:
-        return True
-    if major >= 38.0 and minor >= 12.0 and area_m2 >= 650.0:
-        return True
-    if major >= 30.0 and minor >= 10.5 and area_m2 >= 900.0:
-        return True
-    if major >= 24.0 and minor >= 14.0 and area_m2 >= 1200.0:
-        return True
-    return False
+    return major >= 48.0 and minor >= 16.0
 
 
 def _fallback_typology_for_field(poly: Any, density: float) -> Typology:
-    """Choose a plausible fallback typology when karré is not suitable."""
     area_m2 = float(getattr(poly, 'area', 0.0) or 0.0)
     major, minor = _minimum_rotated_dims(poly)
-    if area_m2 <= 0.0:
+    if area_m2 <= 3200.0 or major < 48.0 or minor < 18.0:
         return Typology.PUNKTHUS
-    # Små og tette infill-felt håndteres mer robust som punktvolumer.
-    if area_m2 < 2200.0 and density >= 1.15:
+    if density >= 2.0 and area_m2 <= 7000.0:
         return Typology.PUNKTHUS
-    if density >= 1.85:
-        return Typology.PUNKTHUS
-    if _lamell_field_fit_possible(poly) and major >= 38.0 and minor >= 12.0 and density <= 1.65:
-        return Typology.LAMELL
-    if major >= 26.0 and minor >= 18.0:
-        return Typology.PUNKTHUS
-    if _lamell_field_fit_possible(poly) and density <= 1.35:
-        return Typology.LAMELL
-    return Typology.PUNKTHUS
+    return Typology.LAMELL
+
+
+def _karre_field_fit_possible(poly: Any) -> bool:
+    return _karre_shape_support(poly) >= 0.60
 
 
 def _count_bounds_for_field_area(field_area_m2: float, typology: Typology) -> Tuple[int, int]:
@@ -341,9 +319,9 @@ class ConceptStrategy:
                         design_karre_shape = 'u'
                         courtyard_open_side = courtyard_open_side or 'south'
 
-            if selected_typology == Typology.LAMELL and ((compact_infill and field_area_m2 < 2200.0 and density >= 1.15) or not _lamell_field_fit_possible(field.polygon)):
+            if selected_typology == Typology.LAMELL and not _lamell_field_fit_possible(field.polygon):
                 selected_typology = Typology.PUNKTHUS
-                rationale += " Feltet er for kompakt eller for tett for en troverdig lamell; punkthus velges i stedet."
+                rationale += " Feltet er for kompakt for en troverdig lamell; punkthus velges i stedet."
 
             target_building_count = _recommended_building_count(
                 field_area_m2=field_area_m2,
