@@ -2391,15 +2391,15 @@ def build_massing_parts(
 
     # Fargepalett per typologi
     COLORS = {
-        "Lamell":        [34, 197, 94, 0.80],    # groenn
-        "Punkthus":      [56, 189, 248, 0.80],   # blaa
-        "Tun":           [168, 130, 240, 0.80],   # lilla
-        "Rekke":         [250, 180, 60, 0.80],    # gul/oransje
-        "Podium + Tårn": [220, 80, 120, 0.80],    # rosa/roed
-        "Karré":         [100, 200, 180, 0.80],   # teal
-        "Tårn":          [56, 140, 248, 0.80],    # moerkere blaa
+        "Lamell":        [64, 126, 188, 0.82],    # Builtly blå
+        "Punkthus":      [74, 184, 179, 0.82],    # cyan/teal
+        "Tun":           [116, 132, 164, 0.82],   # dempet blågrå
+        "Rekke":         [92, 149, 120, 0.82],    # grønn
+        "Podium + Tårn": [188, 118, 96, 0.84],    # varm aksent
+        "Karré":         [66, 103, 155, 0.84],    # Builtly aksentblå
+        "Tårn":          [31, 55, 95, 0.86],      # navy
     }
-    base_color = COLORS.get(typology, [34, 197, 94, 0.80])
+    base_color = COLORS.get(typology, [64, 126, 188, 0.82])
 
     if typology == "Podium + Tårn" and len(components) >= 1:
         # Podium: lav og bred (2 etg). Tårn: høyt og smalt (dobbel høyde av podium eller mer)
@@ -2876,12 +2876,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                     }
                     # Bygg massing_parts fra AI-bygninger
                     PART_COLORS = {
-                        "Lamell": [34, 197, 94, 200], "Punkthus": [56, 189, 248, 200],
-                        "Tun": [168, 130, 240, 200], "Rekke": [250, 180, 60, 200],
-                        "Karré": [100, 200, 180, 200], "Tårn": [56, 140, 248, 200],
-                        "Podium + Tårn": [220, 80, 120, 200],
+                        "Lamell": [64, 126, 188, 210], "Punkthus": [74, 184, 179, 210],
+                        "Tun": [116, 132, 164, 210], "Rekke": [92, 149, 120, 210],
+                        "Karré": [66, 103, 155, 216], "Tårn": [31, 55, 95, 220],
+                        "Podium + Tårn": [188, 118, 96, 220],
                     }
-                    base_color = PART_COLORS.get(typology, [34, 197, 94, 200])
+                    base_color = PART_COLORS.get(typology, [64, 126, 188, 210])
                     ai_massing = []
                     for bld in ai_buildings:
                         bld_poly = bld.get("polygon")
@@ -2892,7 +2892,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                         if role == "wing":
                             color = [int(c * 0.8) for c in base_color[:3]] + [180]
                         elif role == "tower":
-                            color = [56, 140, 248, 230]
+                            color = [31, 55, 95, 230]
                         ai_massing.append({
                             "name": bld.get("name", typology),
                             "height_m": float(bld.get("height_m", site.floor_to_floor_m * 4)),
@@ -4362,10 +4362,9 @@ def _typology_dimension_hint(typology: str) -> str:
         return 'mål: bunn 50 m · sider 25-30 m · dybde 12 m'
     return ''
 
+
 def _alpha_num_tag(index: int) -> str:
-    idx = int(index)
-    if idx < 0:
-        idx = 0
+    idx = max(0, int(index))
     tag = ''
     while True:
         idx, rem = divmod(idx, 26)
@@ -4376,7 +4375,16 @@ def _alpha_num_tag(index: int) -> str:
     return tag
 
 
-def _draw_badge(draw: ImageDraw.ImageDraw, center: Tuple[float, float], text_value: str, *, fill: Tuple[int, int, int, int], outline: Tuple[int, int, int, int], font, text_fill: Tuple[int, int, int, int] = (24, 24, 24, 255)) -> None:
+def _draw_badge(
+    draw: ImageDraw.ImageDraw,
+    center: Tuple[float, float],
+    text_value: str,
+    *,
+    fill: Tuple[int, int, int, int],
+    outline: Tuple[int, int, int, int],
+    font,
+    text_fill: Tuple[int, int, int, int] = (24, 24, 24, 255),
+) -> None:
     label = str(text_value or '').strip() or '?'
     try:
         bbox = font.getbbox(label)
@@ -4395,7 +4403,6 @@ def _draw_badge(draw: ImageDraw.ImageDraw, center: Tuple[float, float], text_val
         outline=outline,
     )
     draw.text((x - tw / 2, y - th / 2 - 1), label, fill=text_fill, font=font)
-
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
@@ -4521,11 +4528,11 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             return (len(text_value) * 10, 16)
 
     typo_colors = {
-        'Lamell': (181, 148, 111, 245),
-        'Punkthus': (132, 154, 121, 245),
-        'Karré': (223, 208, 174, 245),
-        'Rekkehus': (178, 134, 98, 245),
-        'Tun': (188, 163, 126, 245),
+        'Lamell': (64, 126, 188, 245),
+        'Punkthus': (74, 184, 179, 245),
+        'Karré': (66, 103, 155, 245),
+        'Rekkehus': (92, 149, 120, 245),
+        'Tun': (116, 132, 164, 245),
     }
 
     draw.rectangle([(0, 0), (canvas_w, canvas_h)], fill=(244, 244, 241, 255))
@@ -4603,8 +4610,8 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             avg_y = sum(p[1] for p in part['coords']) / len(part['coords'])
             roof_x, roof_y = iso_project(avg_x, avg_y, part['height_m'] + 1.4)
             badge_y = roof_y - 24
-            draw.line([(roof_x, roof_y - 2), (roof_x, badge_y + 10)], fill=(94, 88, 78, 180), width=2)
-            _draw_badge(draw, (roof_x, badge_y), part['tag'], fill=(255, 255, 255, 230), outline=(136, 128, 114, 185), font=font_small)
+            draw.line([(roof_x, roof_y - 2), (roof_x, badge_y + 10)], fill=(66, 103, 155, 150), width=2)
+            _draw_badge(draw, (roof_x, badge_y), part['tag'], fill=(255, 255, 255, 230), outline=(66, 103, 155, 190), font=font_small)
 
     green_polys = public_polys or courtyard_polys
     for item in green_polys[:14]:
@@ -4657,20 +4664,19 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     schedule = sorted(proposed, key=lambda item: item['idx'])[:8]
     if schedule:
         for idx, part in enumerate(schedule, start=1):
-            card_h = 58
+            card_h = 68
             draw.rounded_rectangle([(panel_x, py), (canvas_w - 44, py + card_h)], radius=14, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
-            badge = part['tag']
+            badge = part.get('tag', _alpha_num_tag(idx - 1))
             draw.ellipse([(panel_x + 10, py + 12), (panel_x + 34, py + 36)], fill=part['color'], outline=(120, 110, 96, 180))
             tw, th = label_bbox(badge, font_tiny)
             draw.text((panel_x + 22 - tw / 2, py + 24 - th / 2), badge, fill=(35, 34, 30, 255), font=font_tiny)
-            title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
+            title = f"{part.get('tag', _alpha_num_tag(idx - 1))} · {part['typology']} · {part['floors']} et."
             draw.text((panel_x + 46, py + 9), title, fill=(31, 31, 31, 255), font=font_micro)
             dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-            area_text = f"fotavtrykk {part['area_m2']:.0f} m²" if part['area_m2'] > 0 else ''
-            draw.text((panel_x + 46, py + 30), dim_text, fill=(64, 62, 58, 255), font=font_micro)
-            if area_text:
-                aw, _ = label_bbox(area_text, font_tiny)
-                draw.text((canvas_w - 54 - aw, py + 31), area_text, fill=(100, 98, 92, 255), font=font_tiny)
+            draw.text((panel_x + 46, py + 28), f"Mål: {dim_text}", fill=(64, 62, 58, 255), font=font_micro)
+            if part['area_m2'] > 0:
+                area_text = f"Fotavtrykk: {part['area_m2']:.0f} m²"
+                draw.text((panel_x + 46, py + 46), area_text, fill=(100, 98, 92, 255), font=font_tiny)
             py += card_h + 10
     else:
         draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_micro)
@@ -4794,11 +4800,11 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             return (len(text_value) * 10, 16)
 
     typo_colors = {
-        'Lamell': (173, 141, 106, 235),
-        'Punkthus': (131, 154, 120, 235),
-        'Karré': (225, 214, 181, 235),
-        'Rekkehus': (179, 136, 99, 235),
-        'Tun': (188, 163, 126, 235),
+        'Lamell': (64, 126, 188, 235),
+        'Punkthus': (74, 184, 179, 235),
+        'Karré': (66, 103, 155, 235),
+        'Rekkehus': (92, 149, 120, 235),
+        'Tun': (116, 132, 164, 235),
     }
 
     draw.rectangle([(0, 0), (left_panel_w, canvas_h)], fill=(240, 240, 237, 255))
@@ -4834,16 +4840,16 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     sy = 678
     if schedule:
         for idx, part, length_m, depth_m, area_m2 in schedule:
-            card_h = 52
+            card_h = 60
             draw.rounded_rectangle([(42, sy), (left_panel_w - 22, sy + card_h)], radius=12, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
             badge_color = tuple(int(v) for v in ((part.get('color') or typo_colors.get(part.get('typology', option.typology), (173,141,106,235)))[:4])) if isinstance(part.get('color'), list) else typo_colors.get(part.get('typology', option.typology), (173,141,106,235))
             draw.ellipse([(52, sy + 12), (76, sy + 36)], fill=badge_color, outline=(115, 108, 96, 180))
             label = _alpha_num_tag(idx - 1)
             tw, th = label_bbox(label, font_tiny)
             draw.text((64 - tw / 2, sy + 24 - th / 2), label, fill=(32, 32, 32, 255), font=font_tiny)
-            draw.text((88, sy + 10), _format_dimensions(length_m, depth_m), fill=(32, 32, 32, 255), font=font_micro)
-            meta = f"{part.get('typology', option.typology)} · {int(part.get('floors', option.floors) or option.floors)} et. · {area_m2:.0f} m²"
-            draw.text((88, sy + 30), meta, fill=(88, 86, 80, 255), font=font_tiny)
+            draw.text((88, sy + 10), f"{part.get('typology', option.typology)} · {int(part.get('floors', option.floors) or option.floors)} et.", fill=(32, 32, 32, 255), font=font_micro)
+            draw.text((88, sy + 29), f"Mål: {_format_dimensions(length_m, depth_m)}", fill=(88, 86, 80, 255), font=font_tiny)
+            draw.text((88, sy + 45), f"Fotavtrykk: {area_m2:.0f} m²", fill=(88, 86, 80, 255), font=font_tiny)
             sy += card_h + 8
             if sy > canvas_h - 88:
                 break
@@ -4899,14 +4905,14 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
         if isinstance(base_c, list) and len(base_c) >= 3:
             color = tuple(int(v) for v in base_c[:4]) if len(base_c) >= 4 else (int(base_c[0]), int(base_c[1]), int(base_c[2]), 225)
         else:
-            color = typo_colors.get(typ, (173, 141, 106, 235))
-        draw_poly(coords, fill=color, outline=(50, 50, 50, 190), width=2)
+            color = typo_colors.get(typ, (64, 126, 188, 235))
+        draw_poly(coords, fill=color, outline=(31, 55, 95, 190), width=2)
 
         pp = pts(coords)
         cx_l = sum(p[0] for p in pp) / len(pp)
         cy_l = sum(p[1] for p in pp) / len(pp)
         tag = _alpha_num_tag(idx)
-        _draw_badge(draw, (cx_l, cy_l), tag, fill=(255, 255, 255, 214), outline=(124, 120, 112, 145), font=font_small)
+        _draw_badge(draw, (cx_l, cy_l), tag, fill=(255, 255, 255, 220), outline=(66, 103, 155, 170), font=font_small, text_fill=(31, 55, 95, 255))
 
     draw_poly(flatten_coord_groups(site_coords), fill=None, outline=(202, 66, 66, 255), width=3)
 
@@ -4955,6 +4961,61 @@ def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[I
     return views
 
 
+
+def build_manual_volume_analysis(option: Optional[OptionResult]) -> str:
+    """Kort tekst for volumskisse-siden: hva som fungerer og hva som bør videreutvikles."""
+    if option is None:
+        return (
+            "Styrke: volumene viser en tydelig hovedidé og gir et godt utgangspunkt for videre bearbeiding. "
+            "Videre arbeid: avklar byggavstander, grøntrom og hvilke volumer som skal være primære i komposisjonen."
+        )
+
+    geometry = option.geometry or {}
+    parts = list(geometry.get('massing_parts', []) or [])
+    typologies = [str(p.get('typology') or option.typology) for p in parts]
+    part_count = len(parts)
+    avg_floors = 0.0
+    if parts:
+        avg_floors = sum(float(p.get('floors', option.floors) or option.floors) for p in parts) / max(len(parts), 1)
+    has_courtyard = bool(geometry.get('courtyard_polygons')) or 'karr' in option.typology.lower()
+    has_public_realm = bool(geometry.get('public_realm_polygons'))
+    has_view_corridors = bool(geometry.get('view_corridor_polygons'))
+
+    strengths = []
+    improvements = []
+
+    if has_courtyard:
+        strengths.append('gårdsrommet/grøntrommet gir prosjektet en tydelig indre struktur')
+    if has_public_realm:
+        strengths.append('volumene danner lesbare uterom og en klar kant mot omgivelsene')
+    if has_view_corridors:
+        strengths.append('åpninger og siktlinjer gjør grepet lettere og mer orienterbart')
+    if part_count >= 5:
+        strengths.append('flere bygg gir mulighet for trinnvis høyde- og typologivariasjon')
+    if not strengths:
+        strengths.append('hovedgrepet er enkelt å lese og egner seg godt for videre prosjektering')
+
+    if 'Punkthus' in typologies and 'Lamell' in typologies:
+        improvements.append('samspillet mellom lameller og punkthus kan strammes ytterligere slik at grøntrommet blir enda tydeligere')
+    elif 'Karré' in typologies:
+        improvements.append('forholdet mellom kvartalskanter og indre gårdsrom bør finjusteres slik at ringene oppleves mer komplette')
+    else:
+        improvements.append('tetthet og avstand mellom volumene bør kalibreres videre for å styrke helheten')
+
+    if avg_floors > 5.5:
+        improvements.append('overgangen mot naboskala bør vurderes i de høyeste volumene')
+    improvements.append('innganger, aktive førsteetasjer og landskapsgrep bør konkretiseres i neste iterasjon')
+
+    return (
+        f"Styrker: {strengths[0].capitalize()}"
+        + (f". I tillegg {strengths[1]}" if len(strengths) > 1 else '')
+        + '. '
+        + f"Videre arbeid: {improvements[0].capitalize()}"
+        + (f". Dessuten {improvements[1]}" if len(improvements) > 1 else '')
+        + '.'
+    )
+
+
 def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
     geometry = option.geometry or {}
     src_crs = site.polygon_crs or 'EPSG:25833'
@@ -4963,12 +5024,18 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
     footprint_rings = project_coord_groups_to_lonlat(geometry.get('footprint_polygon_coords') or [], src_crs=src_crs)
 
     massing_parts = []
-    for part in geometry.get('massing_parts', []) or []:
+    for idx, part in enumerate(geometry.get('massing_parts', []) or []):
+        length_m, depth_m, area_m2 = _part_dimensions(part)
         massing_parts.append({
             'name': part.get('name', option.typology),
+            'tag': _alpha_num_tag(idx),
             'height_m': float(part.get('height_m', option.building_height_m)),
             'floors': int(part.get('floors', option.floors)),
-            'color': part.get('color', [34, 197, 94, 0.80]),
+            'typology': part.get('typology', option.typology),
+            'width_m': round(length_m, 1),
+            'depth_m': round(depth_m, 1),
+            'area_m2': round(area_m2, 1),
+            'color': part.get('color', [64, 126, 188, 0.82]),
             'rings': project_coord_groups_to_lonlat(part.get('coords') or [], src_crs=src_crs),
         })
 
@@ -5753,6 +5820,9 @@ async function captureSolarSnapshots() {
   const status = document.getElementById('captureStatus');
   const downloadContainer = document.getElementById('captureDownloads');
   const downloadLinks = document.getElementById('captureDownloadLinks');
+  const hiddenLabelSprites = [...volumeLabelSprites, ...neighborLabelSprites].filter(Boolean);
+  const hiddenLabelStates = hiddenLabelSprites.map((sprite) => sprite.visible);
+  hiddenLabelSprites.forEach((sprite) => { sprite.visible = false; });
   btn.disabled = true;
   btn.style.opacity = '0.6';
   const originalLabel = btn.textContent;
@@ -5839,6 +5909,7 @@ async function captureSolarSnapshots() {
   sendToParent({ source: 'builtly_solar_capture', type: 'done', count: captureTimes.length });
   console.log('[Builtly] Capture complete. State = ready.');
 
+  hiddenLabelSprites.forEach((sprite, idx) => { sprite.visible = hiddenLabelStates[idx]; });
   if (downloadContainer) downloadContainer.style.display = 'block';
   status.textContent = '✓ Klart! Last ned bildene under og last opp i rapporten.';
   btn.disabled = false;
@@ -5851,6 +5922,8 @@ document.getElementById('captureSolar').addEventListener('click', captureSolarSn
 // --- TERRENG ---
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
+const volumeLabelSprites = [];
+const neighborLabelSprites = [];
 
 function getTerrainY(lx, ly) {
   // Bruk regresjonsplan for aa beregne terrenghoeyde
@@ -6015,6 +6088,7 @@ D.neighbors.forEach(n => {
     ls.position.set(cx, baseY + n.height + D.site_span * 0.015, cy);
     ls.scale.set(D.site_span * 0.10, D.site_span * 0.025, 1);
     scene.add(ls);
+    neighborLabelSprites.push(ls);
   }
 });
 
@@ -6043,6 +6117,7 @@ D.volumes.forEach(v => {
   sprite.position.set(cx, baseY + v.height + D.site_span * 0.04, cy);
   sprite.scale.set(D.site_span * 0.22, D.site_span * 0.055, 1);
   scene.add(sprite);
+  volumeLabelSprites.push(sprite);
 });
 
 // --- ORBIT CONTROLS ---
@@ -8382,8 +8457,10 @@ def create_full_report_pdf(
             "Bildene nedenfor viser den manuelt redigerte volumplasseringen "
             "som er valgt for videre bearbeiding."
         )
+        chosen_for_analysis = options[0] if options else None
+        pdf.body_text(build_manual_volume_analysis(chosen_for_analysis))
         pdf.ln(4)
-        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
+        view_labels = ["Skrå volumskisse", "Planvisning (mer ovenfra)", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
