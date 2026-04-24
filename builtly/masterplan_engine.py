@@ -191,14 +191,17 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     area = max(float(buildable_poly.area), 1.0)
     density = float(target_bra_m2) / area if target_bra_m2 > 0 else 0.0
     if requested_count is None:
-        # Små tomter og infill-prosjekter skal ikke tvinges inn i 4-7 delfelt.
-        # På slike tomter er ett helhetlig volumgrep ofte riktigere enn mange små felt.
-        if area < 10_000.0:
-            # Små og mellomsmå tomter bør som hovedregel behandles som ett samlet felt.
-            # Variasjonen skjer inne i feltet, ikke ved å fragmentere tomten i mange delfelt.
-            count = 1
-        elif area < 15_000.0:
-            count = max(2, min(count + (1 if density >= 1.15 else 0), 3))
+        compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
+        urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
+
+        # Små, tette tomter skal ikke over-fragmenteres. Der skjer variasjonen inne i
+        # ett eller to felt – ikke gjennom mange små delfelt.
+        if compact_infill:
+            count = 1 if area <= 3500.0 else min(max(count, 1), 2)
+        elif urban_infill:
+            count = min(max(count, 2), 3)
+            if density >= 1.80:
+                count = min(count + 1, 3)
         else:
             if density >= 1.0:
                 count += 1

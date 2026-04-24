@@ -114,6 +114,25 @@ def _karre_shape_support(poly: Any) -> float:
     return 0.0
 
 
+def _lamell_field_fit_possible(poly: Any) -> bool:
+    major, minor = _minimum_rotated_dims(poly)
+    return major >= 48.0 and minor >= 16.0
+
+
+def _fallback_typology_for_field(poly: Any, density: float) -> Typology:
+    area_m2 = float(getattr(poly, 'area', 0.0) or 0.0)
+    major, minor = _minimum_rotated_dims(poly)
+    if area_m2 <= 3200.0 or major < 48.0 or minor < 18.0:
+        return Typology.PUNKTHUS
+    if density >= 2.0 and area_m2 <= 7000.0:
+        return Typology.PUNKTHUS
+    return Typology.LAMELL
+
+
+def _karre_field_fit_possible(poly: Any) -> bool:
+    return _karre_shape_support(poly) >= 0.60
+
+
 def _count_bounds_for_field_area(field_area_m2: float, typology: Typology) -> Tuple[int, int]:
     min_area, max_area = _AREA_PER_BUILDING_RULES.get(typology, (1200.0, 2200.0))
     if field_area_m2 <= 0:

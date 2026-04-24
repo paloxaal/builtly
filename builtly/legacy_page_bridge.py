@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Sequence
 
 from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon, box
@@ -363,6 +363,42 @@ def _pick_plan_regler(byggesone: str) -> PlanRegler:
     return TRONDHEIM_KPA_2022_SONE_2 if str(byggesone) == "2" else GENERISK_TEK17_NORGE
 
 
+def _adapt_plan_regler_for_context(regler: PlanRegler, buildable_poly: Polygon, target_bra_m2: float) -> PlanRegler:
+    area = float(getattr(buildable_poly, 'area', 0.0) or 0.0)
+    density = float(target_bra_m2 or 0.0) / max(area, 1.0)
+    compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
+    urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
+    custom = dict(getattr(regler, 'custom_rules', {}) or {})
+    max_floors = int(getattr(regler, 'max_floors', 5) or 5)
+    avg_floors = max(2.5, (max_floors + 2.0) / 2.0)
+    required_bya_pct = float(target_bra_m2 or 0.0) / max(avg_floors * max(area, 1.0), 1.0) * 100.0
+
+    if compact_infill:
+        custom.update({'site_mode': 'compact_infill', 'mua_priority': 'advisory', 'allow_full_site_fill': True})
+        return replace(
+            regler,
+            max_bya_pct=max(float(getattr(regler, 'max_bya_pct', 0.0) or 0.0), min(90.0, max(65.0, required_bya_pct * 1.10))),
+            mua_per_bolig_m2=0.0,
+            mua_min_felles_pct=0.0,
+            mua_min_bakke_pct=0.0,
+            custom_rules=custom,
+        )
+
+    if urban_infill:
+        custom.update({'site_mode': 'urban_infill', 'mua_priority': 'reduced'})
+        current_mua = float(getattr(regler, 'mua_per_bolig_m2', 0.0) or 0.0)
+        return replace(
+            regler,
+            max_bya_pct=max(float(getattr(regler, 'max_bya_pct', 0.0) or 0.0), min(78.0, max(42.0, required_bya_pct * 1.05))),
+            mua_per_bolig_m2=min(current_mua, 15.0) if current_mua > 0.0 else 0.0,
+            mua_min_felles_pct=min(float(getattr(regler, 'mua_min_felles_pct', 0.0) or 0.0), 0.20),
+            mua_min_bakke_pct=min(float(getattr(regler, 'mua_min_bakke_pct', 0.0) or 0.0), 0.20),
+            custom_rules=custom,
+        )
+
+    return regler
+
+
 def build_phasing_ui(*, target_bra_m2: float, key_prefix: str = "masterplan"):
     import streamlit as st
 
@@ -476,6 +512,7 @@ def run_masterplan_from_site_inputs(
     try:
         buildable_poly = _poly_from_context(site, geodata_context)
         regler = _pick_plan_regler(byggesone)
+        regler = _adapt_plan_regler_for_context(regler, buildable_poly, float(target_bra_m2))
         barnehage = BarnehageConfig(
             enabled=bool(include_barnehage),
             inne_m2=1279.0 if include_barnehage else 0.0,
