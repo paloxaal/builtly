@@ -755,6 +755,106 @@ def _upload_report_bytes(
         return False, "", f"Upload feilet: {e}"
 
 
+def save_project_data(project_data: Dict) -> Tuple[bool, str]:
+    """Lagre brukerens project_data til Supabase-profil.
+
+    Løsning for at ssot.json er ephemeral på Render. Project_data lagres
+    som JSON-blob på `profiles.project_data_json`-kolonnen. Ved
+    sidelasting kan vi restaurere fra denne i stedet for å vise
+    "sett opp prosjekt"-siden.
+
+    Args:
+        project_data: Dict med p_name, c_name, adresse, kommune, osv.
+            Hele dicten lagres; den kan inneholde mer enn de dokumenterte
+            feltene.
+
+    Returns:
+        (success, error_message). Hvis success=False, forklarer
+        error_message hvorfor (f.eks. "ikke logget inn", "kolonnen
+        mangler", "Supabase-feil").
+
+    Merk:
+        Krever at `profiles`-tabellen har en JSONB-kolonne `project_data_json`.
+        Hvis den mangler må du kjøre følgende i Supabase SQL-editor:
+
+            ALTER TABLE profiles ADD COLUMN project_data_json JSONB;
+
+        Funksjonen feiler stille (returnerer False) hvis kolonnen ikke
+        finnes, slik at appen ikke krasjer.
+    """
+    if not isinstance(project_data, dict):
+        return False, "project_data er ikke en dict"
+    uid = st.session_state.get("user_id", "")
+    if not uid:
+        return False, "ikke logget inn"
+    sb = _sb()
+    if not sb:
+        return False, "Supabase ikke konfigurert"
+    try:
+        # Bruk upsert for å unngå feil hvis profil-rad ikke finnes.
+        # update_() er trygg: hvis project_data_json-kolonnen mangler,
+        # kaster Supabase en feil som vi fanger.
+        sb.table("profiles").update({
+            "project_data_json": project_data,
+            "project_data_updated_at": datetime.utcnow().isoformat(),
+        }).eq("id", uid).execute()
+        return True, ""
+    except Exception as exc:
+        # Vanligst: kolonnen project_data_json finnes ikke i tabellen.
+        return False, str(exc)
+
+
+def load_project_data() -> Optional[Dict]:
+    """Last brukerens project_data fra Supabase-profil.
+
+    Returns:
+        Dict med project_data hvis funnet, None ellers. Fjerner "" og
+        "Nytt Prosjekt" som p_name siden disse betyr "ikke satt opp".
+    """
+    uid = st.session_state.get("user_id", "")
+    if not uid:
+        return None
+    sb = _sb()
+    if not sb:
+        return None
+    try:
+        row = sb.table("profiles").select("project_data_json")\
+            .eq("id", uid).single().execute()
+        pdj = (row.data or {}).get("project_data_json")
+        if not pdj:
+            return None
+        # Supabase returnerer JSONB som allerede-parset dict, men noen
+        # klienter gir string. Håndter begge.
+        if isinstance(pdj, str):
+            pdj = json.loads(pdj)
+        if not isinstance(pdj, dict):
+            return None
+        # Tom prosjekt teller som "ikke satt opp"
+        if pdj.get("p_name") in ("", "Nytt Prosjekt", None):
+            return None
+        return pdj
+    except Exception:
+        return None
+
+
+def save_project_data_to_session_and_remote(project_data: Dict) -> None:
+    """Praktisk helper: oppdater session_state OG persist til Supabase.
+
+    Brukes fra Project Setup og andre sider som endrer project_data.
+    Feiler stille hvis Supabase ikke er tilgjengelig.
+    """
+    try:
+        st.session_state["project_data"] = dict(project_data)
+    except Exception:
+        pass
+    # Best-effort remote persist
+    try:
+        save_project_data(project_data)
+    except Exception:
+        pass
+
+
+
 def save_report(project_name: str, report_name: str, module: str,
                 pdf_bytes: Optional[bytes] = None,
                 file_path: str = "", download_url: str = "",
