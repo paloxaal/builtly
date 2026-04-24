@@ -384,6 +384,14 @@ class MUAReport:
     open_ground_area: float = 0.0
     checks: List[ComplianceCheck] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # Kontekst-adaptive felter (fra mua.py _resolve_mua_context):
+    # Gjør at MUA-vurderingen kan være strict/reduced/advisory basert på
+    # tomtens tetthet og størrelse. Tette infill-prosjekter får redusert
+    # eller rådgivende MUA-krav; større boligfelt får strict.
+    mode: str = "strict"  # "strict" | "reduced" | "advisory"
+    effective_requirement_factor: float = 1.0
+    score_weight: float = 1.0
+    advisory_override: bool = False
 
     @property
     def compliant(self) -> bool:
