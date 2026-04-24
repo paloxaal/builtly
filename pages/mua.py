@@ -1,153 +1,168 @@
 from __future__ import annotations
 
-"""Deterministic MUA / open-space calculations for Builtly v8 delivery 3."""
+from typing import List, Tuple
 
-from typing import List, Optional
-
-from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
-from .masterplan_types import ComplianceCheck, ComplianceState, MUAReport, Masterplan, PlanRegler
+from .masterplan_types import ComplianceCheck, ComplianceState, MUAReport
 
 
-def _status_for(actual: Optional[float], required: Optional[float], *, tol: float = 1e-6) -> ComplianceState:
-    if actual is None or required is None:
-        return ComplianceState.IKKE_VURDERT
-    return ComplianceState.JA if actual + tol >= required else ComplianceState.NEI
+def _bool_state(ok: bool) -> ComplianceState:
+    return ComplianceState.JA if ok else ComplianceState.NEI
 
 
-def _resolve_buildable_polygon(plan: Masterplan, buildable_poly: Optional[Polygon] = None) -> Optional[Polygon]:
-    if buildable_poly is not None and not buildable_poly.is_empty:
-        return buildable_poly.buffer(0)
-    if plan.buildable_polygon is not None and not plan.buildable_polygon.is_empty:
-        return plan.buildable_polygon.buffer(0)
-    if plan.delfelt:
-        return unary_union([field.polygon for field in plan.delfelt]).buffer(0)
-    return None
+def _resolve_mua_context(site_area: float, total_bra: float, total_bya: float, regler=None) -> Tuple[str, float, float, str]:
+    """Bestem hvor hardt MUA skal håndheves.
+
+    Målet er å unngå at små, tette infill-prosjekter blir systematisk vraket bare
+    fordi standard MUA-krav er skrevet for romsligere boligfelt. Samtidig skal vi
+    fortsatt beholde normal strenghet på større tomter.
+
+    Returnerer:
+      mode: strict | reduced | advisory
+      requirement_factor: skalerer MUA-kravene
+      score_weight: hvor mye MUA skal telle i konseptscoren
+      note: forklaring
+    """
+    density = float(total_bra or 0.0) / max(float(site_area or 0.0), 1.0)
+    coverage = float(total_bya or 0.0) / max(float(site_area or 0.0), 1.0)
+    custom = getattr(regler, "custom_rules", {}) or {}
+
+    if custom.get("mua_priority") == "advisory":
+        return (
+            "advisory",
+            0.0,
+            0.0,
+            "MUA er satt til rådgivende via custom_rules; BRA- og bygningsgrep prioriteres foran uteoppholdsareal i dette scenariet.",
+        )
+    if custom.get("mua_priority") == "reduced":
+        return (
+            "reduced",
+            0.45,
+            0.35,
+            "MUA er satt til redusert via custom_rules; tett bymessig/infill-preget utvikling tillater lavere utearealandel enn standard boligfelt.",
+        )
+
+    # Svært tett småtomt / infill: MUA er rådgivende.
+    if site_area <= 3_000.0 and (density >= 2.0 or coverage >= 0.65):
+        return (
+            "advisory",
+            0.0,
+            0.0,
+            "Tomten leses som tett infill med høy utnyttelse; MUA behandles derfor som rådgivende i konseptfasen.",
+        )
+
+    # Kompakt tomt med høy utnyttelse: reduser kravene, men behold dem.
+    if site_area <= 5_500.0 and (density >= 1.4 or coverage >= 0.50):
+        return (
+            "reduced",
+            0.45,
+            0.35,
+            "Tomten er liten/tett og vurderes som urban infill; MUA-kravene skaleres ned slik at BRA-mål ikke automatisk underkjennes.",
+        )
+
+    if site_area <= 9_000.0 and (density >= 1.0 or coverage >= 0.42):
+        return (
+            "reduced",
+            0.70,
+            0.60,
+            "Tomten er relativt kompakt og tett; MUA-kravene reduseres moderat i tidligfase.",
+        )
+
+    return (
+        "strict",
+        1.0,
+        1.0,
+        "Standard MUA-logikk brukes; tomten har nok størrelse/luft til at uteoppholdsareal skal vurderes som ordinært krav.",
+    )
 
 
-def evaluate_compliance(
-    *,
-    total: float,
-    krav_total: Optional[float],
-    bakke: float,
-    krav_bakke: Optional[float],
-    fellesareal: float,
-    krav_felles: Optional[float],
-    mua_sol_timer_actual: Optional[float],
-    mua_sol_timer_required: Optional[float],
-) -> List[ComplianceCheck]:
-    checks: List[ComplianceCheck] = [
-        ComplianceCheck(
-            rule_key="mua_total",
-            status=_status_for(total, krav_total),
-            actual_value=total,
-            required_value=krav_total,
-            unit="m²",
-            note=("Total uteoppholdsareal." if krav_total is not None else "Ikke vurdert fordi mua_per_bolig_m2 ikke er satt."),
-        ),
-        ComplianceCheck(
-            rule_key="mua_felles",
-            status=_status_for(fellesareal, krav_felles),
-            actual_value=fellesareal,
-            required_value=krav_felles,
-            unit="m²",
-            note=("Felles bakke- og takareal." if krav_felles is not None else "Ikke vurdert fordi mua_min_felles_pct ikke er satt."),
-        ),
-        ComplianceCheck(
-            rule_key="mua_bakke",
-            status=_status_for(bakke, krav_bakke),
-            actual_value=bakke,
-            required_value=krav_bakke,
-            unit="m²",
-            note=("Felles areal på bakkeplan." if krav_bakke is not None else "Ikke vurdert fordi mua_min_bakke_pct ikke er satt."),
-        ),
+def calculate_mua(plan, regler=None):
+    buildable = getattr(plan, "buildable_polygon", None)
+    site_area = float(getattr(plan, "site_area_m2", 0.0) or getattr(buildable, "area", 0.0) or 0.0)
+    bygg = list(getattr(plan, "bygg", []) or [])
+    footprints = [getattr(b, "footprint", None) for b in bygg if getattr(b, "footprint", None) is not None]
+    footprint_union = unary_union(footprints).buffer(0) if footprints else None
+    total_bya = float(getattr(plan, "total_bya_m2", 0.0) or getattr(footprint_union, "area", 0.0) or 0.0)
+    total_bra = float(getattr(plan, "total_bra_m2", 0.0) or 0.0)
+    open_ground = max(
+        0.0,
+        site_area
+        - total_bya
+        - float(getattr(plan, "parkering_areal", 0.0) or 0.0)
+        - float(getattr(plan, "vei_areal", 0.0) or 0.0),
+    )
+
+    private = 0.0
+    for b in bygg:
+        typ = getattr(getattr(b, "typology", None), "value", str(getattr(b, "typology", "")))
+        fp = float(getattr(b, "footprint_m2", 0.0) or 0.0)
+        if typ == "Rekkehus":
+            private += fp * 0.24
+        elif typ == "Karré":
+            private += fp * 0.05
+        else:
+            private += fp * 0.08
+    tak = sum(float(getattr(b, "tak_mua_m2", 0.0) or 0.0) for b in bygg)
+    felles_ground = max(0.0, open_ground - private)
+    total = felles_ground + private + tak
+
+    units = int(getattr(plan, "antall_boliger", 0) or 0)
+    req_per_unit = float(getattr(regler, "mua_per_bolig_m2", 0.0) or 0.0) if regler is not None else 0.0
+    min_bakke_pct = float(getattr(regler, "mua_min_bakke_pct", 0.0) or 0.0) if regler is not None else 0.0
+    min_felles_pct = float(getattr(regler, "mua_min_felles_pct", 0.0) or 0.0) if regler is not None else 0.0
+
+    mode, req_factor, score_weight, context_note = _resolve_mua_context(site_area, total_bra, total_bya, regler)
+
+    raw_krav_total = req_per_unit * units if req_per_unit > 0 and units > 0 else None
+    krav_total = raw_krav_total * req_factor if raw_krav_total is not None and req_factor > 0 else None
+    krav_bakke = krav_total * min_bakke_pct if krav_total is not None and min_bakke_pct > 0 else None
+    krav_felles = krav_total * min_felles_pct if krav_total is not None and min_felles_pct > 0 else None
+
+    checks: List[ComplianceCheck] = []
+    notes = [
+        "MUA er beregnet deterministisk fra buildable polygon minus bygg, vei og parkering.",
+        "Private soner og takterrasser er anslått ut fra typologi og etasjetall.",
+        context_note,
     ]
 
-    if mua_sol_timer_actual is not None or mua_sol_timer_required is not None:
+    if mode == "advisory":
         checks.append(
             ComplianceCheck(
-                rule_key="mua_sol_timer",
-                status=_status_for(mua_sol_timer_actual, mua_sol_timer_required),
-                actual_value=mua_sol_timer_actual,
-                required_value=mua_sol_timer_required,
-                unit="timer",
-                note=("Vårjevndøgn, gjennomsnittlige soltimer på MUA." if mua_sol_timer_required is not None else "Ikke vurdert fordi solkrav for MUA ikke er satt."),
+                "mua_context_override",
+                ComplianceState.JA,
+                actual_value=total,
+                required_value=raw_krav_total,
+                unit="m²",
+                note="Tett infill / høy utnyttelse: MUA er rådgivende i konseptfasen og skal ikke automatisk underkjenne volumgrepet.",
             )
         )
-    return checks
-
-
-def calculate_mua(
-    plan: Masterplan,
-    regler: Optional[PlanRegler] = None,
-    buildable_poly: Optional[Polygon] = None,
-    parkering_areal: Optional[float] = None,
-    vei_areal: Optional[float] = None,
-    privat_mua_m2: Optional[float] = None,
-    sol_report=None,
-) -> MUAReport:
-    rules = regler or plan.plan_regler or PlanRegler()
-    resolved_buildable = _resolve_buildable_polygon(plan, buildable_poly=buildable_poly)
-
-    if resolved_buildable is None:
-        return MUAReport(
-            checks=[
-                ComplianceCheck(
-                    rule_key="mua_geometry",
-                    status=ComplianceState.IKKE_VURDERT,
-                    note="Manglende buildable polygon; MUA kan ikke beregnes.",
-                )
-            ]
-        )
-
-    built_union = unary_union([building.footprint for building in plan.bygg]) if plan.bygg else None
-    built_area = float(built_union.area) if built_union is not None else 0.0
-    parking_area = float(plan.parkering_areal if parkering_areal is None else parkering_areal)
-    road_area = float(plan.vei_areal if vei_areal is None else vei_areal)
-    bakke_mua = max(0.0, float(resolved_buildable.area) - built_area - parking_area - road_area)
-    tak_mua = sum(building.tak_mua_m2 for building in plan.bygg)
-    privat_mua = float(sum(max(0.0, float(building.privat_mua_m2)) for building in plan.bygg))
-    if privat_mua_m2 is not None:
-        privat_mua = max(privat_mua, float(privat_mua_m2))
-
-    krav_total = None
-    krav_felles = None
-    krav_bakke = None
-
-    if rules.mua_per_bolig_m2 is not None:
-        krav_total = float(plan.antall_boliger) * float(rules.mua_per_bolig_m2)
-        if rules.mua_min_felles_pct is not None:
-            krav_felles = krav_total * (float(rules.mua_min_felles_pct) / 100.0)
-            if rules.mua_min_bakke_pct is not None:
-                krav_bakke = krav_felles * (float(rules.mua_min_bakke_pct) / 100.0)
-
-    fellesareal = bakke_mua + tak_mua
-    total = fellesareal + privat_mua
-    req_sol = rules.sol_krav_timer_varjevndogn if rules.sol_krav_timer_varjevndogn is not None else rules.mua_min_sol_timer
-    effective_sol_report = sol_report if sol_report is not None else plan.sol_report
-    actual_sol = effective_sol_report.mua_soltimer_varjevndogn if effective_sol_report else None
-
-    checks = evaluate_compliance(
-        total=total,
-        krav_total=krav_total,
-        bakke=bakke_mua,
-        krav_bakke=krav_bakke,
-        fellesareal=fellesareal,
-        krav_felles=krav_felles,
-        mua_sol_timer_actual=actual_sol,
-        mua_sol_timer_required=req_sol,
-    )
+    else:
+        if krav_total is not None:
+            checks.append(ComplianceCheck("mua_total", _bool_state(total >= krav_total), total, krav_total, "m²", "Totalt uteoppholdsareal"))
+        if krav_bakke is not None:
+            checks.append(ComplianceCheck("mua_bakke", _bool_state(open_ground >= krav_bakke), open_ground, krav_bakke, "m²", "Areal på bakkeplan"))
+        if krav_felles is not None:
+            checks.append(ComplianceCheck("mua_felles", _bool_state(felles_ground >= krav_felles), felles_ground, krav_felles, "m²", "Felles tilgjengelig uteareal"))
+        if mode == "reduced":
+            notes.append(
+                f"Effektivt MUA-krav er skalert til {req_factor:.0%} av standardkravet for å håndtere kompakt/tett bymessig utvikling."
+            )
 
     return MUAReport(
         total=total,
         krav_total=krav_total,
-        bakke=bakke_mua,
+        bakke=open_ground,
         krav_bakke=krav_bakke,
-        tak=tak_mua,
-        fellesareal=fellesareal,
+        fellesareal=felles_ground,
         krav_fellesareal=krav_felles,
-        privat=privat_mua,
-        open_ground_area=max(0.0, float(resolved_buildable.area) - built_area),
+        privat=private,
+        tak=tak,
+        open_ground_area=open_ground,
         checks=checks,
+        notes=notes,
+        mode=mode,
+        effective_requirement_factor=req_factor,
+        score_weight=score_weight,
+        advisory_override=(mode == "advisory"),
     )
