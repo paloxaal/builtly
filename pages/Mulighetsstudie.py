@@ -142,6 +142,42 @@ except Exception:
     # Hvis modulen ikke finnes (f.eks. eldre deploy), bare fortsett.
     pass
 
+# --- Auth + project_data restore ---
+# Ved reload eller ny session får vi en tom Streamlit-session. Uten dette
+# steget havner bruker på "Du må sette opp prosjektdata"-siden fordi både
+# auth og project_data er borte. Vi restaurerer begge fra browserens cookie
+# (builtly_rt) og Supabase-profil.
+try:
+    from builtly_auth import try_restore_from_browser
+    _auth_restored = try_restore_from_browser()
+    if _auth_restored:
+        # Auth OK — forsøk å laste project_data fra Supabase (hvis satt)
+        # slik at bruker ikke må sette opp prosjektet på nytt ved hver
+        # container-restart (Render ephemeral disk).
+        try:
+            from builtly_auth import _sb
+            _sb_client = _sb()
+            _user_id = st.session_state.get("user_id", "")
+            if _sb_client and _user_id:
+                _row = _sb_client.table("profiles").select("project_data_json")\
+                    .eq("id", _user_id).single().execute()
+                _pdj = (_row.data or {}).get("project_data_json")
+                if _pdj:
+                    try:
+                        if isinstance(_pdj, str):
+                            _pdj = json.loads(_pdj)
+                        if isinstance(_pdj, dict) and _pdj.get("p_name"):
+                            st.session_state["project_data"] = _pdj
+                    except Exception:
+                        pass
+        except Exception:
+            # Supabase-kolonnen project_data_json finnes kanskje ikke ennå.
+            # Det er OK — vi faller tilbake til ssot.json-lagringen.
+            pass
+except Exception:
+    # builtly_auth kan være utilgjengelig i lokalt dev-miljø.
+    pass
+
 google_key = os.environ.get("GOOGLE_API_KEY")
 llm_available = bool(google_key and (genai is not None or HAS_GOOGLE_GENAI))
 if llm_available and genai is not None:
@@ -9069,8 +9105,48 @@ if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
 if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
-    with open(SSOT_FILE, "r", encoding="utf-8") as f:
-        st.session_state.project_data = json.load(f)
+    try:
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+    except Exception:
+        # Korrupt fil eller I/O-feil — bare fortsett, Supabase er neste fallback
+        pass
+
+# Fallback til Supabase hvis ssot.json ikke finnes eller var tom. Dette er
+# kritisk på Render der disk er ephemeral og ssot.json forsvinner ved
+# container-restart. Supabase-profilen vedvarer.
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    try:
+        from builtly_auth import load_project_data
+        _remote_pd = load_project_data()
+        if _remote_pd and _remote_pd.get("p_name"):
+            st.session_state.project_data = _remote_pd
+            # Skriv også tilbake til ssot.json slik at lokal disk holdes
+            # synkronisert (hvis den finnes midlertidig).
+            try:
+                DB_DIR.mkdir(parents=True, exist_ok=True)
+                with open(SSOT_FILE, "w", encoding="utf-8") as _f:
+                    json.dump(_remote_pd, _f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Hvis ssot.json HAR data men Supabase mangler kopi (f.eks. første gang
+# etter at denne koden er deployet), backup project_data til Supabase som
+# beskyttelse mot neste container-restart. Gjøres kun én gang per session
+# via session_state-flagg slik at vi ikke hamrer Supabase.
+if (st.session_state.project_data.get("p_name")
+        and st.session_state.project_data.get("p_name") not in ["", "Nytt Prosjekt"]
+        and not st.session_state.get("_pd_backup_done")):
+    try:
+        from builtly_auth import save_project_data
+        _ok, _ = save_project_data(st.session_state.project_data)
+        if _ok:
+            st.session_state["_pd_backup_done"] = True
+    except Exception:
+        # Supabase-kolonnen mangler kanskje — ikke blokker brukeren
+        pass
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = (
