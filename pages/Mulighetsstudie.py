@@ -6564,6 +6564,360 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
     return img
 
 
+
+
+# --- ARKITEKTURDIAGRAM (Fase 2) -----------------------------------------
+#
+# Ren planvisning (SVG) som bruker struktur fra bridge Fase 1:
+# - tomtegrense (rød)
+# - nabobygg (grå kontekst)
+# - delfelt-vasker (lyse typologi-farger)
+# - public realm / courtyard reserve
+# - view corridors
+# - volumer i typologi-farger (ikke fase-farger)
+# - minimale labels (FELT 1, A/B/C)
+# - nord-pil
+#
+# Bruker geometrien Fase 1 eksporterer fra masterplan_engine via bridge.
+
+
+def _arkdiag_bounds(all_coords: List[List[List[float]]], padding_m: float = 30.0) -> Tuple[float, float, float, float]:
+    """Finn bounds fra alle koordinat-ringer med padding. Returnerer (minx, miny, maxx, maxy)."""
+    if not all_coords:
+        return (0.0, 0.0, 100.0, 100.0)
+    xs: List[float] = []
+    ys: List[float] = []
+    for ring in all_coords:
+        for pt in ring:
+            xs.append(float(pt[0]))
+            ys.append(float(pt[1]))
+    if not xs:
+        return (0.0, 0.0, 100.0, 100.0)
+    return (min(xs) - padding_m, min(ys) - padding_m, max(xs) + padding_m, max(ys) + padding_m)
+
+
+def _arkdiag_flatten(coord_groups: Any) -> List[List[List[float]]]:
+    """Normaliser coord_groups til liste av ringer. Tåler None og single-ring."""
+    if not coord_groups:
+        return []
+    if isinstance(coord_groups, list) and coord_groups and isinstance(coord_groups[0], list):
+        if coord_groups[0] and isinstance(coord_groups[0][0], (int, float)):
+            # Enkeltring, ikke gruppe
+            return [coord_groups]
+        return coord_groups
+    return []
+
+
+def _arkdiag_poly_d(ring: List[List[float]], to_px) -> str:
+    """SVG-path `d`-streng for et polygon-ring."""
+    if len(ring) < 2:
+        return ""
+    parts = []
+    for i, pt in enumerate(ring):
+        x, y = to_px(float(pt[0]), float(pt[1]))
+        parts.append(f"{'M' if i == 0 else 'L'}{x:.1f},{y:.1f}")
+    parts.append("Z")
+    return " ".join(parts)
+
+
+def _arkdiag_centroid_px(ring: List[List[float]], to_px) -> Tuple[float, float]:
+    """Beregn centroid i pixel-koord for label-plassering."""
+    if not ring:
+        return (0.0, 0.0)
+    xs = [float(pt[0]) for pt in ring]
+    ys = [float(pt[1]) for pt in ring]
+    cx = sum(xs) / len(xs)
+    cy = sum(ys) / len(ys)
+    return to_px(cx, cy)
+
+
+def render_arkitekturdiagram_svg(
+    geometry: Dict[str, Any],
+    width_px: int = 900,
+    height_px: int = 640,
+    show_labels: bool = True,
+    show_public_realm: bool = True,
+    show_view_corridors: bool = True,
+    show_field_washes: bool = True,
+    north_rotation_deg: float = 0.0,
+    style: str = "felt",
+) -> str:
+    """Returner SVG-streng med arkitekt-tegnet planvisning.
+
+    Bruker masterplan-motorens eksporterte felt/skeleton-lag. Tegner i rolig,
+    arkitektonisk stil (ikke dashboard-stil).
+
+    Parametre:
+        style: "felt" (hvit bakgrunn, svarte feltomriss, store FELT-labels —
+            som detaljregulering-diagram) eller "oversikt" (varmere palett,
+            landskap synlig — som konseptdiagram).
+    """
+    # Samle alle coords for bounds
+    all_coords: List[List[List[float]]] = []
+    for key in ("site_polygon_coords", "neighbor_polygons", "field_polygons"):
+        val = geometry.get(key) or []
+        if key == "neighbor_polygons":
+            for n in val:
+                all_coords.extend(_arkdiag_flatten(n.get("coords") or []))
+        elif key == "site_polygon_coords":
+            all_coords.extend(_arkdiag_flatten(val))
+        else:
+            for f in val:
+                all_coords.extend(_arkdiag_flatten(f.get("coords") or []))
+
+    if not all_coords:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width_px}" height="{height_px}"><text x="20" y="30" fill="#888" font-family="Inter,sans-serif" font-size="14">Ingen geometri å tegne</text></svg>'
+
+    minx, miny, maxx, maxy = _arkdiag_bounds(all_coords, padding_m=40.0)
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+    # Bevare aspekt: skalér til minste akse, sentrer
+    scale = min(width_px / span_x, height_px / span_y) * 0.92
+    offset_x = (width_px - span_x * scale) / 2
+    offset_y = (height_px - span_y * scale) / 2
+
+    def to_px(x: float, y: float) -> Tuple[float, float]:
+        # SVG y peker ned — inverter Y-aksen
+        px = (x - minx) * scale + offset_x
+        py = height_px - ((y - miny) * scale + offset_y)
+        return (px, py)
+
+    # Stilkonfigurasjon — to moduser
+    if style == "felt":
+        # Hvit bakgrunn, tydelige felt-omriss (som detaljregulering)
+        bg_color = "#ffffff"
+        neighbor_fill = "#b8b4ad"
+        neighbor_stroke = "#8c887f"
+        neighbor_opacity = "0.88"
+        site_stroke = "#d03838"
+        site_stroke_width = "1.2"
+        field_fill = "#ede4cc"         # beige felt-vask
+        field_stroke = "#1c1c1c"       # solid svart kant
+        field_stroke_width = "1.8"
+        field_dasharray = ""           # ingen stipling
+        public_fill = "#c6cfa8"
+        public_opacity = "0.55"
+        courtyard_fill = "#d8dfc4"
+        courtyard_opacity = "0.58"
+        corridor_fill = "#ecdf9e"
+        corridor_opacity = "0.35"
+        building_stroke = "#111111"
+        building_stroke_width = "0.6"
+        label_color = "#111111"
+        label_size_field = 22
+        label_size_building = 10
+        label_weight_field = "800"
+    else:
+        # "oversikt" — varm konseptmodus
+        bg_color = "#f2efe7"
+        neighbor_fill = "#c8c4b8"
+        neighbor_stroke = "#a8a39a"
+        neighbor_opacity = "0.78"
+        site_stroke = "#c03030"
+        site_stroke_width = "2.5"
+        field_fill = "#d9cfb0"
+        field_stroke = "#847a65"
+        field_stroke_width = "0.5"
+        field_dasharray = "4,3"
+        public_fill = "#9aa890"
+        public_opacity = "0.58"
+        courtyard_fill = "#b5c4a8"
+        courtyard_opacity = "0.48"
+        corridor_fill = "#e6d888"
+        corridor_opacity = "0.32"
+        building_stroke = "#3d342a"
+        building_stroke_width = "0.7"
+        label_color = "#5c4a38"
+        label_size_field = 11
+        label_size_building = 13
+        label_weight_field = "600"
+
+    svg: List[str] = []
+    svg.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width_px} {height_px}" '
+        f'width="{width_px}" height="{height_px}" style="background:{bg_color};font-family:Inter,-apple-system,sans-serif;">'
+    )
+
+    # ---- Lag 1: Nabobygg (grå kontekst) ----
+    for n in (geometry.get("neighbor_polygons") or []):
+        rings = _arkdiag_flatten(n.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{neighbor_fill}" stroke="{neighbor_stroke}" '
+                    f'stroke-width="0.6" opacity="{neighbor_opacity}"/>'
+                )
+
+    # ---- Lag 2: Delfelt-vasker (før tomtegrense og volumer) ----
+    if show_field_washes:
+        for f in (geometry.get("field_polygons") or []):
+            rings = _arkdiag_flatten(f.get("coords") or [])
+            # I "felt"-stil: solid beige fill + svart solid kant (som referanse 2)
+            # I "oversikt"-stil: typologi-fargepalett med stiplet kant
+            if style == "felt":
+                fill = field_fill
+                stroke = field_stroke
+                strokew = field_stroke_width
+                dasharray = ""
+                opacity = "0.92"
+            else:
+                typ_color = f.get("typology_color") or [184, 176, 160, 50]
+                fill = f"rgba({typ_color[0]},{typ_color[1]},{typ_color[2]},{typ_color[3]/255:.2f})"
+                stroke = field_stroke
+                strokew = field_stroke_width
+                dasharray = field_dasharray
+                opacity = "0.85"
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    dash_attr = f'stroke-dasharray="{dasharray}" ' if dasharray else ''
+                    svg.append(
+                        f'<path d="{d}" fill="{fill}" stroke="{stroke}" '
+                        f'stroke-width="{strokew}" {dash_attr}opacity="{opacity}"/>'
+                    )
+
+    # ---- Lag 3: Tomtegrense (rød) ----
+    site_coords = _arkdiag_flatten(geometry.get("site_polygon_coords") or [])
+    for ring in site_coords:
+        d = _arkdiag_poly_d(ring, to_px)
+        if d:
+            svg.append(
+                f'<path d="{d}" fill="none" stroke="{site_stroke}" '
+                f'stroke-width="{site_stroke_width}" stroke-linejoin="round"/>'
+            )
+
+    # ---- Lag 4: Public realm ----
+    if show_public_realm:
+        for p in (geometry.get("public_realm_polygons") or []):
+            rings = _arkdiag_flatten(p.get("coords") or [])
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    svg.append(
+                        f'<path d="{d}" fill="{public_fill}" stroke="none" '
+                        f'opacity="{public_opacity}"/>'
+                    )
+
+    # ---- Lag 5: Courtyard reserve ----
+    for c in (geometry.get("courtyard_reserve_polygons") or []):
+        rings = _arkdiag_flatten(c.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{courtyard_fill}" stroke="none" '
+                    f'opacity="{courtyard_opacity}"/>'
+                )
+
+    # ---- Lag 6: View corridors ----
+    if show_view_corridors:
+        for v in (geometry.get("view_corridor_polygons") or []):
+            rings = _arkdiag_flatten(v.get("coords") or [])
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    svg.append(
+                        f'<path d="{d}" fill="{corridor_fill}" stroke="none" '
+                        f'opacity="{corridor_opacity}"/>'
+                    )
+
+    # ---- Lag 7: Volumer ----
+    for mp in (geometry.get("massing_parts") or []):
+        rings = _arkdiag_flatten(mp.get("coords") or [])
+        if style == "felt":
+            # Hvite volumer med svart kant (som detaljregulering)
+            fill_color = "#f5f2e8"
+        else:
+            typ_color = mp.get("typology_color") or mp.get("color") or [180, 160, 130, 235]
+            fill_color = f"rgb({typ_color[0]},{typ_color[1]},{typ_color[2]})"
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{fill_color}" stroke="{building_stroke}" '
+                    f'stroke-width="{building_stroke_width}" stroke-linejoin="round"/>'
+                )
+
+    # ---- Lag 8: Labels ----
+    if show_labels:
+        # Felt-labels (FELT 1, FELT 2, ...)
+        for f in (geometry.get("field_polygons") or []):
+            rings = _arkdiag_flatten(f.get("coords") or [])
+            if not rings:
+                continue
+            cx, cy = _arkdiag_centroid_px(rings[0], to_px)
+            label = f.get("label") or f.get("field_id", "")
+            # Komprimer label til "FELT N" hvis mulig
+            short = label
+            if label.lower().startswith("delfelt "):
+                short = f"FELT {label.split()[-1]}"
+            elif label.startswith("DF"):
+                short = f"FELT {label[2:]}"
+            if style == "felt":
+                # Stor svart tekst, ingen transparens (som referanse 2)
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="{label_color}" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" dominant-baseline="middle" '
+                    f'letter-spacing="0.04em">{short}</text>'
+                )
+            else:
+                # Diskret, sparset
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="{label_color}" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" '
+                    f'letter-spacing="0.12em" opacity="0.58">{short}</text>'
+                )
+        # Bygg-labels — i "felt"-stil dropper vi dem helt (som referanse 2)
+        if style != "felt":
+            for i, mp in enumerate(geometry.get("massing_parts") or []):
+                rings = _arkdiag_flatten(mp.get("coords") or [])
+                if not rings:
+                    continue
+                cx, cy = _arkdiag_centroid_px(rings[0], to_px)
+                short_letter = chr(ord('A') + i) if i < 26 else (mp.get("name") or f"B{i+1}")
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy + 4:.0f}" text-anchor="middle" '
+                    f'fill="#f5f3ee" font-size="{label_size_building}" '
+                    f'font-weight="700">{short_letter}</text>'
+                )
+
+    # ---- Lag 9: Nord-pil ----
+    arrow_x = width_px - 44
+    arrow_y = 38
+    arrow_bg = "rgba(255,255,255,0.95)" if style == "felt" else "rgba(242,239,231,0.9)"
+    arrow_stroke = "#1c1c1c" if style == "felt" else "#847a65"
+    arrow_fill = "#1c1c1c" if style == "felt" else "#3d342a"
+    svg.append(
+        f'<g transform="translate({arrow_x},{arrow_y}) rotate({-north_rotation_deg})">'
+        f'<circle cx="0" cy="0" r="20" fill="{arrow_bg}" stroke="{arrow_stroke}" stroke-width="0.8"/>'
+        f'<path d="M0,-14 L5,6 L0,2 L-5,6 Z" fill="{arrow_fill}"/>'
+        f'<text x="0" y="-22" text-anchor="middle" fill="{arrow_fill}" font-size="10" font-weight="700">N</text>'
+        f'</g>'
+    )
+
+    # ---- Skala-linje (nederst venstre) ----
+    scale_m = 50.0
+    if span_x < 200:
+        scale_m = 20.0
+    elif span_x > 500:
+        scale_m = 100.0
+    scale_px = scale_m * scale
+    scale_x0 = 24
+    scale_y = height_px - 24
+    scale_color = "#1c1c1c" if style == "felt" else "#3d342a"
+    svg.append(
+        f'<line x1="{scale_x0}" y1="{scale_y}" x2="{scale_x0 + scale_px}" y2="{scale_y}" '
+        f'stroke="{scale_color}" stroke-width="1.8"/>'
+        f'<text x="{scale_x0}" y="{scale_y - 6}" fill="{scale_color}" font-size="10" font-weight="600">{scale_m:.0f} m</text>'
+    )
+
+    svg.append("</svg>")
+    return "".join(svg)
+
+
 # --- SOL/SKYGGE SNAPSHOT RENDERING (v11) ---
 
 def render_solar_snapshot(
@@ -10328,6 +10682,138 @@ if "analysis_results" in st.session_state:
                     unsafe_allow_html=True,
                 )
 
+    # --- ARKITEKTURDIAGRAM (Fase 2) -----------------------------------------
+    st.markdown("<div class='section-header'>Arkitekturdiagram</div>", unsafe_allow_html=True)
+    st.caption("Ren planvisning som viser hvordan motoren tenker — felt, offentlig rom, siktkorridorer og volumer. Fokus på struktur og lesbarhet, ikke dashboard-informasjon.")
+
+    # Valg av alternativ for diagrammet
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        ark_opt_names = [opt.name for opt in options]
+        ark_sel_name = st.selectbox(
+            "Velg alternativ for arkitekturdiagram",
+            ark_opt_names,
+            index=0,
+            key="arkdiag_select",
+        )
+    with col_b:
+        ark_style = st.selectbox(
+            "Stil",
+            options=["felt", "oversikt"],
+            index=0,
+            key="arkdiag_style",
+            help="'felt': hvit bakgrunn, svarte feltomriss (som detaljregulering). 'oversikt': varm palett med typologi-farger.",
+        )
+    ark_sel_opt = next((opt for opt in options if opt.name == ark_sel_name), options[0])
+    ark_geometry = getattr(ark_sel_opt, "geometry", {}) or {}
+
+    # Lag-togglere (utvikler/debugg-vennlig)
+    with st.expander("Lagvalg", expanded=False):
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        show_fields = tc1.checkbox("Delfelt-vasker", value=True, key="ark_show_fields")
+        show_public = tc2.checkbox("Offentlig rom", value=True, key="ark_show_public")
+        show_corridors = tc3.checkbox("Siktkorridorer", value=True, key="ark_show_corridors")
+        show_labels = tc4.checkbox("Tekstlabels", value=True, key="ark_show_labels")
+
+    # Hent nord-rotasjon fra site hvis tilgjengelig
+    _north_rot = float(site_result.get("north_rotation_deg", 0.0) or 0.0)
+
+    # Generer SVG
+    try:
+        _ark_svg = render_arkitekturdiagram_svg(
+            ark_geometry,
+            width_px=900,
+            height_px=640,
+            show_labels=show_labels,
+            show_public_realm=show_public,
+            show_view_corridors=show_corridors,
+            show_field_washes=show_fields,
+            north_rotation_deg=_north_rot,
+            style=ark_style,
+        )
+        # Bakgrunn matcher stilvalget
+        _bg_col = "#ffffff" if ark_style == "felt" else "#f2efe7"
+        st.markdown(
+            f'<div style="background:{_bg_col};border-radius:10px;padding:8px;overflow:hidden;">{_ark_svg}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Info-rad under diagrammet
+        _field_count = len(ark_geometry.get("field_polygons") or [])
+        _building_count = len(ark_geometry.get("massing_parts") or [])
+        _realm_count = len(ark_geometry.get("public_realm_polygons") or [])
+        _corridor_count = len(ark_geometry.get("view_corridor_polygons") or [])
+        _neighbor_count = len(ark_geometry.get("neighbor_polygons") or [])
+
+        info_parts = [
+            f"**{_building_count}** volumer",
+            f"**{_field_count}** delfelt",
+        ]
+        if _realm_count:
+            info_parts.append(f"**{_realm_count}** offentlige rom")
+        if _corridor_count:
+            info_parts.append(f"**{_corridor_count}** siktkorridorer")
+        if _neighbor_count:
+            info_parts.append(f"**{_neighbor_count}** nabobygg")
+        st.caption(" · ".join(info_parts))
+
+        # Statistikk-panel per felt (som i FELT-referansen)
+        if _field_count > 0 and ark_style == "felt":
+            with st.expander("📊 Statistikk per felt", expanded=False):
+                field_data = []
+                _mp_ref = st.session_state.get("_current_masterplan")
+                for f in (ark_geometry.get("field_polygons") or []):
+                    fid = f.get("field_id", "")
+                    label = f.get("label", fid)
+                    # Finn delfelt i masterplan for nøkkeltall
+                    field_area = 0.0
+                    field_bta = 0.0
+                    field_bra = 0.0
+                    field_building_count = 0
+                    if _mp_ref is not None:
+                        for df in getattr(_mp_ref.best_plan if hasattr(_mp_ref, 'best_plan') else _mp_ref, 'delfelt', []):
+                            if df.field_id == fid:
+                                try:
+                                    field_area = float(df.polygon.area)
+                                except Exception:
+                                    field_area = 0.0
+                                # Tell bygg og akkumuler BRA/BTA
+                                plan_obj = _mp_ref.best_plan if hasattr(_mp_ref, 'best_plan') else _mp_ref
+                                for b in plan_obj.bygg:
+                                    if getattr(b, 'delfelt_id', '') == fid:
+                                        field_building_count += 1
+                                        field_bra += float(getattr(b, 'bra_m2', 0) or 0)
+                                        field_bta += float(getattr(b, 'bta_m2', getattr(b, 'footprint_m2', 0) * getattr(b, 'floors', 1)) or 0)
+                                break
+
+                    bya_pct = (field_bta / field_area * 100) if field_area > 0 else 0.0
+                    bra_pct = (field_bra / field_area * 100) if field_area > 0 else 0.0
+
+                    field_data.append({
+                        "Felt": label,
+                        "Areal": f"{field_area:,.0f} m²".replace(",", " "),
+                        "BTA": f"{field_bta:,.0f} m²".replace(",", " "),
+                        "BRA": f"{field_bra:,.0f} m²".replace(",", " "),
+                        "%-BRA": f"{bra_pct:.0f}%",
+                        "BYA": f"{bya_pct:.0f}%",
+                        "Bygg": field_building_count,
+                        "Typologi": f.get("typology", ""),
+                    })
+                if field_data:
+                    st.dataframe(field_data, use_container_width=True, hide_index=True)
+
+        # Nedlastingsknapp for SVG
+        st.download_button(
+            "⬇ Last ned arkitekturdiagram (SVG)",
+            data=_ark_svg.encode("utf-8"),
+            file_name=f"arkitekturdiagram_{ark_style}_{ark_sel_name.replace(' ','_')}.svg",
+            mime="image/svg+xml",
+            type="secondary",
+            key="ark_svg_dl",
+        )
+    except Exception as _ark_exc:
+        st.caption(f"Arkitekturdiagram kunne ikke genereres: {_ark_exc}")
+
     # --- INTERAKTIV BYGNINGSEDITOR ---
     st.markdown("<div class='section-header'>Planeditor — tegn og juster bygningsvolumer</div>", unsafe_allow_html=True)
     st.caption("Klikk og dra for å plassere bygninger. Dra hjørner for å endre størrelse. Klikk på bygg for å endre etasjer. Dobbeltklikk for å slette.")
@@ -11784,6 +12270,10 @@ render();
             type="primary",
             use_container_width=True,
         )
+        # Vis sist lagring-debug hvis tilgjengelig
+        _save_dbg = st.session_state.get("_report_save_debug")
+        if _save_dbg:
+            st.caption(f"Supabase: {_save_dbg}")
     elif pdf_error:
         # PDF-gen ble forsøkt men feilet — vis faktisk årsak
         st.error(
@@ -11794,3 +12284,63 @@ render();
         )
     else:
         st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
+        # Diagnose — hjelp brukeren forstå hvorfor
+        with st.expander("🔍 Hvorfor ser jeg ikke PDF?", expanded=False):
+            _session_has_results = "analysis_results" in st.session_state
+            _session_has_pdf_key = "generated_ark_pdf" in st.session_state
+            _pdf_val = st.session_state.get("generated_ark_pdf")
+            _pdf_type = type(_pdf_val).__name__ if _pdf_val is not None else "None"
+            _pdf_len = len(_pdf_val) if isinstance(_pdf_val, (bytes, bytearray)) else "N/A"
+            _save_dbg = st.session_state.get("_report_save_debug", "(ikke kjørt)")
+            st.code(
+                f"analysis_results finnes: {_session_has_results}\n"
+                f"generated_ark_pdf i session: {_session_has_pdf_key}\n"
+                f"generated_ark_pdf type: {_pdf_type}\n"
+                f"generated_ark_pdf lengde: {_pdf_len} bytes\n"
+                f"pdf_generation_error: {pdf_error or '(ingen)'}\n"
+                f"save_report debug: {_save_dbg}\n\n"
+                "Mulige årsaker:\n"
+                "  1. 'Kjør tomtestudie'-knappen ble aldri trykket (trykk den øverst)\n"
+                "  2. PDF-generering feilet men feilmeldingen forsvant før den ble "
+                "lagret (f.eks. ved en av-rerun midt i kjøringen)\n"
+                "  3. Session state mistet PDF-dataen mellom reruns — sjekk at "
+                "keepalive virker og at du ikke refresher siden",
+                language="text",
+            )
+            if st.button("Prøv å bygge PDF på nytt fra eksisterende analyse", key="retry_pdf_build"):
+                try:
+                    _retry_result = st.session_state.get("analysis_results", {})
+                    _retry_options_raw = _retry_result.get("options", [])
+                    _retry_options = [OptionResult(**o) if isinstance(o, dict) else o for o in _retry_options_raw]
+                    _retry_site_dict = _retry_result.get("site", {})
+                    _retry_site = SiteInputs(**_retry_site_dict) if _retry_site_dict else None
+                    _retry_pd = st.session_state.get("project_data", {})
+                    _retry_name = _retry_pd.get("p_name", "Prosjekt")
+                    if not _retry_options or _retry_site is None:
+                        st.error("Mangler analysis_results — kjør tomtestudie på nytt.")
+                    else:
+                        with st.spinner("Bygger PDF på nytt..."):
+                            _retry_pdf = create_full_report_pdf(
+                                name=_retry_name,
+                                client=_retry_pd.get("c_name", "Ukjent"),
+                                land=_retry_pd.get("land", "Norge"),
+                                report_text=_retry_result.get("report_text", ""),
+                                options=_retry_options,
+                                option_images=_retry_result.get("option_images", []),
+                                visual_attachments=_retry_result.get("visual_attachments", []),
+                                site=_retry_site,
+                                environment_data=_retry_result.get("environment"),
+                                masterplan=st.session_state.get("_current_masterplan"),
+                            )
+                        if _retry_pdf:
+                            st.session_state["generated_ark_pdf"] = _retry_pdf
+                            st.session_state["generated_ark_filename"] = f"Builtly_ARK_{_retry_name}_retry.pdf"
+                            st.session_state.pop("pdf_generation_error", None)
+                            st.success(f"PDF bygget på nytt ({len(_retry_pdf)} bytes). Last ned under.")
+                            st.rerun()
+                        else:
+                            st.error("PDF-gen returnerte tom verdi.")
+                except Exception as _retry_err:
+                    import traceback as _retry_tb
+                    st.error(f"Retry feilet: {type(_retry_err).__name__}: {_retry_err}")
+                    st.code(_retry_tb.format_exc(), language="python")
