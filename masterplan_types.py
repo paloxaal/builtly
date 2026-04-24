@@ -73,7 +73,7 @@ class Delfelt:
     floors_max: int
     target_bra: float
     courtyard_kind: Optional[CourtyardKind] = None
-    tower_size_m: Optional[Literal[17, 21]] = None
+    tower_size_m: Optional[Literal[17, 20, 21]] = None
     phase: int = 1
     phase_label: str = ""
     field_role: str = ""
@@ -327,11 +327,17 @@ class MUAReport:
     open_ground_area: float = 0.0
     checks: List[ComplianceCheck] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    mode: str = "strict"
+    effective_requirement_factor: float = 1.0
+    score_weight: float = 1.0
+    advisory_override: bool = False
 
     @property
     def compliant(self) -> bool:
         relevant = [check for check in self.checks if check.status != ComplianceState.IKKE_VURDERT]
-        return bool(relevant) and all(check.status == ComplianceState.JA for check in relevant)
+        if not relevant:
+            return True
+        return all(check.status == ComplianceState.JA for check in relevant)
 
 
 @dataclass
@@ -415,7 +421,7 @@ class FieldParameterChoice:
     floors_max: int
     target_bra: float
     courtyard_kind: Optional[CourtyardKind] = None
-    tower_size_m: Optional[Literal[17, 21]] = None
+    tower_size_m: Optional[Literal[17, 20, 21]] = None
     rationale: str = ""
     field_role: str = ""
     character: str = ""
@@ -488,20 +494,6 @@ class Masterplan:
     pass6_source: str = "fallback"
     skeleton_summaries: List[FieldSkeletonSummary] = field(default_factory=list)
     architecture_report: ArchitectureMetrics = field(default_factory=ArchitectureMetrics)
-    # --- Masterplan-struktur (uke 1 av arkitektkvalitet-løftet) ---
-    # Bevisst løse felter (ikke en MasterplanAxes-referanse) for å unngå
-    # sirkulær import mellom masterplan_structure og masterplan_types.
-    axes_primary_line: Optional[LineString] = None
-    axes_secondary_line: Optional[LineString] = None
-    axes_corridor_polygons: List[Polygon] = field(default_factory=list)
-    axes_torg_polygons: List[Polygon] = field(default_factory=list)
-    axes_torg_points: List[Point] = field(default_factory=list)
-    axes_type: str = ""              # "diagonal" | "orthogonal" | "none" | ""
-    axes_profile: str = ""           # "FORSTAD" | "URBAN"
-    axes_rationale: str = ""
-    axes_elongation: float = 0.0
-    axes_neighbor_asymmetry: float = 0.0
-    axes_primary_orientation_deg: float = 0.0
 
     def iter_buildings_for_delfelt(self, field_id: str) -> Iterable[Bygg]:
         return (bygg for bygg in self.bygg if bygg.delfelt_id == field_id)
