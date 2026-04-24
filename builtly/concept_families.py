@@ -12,6 +12,39 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .masterplan_types import ConceptFamily, CourtyardKind, Delfelt, FieldParameterChoice, PlanRegler, Typology
 
 
+def _scale_building_count_by_area(
+    field: Optional[Delfelt],
+    *,
+    default_small: int,
+    area_per_building_m2: float,
+    min_count: int = 1,
+    max_count: int = 12,
+) -> int:
+    """Skalér target_building_count proporsjonalt med feltets areal.
+
+    Bakgrunn: Tidligere returnerte strategiene et fast tall (f.eks. 1 karré
+    per felt). På store delfelt (8 000+ m²) ble resultatet arkitektonisk
+    urealistisk — én kjempe-karré istedenfor flere mindre. Arkitektonisk
+    rettesnor (hentet fra referanseprosjekter):
+
+    - Karré: 1 volum per ~3 500 m² (lar seg bryte ned i 2-4 karreer per felt)
+    - Lamell: 1 volum per ~1 100 m² (10-14m dype, 30-60m lange)
+    - Punkthus: 1 volum per ~1 500 m² (kvadratiske 20-25m sider)
+
+    Hvis `field` er None eller areal = 0, faller vi tilbake til `default_small`.
+    """
+    if field is None:
+        return max(min_count, default_small)
+    try:
+        area = float(field.polygon.area)
+    except Exception:
+        return max(min_count, default_small)
+    if area <= 0 or area_per_building_m2 <= 0:
+        return max(min_count, default_small)
+    scaled = int(round(area / area_per_building_m2))
+    return max(min_count, min(max_count, max(default_small, scaled)))
+
+
 @dataclass(frozen=True)
 class FieldEnvelope:
     allowed_typologies: Tuple[Typology, ...]
@@ -176,7 +209,11 @@ class LinearMixedStrategy(ConceptStrategy):
             frontage_primary_side="south",
             frontage_secondary_side=("north" if not edge else None),
             lamell_rhythm_mode=("paired" if edge else "mirrored"),
-            target_building_count=(2 if edge else 3),
+            target_building_count=_scale_building_count_by_area(
+                field, default_small=(2 if edge else 3),
+                area_per_building_m2=1100.0,
+                min_count=2, max_count=10,
+            ),
             frontage_emphasis=0.90,
             rhythm_strength=0.90,
         )
@@ -242,7 +279,11 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             frontage_primary_side=("south" if edge else None),
             frontage_secondary_side=("east" if edge else None),
             courtyard_open_side=("south" if edge else None),
-            target_building_count=(1 if use_karre else 2),
+            target_building_count=_scale_building_count_by_area(
+                field, default_small=(1 if use_karre else 2),
+                area_per_building_m2=3500.0 if use_karre else 1200.0,
+                min_count=1, max_count=8,
+            ),
             frontage_emphasis=0.96,
             rhythm_strength=0.82,
         )
@@ -307,7 +348,11 @@ class ClusterParkStrategy(ConceptStrategy):
             frontage_primary_side=(None if use_punkthus else "west"),
             frontage_secondary_side=(None if use_punkthus else "east"),
             node_layout_mode=("paired_edges" if use_punkthus else None),
-            target_building_count=(2 if use_punkthus else 3),
+            target_building_count=_scale_building_count_by_area(
+                field, default_small=(2 if use_punkthus else 3),
+                area_per_building_m2=1500.0 if use_punkthus else 1300.0,
+                min_count=2, max_count=8,
+            ),
             frontage_emphasis=0.72,
             rhythm_strength=0.70,
         )
