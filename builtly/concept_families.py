@@ -59,14 +59,14 @@ class FieldEnvelope:
 #   på mindre felt.
 # - Punkthus styres mot ca. 20 x 20 m.
 _AREA_PER_BUILDING_RULES: Dict[Typology, Tuple[float, float]] = {
-    Typology.KARRE: (4500.0, 9000.0),
+    Typology.KARRE: (3800.0, 7600.0),
     Typology.LAMELL: (1800.0, 3200.0),
     Typology.PUNKTHUS: (1400.0, 2200.0),
     Typology.REKKEHUS: (350.0, 700.0),
 }
 
 _COUNT_CEILINGS: Dict[Typology, int] = {
-    Typology.KARRE: 3,
+    Typology.KARRE: 6,
     Typology.LAMELL: 12,
     Typology.PUNKTHUS: 8,
     Typology.REKKEHUS: 16,
@@ -191,12 +191,18 @@ def _recommended_building_count(
         if field_area_m2 < 6000.0:
             target = 1 if density >= 1.0 else 0
         elif field_area_m2 < 12000.0:
-            target = 1 if density < 1.85 else 2
+            target = 1 if density < 1.65 else 2
+        elif field_area_m2 < 20000.0:
+            target = 2 if density >= 1.05 else 1
+            if density >= 1.85:
+                target = min(max_count, 3)
         else:
-            target = max(1, int(round(field_area_m2 / 9000.0)))
-            if density >= 1.60 and target < max_count:
+            # Runde 6: store felt skal kunne bli en reell kvartalsstruktur
+            # med 3-5 separate karréringer, ikke bare 1-2 store objekter.
+            target = max(2, int(round(field_area_m2 / 7200.0)))
+            if density >= 1.45 and target < max_count:
                 target += 1
-            elif density <= 0.85 and target > min_count:
+            elif density <= 0.80 and target > min_count:
                 target -= 1
         if fallback_count > 0 and field_area_m2 < 9000.0:
             target = max(target, min(1, fallback_count))
@@ -336,8 +342,12 @@ class ConceptStrategy:
             if selected_typology == Typology.KARRE:
                 if field_area_m2 < 9_000.0:
                     target_building_count = min(max(target_building_count, 1), 1)
-                elif field_area_m2 < 18_000.0:
+                elif field_area_m2 < 14_000.0:
                     target_building_count = min(max(target_building_count, 1), 2)
+                elif field_area_m2 < 22_000.0:
+                    target_building_count = min(max(target_building_count, 2), 3)
+                else:
+                    target_building_count = max(target_building_count, 3)
             elif compact_infill and selected_typology in {Typology.LAMELL, Typology.PUNKTHUS}:
                 target_building_count = max(1, min(target_building_count, 2 if field_area_m2 <= 3_500.0 else 3))
 
@@ -464,27 +474,28 @@ class LinearMixedStrategy(ConceptStrategy):
             character=("open_view" if edge else "street_facing"),
             design_variant=("terraced" if edge else "rhythmic"),
             design_height_pattern=("neighbor_step_down" if edge else "stepped"),
-            target_bya_pct=26.0,
+            # Runde 7: lineart blandet skal leses tettere og mer urban.
+            target_bya_pct=(33.0 if edge else 35.0),
             skeleton_mode="linear_bands",
             frontage_mode=("single" if edge else "double"),
-            micro_band_count=(4 if edge else 5),
-            view_corridor_count=(1 if edge else 2),
-            courtyard_reserve_ratio=(0.08 if edge else 0.10),
-            frontage_depth_m=12.5,
-            corridor_width_m=8.5,
+            micro_band_count=(6 if edge else 8),
+            view_corridor_count=1,
+            courtyard_reserve_ratio=(0.04 if edge else 0.05),
+            frontage_depth_m=13.0,
+            corridor_width_m=7.2,
             macro_structure="spine",
             micro_field_pattern="parallel_bands",
             symmetry_preference="bilateral",
-            composition_strictness=0.92,
-            frontage_zone_ratio=0.22,
-            public_realm_ratio=0.10,
+            composition_strictness=0.95,
+            frontage_zone_ratio=0.24,
+            public_realm_ratio=0.06,
             node_symmetry=True,
             frontage_primary_side="south",
             frontage_secondary_side=("north" if not edge else None),
             lamell_rhythm_mode=("paired" if edge else "mirrored"),
-            target_building_count=(2 if edge else 3),
-            frontage_emphasis=0.90,
-            rhythm_strength=0.90,
+            target_building_count=(4 if edge else 6),
+            frontage_emphasis=0.94,
+            rhythm_strength=0.94,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
@@ -519,6 +530,12 @@ class CourtyardUrbanStrategy(ConceptStrategy):
         role = field.field_role if field else "urban_core"
         edge = role in {"street_edge", "urban_edge"} or index in {0, count - 1}
         use_karre = not (count >= 7 and role == "neighborhood_edge" and index == count - 1)
+        field_area = float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or 0.0)
+        karre_count = 1
+        if use_karre and field_area >= 9000.0:
+            karre_count = 2
+        if use_karre and field_area >= 16000.0:
+            karre_count = 3
         return FieldEnvelope(
             allowed_typologies=(Typology.KARRE, Typology.LAMELL),
             default_typology=Typology.KARRE if use_karre else Typology.LAMELL,
@@ -530,14 +547,14 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             design_karre_shape=("uo_chamfered" if edge else "uo"),
             design_height_pattern=("neighbor_step_down" if (field and field.character == "neighborhood_edge") else "stepped"),
             design_variant=(None if use_karre else "terraced"),
-            target_bya_pct=29.0,
+            target_bya_pct=(31.0 if karre_count >= 2 else 29.0),
             skeleton_mode="courtyard_frontage",
             frontage_mode=("quad" if edge else "ring"),
-            micro_band_count=4,
+            micro_band_count=(5 if karre_count >= 2 else 4),
             view_corridor_count=(1 if edge else 0),
-            courtyard_reserve_ratio=(0.28 if edge else 0.32),
+            courtyard_reserve_ratio=(0.26 if edge else 0.30),
             frontage_depth_m=13.5,
-            corridor_width_m=8.0,
+            corridor_width_m=7.0,
             macro_structure="perimeter_block",
             micro_field_pattern="frontage_ring",
             symmetry_preference="axial",
@@ -548,7 +565,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             frontage_primary_side=("south" if edge else None),
             frontage_secondary_side=("east" if edge else None),
             courtyard_open_side=("south" if edge else None),
-            target_building_count=(1 if use_karre else 2),
+            target_building_count=(karre_count if use_karre else 2),
             frontage_emphasis=0.96,
             rhythm_strength=0.82,
         )
@@ -595,27 +612,28 @@ class ClusterParkStrategy(ConceptStrategy):
             character=("open_view" if use_punkthus else "sheltered"),
             design_variant=(None if use_punkthus else "varied"),
             design_height_pattern=("accent" if use_punkthus else "stepped"),
-            target_bya_pct=22.0,
+            # Runde 7: klyngene skal tydeligere lese som bygg rundt ett felles grønt rom.
+            target_bya_pct=(24.0 if use_punkthus else 21.0),
             skeleton_mode=("park_nodes" if use_punkthus else "park_bands"),
             frontage_mode=("node" if use_punkthus else "edge"),
             micro_band_count=(0 if use_punkthus else 3),
-            view_corridor_count=(2 if use_punkthus else 1),
-            courtyard_reserve_ratio=0.40,
-            frontage_depth_m=11.5,
-            corridor_width_m=11.0,
+            view_corridor_count=1,
+            courtyard_reserve_ratio=(0.30 if use_punkthus else 0.28),
+            frontage_depth_m=(12.0 if use_punkthus else 12.5),
+            corridor_width_m=8.5,
             macro_structure="park_cluster",
             micro_field_pattern=("node_cluster" if use_punkthus else "park_bands"),
             symmetry_preference="bilateral",
-            composition_strictness=0.86,
-            frontage_zone_ratio=0.18,
+            composition_strictness=0.95,
+            frontage_zone_ratio=0.16,
             public_realm_ratio=0.26,
             node_symmetry=use_punkthus,
             frontage_primary_side=(None if use_punkthus else "west"),
             frontage_secondary_side=(None if use_punkthus else "east"),
-            node_layout_mode=("paired_edges" if use_punkthus else None),
-            target_building_count=(2 if use_punkthus else 3),
-            frontage_emphasis=0.72,
-            rhythm_strength=0.70,
+            node_layout_mode=("green_room_ring" if use_punkthus else "green_room_edges"),
+            target_building_count=(5 if use_punkthus else 3),
+            frontage_emphasis=0.80,
+            rhythm_strength=0.78,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:

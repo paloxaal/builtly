@@ -191,18 +191,19 @@ def default_delfelt_count(area_m2: float, major_axis_m: float) -> int:
 def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int] = None) -> int:
     """Resolve a practical field count.
 
-    The spec's default formula is preserved in `default_delfelt_count()`, but
-    actual subdivision moderates the count for very long, narrow sites to avoid
-    irrational micro-fields. This is the deterministic hook that makes the
-    "8 000 m² × 250 m" edge case land on 2–3 fields instead of 4.
+    Requested phase counts are treated as wishes, not absolutes. Very small or
+    compact tomter skal ikke fragmenteres i mange delfelt bare fordi UI-et står
+    på et høyt tall; feltantallet klamper derfor alltid mot en geometrisk
+    rasjonell øvre grense.
     """
-    if requested_count is not None and requested_count > 0:
-        return int(requested_count)
-
     axes = pca_site_axes(buildable_poly)
     area_m2 = float(buildable_poly.area)
-    count = default_delfelt_count(area_m2, axes.major_axis_m)
     aspect = axes.major_axis_m / max(axes.minor_axis_m, 1.0)
+
+    if requested_count is not None and requested_count > 0:
+        count = int(requested_count)
+    else:
+        count = default_delfelt_count(area_m2, axes.major_axis_m)
 
     area_based = 1
     if area_m2 < 5_000:
@@ -218,9 +219,14 @@ def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int
     else:
         area_based = 6
 
-    # Slender plots should not over-fragment beyond one step above area-based.
-    if area_m2 < 10_000 and aspect > 6.0:
+    # Små tomter og slanke infill-felt må ikke overfragmenteres.
+    if area_m2 < 3_200:
+        count = 1
+    elif area_m2 < 6_000:
+        count = min(count, 2)
+    elif area_m2 < 10_000 and aspect > 6.0:
         count = min(count, area_based + 1)
+
     # Avoid fields that become too small to carry coherent urban structure.
     min_rational_area = 2_400.0
     while count > 1 and area_m2 / count < min_rational_area:
@@ -1941,13 +1947,122 @@ def _evaluate_karre_shapes(core: Polygon, field: Delfelt, spec: BaseTypologySpec
     return min(candidates, key=lambda item: _karre_candidate_penalty(item, field.target_bra))
 
 
-def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
-    """Plasser karré som proporsjonalt kvartalsvolum i stedet for tynne armer.
+def _split_for_karre_clusters(core: Polygon, count: int) -> List[Polygon]:
+    """Split a large field into robust subcores for multiple karré rings."""
+    if core is None or core.is_empty:
+        return []
+    count = max(1, int(count))
+    if count <= 1:
+        return [_largest_polygon(core) or core]
+    minx, miny, maxx, maxy = core.bounds
+    width = maxx - minx
+    height = maxy - miny
 
-    Denne varianten holder seg tett på styringsmålene 50 m bunn, 25-30 m sider
-    og 12 m bygningsbredde, og lager derfor mer troverdige volumskisser.
+    # A complete karré needs roughly 50 x 50 m. Prefer the split direction that
+    # leaves subcores with enough depth to carry a full ring.
+    axis_candidates: List[str] = []
+    if width / count >= 54.0 and height >= 48.0:
+        axis_candidates.append("x")
+    if height / count >= 54.0 and width >= 48.0:
+        axis_candidates.append("y")
+    if not axis_candidates:
+        axis_candidates.append("x" if width >= height else "y")
+
+    best_parts: List[Polygon] = []
+    best_score = -1.0
+    for axis in axis_candidates:
+        parts = _split_poly_evenly(core, count, axis=axis) or []
+        parts = [_largest_polygon(p) or p for p in parts if p is not None and not p.is_empty and p.area > 900.0]
+        if not parts:
+            continue
+        # score favors complete-ring-capable subcores and balanced areas
+        fit_score = 0.0
+        areas = [p.area for p in parts]
+        for p in parts:
+            px0, py0, px1, py1 = p.bounds
+            pw, ph = px1 - px0, py1 - py0
+            if pw >= 54.0 and ph >= 48.0:
+                fit_score += 3.0
+            elif pw >= 50.0 and ph >= 40.0:
+                fit_score += 1.4
+            fit_score += min(pw, ph) / max(max(pw, ph), 1.0)
+        balance = min(areas) / max(max(areas), 1.0) if areas else 0.0
+        score = fit_score + balance
+        if score > best_score:
+            best_score = score
+            best_parts = parts
+
+    return best_parts or [_largest_polygon(core) or core]
+
+
+def _evaluate_multiple_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Create several complete/proportional karré rings for large fields.
+
+    Older versions placed one karré candidate per field. On large sites this
+    reads as one or two isolated objects rather than a real urban quarter system.
+    This helper splits large karré fields into subcores and fits one full ring
+    per subcore where possible.
     """
-    return _evaluate_karre_shapes(core, field, spec)
+    target = int(getattr(field, "target_building_count", 0) or 1)
+    if target <= 1:
+        return _evaluate_karre_shapes(core, field, spec)
+
+    # Avoid over-fragmentation if the field is not actually large enough.
+    target = max(1, min(target, 8))
+    subcores = _split_for_karre_clusters(core, target)
+    if len(subcores) <= 1:
+        return _evaluate_karre_shapes(core, field, spec)
+
+    open_side = getattr(field, "courtyard_open_side", None) or "south"
+    footprints: List[Polygon] = []
+    for subcore in subcores:
+        if subcore is None or subcore.is_empty:
+            continue
+        # Prefer complete rings, then U-shaped karré if the subcore is too shallow.
+        shape = _canonical_karre_shape(subcore, field, spec, closed=True)
+        variant = "multi_o"
+        if shape is None:
+            shape = _canonical_karre_shape(subcore, field, spec, closed=False, open_side=open_side)
+            variant = "multi_u"
+        if shape is None or shape.is_empty:
+            continue
+        if any(shape.distance(existing) < 6.0 for existing in footprints):
+            continue
+        footprints.append(shape.buffer(0))
+
+    if not footprints:
+        return _evaluate_karre_shapes(core, field, spec)
+
+    # If only one cluster survived, keep normal scoring.
+    if len(footprints) == 1:
+        cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max))
+        if cand is not None:
+            cand._variant = "multi_single"
+        return cand
+
+    total_fp = sum(float(p.area) for p in footprints)
+    base_f = int(round(float(field.target_bra or 0.0) / max(total_fp, 1.0))) if field.target_bra else field.floors_min
+    base_f = max(field.floors_min, min(field.floors_max, base_f))
+    floors_per = _varied_floors_for_cluster(
+        len(footprints),
+        base_f,
+        field.floors_min,
+        field.floors_max,
+        variation=getattr(field, "design_height_pattern", None) or "stepped",
+    )
+    cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per)
+    if cand is not None:
+        cand._variant = "multi_karre_ring"
+    return cand
+
+
+def _place_karre_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Plasser karré som ett eller flere proporsjonale kvartalsvolum.
+
+    Runde 6: store karréfelt kan bli flere komplette ringer, mens små felt
+    fortsatt får én kompakt U-/O-karré når formen støtter det.
+    """
+    return _evaluate_multiple_karre_clusters(core, field, spec)
 
 
 # ---------------------------------------------------------------------------
@@ -2372,10 +2487,10 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     frontage_depth = float(getattr(field, "frontage_depth_m", None) or 11.5)
     corridor_w = float(getattr(field, "corridor_width_m", None) or 11.0)
     primary_side, secondary_side = _preferred_frontage_sides(field, "west", "east")
-    scale = max(0.52, min(0.80, reserve_ratio ** 0.5))
+    scale = max(0.34, min(0.58, reserve_ratio ** 0.5))
     park = _safe_center_rect(core, width * scale, height * scale)
     if park is None:
-        park = _safe_center_rect(core, width * 0.56, height * 0.56)
+        park = _safe_center_rect(core, width * 0.42, height * 0.42)
     if park is None:
         park = _largest_polygon(core.buffer(-4.0)) or core
     pminx, pminy, pmaxx, pmaxy = park.bounds
@@ -2414,36 +2529,59 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     node_layout = getattr(field, "node_layout_mode", None) or ("paired_edges" if getattr(field, "node_symmetry", False) else "corners")
     target_nodes = max(2, int(getattr(field, "target_building_count", 0) or 4))
     nodes: List[Point] = []
-    corners = [Point(pminx, pminy), Point(pminx, pmaxy), Point(pmaxx, pminy), Point(pmaxx, pmaxy)]
-    if node_layout == "paired_edges" and target_nodes <= 4:
-        nodes = [
-            Point((pminx + pmaxx) / 2.0, pmaxy),
-            Point((pminx + pmaxx) / 2.0, pminy),
-            Point(pminx, (pminy + pmaxy) / 2.0),
-            Point(pmaxx, (pminy + pmaxy) / 2.0),
-        ]
-    elif node_layout in {"perimeter_ring", "perimeter_ring_dense"} or target_nodes > 4:
-        horizontal_major = (pmaxx - pminx) >= (pmaxy - pminy)
-        long_side_midpoints = [
-            Point((pminx + pmaxx) / 2.0, pminy),
-            Point((pminx + pmaxx) / 2.0, pmaxy),
-        ] if horizontal_major else [
-            Point(pminx, (pminy + pmaxy) / 2.0),
-            Point(pmaxx, (pminy + pmaxy) / 2.0),
-        ]
-        all_midpoints = [
-            Point((pminx + pmaxx) / 2.0, pminy),
-            Point((pminx + pmaxx) / 2.0, pmaxy),
-            Point(pminx, (pminy + pmaxy) / 2.0),
-            Point(pmaxx, (pminy + pmaxy) / 2.0),
-        ]
-        nodes = list(corners)
-        if target_nodes >= 5:
-            nodes.extend(long_side_midpoints)
-        if target_nodes >= 7 or node_layout == "perimeter_ring_dense":
-            nodes = list(corners) + all_midpoints
+
+    # Runde 7: boligklynger skal lese som et tydelig grønt rom med bygg tett rundt.
+    # Flytt nodene noe nærmere parkrommet enn tidligere og prioriter sidepunkter
+    # før hjørner, slik at man får en lesbar ring i stedet for en diffus spredning.
+    tower_size = float(getattr(field, "tower_size_m", None) or 20.0)
+    clear = max(2.8, tower_size * 0.16)
+    offset = tower_size / 2.0 + clear
+    midx = (pminx + pmaxx) / 2.0
+    midy = (pminy + pmaxy) / 2.0
+
+    def _node_if_fits(x: float, y: float) -> Optional[Point]:
+        rect = box(x - tower_size / 2.0, y - tower_size / 2.0, x + tower_size / 2.0, y + tower_size / 2.0)
+        if not core.buffer(0.2).covers(rect):
+            return None
+        if rect.intersects(park.buffer(1.5)):
+            return None
+        if any(rect.intersects(c.buffer(0.5)) for c in corridors):
+            return None
+        return Point(x, y)
+
+    green_room_nodes = [
+        _node_if_fits(midx, pmaxy + offset),
+        _node_if_fits(midx, pminy - offset),
+        _node_if_fits(pminx - offset, midy),
+        _node_if_fits(pmaxx + offset, midy),
+        _node_if_fits(pminx - offset, pmaxy + offset),
+        _node_if_fits(pmaxx + offset, pmaxy + offset),
+        _node_if_fits(pminx - offset, pminy - offset),
+        _node_if_fits(pmaxx + offset, pminy - offset),
+    ]
+    green_room_nodes = [p for p in green_room_nodes if p is not None]
+
+    if node_layout in {"green_room_ring", "perimeter_ring", "perimeter_ring_dense"} or target_nodes >= 4:
+        nodes = green_room_nodes
+        if node_layout == "green_room_ring" and len(nodes) > target_nodes:
+            # Prioriter de fire sidene først, deretter hjørnene.
+            nodes = nodes[:target_nodes]
+    elif node_layout == "paired_edges" and target_nodes <= 4:
+        nodes = [p for p in green_room_nodes[:4]]
     else:
-        nodes = list(corners)
+        nodes = green_room_nodes[: max(2, target_nodes)]
+
+    if len(nodes) < min(target_nodes, 4):
+        # Fallback: bruk feltets hjørner bare hvis de faktisk fungerer som byggnode.
+        corners = [
+            _node_if_fits(minx + offset, miny + offset),
+            _node_if_fits(minx + offset, maxy - offset),
+            _node_if_fits(maxx - offset, miny + offset),
+            _node_if_fits(maxx - offset, maxy - offset),
+        ]
+        nodes.extend([p for p in corners if p is not None and all(p.distance(q) > tower_size for q in nodes)])
+
+    nodes = nodes[: max(target_nodes, 2)]
 
     micro_fields = _build_micro_fields_from_bands(
         bands,
@@ -2572,51 +2710,60 @@ def _fit_rect_in_slot(piece: Polygon, depth_m: float, preferred_length: float, m
 
 
 def _center_out_row_order(items: Sequence[Polygon], *, axis: str, center_value: float) -> List[Polygon]:
+    """Sort a row center-out to create calmer, more balanced composition."""
     if not items:
         return []
-    if axis == "x":
-        ordered = sorted(items, key=lambda p: (round(p.centroid.x, 3), round(p.centroid.y, 3)))
-        values = [p.centroid.x for p in ordered]
-    else:
-        ordered = sorted(items, key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
-        values = [p.centroid.y for p in ordered]
+    ordered = sorted(
+        items,
+        key=lambda p: (round(p.centroid.x, 3), round(p.centroid.y, 3)) if axis == "x" else (round(p.centroid.y, 3), round(p.centroid.x, 3)),
+    )
+    values = [float(p.centroid.x if axis == "x" else p.centroid.y) for p in ordered]
     idxs = list(range(len(ordered)))
     idxs.sort(key=lambda i: (abs(values[i] - center_value), values[i]))
     return [ordered[i] for i in idxs]
 
 
 def _group_lamell_rows(pieces: Sequence[Polygon], *, stack_axis: str) -> List[List[Polygon]]:
-    rows: List[List[Polygon]] = []
+    """Group slot polygons into rows/columns before picking lamell locations."""
     if not pieces:
-        return rows
-    spans = []
+        return []
+    spans: List[float] = []
     for piece in pieces:
         minx, miny, maxx, maxy = piece.bounds
         spans.append((maxy - miny) if stack_axis == "y" else (maxx - minx))
     spans = [s for s in spans if s > 0.0]
-    tol = max(5.0, (sorted(spans)[len(spans) // 2] * 0.72) if spans else 8.0)
+    tol = max(5.0, (float(np.median(spans)) * 0.72) if spans else 8.0)
     ordered = sorted(
         pieces,
         key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)) if stack_axis == "y" else (round(p.centroid.x, 3), round(p.centroid.y, 3)),
     )
+    rows: List[List[Polygon]] = []
     for piece in ordered:
-        coord = piece.centroid.y if stack_axis == "y" else piece.centroid.x
+        coord = float(piece.centroid.y if stack_axis == "y" else piece.centroid.x)
         if not rows:
             rows.append([piece])
             continue
-        prev = rows[-1]
-        prev_coords = [p.centroid.y if stack_axis == "y" else p.centroid.x for p in prev]
-        if abs(coord - (sum(prev_coords) / max(len(prev_coords), 1))) <= tol:
-            prev.append(piece)
+        row = rows[-1]
+        row_coord = sum(float(p.centroid.y if stack_axis == "y" else p.centroid.x) for p in row) / max(len(row), 1)
+        if abs(coord - row_coord) <= tol:
+            row.append(piece)
         else:
             rows.append([piece])
     return rows
 
 
 def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton) -> List[Polygon]:
+    """Order lamell slots by field system rather than simple first-available order.
+
+    The older order often filled one band before using the next. This version
+    groups slots into rows/columns, prioritises frontage rows, and then
+    interleaves rows center-out. The result is more systematic, more readable
+    and closer to architectural field diagrams.
+    """
     pieces = [p for p in slots if not p.is_empty and p.area > 60.0]
     if not pieces:
         return []
+
     frontage_union = unary_union(skeleton.frontage_zones).buffer(0) if skeleton.frontage_zones else None
     minx = min(p.bounds[0] for p in pieces)
     miny = min(p.bounds[1] for p in pieces)
@@ -2624,6 +2771,7 @@ def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton)
     maxy = max(p.bounds[3] for p in pieces)
     cx = (minx + maxx) / 2.0
     cy = (miny + maxy) / 2.0
+
     stack_axis = "y"
     within_axis = "x"
     if skeleton.symmetry_axis is not None:
@@ -2632,12 +2780,13 @@ def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton)
         if not vertical:
             stack_axis = "x"
             within_axis = "y"
+
     rows = _group_lamell_rows(pieces, stack_axis=stack_axis)
+    if not rows:
+        return pieces
 
     def _row_center(row: Sequence[Polygon]) -> float:
-        if stack_axis == "y":
-            return sum(p.centroid.y for p in row) / max(len(row), 1)
-        return sum(p.centroid.x for p in row) / max(len(row), 1)
+        return sum(float(p.centroid.y if stack_axis == "y" else p.centroid.x) for p in row) / max(len(row), 1)
 
     def _frontage_rank(row: Sequence[Polygon]) -> int:
         if frontage_union is None:
@@ -2649,36 +2798,39 @@ def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton)
 
     def _row_sort_key(row: Sequence[Polygon]):
         coord = _row_center(row)
-        frontage_rank = _frontage_rank(row)
+        fr = _frontage_rank(row)
         if stack_axis == "y":
             if secondary and {primary, secondary} == {"south", "north"}:
-                row_metric = -abs(coord - cy) if frontage_rank == 0 else abs(coord - cy)
+                metric = -abs(coord - cy) if fr == 0 else abs(coord - cy)
             elif primary == "north":
-                row_metric = -coord
+                metric = -coord
             else:
-                row_metric = coord
+                metric = coord
         else:
             if secondary and {primary, secondary} == {"west", "east"}:
-                row_metric = -abs(coord - cx) if frontage_rank == 0 else abs(coord - cx)
+                metric = -abs(coord - cx) if fr == 0 else abs(coord - cx)
             elif primary == "east":
-                row_metric = -coord
+                metric = -coord
             else:
-                row_metric = coord
-        return (frontage_rank, row_metric, -sum(p.area for p in row))
+                metric = coord
+        return (fr, metric, -sum(p.area for p in row))
 
     rows.sort(key=_row_sort_key)
+
     ordered_rows: List[List[Polygon]] = []
     for row in rows:
         center_value = cx if within_axis == "x" else cy
         ordered_rows.append(_center_out_row_order(row, axis=within_axis, center_value=center_value))
 
     interleaved: List[Polygon] = []
-    depth = max((len(row) for row in ordered_rows), default=0)
-    for idx in range(depth):
+    max_len = max((len(row) for row in ordered_rows), default=0)
+    for idx in range(max_len):
         for row in ordered_rows:
             if idx < len(row):
                 interleaved.append(row[idx])
+
     return interleaved
+
 
 def _lamell_rhythm_sequence(palette: Sequence[float], count: int, mode: Optional[str]) -> List[float]:
     if not palette:
@@ -2830,7 +2982,7 @@ def _place_karre_from_frontage(skeleton: FieldSkeleton, field: Delfelt, spec: Ba
         arm = float(spec.segment_depth_m.midpoint() if spec.segment_depth_m else 12.0)
         outer = box(rx0 - arm, ry0 - arm, rx1 + arm, ry1 + arm).intersection(core).buffer(0)
         core = _largest_polygon(outer) or core
-    cand = _evaluate_karre_shapes(core, field, spec)
+    cand = _evaluate_multiple_karre_clusters(core, field, spec)
     if cand is not None:
         cand._variant = getattr(cand, '_variant', None) or ('u' if skeleton.open_edges else 'o')
     return cand
