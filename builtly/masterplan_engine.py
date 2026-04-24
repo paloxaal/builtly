@@ -37,6 +37,13 @@ from .geometry import (
     resolve_delfelt_count,
     subdivide_buildable_polygon,
 )
+from .masterplan_structure import (
+    MasterplanAxes,
+    MasterplanProfile,
+    analyze_site_axes,
+    resolve_axis_type_for_concept,
+    subtract_axes_from_buildable,
+)
 from .masterplan_types import (
     BarnehageConfig,
     ConceptFamily,
@@ -185,7 +192,30 @@ def _seed_neutral_fields(field_polygons: Sequence[Polygon], target_bra_m2: float
     return out
 
 
-def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamily, target_bra_m2: float, requested_count: Optional[int] = None) -> List[Delfelt]:
+def pass1_generate_delfelt(
+    buildable_poly: Polygon,
+    concept_family: ConceptFamily,
+    target_bra_m2: float,
+    requested_count: Optional[int] = None,
+    *,
+    axes_corridor_polygons: Optional[Sequence[Polygon]] = None,
+    axes_torg_polygons: Optional[Sequence[Polygon]] = None,
+) -> List[Delfelt]:
+    """Pass 1: bygg delfelt-polygoner.
+
+    Uke 1-utvidelse: Hvis `axes_corridor_polygons` og/eller
+    `axes_torg_polygons` er gitt, trekkes disse ut av `buildable_poly`
+    FØR delfelt-splittingen. Delfeltene legger seg dermed langs aksene,
+    ikke på tvers. Dette er kjernen i masterplan-grepet som referansene
+    (LPO/Kibnes) bruker.
+
+    Når aksene splitter tomten i flere regioner (typisk for ortogonal
+    med både primær og sekundær akse), fordeles delfelt-antallet
+    proporsjonalt på arealet av hver region.
+    """
+    from shapely.geometry import MultiPolygon
+    from shapely.ops import unary_union
+
     axes = pca_site_axes(buildable_poly)
     count = resolve_delfelt_count(buildable_poly, requested_count=requested_count)
     area = max(float(buildable_poly.area), 1.0)
@@ -205,7 +235,68 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
             count = max(5, min(count, 7))
         else:  # COURTYARD_URBAN
             count = max(4, min(count, 6 if density < 1.18 else 7))
-    polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
+
+    # Trekk korridor + torg fra hvis gitt
+    splitting_poly: Any = buildable_poly
+    subtract_parts: List[Polygon] = []
+    if axes_corridor_polygons:
+        subtract_parts.extend([p for p in axes_corridor_polygons if p is not None and not p.is_empty])
+    if axes_torg_polygons:
+        subtract_parts.extend([p for p in axes_torg_polygons if p is not None and not p.is_empty])
+    if subtract_parts:
+        try:
+            subtract_union = unary_union(subtract_parts)
+            subtracted = buildable_poly.difference(subtract_union)
+            if not subtracted.is_empty and subtracted.area > 500.0:
+                splitting_poly = subtracted.buffer(0)
+        except Exception:
+            pass  # Fall tilbake til opprinnelig buildable_poly
+
+    # Del opp. Hvis akse-subtraksjonen ga MultiPolygon, fordel count proporsjonalt.
+    polygons: List[Polygon] = []
+    if isinstance(splitting_poly, MultiPolygon):
+        parts = sorted(
+            [g for g in splitting_poly.geoms if isinstance(g, Polygon) and g.area > 500.0],
+            key=lambda p: -p.area,
+        )
+        if not parts:
+            polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
+        else:
+            total_part_area = sum(p.area for p in parts)
+            # Proporsjonal fordeling, minst 1 per part
+            raw_counts = [max(1, int(round(count * p.area / total_part_area))) for p in parts]
+            # Juster så sum = count
+            diff = count - sum(raw_counts)
+            while diff > 0:
+                idx_max = max(range(len(parts)), key=lambda i: parts[i].area / max(raw_counts[i], 1))
+                raw_counts[idx_max] += 1
+                diff -= 1
+            while diff < 0 and any(c > 1 for c in raw_counts):
+                idx_min = min(
+                    (i for i, c in enumerate(raw_counts) if c > 1),
+                    key=lambda i: parts[i].area / raw_counts[i],
+                )
+                raw_counts[idx_min] -= 1
+                diff += 1
+            for part, part_count in zip(parts, raw_counts):
+                if part_count <= 0:
+                    continue
+                try:
+                    sub_polygons = subdivide_buildable_polygon(
+                        part, count=part_count, orientation_deg=axes.theta_deg
+                    )
+                    polygons.extend(sub_polygons)
+                except Exception:
+                    polygons.append(part.buffer(0))
+    else:
+        # Single polygon (eller opprinnelig buildable_poly hvis subtraksjon feilet)
+        single_poly = splitting_poly if isinstance(splitting_poly, Polygon) else buildable_poly
+        polygons = subdivide_buildable_polygon(single_poly, count=count, orientation_deg=axes.theta_deg)
+
+    # Sikre sør-til-nord-sortering (matcher eksisterende kontrakt)
+    polygons = [p.buffer(0) for p in polygons if p.area > 1.0]
+    polygons.sort(key=lambda p: (p.centroid.y, p.centroid.x))
+
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
 
@@ -597,12 +688,44 @@ def plan_masterplan_geometry(
     site_area_m2: Optional[float] = None,
     ai_selector: Optional[StructuredPassClient] = None,
     ai_reporter: Optional[StructuredPassClient] = None,
+    masterplan_profile: MasterplanProfile = MasterplanProfile.FORSTAD,
 ) -> Masterplan:
     if buildable_poly is None or buildable_poly.is_empty:
         raise ValueError("buildable_poly mangler eller er tom")
     rules = plan_regler or PlanRegler()
 
-    base_fields = pass1_generate_delfelt(buildable_poly, concept_family, target_bra_m2, requested_delfelt_count)
+    # --- Uke 1: Masterplan-strukturell analyse FØR delfelt-splitting ---
+    # Kjør auto-analyse først, så sjekk om konseptet vil overstyre akse-typen.
+    auto_axes = analyze_site_axes(
+        buildable_poly,
+        neighbors=neighbor_buildings,
+        latitude_deg=latitude_deg,
+        profile=masterplan_profile,
+    )
+    override_type = resolve_axis_type_for_concept(
+        concept_family.value,
+        auto_axes.axis_type,
+        elongation=auto_axes.elongation,
+    )
+    if override_type and override_type != auto_axes.axis_type:
+        axes = analyze_site_axes(
+            buildable_poly,
+            neighbors=neighbor_buildings,
+            latitude_deg=latitude_deg,
+            profile=masterplan_profile,
+            force_axis_type=override_type,
+        )
+    else:
+        axes = auto_axes
+
+    base_fields = pass1_generate_delfelt(
+        buildable_poly,
+        concept_family,
+        target_bra_m2,
+        requested_delfelt_count,
+        axes_corridor_polygons=axes.corridor_polygons,
+        axes_torg_polygons=axes.torg_polygons,
+    )
     configured_fields, pass2_source = pass2_select_field_parameters(
         concept_family,
         base_fields,
@@ -647,6 +770,19 @@ def plan_masterplan_geometry(
         longitude_deg=float(longitude_deg),
         pass2_source=pass2_source,
     )
+    # --- Uke 1: Fest masterplan-akser på plan-objektet ---
+    plan.axes_primary_line = axes.primary_axis
+    plan.axes_secondary_line = axes.secondary_axis
+    plan.axes_corridor_polygons = list(axes.corridor_polygons)
+    plan.axes_torg_polygons = list(axes.torg_polygons)
+    plan.axes_torg_points = list(axes.torg_nodes)
+    plan.axes_type = axes.axis_type
+    plan.axes_profile = axes.profile.value
+    plan.axes_rationale = axes.rationale
+    plan.axes_elongation = float(axes.elongation)
+    plan.axes_neighbor_asymmetry = float(axes.neighbor_asymmetry)
+    plan.axes_primary_orientation_deg = float(axes.primary_orientation_deg)
+
     plan.mua_report = pass5_calculate_mua(plan, rules)
     plan.skeleton_summaries = build_field_skeleton_summaries(plan.delfelt, rules)
     plan.architecture_report = compute_architecture_metrics(plan)
@@ -678,6 +814,7 @@ def generate_concept_masterplans(
     site_area_m2: Optional[float] = None,
     ai_selector: Optional[StructuredPassClient] = None,
     ai_reporter: Optional[StructuredPassClient] = None,
+    masterplan_profile: MasterplanProfile = MasterplanProfile.FORSTAD,
 ) -> List[Masterplan]:
     plans: List[Masterplan] = []
     for family in all_concept_families():
@@ -699,6 +836,7 @@ def generate_concept_masterplans(
                 site_area_m2=site_area_m2,
                 ai_selector=ai_selector,
                 ai_reporter=ai_reporter,
+                masterplan_profile=masterplan_profile,
             )
         )
     return plans
