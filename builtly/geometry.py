@@ -3891,7 +3891,7 @@ def _align_facades_within_arm(
 def building_geometry_is_orthogonal_to_field(bygg: Bygg, field: Delfelt, tol: float = 1e-6) -> bool:
     local = _rotate(bygg.footprint, -field.orientation_deg, origin=field.polygon.centroid)
     from .typology_library import is_axis_aligned_rectilinear
-    return is_axis_aligned_rectilinear(local, tol=tol)
+    return is_axis_aligned_rectilinear(local, tolerance=tol)
 
 
 def buildings_do_not_overlap(buildings: Sequence[Bygg]) -> bool:
