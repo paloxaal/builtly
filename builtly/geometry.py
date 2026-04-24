@@ -2861,6 +2861,89 @@ def _isolated_building_penalty_local(buildings_local: Sequence[Polygon], span_re
     return isolated / max(len(buildings_local), 1)
 
 
+# ---------------------------------------------------------------------------
+# Public helper — hent FieldSkeletons i globalt koordinatsystem for UI-bruk
+# ---------------------------------------------------------------------------
+
+
+def _rotate_geom(geom, angle_deg: float, origin):
+    """Roter vilkårlig shapely-geometri rundt origin."""
+    if geom is None:
+        return None
+    try:
+        return _rotate(geom, angle_deg, origin=origin)
+    except Exception:
+        return geom
+
+
+def build_field_skeletons_for_plan(plan: Masterplan) -> Dict[str, FieldSkeleton]:
+    """Returner FieldSkeletons per field_id i GLOBALT koordinatsystem.
+
+    Motoren bygger skeletons internt i lokalt koordinatsystem (rotert om
+    field.orientation_deg) mens den plasserer bygg. De kastes etter bruk.
+    Denne helperen re-genererer dem for UI og roterer dem tilbake til
+    globalt koordinatsystem slik at de kan vises sammen med tomt-polygonet
+    og byggene uten ekstra transformasjon.
+
+    Idempotent — kaller bare eksisterende composition-funksjoner.
+    Kan være tung på store planer (én skeleton per delfelt), men typisk
+    6-8 delfelt = rask (<100ms).
+    """
+    out: Dict[str, FieldSkeleton] = {}
+    if not plan.delfelt:
+        return out
+    brann_m = plan.plan_regler.brann_avstand_m if plan.plan_regler else 8.0
+    for field in plan.delfelt:
+        try:
+            core_global = _field_core_polygon(field.polygon, brann_m)
+            angle = float(field.orientation_deg or 0.0)
+            origin = field.polygon.centroid
+            # Rotér core til lokalt for skeleton-komposisjon
+            if abs(angle) > 1e-3:
+                local_core = _rotate(core_global, -angle, origin=origin)
+            else:
+                local_core = core_global
+            local_skeleton = _compose_field_skeleton(local_core, field)
+            # Roter alle polygoner + linjer tilbake til globalt
+            if abs(angle) > 1e-3:
+                global_skeleton = FieldSkeleton(
+                    field_id=local_skeleton.field_id,
+                    mode=local_skeleton.mode,
+                    local_orientation_deg=angle,
+                    frontage_lines=[
+                        SkeletonFrontage(
+                            role=fl.role,
+                            line=_rotate_geom(fl.line, angle, origin),
+                        )
+                        for fl in local_skeleton.frontage_lines
+                    ],
+                    build_bands=[_rotate_geom(b, angle, origin) for b in local_skeleton.build_bands],
+                    courtyard_reserve=_rotate_geom(local_skeleton.courtyard_reserve, angle, origin),
+                    view_corridors=[_rotate_geom(v, angle, origin) for v in local_skeleton.view_corridors],
+                    accent_nodes=[_rotate_geom(n, angle, origin) for n in local_skeleton.accent_nodes],
+                    open_edges=list(local_skeleton.open_edges),
+                    frontage_depth_m=local_skeleton.frontage_depth_m,
+                    corridor_width_m=local_skeleton.corridor_width_m,
+                    macro_axis=_rotate_geom(local_skeleton.macro_axis, angle, origin),
+                    symmetry_axis=_rotate_geom(local_skeleton.symmetry_axis, angle, origin),
+                    frontage_zones=[_rotate_geom(z, angle, origin) for z in local_skeleton.frontage_zones],
+                    micro_fields=[_rotate_geom(m, angle, origin) for m in local_skeleton.micro_fields],
+                    public_realm=[_rotate_geom(p, angle, origin) for p in local_skeleton.public_realm],
+                    reserved_open_space=[_rotate_geom(r, angle, origin) for r in local_skeleton.reserved_open_space],
+                    frontage_primary_side=local_skeleton.frontage_primary_side,
+                    frontage_secondary_side=local_skeleton.frontage_secondary_side,
+                    build_slots=[_rotate_geom(s, angle, origin) for s in local_skeleton.build_slots],
+                    node_layout_mode=local_skeleton.node_layout_mode,
+                )
+                out[field.field_id] = global_skeleton
+            else:
+                out[field.field_id] = local_skeleton
+        except Exception:
+            # Skeleton-bygging skal aldri stoppe UI-flyten
+            continue
+    return out
+
+
 def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
     if not plan.delfelt:
         return ArchitectureMetrics(total_score=0.0, notes=["Ingen delfelt i plan."])
