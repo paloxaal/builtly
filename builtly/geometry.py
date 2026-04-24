@@ -3423,8 +3423,17 @@ def _place_typologi_v2(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
     def _note(msg: str) -> None:
         try:
             _dbg_notes.append(msg)
+            # Også legg til i field.notes slik at det vises i rapporten.
+            # Dette gjør at vi kan se at v2 faktisk kjørte, ikke bare
+            # at fallback-paths ble tatt.
+            try:
+                field.notes.append(f"[v2] {msg}")
+            except Exception:
+                pass
         except Exception:
             pass
+
+    _note(f"_place_typologi_v2 kalt for {field.field_id} ({field.typology.value})")
 
     try:
         from .typologi_primitiver import (
