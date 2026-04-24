@@ -191,18 +191,19 @@ def default_delfelt_count(area_m2: float, major_axis_m: float) -> int:
 def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int] = None) -> int:
     """Resolve a practical field count.
 
-    The spec's default formula is preserved in `default_delfelt_count()`, but
-    actual subdivision moderates the count for very long, narrow sites to avoid
-    irrational micro-fields. This is the deterministic hook that makes the
-    "8 000 m² × 250 m" edge case land on 2–3 fields instead of 4.
+    Requested phase counts are treated as wishes, not absolutes. Very small or
+    compact tomter skal ikke fragmenteres i mange delfelt bare fordi UI-et står
+    på et høyt tall; feltantallet klamper derfor alltid mot en geometrisk
+    rasjonell øvre grense.
     """
-    if requested_count is not None and requested_count > 0:
-        return int(requested_count)
-
     axes = pca_site_axes(buildable_poly)
     area_m2 = float(buildable_poly.area)
-    count = default_delfelt_count(area_m2, axes.major_axis_m)
     aspect = axes.major_axis_m / max(axes.minor_axis_m, 1.0)
+
+    if requested_count is not None and requested_count > 0:
+        count = int(requested_count)
+    else:
+        count = default_delfelt_count(area_m2, axes.major_axis_m)
 
     area_based = 1
     if area_m2 < 5_000:
@@ -218,9 +219,14 @@ def resolve_delfelt_count(buildable_poly: Polygon, requested_count: Optional[int
     else:
         area_based = 6
 
-    # Slender plots should not over-fragment beyond one step above area-based.
-    if area_m2 < 10_000 and aspect > 6.0:
+    # Små tomter og slanke infill-felt må ikke overfragmenteres.
+    if area_m2 < 3_200:
+        count = 1
+    elif area_m2 < 6_000:
+        count = min(count, 2)
+    elif area_m2 < 10_000 and aspect > 6.0:
         count = min(count, area_based + 1)
+
     # Avoid fields that become too small to carry coherent urban structure.
     min_rational_area = 2_400.0
     while count > 1 and area_m2 / count < min_rational_area:
