@@ -673,6 +673,25 @@ def _height_for(typology: Typology, floors: int) -> float:
     return float(floors) * DEFAULT_HEIGHT_PER_FLOOR_M[typology]
 
 
+def _minimum_building_spacing_m(rules: PlanRegler) -> float:
+    """Hard minimum clear distance between separate buildings.
+
+    The feasibility drawings must never show buildings closer than the fire
+    separation / user rule. We keep 8 m as an explicit floor even if an older
+    rules object is missing `brann_avstand_m` or has it set too low.
+    """
+    values = [8.0]
+    try:
+        values.append(float(getattr(rules, "brann_avstand_m", 0.0) or 0.0))
+    except Exception:
+        pass
+    try:
+        values.append(float(getattr(rules, "avstand_bygg_bygg_m", 0.0) or 0.0))
+    except Exception:
+        pass
+    return max(values)
+
+
 def _required_spacing(typology: Typology, height_m: float, rules: PlanRegler) -> float:
     spec = get_typology_spec(typology)
     if typology == Typology.LAMELL:
@@ -683,7 +702,7 @@ def _required_spacing(typology: Typology, height_m: float, rules: PlanRegler) ->
         sol_spacing = min(12.0, max(float(rules.brann_avstand_m), 0.50 * float(height_m) + 2.0))
     else:
         sol_spacing = spec.min_spacing_m
-    return max(float(rules.brann_avstand_m), float(sol_spacing))
+    return max(_minimum_building_spacing_m(rules), float(sol_spacing))
 
 
 def _lamell_row_spacing(field: Delfelt, spec: BaseTypologySpec, rules: Optional[PlanRegler] = None) -> float:
@@ -692,10 +711,10 @@ def _lamell_row_spacing(field: Delfelt, spec: BaseTypologySpec, rules: Optional[
     base = _required_spacing(Typology.LAMELL, height_m, rule_obj)
     target_count = max(1, int(getattr(field, 'target_building_count', 0) or 1))
     if target_count >= 8:
-        return max(float(rule_obj.brann_avstand_m), min(9.0, base))
+        return max(_minimum_building_spacing_m(rule_obj), min(9.0, base))
     if target_count >= 6:
-        return max(float(rule_obj.brann_avstand_m), min(10.0, base))
-    return max(float(rule_obj.brann_avstand_m), base)
+        return max(_minimum_building_spacing_m(rule_obj), min(10.0, base))
+    return max(_minimum_building_spacing_m(rule_obj), base)
 
 
 def _is_parallel(angle_a: float, angle_b: float, tol: float = 1e-3) -> bool:
@@ -744,8 +763,8 @@ def _parallel_lamell_spacing_requirement(
     normal_gap = _interval_gap(a_n, b_n)
 
     lamell_height = max(float(height_a_m), float(height_b_m))
-    solar_req = max(float(rules.brann_avstand_m), min(12.0, 0.55 * lamell_height + 2.0))
-    fire_req = max(float(rules.brann_avstand_m), 8.0)
+    solar_req = max(_minimum_building_spacing_m(rules), min(12.0, 0.55 * lamell_height + 2.0))
+    fire_req = _minimum_building_spacing_m(rules)
 
     # Stor overlap i lengderetningen = fasade mot fasade → krev solavstand.
     if tangent_overlap >= max(8.0, 0.35 * tangent_len):
@@ -771,7 +790,7 @@ def _building_spacing_ok(candidate: Polygon, candidate_angle_deg: float, candida
                 rules,
             )
         else:
-            req = max(float(rules.brann_avstand_m), _required_spacing(candidate_typology, candidate_height_m, rules), _required_spacing(other_typology, other_height_m, rules))
+            req = max(_minimum_building_spacing_m(rules), _required_spacing(candidate_typology, candidate_height_m, rules), _required_spacing(other_typology, other_height_m, rules))
         if candidate.distance(other_poly) + 1e-6 < req:
             return False
     return True
@@ -1179,7 +1198,7 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                 y0 = miny + off
                 rects = _fit_varied_lameller_in_segment(
                     local_poly, y0, depth, aesthetic_min_length, spec.length_m.max_m,
-                    min_spacing=6.0,
+                    min_spacing=8.0,
                 )
                 footprints_varied.extend(rects)
 
@@ -1882,8 +1901,11 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
         width_candidates = [60.0, 58.0, 56.0, 54.0, 52.0, 50.0, 48.0]
         side_candidates = [36.0, 34.0, 32.0, 30.0, 28.0]
     else:
-        width_candidates = [54.0, 52.0, 50.0, 48.0, 46.0, 44.0]
-        side_candidates = [30.0, 28.0, 26.0, 25.0]
+        # Smaller karré cells are allowed in a multi-kvartal structure.
+        # They still keep 11.5-12.5 m building depth, but the facade run may
+        # step down to ca. 42-46 m so that two U-forms can face a shared space.
+        width_candidates = [54.0, 52.0, 50.0, 48.0, 46.0, 44.0, 42.0, 40.0]
+        side_candidates = [30.0, 28.0, 26.0, 25.0, 24.0]
     outer_h_candidates = []
     if closed:
         outer_h_candidates = [s + 2.0 * arm for s in side_candidates]
@@ -2841,7 +2863,7 @@ def _place_lameller_in_bands(skeleton: FieldSkeleton, field: Delfelt, spec: Base
                 if (bmaxy - bminy) < depth * 0.9:
                     continue
                 rect = _fit_rect_in_segment(band, (bminy + bmaxy) / 2.0 - depth / 2.0, depth, min_fit_length, spec.length_m.max_m)
-                if rect is not None and all(rect.distance(existing) >= 6.0 for existing in footprints):
+                if rect is not None and all(rect.distance(existing) >= 8.0 for existing in footprints):
                     footprints.append(rect)
                     used_area += rect.area
 
@@ -3386,8 +3408,8 @@ def _split_core_for_multi_clusters(
     central_void = float(central_void_m or 0.0)
     if central_void <= 0.0:
         central_void = 22.0 if cluster_count >= 4 else 18.0
-    central_void = max(14.0, min(26.0, central_void))
-    smau = max(1.5, min(float(gap_m or 4.0) / 2.0, 3.0))
+    central_void = max(16.0, min(28.0, central_void))
+    smau = max(2.5, min(float(gap_m or 8.0) / 2.0, 4.0))
 
     def _clip_cell(x0: float, y0: float, x1: float, y1: float) -> Optional[Polygon]:
         if x1 <= x0 + 8.0 or y1 <= y0 + 8.0:
@@ -3404,13 +3426,15 @@ def _split_core_for_multi_clusters(
 
     parts: List[Polygon] = []
     # Ønsket celle gir rom for 50–60 m fasade + 25–35 m side i U/O-form.
-    desired_w = 72.0
-    desired_h = 70.0
-    edge_margin = max(2.0, min(8.0, float(gap_m or 4.0)))
+    desired_w = 62.0
+    desired_h = 56.0
+    min_cell_w = 42.0
+    min_cell_h = 38.0
+    edge_margin = max(4.0, min(10.0, float(gap_m or 8.0)))
 
-    if cluster_count >= 4 and width >= central_void + 2 * 48.0 and height >= central_void + 2 * 42.0:
-        cell_w = min(desired_w, max(48.0, (width - central_void - 2 * edge_margin) / 2.0))
-        cell_h = min(desired_h, max(42.0, (height - central_void - 2 * edge_margin) / 2.0))
+    if cluster_count >= 4 and width >= central_void + 2 * min_cell_w and height >= central_void + 2 * min_cell_h:
+        cell_w = min(desired_w, max(min_cell_w, (width - central_void - 2 * edge_margin) / 2.0))
+        cell_h = min(desired_h, max(min_cell_h, (height - central_void - 2 * edge_margin) / 2.0))
         x_left0 = max(minx + edge_margin, cx - central_void / 2.0 - cell_w)
         x_left1 = cx - central_void / 2.0
         x_right0 = cx + central_void / 2.0
@@ -3433,11 +3457,11 @@ def _split_core_for_multi_clusters(
             return parts[:cluster_count]
 
     # 2 karréer side-om-side eller over/under med 18–25 m fellesrom imellom.
-    if cluster_count == 2 and (width >= central_void + 2 * 48.0 or height >= central_void + 2 * 42.0):
-        horizontal = width >= height and width >= central_void + 2 * 48.0
+    if cluster_count == 2 and (width >= central_void + 2 * min_cell_w or height >= central_void + 2 * min_cell_h):
+        horizontal = width >= height and width >= central_void + 2 * min_cell_w
         if horizontal:
-            cell_w = min(desired_w, max(48.0, (width - central_void - 2 * edge_margin) / 2.0))
-            cell_h = min(desired_h, max(42.0, height - 2 * edge_margin))
+            cell_w = min(desired_w, max(min_cell_w, (width - central_void - 2 * edge_margin) / 2.0))
+            cell_h = min(desired_h, max(min_cell_h, height - 2 * edge_margin))
             y0 = max(miny + edge_margin, cy - cell_h / 2.0)
             y1 = min(maxy - edge_margin, cy + cell_h / 2.0)
             candidates = [
@@ -3445,8 +3469,8 @@ def _split_core_for_multi_clusters(
                 (cx + central_void / 2.0, y0, min(maxx - edge_margin, cx + central_void / 2.0 + cell_w), y1),
             ]
         else:
-            cell_w = min(desired_w, max(48.0, width - 2 * edge_margin))
-            cell_h = min(desired_h, max(42.0, (height - central_void - 2 * edge_margin) / 2.0))
+            cell_w = min(desired_w, max(min_cell_w, width - 2 * edge_margin))
+            cell_h = min(desired_h, max(min_cell_h, (height - central_void - 2 * edge_margin) / 2.0))
             x0 = max(minx + edge_margin, cx - cell_w / 2.0)
             x1 = min(maxx - edge_margin, cx + cell_w / 2.0)
             candidates = [
@@ -3540,7 +3564,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
     if cluster_target <= 1:
         return None
 
-    gap_m = max(3.0, float(getattr(field, "gap_between_m", 0.0) or 4.0))
+    gap_m = max(8.0, float(getattr(field, "gap_between_m", 0.0) or 8.0))
     central_void_m = float(getattr(field, "central_void_m", 0.0) or (22.0 if cluster_target >= 4 else 18.0))
     cluster_counts = [cluster_target]
     if cluster_target >= 3:
@@ -3825,17 +3849,21 @@ def _verify_adjusted_buildings(
             pass
         checked.append(bygg)
 
-    # Sjekk overlapp mellom bygg
-    # Hvis to bygg nå overlapper, behold det første og forkast det andre.
+    # Sjekk overlapp og hard minsteavstand mellom bygg. Fasadesnapping kan
+    # ellers flytte to bygg nærmere enn brann-/avstandskravet.
     final: List[Bygg] = []
+    min_gap = _minimum_building_spacing_m(rules)
     for b in checked:
-        overlaps = False
+        violates = False
         for existing in final:
             if b.footprint.intersects(existing.footprint):
                 if b.footprint.intersection(existing.footprint).area > 0.5:
-                    overlaps = True
+                    violates = True
                     break
-        if not overlaps:
+            if b.footprint.distance(existing.footprint) + 1e-6 < min_gap:
+                violates = True
+                break
+        if not violates:
             final.append(b)
     return final
 
@@ -3997,5 +4025,17 @@ def buildings_do_not_overlap(buildings: Sequence[Bygg]) -> bool:
     for i, a in enumerate(buildings):
         for b in buildings[i + 1 :]:
             if a.footprint.intersects(b.footprint) or a.footprint.overlaps(b.footprint):
+                return False
+    return True
+
+
+def buildings_respect_min_spacing(buildings: Sequence[Bygg], min_spacing_m: float = 8.0) -> bool:
+    """Return True only when all separate buildings have the required clear gap."""
+    min_gap = max(0.0, float(min_spacing_m or 0.0))
+    if min_gap <= 0.0:
+        return True
+    for i, a in enumerate(buildings):
+        for b in buildings[i + 1 :]:
+            if a.footprint.distance(b.footprint) + 1e-6 < min_gap:
                 return False
     return True

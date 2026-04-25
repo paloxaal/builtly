@@ -35,7 +35,7 @@ class FieldEnvelope:
     frontage_depth_m: Optional[float] = None
     corridor_width_m: Optional[float] = None
     central_void_m: float = 0.0
-    gap_between_m: float = 4.0
+    gap_between_m: float = 8.0
     macro_structure: Optional[str] = None
     micro_field_pattern: Optional[str] = None
     symmetry_preference: Optional[str] = None
@@ -61,7 +61,7 @@ class FieldEnvelope:
 #   på mindre felt.
 # - Punkthus styres mot ca. 20 x 20 m.
 _AREA_PER_BUILDING_RULES: Dict[Typology, Tuple[float, float]] = {
-    Typology.KARRE: (4500.0, 9000.0),
+    Typology.KARRE: (3000.0, 6500.0),
     Typology.LAMELL: (1800.0, 3200.0),
     Typology.PUNKTHUS: (1400.0, 2200.0),
     Typology.REKKEHUS: (350.0, 700.0),
@@ -192,18 +192,23 @@ def _recommended_building_count(
         typical_bra_per_building = 6.5 * 10.0 * avg_f
 
     if typology == Typology.KARRE:
-        if field_area_m2 < 6000.0:
-            target = 1 if density >= 1.0 else 0
-        elif field_area_m2 < 12000.0:
-            target = 1 if density < 1.85 else 2
+        # Karré skal kunne danne en liten kvartalsstruktur, ikke bare ett stort
+        # isolert volum. Ved høy tetthet prioriterer vi flere U/O-karréer som
+        # kan stå mot hverandre med et lesbart fellesrom imellom.
+        if field_area_m2 < 5200.0:
+            target = 1 if density < 2.15 else 2
+        elif field_area_m2 < 9000.0:
+            target = 2 if density >= 1.45 else 1
+        elif field_area_m2 < 14000.0:
+            target = 3 if density >= 1.55 else 2
         else:
-            target = max(1, int(round(field_area_m2 / 9000.0)))
-            if density >= 1.60 and target < max_count:
+            target = max(2, int(round(field_area_m2 / 6500.0)))
+            if density >= 1.45 and target < max_count:
                 target += 1
             elif density <= 0.85 and target > min_count:
                 target -= 1
-        if fallback_count > 0 and field_area_m2 < 9000.0:
-            target = max(target, min(1, fallback_count))
+        if fallback_count > 0:
+            target = max(target, min(fallback_count, max_count))
         return max(min_count, min(max_count, target))
 
     if typical_bra_per_building > 0:
@@ -347,21 +352,24 @@ class ConceptStrategy:
                 elif selected_typology == Typology.PUNKTHUS:
                     cap = 2 if field_area_m2 < 2500.0 else (3 if field_area_m2 < 5200.0 else env.target_building_count)
                     target_building_count = max(target_building_count, min(env.target_building_count, cap))
-                elif selected_typology == Typology.KARRE and field_area_m2 >= 7500.0:
-                    target_building_count = max(target_building_count, min(env.target_building_count, 4))
+                elif selected_typology == Typology.KARRE and field_area_m2 >= 4800.0:
+                    target_building_count = max(target_building_count, min(env.target_building_count, 5))
 
-            if selected_typology == Typology.KARRE and field_area_m2 < 4_200.0:
+            if selected_typology == Typology.KARRE and field_area_m2 < 3_800.0:
                 target_building_count = 1
 
             if selected_typology == Typology.KARRE:
-                # Runde 9: høy tetthet på mellomstore felt må kunne gi 2 karréer
-                # med et felles uterom imellom, ellers kollapser BRA til 60% nivå.
-                if field_area_m2 < 6_000.0:
-                    target_building_count = min(max(target_building_count, 1), 1 if density < 2.2 else 2)
-                elif field_area_m2 < 11_000.0:
-                    target_building_count = min(max(target_building_count, 1), 2)
-                elif field_area_m2 < 18_000.0:
-                    target_building_count = min(max(target_building_count, 2), 3)
+                # Høy tetthet på mellomstore felt må kunne gi flere karréer
+                # med et felles uterom imellom, ellers kollapser BRA og planen
+                # leses som to isolerte objektbygg.
+                if field_area_m2 < 5_200.0:
+                    target_building_count = min(max(target_building_count, 1), 1 if density < 2.15 else 2)
+                elif field_area_m2 < 9_000.0:
+                    target_building_count = min(max(target_building_count, 2), 3 if density >= 1.75 else 2)
+                elif field_area_m2 < 14_000.0:
+                    target_building_count = min(max(target_building_count, 2), 4 if density >= 1.65 else 3)
+                elif field_area_m2 < 22_000.0:
+                    target_building_count = min(max(target_building_count, 3), 5)
             elif compact_infill and selected_typology in {Typology.LAMELL, Typology.PUNKTHUS}:
                 target_building_count = max(1, min(target_building_count, 2 if field_area_m2 <= 3_500.0 else 3))
 
@@ -404,7 +412,7 @@ class ConceptStrategy:
                 micro_field_pattern = micro_field_pattern or 'clustered_frontage_ring'
                 if central_void_m <= 0.0:
                     central_void_m = 22.0 if target_building_count >= 4 else 18.0
-                gap_between_m = max(3.0, float(gap_between_m or 4.0))
+                gap_between_m = max(8.0, float(gap_between_m or 8.0))
                 rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, med felles uterom mellom kvartalene."
 
             out.append(FieldParameterChoice(
@@ -520,7 +528,7 @@ class LinearMixedStrategy(ConceptStrategy):
             frontage_depth_m=(14.0 if use_karre else (12.0 if use_punkthus else 13.0)),
             corridor_width_m=7.2,
             central_void_m=(18.0 if use_karre else 0.0),
-            gap_between_m=4.0,
+            gap_between_m=8.0,
             macro_structure=("spine_court" if use_karre else "spine"),
             micro_field_pattern=("frontage_ring" if use_karre else ("node_cluster" if use_punkthus else ("dense_parallel_bands" if near_core else "parallel_bands"))),
             symmetry_preference=("axial" if use_karre else "bilateral"),
@@ -573,13 +581,13 @@ class CourtyardUrbanStrategy(ConceptStrategy):
         if role == "neighborhood_edge" and field_area < 4_000.0:
             use_karre = False
         karre_count = 1
-        if use_karre and field_area >= 6_500.0:
+        if use_karre and field_area >= 4_800.0:
             karre_count = 2
-        if use_karre and field_area >= 11_500.0:
+        if use_karre and field_area >= 8_500.0:
             karre_count = 3
-        if use_karre and field_area >= 18_500.0:
+        if use_karre and field_area >= 14_000.0:
             karre_count = 4
-        if use_karre and field_area >= 27_000.0:
+        if use_karre and field_area >= 22_000.0:
             karre_count = 5
 
         return FieldEnvelope(
@@ -593,7 +601,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             design_karre_shape=("uo_chamfered" if edge else "uo"),
             design_height_pattern=("neighbor_step_down" if (field and field.character == "neighborhood_edge") else "stepped"),
             design_variant=(None if use_karre else "terraced"),
-            target_bya_pct=(35.0 if karre_count >= 3 else (34.0 if karre_count >= 2 else 32.0)),
+            target_bya_pct=(39.0 if karre_count >= 3 else (37.0 if karre_count >= 2 else 34.0)),
             skeleton_mode=("courtyard_frontage" if use_karre else "linear_bands"),
             frontage_mode=("quad" if edge and use_karre else ("ring" if use_karre else "double")),
             micro_band_count=(7 if karre_count >= 4 else 6 if karre_count >= 2 else 5),
@@ -601,14 +609,14 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             courtyard_reserve_ratio=(0.31 if edge else 0.34),
             frontage_depth_m=(15.0 if use_karre else 13.0),
             corridor_width_m=7.5,
-            central_void_m=(22.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
-            gap_between_m=4.0,
+            central_void_m=(24.0 if karre_count >= 4 else (18.0 if karre_count >= 2 else 0.0)),
+            gap_between_m=8.0,
             macro_structure="perimeter_block",
             micro_field_pattern=("clustered_frontage_ring" if karre_count >= 2 else ("frontage_ring" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
             composition_strictness=0.988,
             frontage_zone_ratio=0.30,
-            public_realm_ratio=0.20,
+            public_realm_ratio=0.22,
             node_symmetry=True,
             frontage_primary_side="south",
             frontage_secondary_side="west",
