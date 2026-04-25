@@ -4488,18 +4488,21 @@ def _draw_building_callouts(
     *,
     font_label,
     font_detail=None,
-    max_items: int = 8,
+    max_items: int = 12,
 ) -> None:
-    """Draw elegant off-footprint labels with leader lines.
+    """Draw compact building labels outside the footprints with leader lines.
 
-    Runde 9.1: labels skal ikke ligge oppå byggene. Denne helperen holder
-    byggenes fotavtrykk rent og legger små forklarende etiketter i randsonen
-    rundt selve bebyggelsen, med tynne knekkede lederlinjer tilbake til bygg.
+    The 2D concept drawings should not place text on top of buildings. This
+    helper keeps the plan clean by moving labels to the side and connecting them
+    with restrained leader lines.
     """
     if not parts:
         return
     x0, y0, x1, y1 = map_bounds
     width = max(1.0, x1 - x0)
+    height = max(1.0, y1 - y0)
+    cx_mid = (x0 + x1) / 2.0
+    cy_mid = (y0 + y1) / 2.0
     font_detail = font_detail or font_label
 
     def _bbox(txt: str, font_obj) -> Tuple[int, int]:
@@ -4510,81 +4513,47 @@ def _draw_building_callouts(
             return max(8, len(str(txt)) * 7), 12
 
     candidates = list(parts[:max_items])
-    if not candidates:
-        return
+    left = [p for p in candidates if p.get('center', (cx_mid, cy_mid))[0] <= cx_mid]
+    right = [p for p in candidates if p.get('center', (cx_mid, cy_mid))[0] > cx_mid]
 
-    all_x: List[float] = []
-    all_y: List[float] = []
-    for part in candidates:
-        for pt in part.get('pts', []) or []:
-            try:
-                all_x.append(float(pt[0]))
-                all_y.append(float(pt[1]))
-            except Exception:
-                pass
-    if all_x and all_y:
-        bminx, bmaxx = min(all_x), max(all_x)
-        bminy, bmaxy = min(all_y), max(all_y)
-    else:
-        bminx, bmaxx = x0 + width * 0.35, x1 - width * 0.35
-        bminy, bmaxy = y0 + (y1-y0) * 0.35, y1 - (y1-y0) * 0.35
-
-    cx_mid = (bminx + bmaxx) / 2.0
-    box_w = min(142.0, max(112.0, width * 0.17))
-    box_h = 32.0
-    gutter = max(10.0, width * 0.012)
-    leader_gap = 18.0
-
-    left = [p for p in candidates if p.get('center', (cx_mid, 0))[0] <= cx_mid]
-    right = [p for p in candidates if p.get('center', (cx_mid, 0))[0] > cx_mid]
+    # If everything ends on one side, split by y-position so labels still breathe.
     if len(left) == 0 or len(right) == 0:
         ordered = sorted(candidates, key=lambda p: p.get('center', (0, 0))[1])
         left = ordered[::2]
         right = ordered[1::2]
 
-    def _column_x(side: str) -> float:
-        if side == 'left':
-            preferred = bminx - leader_gap - box_w
-            return max(x0 + gutter, min(preferred, x1 - gutter - box_w))
-        preferred = bmaxx + leader_gap
-        return max(x0 + gutter, min(preferred, x1 - gutter - box_w))
-
     def _layout_column(col: List[Dict[str, Any]], side: str) -> List[Tuple[Dict[str, Any], Tuple[float, float, float, float]]]:
         if not col:
             return []
         col = sorted(col, key=lambda p: p.get('center', (0, 0))[1])
-        bx = _column_x(side)
+        box_w = min(152.0, max(116.0, width * 0.20))
+        box_h = 38.0
+        gutter = max(8.0, width * 0.012)
+        if side == 'left':
+            bx = x0 + gutter
+        else:
+            bx = x1 - gutter - box_w
         min_y = y0 + gutter
         max_y = y1 - gutter - box_h
-        if max_y < min_y:
-            max_y = min_y
-        # Use evenly distributed anchors when many labels would collide.
-        if len(col) > 1:
-            target_ys = [min_y + i * ((max_y - min_y) / max(len(col) - 1, 1)) for i in range(len(col))]
-        else:
-            cy = float(col[0].get('center', (0, (y0+y1)/2))[1]) - box_h/2.0
-            target_ys = [max(min_y, min(max_y, cy))]
         result = []
-        for part, by in zip(col, target_ys):
-            # Blend between natural y and evenly spaced y, so labels point neatly
-            # but remain uncluttered.
-            natural = float(part.get('center', (0, by))[1]) - box_h / 2.0
-            by = 0.55 * by + 0.45 * max(min_y, min(max_y, natural))
+        used_y: List[float] = []
+        for idx, part in enumerate(col):
+            target_y = float(part.get('center', (0, cy_mid))[1]) - box_h / 2.0
+            by = max(min_y, min(max_y, target_y))
+            for prev_y in used_y:
+                if abs(by - prev_y) < box_h + 6:
+                    by = prev_y + box_h + 6
+            if by > max_y:
+                by = max_y
+                # Back-propagate gently if we hit the bottom.
+                if result:
+                    shift = max(0.0, (used_y[-1] + box_h + 6) - max_y)
+                    if shift > 0:
+                        result = [(rp, (rx0, max(min_y, ry0-shift), rx1, max(min_y, ry1-shift))) for rp, (rx0, ry0, rx1, ry1) in result]
+                        used_y = [max(min_y, y-shift) for y in used_y]
+            used_y.append(by)
             result.append((part, (bx, by, bx + box_w, by + box_h)))
-        # Final collision pass.
-        result.sort(key=lambda item: item[1][1])
-        adjusted = []
-        last_bottom = min_y - 999.0
-        for part, (rx0, ry0, rx1, ry1) in result:
-            ry0 = max(ry0, last_bottom + 6.0)
-            ry0 = min(ry0, max_y)
-            adjusted.append((part, (rx0, ry0, rx1, ry0 + box_h)))
-            last_bottom = ry0 + box_h
-        # If bottom overflow, shift all up.
-        if adjusted and adjusted[-1][1][3] > y1 - gutter:
-            overflow = adjusted[-1][1][3] - (y1 - gutter)
-            adjusted = [(part, (rx0, max(min_y, ry0-overflow), rx1, max(min_y, ry1-overflow))) for part, (rx0, ry0, rx1, ry1) in adjusted]
-        return adjusted
+        return result
 
     placements = _layout_column(left, 'left') + _layout_column(right, 'right')
 
@@ -4601,98 +4570,29 @@ def _draw_building_callouts(
             detail_bits.append(f"{int(floors)} et.")
         if length > 0 and depth > 0:
             detail_bits.append(f"{length:.0f}×{depth:.0f} m")
-        detail = ' / '.join(detail_bits)
+        detail = ' · '.join(detail_bits)
         color = part.get('color') or (198, 198, 190, 230)
         outline = part.get('outline') or (110, 118, 128, 180)
 
+        # Leader line: short orthogonal elbow, kept pale so it supports rather than dominates.
         label_anchor_x = bx1 if bx0 < cx else bx0
         label_anchor_y = (by0 + by1) / 2.0
-        side_sign = 1 if bx0 < cx else -1
-        elbow_x = label_anchor_x + side_sign * 14.0
-        elbow_y = cy
-        draw.line([(cx, cy), (elbow_x, elbow_y), (label_anchor_x, label_anchor_y)], fill=(67, 94, 124, 120), width=2)
-        draw.ellipse([(cx - 2.6, cy - 2.6), (cx + 2.6, cy + 2.6)], fill=(67, 94, 124, 170))
+        elbow_x = label_anchor_x + (10 if bx0 < cx else -10)
+        draw.line([(cx, cy), (elbow_x, cy), (label_anchor_x, label_anchor_y)], fill=(63, 94, 126, 150), width=2)
+        draw.ellipse([(cx - 3, cy - 3), (cx + 3, cy + 3)], fill=(63, 94, 126, 180))
 
-        draw.rounded_rectangle([(bx0, by0), (bx1, by1)], radius=11, fill=(255, 255, 255, 214), outline=(178, 187, 196, 150))
-        draw.ellipse([(bx0 + 7, by0 + 7), (bx0 + 25, by0 + 25)], fill=color, outline=outline)
+        draw.rounded_rectangle([(bx0, by0), (bx1, by1)], radius=12, fill=(255, 255, 255, 226), outline=(174, 184, 194, 170))
+        draw.ellipse([(bx0 + 9, by0 + 9), (bx0 + 29, by0 + 29)], fill=color, outline=outline)
         tw, th = _bbox(tag, font_label)
-        draw.text((bx0 + 16 - tw / 2.0, by0 + 16 - th / 2.0 - 1), tag, fill=(20, 34, 54, 255), font=font_label)
+        draw.text((bx0 + 19 - tw / 2.0, by0 + 19 - th / 2.0 - 1), tag, fill=(20, 34, 54, 255), font=font_label)
         title = f"{tag} · {typ}" if typ else tag
-        if len(title) > 16:
-            title = title[:15] + '…'
-        draw.text((bx0 + 31, by0 + 5), title, fill=(31, 38, 48, 255), font=font_label)
+        if len(title) > 17:
+            title = title[:16] + '…'
+        draw.text((bx0 + 37, by0 + 7), title, fill=(31, 38, 48, 255), font=font_label)
         if detail:
-            if len(detail) > 19:
-                detail = detail[:18] + '…'
-            draw.text((bx0 + 31, by0 + 20), detail, fill=(89, 95, 101, 235), font=font_detail)
-
-
-def _draw_feature_callouts(
-    draw: ImageDraw.ImageDraw,
-    features: List[Dict[str, Any]],
-    map_bounds: Tuple[float, float, float, float],
-    *,
-    font_label,
-    max_items: int = 6,
-) -> None:
-    """Draw light site-plan annotations outside the main building footprints.
-
-    Inspired by Nordic site-plan references: annotations sit in quiet margins
-    and are connected with thin leader lines rather than placed directly over
-    buildings or outdoor rooms.
-    """
-    if not features:
-        return
-    x0, y0, x1, y1 = map_bounds
-    width = max(1.0, x1 - x0)
-    height = max(1.0, y1 - y0)
-
-    def _bbox(txt: str) -> Tuple[int, int]:
-        try:
-            bb = font_label.getbbox(str(txt))
-            return bb[2] - bb[0], bb[3] - bb[1]
-        except Exception:
-            return max(8, len(str(txt)) * 7), 12
-
-    usable = [f for f in features[:max_items] if f.get('center')]
-    if not usable:
-        return
-    mid_x = (x0 + x1) / 2.0
-    left = [f for f in usable if f['center'][0] <= mid_x]
-    right = [f for f in usable if f['center'][0] > mid_x]
-    if not left or not right:
-        ordered = sorted(usable, key=lambda f: f['center'][1])
-        left = ordered[::2]
-        right = ordered[1::2]
-
-    def _place_group(group: List[Dict[str, Any]], side: str) -> List[Tuple[Dict[str, Any], Tuple[float, float]]]:
-        if not group:
-            return []
-        group = sorted(group, key=lambda f: f['center'][1])
-        bx = x0 + width * 0.035 if side == 'left' else x1 - width * 0.28
-        top = y0 + height * 0.11
-        bottom = y1 - height * 0.13
-        if len(group) == 1:
-            ys = [max(top, min(bottom, group[0]['center'][1]))]
-        else:
-            ys = [top + i * ((bottom - top) / max(len(group) - 1, 1)) for i in range(len(group))]
-        return list(zip(group, [(bx, y) for y in ys]))
-
-    placements = _place_group(left, 'left') + _place_group(right, 'right')
-    for feature, (tx, ty) in placements:
-        label = str(feature.get('label') or '').strip()
-        if not label:
-            continue
-        cx, cy = feature['center']
-        color = feature.get('color') or (60, 90, 120, 190)
-        tw, th = _bbox(label)
-        side = 'left' if tx < cx else 'right'
-        # Long, thin, reference-like callout line.
-        text_anchor_x = tx + (0 if side == 'left' else tw)
-        line_end_x = tx + tw + 8 if side == 'left' else tx - 8
-        draw.line([(cx, cy), (line_end_x, ty + th / 2.0)], fill=(47, 58, 66, 120), width=1)
-        draw.ellipse([(cx - 2.3, cy - 2.3), (cx + 2.3, cy + 2.3)], fill=color)
-        draw.text((tx, ty), label, fill=(48, 55, 61, 220), font=font_label)
+            if len(detail) > 22:
+                detail = detail[:21] + '…'
+            draw.text((bx0 + 37, by0 + 22), detail, fill=(89, 95, 101, 235), font=font_detail)
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render a clean 2D concept overview.
@@ -4921,38 +4821,6 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
         if len(part['pts']) >= 4:
             draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
-
-    # Light site-plan annotations, kept outside the actual building footprints.
-    feature_callouts: List[Dict[str, Any]] = []
-
-    def _append_feature_callout(items: List[Dict[str, Any]], label: str, color: Tuple[int, int, int, int], limit: int = 2) -> None:
-        added = 0
-        for item in items:
-            if added >= limit:
-                break
-            coords = flatten_coord_groups(item.get('coords', []))
-            if len(coords) < 3:
-                continue
-            try:
-                poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-                if poly.is_empty or poly.area < 1.0:
-                    continue
-                c = poly.representative_point()
-                feature_callouts.append({'label': label, 'center': project((c.x, c.y)), 'color': color})
-                added += 1
-            except Exception:
-                continue
-
-    _append_feature_callout(courtyard_polys, 'felles gårdsrom', (128, 169, 105, 220), limit=2)
-    _append_feature_callout(public_polys, 'grønt fellesrom', (119, 166, 111, 220), limit=2)
-    _append_feature_callout(corridor_polys, 'sikt / gangakse', (224, 130, 60, 210), limit=2)
-    _draw_feature_callouts(
-        draw,
-        feature_callouts,
-        (map_x0 + inner_pad, map_y0 + inner_pad, map_x1 - inner_pad, map_y1 - inner_pad),
-        font_label=font_tiny,
-        max_items=6,
-    )
 
     # Building labels are intentionally kept off the footprints.
     _draw_building_callouts(
@@ -5276,7 +5144,6 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             'idx': idx,
             'tag': _alpha_num_tag(idx),
             'typology': typ,
-            'pts': pp,
             'center': (cx_l, cy_l),
             'color': color,
             'outline': outline,
@@ -5285,37 +5152,6 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             'depth_m': depth_m,
             'area_m2': area_m2,
         })
-
-    plan_feature_callouts: List[Dict[str, Any]] = []
-
-    def _append_plan_feature(items: List[Dict[str, Any]], label: str, color: Tuple[int, int, int, int], limit: int = 2) -> None:
-        added = 0
-        for item in items:
-            if added >= limit:
-                break
-            coords = flatten_coord_groups(item.get('coords', []))
-            if len(coords) < 3:
-                continue
-            try:
-                poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-                if poly.is_empty or poly.area < 1.0:
-                    continue
-                c = poly.representative_point()
-                plan_feature_callouts.append({'label': label, 'center': proj(float(c.x), float(c.y)), 'color': color})
-                added += 1
-            except Exception:
-                continue
-
-    _append_plan_feature(courtyard_polys, 'privat/felles gårdsrom', (128, 169, 105, 220), limit=2)
-    _append_plan_feature(public_polys, 'grønt fellesrom', (119, 166, 111, 220), limit=2)
-    _append_plan_feature(corridor_polys, 'sikt- og gangakse', (224, 130, 60, 210), limit=2)
-    _draw_feature_callouts(
-        draw,
-        plan_feature_callouts,
-        (map_x0, map_y0, map_x1, map_y1),
-        font_label=font_tiny,
-        max_items=6,
-    )
 
     _draw_building_callouts(
         draw,
