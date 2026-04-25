@@ -9139,7 +9139,7 @@ IMG_DIR = DB_DIR / "project_images"
 # killed the session, and the user was sent back to Project Setup.
 # The new order is: Session -> local ssot.json -> optional Supabase with hard timeout.
 
-_PD_REMOTE_TIMEOUT_S = 1.2
+_PD_REMOTE_TIMEOUT_S = 5.0
 
 
 def _default_project_data() -> Dict[str, Any]:
@@ -9323,11 +9323,32 @@ def _bootstrap_project_data() -> Dict[str, Any]:
             st.session_state["_pd_backup_done"] = True
         return local
 
-    # 2) Remote only if session + local are empty, and only once per session.
-    if not st.session_state.get("_pd_remote_attempted", False):
-        st.session_state["_pd_remote_attempted"] = True
+    # 2) Remote only if session + local are empty.
+    # FIX (timeout-bug): tidligere ble _pd_remote_attempted-flagget satt
+    # uansett om Supabase faktisk svarte. Det betydde at hvis Supabase hadde
+    # cold-start eller var treig på første reconnect, så ble bruker fast i
+    # default-state (Project Setup). Ved senere reloads forsøkte vi IKKE
+    # Supabase igjen pga. flagget, og brukeren havnet i loop.
+    #
+    # Ny logikk: throttle med tidsstempel istedenfor permanent flagg.
+    # - Ved suksess: lagres tidsstempel + flagg = True (ingen flere forsøk
+    #   denne sesjonen, men data er nå lokalt cached).
+    # - Ved feil/timeout: lagres tidsstempel uten flagg, slik at vi prøver
+    #   igjen etter minst 10 sekunder. Det forhindrer thread-spam ved
+    #   mange Streamlit-reruns men gir oss flere sjanser til å få data.
+    import time as _time
+    _pd_last_attempt = float(st.session_state.get("_pd_remote_last_attempt_ts", 0.0) or 0.0)
+    _pd_now = _time.time()
+    if (
+        not st.session_state.get("_pd_remote_attempted", False)
+        and (_pd_now - _pd_last_attempt) >= 10.0
+    ):
+        st.session_state["_pd_remote_last_attempt_ts"] = _pd_now
         remote = _load_project_data_remote(timeout_s=_PD_REMOTE_TIMEOUT_S)
         if remote and _project_data_has_identity(remote):
+            st.session_state["_pd_remote_attempted"] = True
+            # save_project_data_to_session_and_remote skriver til ssot.json,
+            # slik at neste reload/reconnect finner data lokalt.
             return save_project_data_to_session_and_remote(remote, sync_remote=False)
 
     # 3) Keep a valid default without blocking.
