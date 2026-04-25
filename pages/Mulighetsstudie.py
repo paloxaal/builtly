@@ -4626,6 +4626,74 @@ def _draw_building_callouts(
                 detail = detail[:18] + '…'
             draw.text((bx0 + 31, by0 + 20), detail, fill=(89, 95, 101, 235), font=font_detail)
 
+
+def _draw_feature_callouts(
+    draw: ImageDraw.ImageDraw,
+    features: List[Dict[str, Any]],
+    map_bounds: Tuple[float, float, float, float],
+    *,
+    font_label,
+    max_items: int = 6,
+) -> None:
+    """Draw light site-plan annotations outside the main building footprints.
+
+    Inspired by Nordic site-plan references: annotations sit in quiet margins
+    and are connected with thin leader lines rather than placed directly over
+    buildings or outdoor rooms.
+    """
+    if not features:
+        return
+    x0, y0, x1, y1 = map_bounds
+    width = max(1.0, x1 - x0)
+    height = max(1.0, y1 - y0)
+
+    def _bbox(txt: str) -> Tuple[int, int]:
+        try:
+            bb = font_label.getbbox(str(txt))
+            return bb[2] - bb[0], bb[3] - bb[1]
+        except Exception:
+            return max(8, len(str(txt)) * 7), 12
+
+    usable = [f for f in features[:max_items] if f.get('center')]
+    if not usable:
+        return
+    mid_x = (x0 + x1) / 2.0
+    left = [f for f in usable if f['center'][0] <= mid_x]
+    right = [f for f in usable if f['center'][0] > mid_x]
+    if not left or not right:
+        ordered = sorted(usable, key=lambda f: f['center'][1])
+        left = ordered[::2]
+        right = ordered[1::2]
+
+    def _place_group(group: List[Dict[str, Any]], side: str) -> List[Tuple[Dict[str, Any], Tuple[float, float]]]:
+        if not group:
+            return []
+        group = sorted(group, key=lambda f: f['center'][1])
+        bx = x0 + width * 0.035 if side == 'left' else x1 - width * 0.28
+        top = y0 + height * 0.11
+        bottom = y1 - height * 0.13
+        if len(group) == 1:
+            ys = [max(top, min(bottom, group[0]['center'][1]))]
+        else:
+            ys = [top + i * ((bottom - top) / max(len(group) - 1, 1)) for i in range(len(group))]
+        return list(zip(group, [(bx, y) for y in ys]))
+
+    placements = _place_group(left, 'left') + _place_group(right, 'right')
+    for feature, (tx, ty) in placements:
+        label = str(feature.get('label') or '').strip()
+        if not label:
+            continue
+        cx, cy = feature['center']
+        color = feature.get('color') or (60, 90, 120, 190)
+        tw, th = _bbox(label)
+        side = 'left' if tx < cx else 'right'
+        # Long, thin, reference-like callout line.
+        text_anchor_x = tx + (0 if side == 'left' else tw)
+        line_end_x = tx + tw + 8 if side == 'left' else tx - 8
+        draw.line([(cx, cy), (line_end_x, ty + th / 2.0)], fill=(47, 58, 66, 120), width=1)
+        draw.ellipse([(cx - 2.3, cy - 2.3), (cx + 2.3, cy + 2.3)], fill=color)
+        draw.text((tx, ty), label, fill=(48, 55, 61, 220), font=font_label)
+
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render a clean 2D concept overview.
 
@@ -4853,6 +4921,38 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
         if len(part['pts']) >= 4:
             draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
+
+    # Light site-plan annotations, kept outside the actual building footprints.
+    feature_callouts: List[Dict[str, Any]] = []
+
+    def _append_feature_callout(items: List[Dict[str, Any]], label: str, color: Tuple[int, int, int, int], limit: int = 2) -> None:
+        added = 0
+        for item in items:
+            if added >= limit:
+                break
+            coords = flatten_coord_groups(item.get('coords', []))
+            if len(coords) < 3:
+                continue
+            try:
+                poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+                if poly.is_empty or poly.area < 1.0:
+                    continue
+                c = poly.representative_point()
+                feature_callouts.append({'label': label, 'center': project((c.x, c.y)), 'color': color})
+                added += 1
+            except Exception:
+                continue
+
+    _append_feature_callout(courtyard_polys, 'felles gårdsrom', (128, 169, 105, 220), limit=2)
+    _append_feature_callout(public_polys, 'grønt fellesrom', (119, 166, 111, 220), limit=2)
+    _append_feature_callout(corridor_polys, 'sikt / gangakse', (224, 130, 60, 210), limit=2)
+    _draw_feature_callouts(
+        draw,
+        feature_callouts,
+        (map_x0 + inner_pad, map_y0 + inner_pad, map_x1 - inner_pad, map_y1 - inner_pad),
+        font_label=font_tiny,
+        max_items=6,
+    )
 
     # Building labels are intentionally kept off the footprints.
     _draw_building_callouts(
@@ -5185,6 +5285,37 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             'depth_m': depth_m,
             'area_m2': area_m2,
         })
+
+    plan_feature_callouts: List[Dict[str, Any]] = []
+
+    def _append_plan_feature(items: List[Dict[str, Any]], label: str, color: Tuple[int, int, int, int], limit: int = 2) -> None:
+        added = 0
+        for item in items:
+            if added >= limit:
+                break
+            coords = flatten_coord_groups(item.get('coords', []))
+            if len(coords) < 3:
+                continue
+            try:
+                poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+                if poly.is_empty or poly.area < 1.0:
+                    continue
+                c = poly.representative_point()
+                plan_feature_callouts.append({'label': label, 'center': proj(float(c.x), float(c.y)), 'color': color})
+                added += 1
+            except Exception:
+                continue
+
+    _append_plan_feature(courtyard_polys, 'privat/felles gårdsrom', (128, 169, 105, 220), limit=2)
+    _append_plan_feature(public_polys, 'grønt fellesrom', (119, 166, 111, 220), limit=2)
+    _append_plan_feature(corridor_polys, 'sikt- og gangakse', (224, 130, 60, 210), limit=2)
+    _draw_feature_callouts(
+        draw,
+        plan_feature_callouts,
+        (map_x0, map_y0, map_x1, map_y1),
+        font_label=font_tiny,
+        max_items=6,
+    )
 
     _draw_building_callouts(
         draw,
