@@ -190,10 +190,10 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     count = resolve_delfelt_count(buildable_poly, requested_count=requested_count)
     area = max(float(buildable_poly.area), 1.0)
     density = float(target_bra_m2) / area if target_bra_m2 > 0 else 0.0
-    if requested_count is None:
-        compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
-        urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
+    compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
+    urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
 
+    if requested_count is None:
         # Små, tette tomter skal ikke over-fragmenteres. Der skjer variasjonen inne i
         # ett eller to felt – ikke gjennom mange små delfelt.
         if compact_infill:
@@ -209,14 +209,20 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
                 count += 1
             if density >= 1.28 and concept_family != ConceptFamily.COURTYARD_URBAN:
                 count += 1
-            # Makro/mikro-prinsipp: hold makrofeltene rolige, men gi lineære og parkgrep
-            # nok armer til å bygge rytme. Karré-grep holdes strammere for å unngå for små blokker.
-            if concept_family == ConceptFamily.LINEAR_MIXED:
-                count = max(5, min(count, 7 if density < 1.18 else 8))
-            elif concept_family == ConceptFamily.CLUSTER_PARK:
-                count = max(5, min(count, 7))
-            else:  # COURTYARD_URBAN
-                count = max(4, min(count, 6 if density < 1.18 else 7))
+
+    # Runde 8.2B: UI-faser skal ikke alltid bli like mange makro-delfelt.
+    # Uansett om count kommer fra UI eller auto, mappes det til konseptets
+    # arkitektoniske makrostruktur. Flere bygg håndteres inne i hvert felt.
+    if compact_infill:
+        count = 1 if area <= 3500.0 else min(max(count, 1), 2)
+    elif urban_infill:
+        count = min(max(count, 2), 3)
+    elif concept_family == ConceptFamily.LINEAR_MIXED:
+        count = max(3, min(count, 4 if area < 18000.0 else 5))
+    elif concept_family == ConceptFamily.CLUSTER_PARK:
+        count = max(3, min(count, 3 if area < 16000.0 else 4))
+    else:  # COURTYARD_URBAN
+        count = max(2, min(count, 2 if area < 18000.0 else 4))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -259,6 +265,8 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 courtyard_reserve_ratio=float(choice.courtyard_reserve_ratio or 0.0),
                 frontage_depth_m=choice.frontage_depth_m,
                 corridor_width_m=choice.corridor_width_m,
+                central_void_m=float(getattr(choice, "central_void_m", 0.0) or 0.0),
+                gap_between_m=float(getattr(choice, "gap_between_m", 4.0) or 4.0),
                 macro_structure=choice.macro_structure,
                 micro_field_pattern=choice.micro_field_pattern,
                 symmetry_preference=choice.symmetry_preference,
@@ -599,6 +607,34 @@ def pass6_generate_report_text(plan: Masterplan, target_bra_m2: float, ai_report
 # ---------------------------------------------------------------------------
 
 
+def _effective_delfelt_count_for_family(
+    buildable_poly: Polygon,
+    family: ConceptFamily,
+    requested_count: Optional[int],
+    target_bra_m2: float,
+) -> Optional[int]:
+    """Treat phase count as a maximum, not a hard delfelt count.
+
+    Runde 8.1: 6 phases should not automatically become 6 tiny fields. That
+    destroyed gaterom, grønt fellesrom and karré rings. This maps requested
+    phases to concept-appropriate macro fields.
+    """
+    if requested_count is None or requested_count <= 0:
+        return None
+    area = max(float(getattr(buildable_poly, "area", 0.0) or 0.0), 1.0)
+    density = float(target_bra_m2 or 0.0) / area
+    if area <= 2500.0 and density >= 1.85:
+        return 1
+    req = max(1, int(requested_count))
+    if family == ConceptFamily.CLUSTER_PARK:
+        return 3 if area >= 7000.0 else max(1, min(req, 2))
+    if family == ConceptFamily.COURTYARD_URBAN:
+        return max(2, min(req, 3 if density < 1.10 and area < 10000.0 else 4))
+    if family == ConceptFamily.LINEAR_MIXED:
+        return max(3, min(req, 4))
+    return req
+
+
 def plan_masterplan_geometry(
     buildable_poly: Polygon,
     *,
@@ -707,7 +743,12 @@ def generate_concept_masterplans(
                 concept_family=family,
                 target_bra_m2=target_bra_m2,
                 plan_regler=plan_regler,
-                requested_delfelt_count=requested_delfelt_count,
+                requested_delfelt_count=_effective_delfelt_count_for_family(
+                    buildable_poly,
+                    family,
+                    requested_delfelt_count,
+                    target_bra_m2,
+                ),
                 avg_unit_bra_m2=avg_unit_bra_m2,
                 barnehage_config=barnehage_config,
                 latitude_deg=latitude_deg,
