@@ -311,27 +311,34 @@ def _pil_font(size: int = 14, bold: bool = False) -> "ImageFont.FreeTypeFont":
 
 
 def clean_pdf_text(text: Any) -> str:
+    """Sanitize text for PDF output.
+
+    FPDF can still fall back to Helvetica even if DejaVu exists locally.
+    Therefore normalize fragile characters such as arrows before every PDF write,
+    and only keep broader Unicode when the active PDF font supports it.
+    """
     if text is None:
         return ""
     text = str(text)
     active_font = str(globals().get("PDF_ACTIVE_FONT", PDF_FONT)).lower()
     uses_unicode_font = active_font != "helvetica"
     replacements = {
-        "→": "->",
-        "←": "<-",
-        "↔": "<->",
-        "–": "-",
-        "—": "-",
-        "−": "-",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "…": "...",
-        "•": "*",
-        "·": "-",
-        "²": "2",
-        "³": "3",
+        "\u2192": "->",
+        "\u2190": "<-",
+        "\u2194": "<->",
+        "\u21d2": "=>",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u2026": "...",
+        "\u2022": "*",
+        "\u00b7": "-",
+        "\u00b2": "2",
+        "\u00b3": "3",
     }
     for src, dst in replacements.items():
         text = text.replace(src, dst)
@@ -4419,183 +4426,217 @@ def _draw_badge(
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """2D konseptoversikt for rapport og UI.
+    """Render a clean 2D concept overview.
 
-    Brukeren ønsket en tydeligere og mer lesbar konseptoversikt enn den
-    tidligere aksonometriske skissen. Denne versjonen viser derfor et
-    top-down 2D-diagram med tydelig tomteavgrensning, nabokontekst,
-    grøntrom, gårdsrom og en systematisk byggeliste i høyrepanelet.
+    The previous axonometric overview made the massing hard to read. This view is
+    intentionally top-down: it prioritizes urban structure, public realm,
+    courtyard/park rooms, sight lines and building footprints.
     """
     canvas_w, canvas_h = 1500, 980
-    right_panel_w = 320
-    outer_pad = 24
-    header_h = 108
-    footer_h = 56
-    map_box = (outer_pad, header_h, canvas_w - right_panel_w - 28, canvas_h - footer_h)
-    stage_pad = 26
-    stage_x0, stage_y0 = map_box[0] + stage_pad, map_box[1] + stage_pad
-    stage_x1, stage_y1 = map_box[2] - stage_pad, map_box[3] - stage_pad
+    right_panel_w = 330
+    header_h = 116
+    footer_h = 58
+    margin = 28
+    map_x0, map_y0 = margin, header_h
+    map_x1 = canvas_w - right_panel_w - margin
+    map_y1 = canvas_h - footer_h
 
     img = Image.new('RGBA', (canvas_w, canvas_h), (246, 245, 241, 255))
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(img, 'RGBA')
 
-    font_hero = _pil_font(52, bold=True)
-    font_title = _pil_font(18, bold=False)
-    font_section = _pil_font(16, bold=True)
-    font_body = _pil_font(14, bold=False)
-    font_small = _pil_font(12, bold=False)
-    font_micro = _pil_font(11, bold=False)
-    font_tiny = _pil_font(10, bold=False)
+    font_hero = _pil_font(56, bold=True)
+    font_title = _pil_font(28)
+    font_section = _pil_font(19, bold=True)
+    font_body = _pil_font(17)
+    font_small = _pil_font(14)
+    font_tiny = _pil_font(12)
 
     geometry = option.geometry or {}
+    site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = geometry.get('buildable_polygon_coords') or site_coords
     massing_parts = geometry.get('massing_parts', []) or []
-    site_pts = flatten_coord_groups(getattr(site, 'site_boundary_coords', []))
-    buildable_pts = flatten_coord_groups(getattr(site, 'buildable_coords', []))
-    field_polys = geometry_to_coord_groups(geometry.get('field_polygons', []))
-    public_polys = geometry_to_coord_groups(geometry.get('public_realm_polygons', []))
-    courtyard_polys = geometry_to_coord_groups(geometry.get('courtyard_polygons', []))
-    corridor_polys = geometry_to_coord_groups(geometry.get('view_corridor_polygons', []))
+    neighbor_polys = geometry.get('neighbor_polygons', []) or []
+    field_polys = geometry.get('field_polygons', []) or []
+    public_polys = geometry.get('public_realm_polygons', []) or []
+    courtyard_polys = geometry.get('courtyard_polygons', []) or []
+    corridor_polys = geometry.get('view_corridor_polygons', []) or []
+    macro_axes = geometry.get('macro_axes', []) or []
+    symmetry_axes = geometry.get('symmetry_axes', []) or []
 
-    focus_pts = site_pts or buildable_pts or []
-    if not focus_pts and massing_parts:
-        focus_pts = flatten_coord_groups(massing_parts[0].get('coords', []))
+    site_pts = flatten_coord_groups(site_coords)
+    buildable_pts = flatten_coord_groups(buildable_coords)
+    focus_pts: List[List[float]] = list(site_pts or buildable_pts)
+    for seq in (field_polys, public_polys, courtyard_polys, corridor_polys):
+        for item in seq:
+            focus_pts.extend(flatten_coord_groups(item.get('coords', [])))
+    for part in massing_parts:
+        focus_pts.extend(flatten_coord_groups(part.get('coords', [])))
     if not focus_pts:
-        return img.convert('RGB')
+        focus_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
 
-    focus_xs = [p[0] for p in focus_pts]
-    focus_ys = [p[1] for p in focus_pts]
-    focus_cx = (min(focus_xs) + max(focus_xs)) / 2.0
-    focus_cy = (min(focus_ys) + max(focus_ys)) / 2.0
-    focus_span = max(max(focus_xs) - min(focus_xs), max(focus_ys) - min(focus_ys), 1.0)
-    context_limit = focus_span * 1.9
+    fx = [p[0] for p in focus_pts]
+    fy = [p[1] for p in focus_pts]
+    focus_cx = (min(fx) + max(fx)) / 2.0
+    focus_cy = (min(fy) + max(fy)) / 2.0
+    focus_span = max(max(fx) - min(fx), max(fy) - min(fy), 1.0)
 
     filtered_neighbors = []
-    for neighbor in getattr(site, 'neighbors', []) or []:
-        coords = flatten_coord_groups(neighbor.get('coords', []))
+    for neighbor in neighbor_polys:
+        coords = flatten_coord_groups(neighbor.get('coords') or neighbor.get('polygon_coords') or [])
         if len(coords) < 3:
             continue
         avg_x = sum(p[0] for p in coords) / len(coords)
         avg_y = sum(p[1] for p in coords) / len(coords)
-        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= context_limit:
-            filtered_neighbors.append(neighbor)
+        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= focus_span * 1.8:
+            filtered_neighbors.append({'coords': coords})
 
-    all_pts = list(focus_pts)
+    all_pts: List[List[float]] = list(focus_pts)
     for neighbor in filtered_neighbors:
-        all_pts.extend(flatten_coord_groups(neighbor.get('coords', [])))
+        all_pts.extend(neighbor['coords'])
     xs = [p[0] for p in all_pts]
     ys = [p[1] for p in all_pts]
     minx, maxx = min(xs), max(xs)
     miny, maxy = min(ys), max(ys)
     span_x = max(maxx - minx, 1.0)
     span_y = max(maxy - miny, 1.0)
-    pad_x = max(10.0, span_x * 0.08)
-    pad_y = max(10.0, span_y * 0.08)
+    pad_x = max(8.0, span_x * 0.07)
+    pad_y = max(8.0, span_y * 0.07)
     minx -= pad_x
     maxx += pad_x
     miny -= pad_y
     maxy += pad_y
     span_x = max(maxx - minx, 1.0)
     span_y = max(maxy - miny, 1.0)
-    scale = min((stage_x1 - stage_x0) / span_x, (stage_y1 - stage_y0) / span_y)
 
-    def project(pt):
+    inner_pad = 26
+    sx0, sy0 = map_x0 + inner_pad, map_y0 + inner_pad
+    sx1, sy1 = map_x1 - inner_pad, map_y1 - inner_pad
+    scale = min((sx1 - sx0) / span_x, (sy1 - sy0) / span_y)
+
+    def project(pt: Any) -> Tuple[float, float]:
         x, y = float(pt[0]), float(pt[1])
-        px = stage_x0 + (x - minx) * scale
-        py = stage_y1 - (y - miny) * scale
-        return (px, py)
+        return sx0 + (x - minx) * scale, sy1 - (y - miny) * scale
 
-    def project_coords(coords):
-        pts = [project(p) for p in coords if len(p) >= 2]
+    def pts_from_coords(coords: Any) -> List[Tuple[float, float]]:
+        pts = [project(p) for p in flatten_coord_groups(coords) if len(p) >= 2]
         return pts if len(pts) >= 3 else []
-
-    def draw_polygon_groups(items, fill, outline=None, width=1):
-        for item in items:
-            coords = flatten_coord_groups(item.get('coords', [])) if isinstance(item, dict) else flatten_coord_groups(item)
-            pts = project_coords(coords)
-            if pts:
-                draw.polygon(pts, fill=fill, outline=outline)
-                if outline and width > 1:
-                    draw.line(pts + [pts[0]], fill=outline, width=width)
 
     def label_bbox(text_value: str, font_obj) -> Tuple[int, int]:
         try:
-            bbox = font_obj.getbbox(text_value)
+            bbox = font_obj.getbbox(str(text_value))
             return bbox[2] - bbox[0], bbox[3] - bbox[1]
         except Exception:
-            return (len(text_value) * 8, 12)
+            return (len(str(text_value)) * 8, 12)
+
+    def draw_poly(coords: Any, fill, outline=None, width: int = 1):
+        pp = pts_from_coords(coords)
+        if len(pp) < 3:
+            return
+        draw.polygon(pp, fill=fill, outline=outline)
+        if outline and width > 1:
+            draw.line(pp + [pp[0]], fill=outline, width=width)
+
+    def draw_line(coords: Any, fill, width: int = 2, dash: bool = False):
+        pp = [project(p) for p in coords if len(p) >= 2]
+        if len(pp) < 2:
+            return
+        if not dash:
+            draw.line(pp, fill=fill, width=width)
+            return
+        for a, b in zip(pp, pp[1:]):
+            seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
+            if seg_len <= 0:
+                continue
+            step = 12.0
+            s = 0.0
+            on = True
+            while s < seg_len:
+                e = min(seg_len, s + step * 0.62)
+                if on:
+                    x1 = a[0] + (b[0] - a[0]) * (s / seg_len)
+                    y1 = a[1] + (b[1] - a[1]) * (s / seg_len)
+                    x2 = a[0] + (b[0] - a[0]) * (e / seg_len)
+                    y2 = a[1] + (b[1] - a[1]) * (e / seg_len)
+                    draw.line([(x1, y1), (x2, y2)], fill=fill, width=width)
+                on = not on
+                s += step
 
     typo_colors = {
-        'Lamell': (205, 166, 121, 235),
-        'Punkthus': (176, 194, 147, 235),
-        'Karré': (229, 219, 178, 235),
-        'Rekkehus': (181, 201, 158, 235),
-        'Tun': (196, 183, 150, 235),
+        'Lamell': (205, 166, 121, 232),
+        'Punkthus': (176, 194, 147, 232),
+        'Karré': (229, 219, 178, 236),
+        'Rekkehus': (181, 201, 158, 232),
+        'Tun': (196, 183, 150, 232),
+        'Podium + Tårn': (188, 118, 96, 232),
+        'Tårn': (83, 145, 191, 232),
     }
     typo_outline = {
-        'Lamell': (146, 110, 68, 255),
-        'Punkthus': (112, 132, 92, 255),
-        'Karré': (146, 134, 88, 255),
-        'Rekkehus': (118, 136, 98, 255),
-        'Tun': (130, 118, 95, 255),
+        'Lamell': (138, 101, 64, 255),
+        'Punkthus': (105, 128, 88, 255),
+        'Karré': (144, 132, 86, 255),
+        'Rekkehus': (116, 138, 94, 255),
+        'Tun': (126, 116, 93, 255),
+        'Podium + Tårn': (126, 74, 60, 255),
+        'Tårn': (52, 94, 130, 255),
     }
 
-    # Bakgrunn og paneler
-    draw.rectangle([(0, 0), (canvas_w, canvas_h)], fill=(246, 245, 241, 255))
-    draw.rounded_rectangle([(map_box[0], map_box[1]), (map_box[2], map_box[3])], radius=24, fill=(243, 242, 238, 255), outline=(224, 222, 215, 255))
-    draw.rounded_rectangle([(canvas_w - right_panel_w, 24), (canvas_w - 24, canvas_h - 24)], radius=24, fill=(242, 241, 237, 255), outline=(224, 222, 215, 255))
+    # page frames
+    draw.rounded_rectangle([(22, 20), (canvas_w - 22, canvas_h - 20)], radius=26, fill=(250, 250, 247, 255), outline=(228, 226, 220, 255))
+    draw.rounded_rectangle([(map_x0, map_y0), (map_x1, map_y1)], radius=22, fill=(244, 244, 240, 255), outline=(222, 220, 214, 255))
+    panel_x0 = canvas_w - right_panel_w
+    draw.rounded_rectangle([(panel_x0, 38), (canvas_w - 24, canvas_h - 28)], radius=24, fill=(242, 241, 237, 255), outline=(222, 220, 214, 255))
 
-    # Kuntekst / naboer
+    # context
     for neighbor in filtered_neighbors:
-        coords = flatten_coord_groups(neighbor.get('coords', []))
-        pts = project_coords(coords)
-        if pts:
-            draw.polygon(pts, fill=(220, 220, 218, 255), outline=(204, 204, 200, 255))
+        draw_poly(neighbor['coords'], fill=(219, 219, 217, 255), outline=(201, 202, 199, 225), width=1)
 
-    # Tomtegrense og byggegrense
-    if site_pts:
-        pts = project_coords(site_pts)
-        if pts:
-            draw.polygon(pts, fill=(225, 232, 222, 135), outline=(220, 121, 110, 255))
-            draw.line(pts + [pts[0]], fill=(220, 121, 110, 255), width=2)
-    if buildable_pts:
-        pts = project_coords(buildable_pts)
-        if pts:
-            draw.line(pts + [pts[0]], fill=(114, 168, 205, 200), width=3)
+    # base layers
+    draw_poly(site_coords, fill=(227, 232, 220, 128), outline=(220, 108, 96, 255), width=3)
+    draw_poly(buildable_coords, fill=(222, 236, 241, 88), outline=(98, 158, 197, 220), width=2)
 
-    # Felt og uterom
-    draw_polygon_groups(field_polys, fill=(235, 227, 195, 120), outline=(190, 180, 142, 140), width=1)
-    draw_polygon_groups(public_polys, fill=(202, 219, 194, 150), outline=(153, 172, 142, 170), width=1)
-    draw_polygon_groups(courtyard_polys, fill=(223, 234, 201, 170), outline=(154, 177, 137, 180), width=1)
-    draw_polygon_groups(corridor_polys, fill=(255, 184, 110, 75), outline=(231, 145, 71, 180), width=2)
+    for item in field_polys:
+        draw_poly(item.get('coords', []), fill=(235, 227, 196, 95), outline=(177, 168, 130, 150), width=1)
+    for item in public_polys:
+        draw_poly(item.get('coords', []), fill=(199, 219, 191, 155), outline=(142, 169, 132, 170), width=1)
+    for item in courtyard_polys:
+        draw_poly(item.get('coords', []), fill=(224, 235, 202, 180), outline=(148, 175, 128, 190), width=1)
+    for item in corridor_polys:
+        draw_poly(item.get('coords', []), fill=(255, 183, 107, 65), outline=(230, 143, 61, 170), width=2)
+
+    # axes and sightlines
+    for axis in macro_axes:
+        if axis.get('coords'):
+            draw_line(axis.get('coords'), fill=(73, 111, 152, 125), width=4, dash=False)
+    for axis in symmetry_axes:
+        if axis.get('coords'):
+            draw_line(axis.get('coords'), fill=(73, 180, 220, 135), width=2, dash=True)
 
     proposed = []
     for idx, part in enumerate(massing_parts):
         coords = flatten_coord_groups(part.get('coords', []))
-        pts = project_coords(coords)
-        if not pts:
+        pp = pts_from_coords(coords)
+        if len(pp) < 3:
             continue
         typ = part.get('typology', option.typology)
         base = part.get('color')
         if isinstance(base, list) and len(base) >= 3:
-            color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 235)
+            color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 232)
         else:
-            color = typo_colors.get(typ, (201, 167, 124, 235))
-        outline = typo_outline.get(typ, (126, 108, 82, 255))
+            color = typo_colors.get(typ, (205, 166, 121, 232))
+        outline = typo_outline.get(typ, (125, 110, 84, 255))
         try:
-            poly = Polygon([(p[0], p[1]) for p in coords])
-            centroid = poly.centroid
-            cx, cy = project((float(centroid.x), float(centroid.y)))
+            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            c = poly.centroid
+            center = project((c.x, c.y))
         except Exception:
-            avg_x = sum(p[0] for p in pts) / len(pts)
-            avg_y = sum(p[1] for p in pts) / len(pts)
-            cx, cy = avg_x, avg_y
+            center = (sum(x for x, _ in pp) / len(pp), sum(y for _, y in pp) / len(pp))
         length_m, depth_m, area_m2 = _part_dimensions(part)
         proposed.append({
             'idx': idx,
             'tag': _alpha_num_tag(idx),
+            'pts': pp,
+            'center': center,
             'typology': typ,
-            'coords': pts,
-            'center': (cx, cy),
             'color': color,
             'outline': outline,
             'floors': int(part.get('floors', option.floors) or option.floors),
@@ -4604,47 +4645,44 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             'area_m2': area_m2,
         })
 
-    # Bygg med enkel skygge for lesbarhet
     for part in proposed:
-        shadow = [(x + 6, y + 5) for x, y in part['coords']]
-        draw.polygon(shadow, fill=(120, 118, 112, 38))
-        draw.polygon(part['coords'], fill=part['color'], outline=part['outline'])
-        draw.line(part['coords'] + [part['coords'][0]], fill=part['outline'], width=2)
-        if len(part['coords']) >= 4:
-            p0, p1 = part['coords'][0], part['coords'][1]
-            draw.line([p0, p1], fill=(255, 255, 255, 85), width=2)
+        shadow = [(x + 5, y + 4) for x, y in part['pts']]
+        draw.polygon(shadow, fill=(90, 90, 90, 32))
+        draw.polygon(part['pts'], fill=part['color'], outline=part['outline'])
+        draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
+        if len(part['pts']) >= 4:
+            draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
 
-    # Felt-/bygg-badges
     for part in proposed[:12]:
-        bx, by = part['center']
-        _draw_badge(draw, (bx, by - 4), part['tag'], fill=(255, 255, 255, 236), outline=(91, 120, 151, 190), font=font_small)
+        cx, cy = part['center']
+        _draw_badge(draw, (cx, cy - 4), part['tag'], fill=(255, 255, 255, 232), outline=(84, 114, 145, 180), font=font_small, text_fill=(31, 55, 95, 255))
 
-    # Enkle trær/personlige prikkmarkører inspirert av referanseillustrasjonene
-    green_sources = courtyard_polys or public_polys
-    for item in green_sources[:18]:
+    # trees, restrained
+    for item in (courtyard_polys or public_polys)[:16]:
         coords = flatten_coord_groups(item.get('coords', []))
         if len(coords) < 3:
             continue
         try:
-            poly = Polygon([(p[0], p[1]) for p in coords])
-            cent = poly.centroid
-            tx, ty = project((float(cent.x), float(cent.y)))
-            draw.ellipse([(tx - 9, ty - 20), (tx + 9, ty - 2)], fill=(189, 214, 156, 230), outline=(143, 165, 118, 200))
-            draw.line([(tx, ty - 2), (tx, ty + 8)], fill=(124, 101, 69, 220), width=2)
+            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            c = poly.centroid
+            tx, ty = project((c.x, c.y))
+            draw.ellipse([(tx - 8, ty - 20), (tx + 8, ty - 4)], fill=(180, 209, 149, 225), outline=(131, 161, 104, 180))
+            draw.line([(tx, ty - 4), (tx, ty + 8)], fill=(112, 92, 66, 210), width=2)
         except Exception:
             continue
 
-    # Tittel / orientering
-    draw.text((40, 36), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
-    draw.text((36, 66), 'OVERSIKT', fill=(24, 24, 24, 255), font=font_hero)
-    draw.text((36, canvas_h - 46), 'Volumstudie med mål og typologisk kontroll', fill=(42, 42, 42, 255), font=font_title)
+    # header/footer
+    draw.text((42, 34), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
+    draw.text((38, 62), 'OVERSIKT', fill=(25, 25, 25, 255), font=font_hero)
+    draw.text((42, canvas_h - 44), '2D-konseptoversikt med bygg, uterom og siktlinjer', fill=(44, 44, 44, 255), font=font_title)
 
-    nx, ny = 70, 150
-    draw.line((nx, ny + 26, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
+    nx, ny = 70, 144
+    draw.line((nx, ny + 24, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
     draw.polygon([(nx, ny - 18), (nx - 8, ny - 2), (nx + 8, ny - 2)], fill=(55, 55, 55, 200))
-    draw.text((nx - 7, ny + 32), 'N', fill=(55, 55, 55, 190), font=font_small)
+    draw.text((nx - 7, ny + 30), 'N', fill=(55, 55, 55, 190), font=font_small)
 
-    panel_x = canvas_w - right_panel_w + 22
+    # panel
+    panel_x = panel_x0 + 22
     unique_typos = []
     for p in proposed:
         typ = p['typology']
@@ -4652,14 +4690,14 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             unique_typos.append(typ)
     panel_typology = ', '.join(unique_typos) if unique_typos else option.typology
     panel_typology = panel_typology.upper()
-    if len(panel_typology) > 22:
+    if len(panel_typology) > 24:
         panel_typology = panel_typology.replace(', ', ',\n')
 
-    draw.text((panel_x, 56), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_section)
-    draw.multiline_text((panel_x, 100), panel_typology, fill=(28, 28, 28, 255), font=font_body, spacing=2)
+    draw.text((panel_x, 58), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_section)
+    draw.multiline_text((panel_x, 100), panel_typology, fill=(28, 28, 28, 255), font=font_body, spacing=3)
     hint = _typology_dimension_hint(option.typology)
     if hint:
-        draw.text((panel_x, 144), hint, fill=(94, 92, 86, 255), font=font_small)
+        draw.text((panel_x, 148), hint, fill=(94, 92, 86, 255), font=font_small)
 
     summary_rows = [
         ('BTA', f"{option.gross_bta_m2:,.0f} m²".replace(',', ' ')),
@@ -4670,38 +4708,33 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         ('Score', f"{option.score:.0f}/100"),
         ('Sol', f"{option.solar_score:.0f}/100"),
     ]
-    py = 192
+    py = 198
     for key, value in summary_rows:
         draw.text((panel_x, py), key, fill=(96, 94, 90, 255), font=font_small)
         draw.text((panel_x + 112, py), value, fill=(33, 33, 33, 255), font=font_small)
-        py += 30
+        py += 28
 
     draw.text((panel_x, py + 14), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_section)
-    py += 54
-    schedule = sorted(proposed, key=lambda item: item['idx'])[:9]
-    if schedule:
-        card_h = 50
-        for part in schedule:
-            draw.rounded_rectangle([(panel_x, py), (canvas_w - 40, py + card_h)], radius=12, fill=(248, 247, 244, 255), outline=(223, 221, 214, 255))
-            draw.ellipse([(panel_x + 10, py + 12), (panel_x + 32, py + 34)], fill=part['color'], outline=part['outline'])
-            tw, th = label_bbox(part['tag'], font_tiny)
-            draw.text((panel_x + 21 - tw / 2, py + 22 - th / 2), part['tag'], fill=(35, 34, 30, 255), font=font_tiny)
-            title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
-            draw.text((panel_x + 42, py + 8), title, fill=(31, 31, 31, 255), font=font_small)
-            dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-            draw.text((panel_x + 42, py + 26), dim_text, fill=(73, 71, 67, 255), font=font_tiny)
-            if part['area_m2'] > 0:
-                area_text = f"fotavtrykk {part['area_m2']:.0f} m²"
-                aw, _ = label_bbox(area_text, font_tiny)
-                draw.text((canvas_w - 50 - aw, py + 26), area_text, fill=(103, 100, 95, 255), font=font_tiny)
-            py += card_h + 8
-            if py + card_h > canvas_h - 46:
-                break
-    else:
-        draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_small)
+    py += 50
+    card_h = 50
+    for part in sorted(proposed, key=lambda item: item['idx'])[:9]:
+        if py + card_h > canvas_h - 44:
+            break
+        draw.rounded_rectangle([(panel_x, py), (canvas_w - 42, py + card_h)], radius=12, fill=(248, 247, 244, 255), outline=(223, 221, 214, 255))
+        draw.ellipse([(panel_x + 10, py + 12), (panel_x + 32, py + 34)], fill=part['color'], outline=part['outline'])
+        tw, th = label_bbox(part['tag'], font_tiny)
+        draw.text((panel_x + 21 - tw / 2, py + 22 - th / 2), part['tag'], fill=(35, 34, 30, 255), font=font_tiny)
+        title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
+        draw.text((panel_x + 42, py + 8), title, fill=(31, 31, 31, 255), font=font_small)
+        dim_text = _format_dimensions(part['length_m'], part['depth_m'])
+        draw.text((panel_x + 42, py + 26), dim_text, fill=(73, 71, 67, 255), font=font_tiny)
+        if part['area_m2'] > 0:
+            area_text = f"fotavtrykk {part['area_m2']:.0f} m²"
+            aw, _ = label_bbox(area_text, font_tiny)
+            draw.text((canvas_w - 50 - aw, py + 26), area_text, fill=(103, 100, 95, 255), font=font_tiny)
+        py += card_h + 8
 
     return img.convert('RGB')
-
 def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render en tydelig plan med byggenes faktiske fotavtrykksmål."""
     canvas_w, canvas_h = 1500, 980
@@ -9100,6 +9133,15 @@ DB_DIR = Path("qa_database")
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
+# Project-data bootstrap must never block Streamlit startup.
+# R8.2C hotfix: the previous implementation tried Supabase before local ssot.json.
+# If Supabase/http stalled, _stcore/stream stayed open with 0 bytes until the host
+# killed the session, and the user was sent back to Project Setup.
+# The new order is: Session -> local ssot.json -> optional Supabase with hard timeout.
+
+_PD_REMOTE_TIMEOUT_S = 1.2
+
+
 def _default_project_data() -> Dict[str, Any]:
     return {
         "p_name": "",
@@ -9115,6 +9157,11 @@ def _default_project_data() -> Dict[str, Any]:
         "land": "Norge",
     }
 
+
+def _project_data_has_identity(payload: Any) -> bool:
+    return isinstance(payload, dict) and str(payload.get("p_name") or "").strip() not in ("", "Nytt Prosjekt")
+
+
 def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
     if isinstance(payload, str):
         try:
@@ -9123,6 +9170,7 @@ def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
             payload = {}
     if not isinstance(payload, dict):
         return _default_project_data()
+
     candidate = payload
     for key in ("project_data_json", "project_data", "data", "payload"):
         nested = candidate.get(key) if isinstance(candidate, dict) else None
@@ -9134,102 +9182,158 @@ def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
         if isinstance(nested, dict):
             candidate = nested
             break
+
     merged = _default_project_data()
     for key, value in candidate.items():
         if key in merged:
             merged[key] = value
     return merged
 
+
 def _load_project_data_local() -> Optional[Dict[str, Any]]:
     if not SSOT_FILE.exists():
         return None
     try:
         with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            return _normalize_project_data_payload(json.load(f))
+            normalized = _normalize_project_data_payload(json.load(f))
+        return normalized if _project_data_has_identity(normalized) else None
     except Exception:
+        # Korrupt ssot.json skal ikke knekke appen eller sende brukeren i loop.
         return None
+
 
 def _save_project_data_local(payload: Dict[str, Any]) -> None:
     try:
         DB_DIR.mkdir(parents=True, exist_ok=True)
         with open(SSOT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            json.dump(_normalize_project_data_payload(payload), f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-def _load_project_data_remote() -> Optional[Dict[str, Any]]:
-    try:
-        import builtly_auth as _builtly_auth  # type: ignore
-    except Exception:
-        return None
-    for fn_name in ("load_project_data", "load_project_data_from_supabase"):
-        loader = getattr(_builtly_auth, fn_name, None)
-        if not callable(loader):
-            continue
-        try:
-            result = loader()
-        except TypeError:
-            try:
-                result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
-            except Exception:
-                continue
-        except Exception:
-            continue
-        normalized = _normalize_project_data_payload(result)
-        if normalized.get("p_name"):
-            return normalized
-    return None
 
-def _save_project_data_remote(payload: Dict[str, Any]) -> None:
-    try:
-        import builtly_auth as _builtly_auth  # type: ignore
-    except Exception:
-        return
-    for fn_name in ("save_project_data_to_session_and_remote", "save_project_data_to_supabase", "save_project_data"):
-        saver = getattr(_builtly_auth, fn_name, None)
-        if not callable(saver):
-            continue
+def _call_project_data_with_timeout(func, timeout_s: float = _PD_REMOTE_TIMEOUT_S, default: Any = None) -> Any:
+    """Run a risky auth/Supabase call without blocking Streamlit startup."""
+    import queue
+    import threading
+
+    q: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
+
+    def _runner() -> None:
         try:
-            saver(payload)
-            return
-        except TypeError:
+            q.put((True, func()))
+        except Exception as exc:
             try:
-                saver(project_data=payload)
-                return
+                q.put((False, exc))
             except Exception:
                 pass
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    try:
+        ok, value = q.get(timeout=max(0.05, float(timeout_s)))
+    except queue.Empty:
+        return default
+    if not ok:
+        return default
+    return value
+
+
+def _load_project_data_remote(timeout_s: float = _PD_REMOTE_TIMEOUT_S) -> Optional[Dict[str, Any]]:
+    def _load() -> Optional[Dict[str, Any]]:
+        try:
+            import builtly_auth as _builtly_auth  # type: ignore
         except Exception:
-            pass
+            return None
+        for fn_name in ("load_project_data", "load_project_data_from_supabase"):
+            loader = getattr(_builtly_auth, fn_name, None)
+            if not callable(loader):
+                continue
+            try:
+                result = loader()
+            except TypeError:
+                try:
+                    result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            normalized = _normalize_project_data_payload(result)
+            if _project_data_has_identity(normalized):
+                return normalized
+        return None
+
+    return _call_project_data_with_timeout(_load, timeout_s=timeout_s, default=None)
+
+
+def _save_project_data_remote_async(payload: Dict[str, Any]) -> None:
+    """Best-effort Supabase save. Never block the UI/session stream."""
+    import threading
+
+    normalized = _normalize_project_data_payload(payload)
+
+    def _save() -> None:
+        try:
+            import builtly_auth as _builtly_auth  # type: ignore
+        except Exception:
+            return
+        # Use pure remote savers only. Avoid calling helpers that also mutate
+        # st.session_state from a background thread.
+        for fn_name in ("save_project_data_to_supabase", "save_project_data"):
+            saver = getattr(_builtly_auth, fn_name, None)
+            if not callable(saver):
+                continue
+            try:
+                saver(normalized)
+                return
+            except TypeError:
+                try:
+                    saver(project_data=normalized)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_save, daemon=True).start()
+
 
 def save_project_data_to_session_and_remote(payload: Dict[str, Any], sync_remote: bool = True) -> Dict[str, Any]:
-    """Public helper for Project Setup / pages: session + ssot.json + best-effort remote."""
+    """Project Setup helper: update session + ssot.json immediately, remote async."""
     normalized = _normalize_project_data_payload(payload)
     st.session_state.project_data = normalized
     _save_project_data_local(normalized)
     if sync_remote:
-        _save_project_data_remote(normalized)
+        _save_project_data_remote_async(normalized)
     return normalized
+
 
 def _bootstrap_project_data() -> Dict[str, Any]:
     current = st.session_state.get("project_data")
-    if isinstance(current, dict) and current.get("p_name") not in (None, ""):
-        return _normalize_project_data_payload(current)
+    if _project_data_has_identity(current):
+        normalized = _normalize_project_data_payload(current)
+        st.session_state.project_data = normalized
+        return normalized
 
-    remote = _load_project_data_remote()
-    if remote and remote.get("p_name"):
-        return save_project_data_to_session_and_remote(remote, sync_remote=False)
-
+    # 1) Local first. This is fast and avoids Project Setup on reconnects.
     local = _load_project_data_local()
-    if local and local.get("p_name"):
+    if local and _project_data_has_identity(local):
         st.session_state.project_data = local
-        # One-time backup to Supabase if local exists but remote was empty/unavailable.
         if not st.session_state.get("_pd_backup_done", False):
-            _save_project_data_remote(local)
+            _save_project_data_remote_async(local)
             st.session_state["_pd_backup_done"] = True
         return local
 
+    # 2) Remote only if session + local are empty, and only once per session.
+    if not st.session_state.get("_pd_remote_attempted", False):
+        st.session_state["_pd_remote_attempted"] = True
+        remote = _load_project_data_remote(timeout_s=_PD_REMOTE_TIMEOUT_S)
+        if remote and _project_data_has_identity(remote):
+            return save_project_data_to_session_and_remote(remote, sync_remote=False)
+
+    # 3) Keep a valid default without blocking.
     st.session_state.project_data = _default_project_data()
     return st.session_state.project_data
+
 
 if "project_data" not in st.session_state:
     st.session_state.project_data = _default_project_data()
