@@ -4664,7 +4664,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     schedule = sorted(proposed, key=lambda item: item['idx'])[:8]
     if schedule:
         for idx, part in enumerate(schedule, start=1):
-            card_h = 68
+            card_h = 58
             draw.rounded_rectangle([(panel_x, py), (canvas_w - 44, py + card_h)], radius=14, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
             badge = part.get('tag', _alpha_num_tag(idx - 1))
             draw.ellipse([(panel_x + 10, py + 12), (panel_x + 34, py + 36)], fill=part['color'], outline=(120, 110, 96, 180))
@@ -4673,10 +4673,11 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             title = f"{part.get('tag', _alpha_num_tag(idx - 1))} · {part['typology']} · {part['floors']} et."
             draw.text((panel_x + 46, py + 9), title, fill=(31, 31, 31, 255), font=font_micro)
             dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-            draw.text((panel_x + 46, py + 28), f"Mål: {dim_text}", fill=(64, 62, 58, 255), font=font_micro)
-            if part['area_m2'] > 0:
-                area_text = f"Fotavtrykk: {part['area_m2']:.0f} m²"
-                draw.text((panel_x + 46, py + 46), area_text, fill=(100, 98, 92, 255), font=font_tiny)
+            area_text = f"fotavtrykk {part['area_m2']:.0f} m²" if part['area_m2'] > 0 else ''
+            draw.text((panel_x + 46, py + 30), dim_text, fill=(64, 62, 58, 255), font=font_micro)
+            if area_text:
+                aw, _ = label_bbox(area_text, font_tiny)
+                draw.text((canvas_w - 54 - aw, py + 31), area_text, fill=(100, 98, 92, 255), font=font_tiny)
             py += card_h + 10
     else:
         draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_micro)
@@ -4840,16 +4841,16 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     sy = 678
     if schedule:
         for idx, part, length_m, depth_m, area_m2 in schedule:
-            card_h = 60
+            card_h = 52
             draw.rounded_rectangle([(42, sy), (left_panel_w - 22, sy + card_h)], radius=12, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
             badge_color = tuple(int(v) for v in ((part.get('color') or typo_colors.get(part.get('typology', option.typology), (173,141,106,235)))[:4])) if isinstance(part.get('color'), list) else typo_colors.get(part.get('typology', option.typology), (173,141,106,235))
             draw.ellipse([(52, sy + 12), (76, sy + 36)], fill=badge_color, outline=(115, 108, 96, 180))
             label = _alpha_num_tag(idx - 1)
             tw, th = label_bbox(label, font_tiny)
             draw.text((64 - tw / 2, sy + 24 - th / 2), label, fill=(32, 32, 32, 255), font=font_tiny)
-            draw.text((88, sy + 10), f"{part.get('typology', option.typology)} · {int(part.get('floors', option.floors) or option.floors)} et.", fill=(32, 32, 32, 255), font=font_micro)
-            draw.text((88, sy + 29), f"Mål: {_format_dimensions(length_m, depth_m)}", fill=(88, 86, 80, 255), font=font_tiny)
-            draw.text((88, sy + 45), f"Fotavtrykk: {area_m2:.0f} m²", fill=(88, 86, 80, 255), font=font_tiny)
+            draw.text((88, sy + 10), _format_dimensions(length_m, depth_m), fill=(32, 32, 32, 255), font=font_micro)
+            meta = f"{part.get('typology', option.typology)} · {int(part.get('floors', option.floors) or option.floors)} et. · {area_m2:.0f} m²"
+            draw.text((88, sy + 30), meta, fill=(88, 86, 80, 255), font=font_tiny)
             sy += card_h + 8
             if sy > canvas_h - 88:
                 break
@@ -4959,61 +4960,6 @@ def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[I
         pass
 
     return views
-
-
-
-def build_manual_volume_analysis(option: Optional[OptionResult]) -> str:
-    """Kort tekst for volumskisse-siden: hva som fungerer og hva som bør videreutvikles."""
-    if option is None:
-        return (
-            "Styrke: volumene viser en tydelig hovedidé og gir et godt utgangspunkt for videre bearbeiding. "
-            "Videre arbeid: avklar byggavstander, grøntrom og hvilke volumer som skal være primære i komposisjonen."
-        )
-
-    geometry = option.geometry or {}
-    parts = list(geometry.get('massing_parts', []) or [])
-    typologies = [str(p.get('typology') or option.typology) for p in parts]
-    part_count = len(parts)
-    avg_floors = 0.0
-    if parts:
-        avg_floors = sum(float(p.get('floors', option.floors) or option.floors) for p in parts) / max(len(parts), 1)
-    has_courtyard = bool(geometry.get('courtyard_polygons')) or 'karr' in option.typology.lower()
-    has_public_realm = bool(geometry.get('public_realm_polygons'))
-    has_view_corridors = bool(geometry.get('view_corridor_polygons'))
-
-    strengths = []
-    improvements = []
-
-    if has_courtyard:
-        strengths.append('gårdsrommet/grøntrommet gir prosjektet en tydelig indre struktur')
-    if has_public_realm:
-        strengths.append('volumene danner lesbare uterom og en klar kant mot omgivelsene')
-    if has_view_corridors:
-        strengths.append('åpninger og siktlinjer gjør grepet lettere og mer orienterbart')
-    if part_count >= 5:
-        strengths.append('flere bygg gir mulighet for trinnvis høyde- og typologivariasjon')
-    if not strengths:
-        strengths.append('hovedgrepet er enkelt å lese og egner seg godt for videre prosjektering')
-
-    if 'Punkthus' in typologies and 'Lamell' in typologies:
-        improvements.append('samspillet mellom lameller og punkthus kan strammes ytterligere slik at grøntrommet blir enda tydeligere')
-    elif 'Karré' in typologies:
-        improvements.append('forholdet mellom kvartalskanter og indre gårdsrom bør finjusteres slik at ringene oppleves mer komplette')
-    else:
-        improvements.append('tetthet og avstand mellom volumene bør kalibreres videre for å styrke helheten')
-
-    if avg_floors > 5.5:
-        improvements.append('overgangen mot naboskala bør vurderes i de høyeste volumene')
-    improvements.append('innganger, aktive førsteetasjer og landskapsgrep bør konkretiseres i neste iterasjon')
-
-    return (
-        f"Styrker: {strengths[0].capitalize()}"
-        + (f". I tillegg {strengths[1]}" if len(strengths) > 1 else '')
-        + '. '
-        + f"Videre arbeid: {improvements[0].capitalize()}"
-        + (f". Dessuten {improvements[1]}" if len(improvements) > 1 else '')
-        + '.'
-    )
 
 
 def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -5820,9 +5766,6 @@ async function captureSolarSnapshots() {
   const status = document.getElementById('captureStatus');
   const downloadContainer = document.getElementById('captureDownloads');
   const downloadLinks = document.getElementById('captureDownloadLinks');
-  const hiddenLabelSprites = [...volumeLabelSprites, ...neighborLabelSprites].filter(Boolean);
-  const hiddenLabelStates = hiddenLabelSprites.map((sprite) => sprite.visible);
-  hiddenLabelSprites.forEach((sprite) => { sprite.visible = false; });
   btn.disabled = true;
   btn.style.opacity = '0.6';
   const originalLabel = btn.textContent;
@@ -5909,7 +5852,6 @@ async function captureSolarSnapshots() {
   sendToParent({ source: 'builtly_solar_capture', type: 'done', count: captureTimes.length });
   console.log('[Builtly] Capture complete. State = ready.');
 
-  hiddenLabelSprites.forEach((sprite, idx) => { sprite.visible = hiddenLabelStates[idx]; });
   if (downloadContainer) downloadContainer.style.display = 'block';
   status.textContent = '✓ Klart! Last ned bildene under og last opp i rapporten.';
   btn.disabled = false;
@@ -5922,8 +5864,6 @@ document.getElementById('captureSolar').addEventListener('click', captureSolarSn
 // --- TERRENG ---
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
-const volumeLabelSprites = [];
-const neighborLabelSprites = [];
 
 function getTerrainY(lx, ly) {
   // Bruk regresjonsplan for aa beregne terrenghoeyde
@@ -6088,7 +6028,6 @@ D.neighbors.forEach(n => {
     ls.position.set(cx, baseY + n.height + D.site_span * 0.015, cy);
     ls.scale.set(D.site_span * 0.10, D.site_span * 0.025, 1);
     scene.add(ls);
-    neighborLabelSprites.push(ls);
   }
 });
 
@@ -6117,7 +6056,6 @@ D.volumes.forEach(v => {
   sprite.position.set(cx, baseY + v.height + D.site_span * 0.04, cy);
   sprite.scale.set(D.site_span * 0.22, D.site_span * 0.055, 1);
   scene.add(sprite);
-  volumeLabelSprites.push(sprite);
 });
 
 // --- ORBIT CONTROLS ---
@@ -8457,10 +8395,8 @@ def create_full_report_pdf(
             "Bildene nedenfor viser den manuelt redigerte volumplasseringen "
             "som er valgt for videre bearbeiding."
         )
-        chosen_for_analysis = options[0] if options else None
-        pdf.body_text(build_manual_volume_analysis(chosen_for_analysis))
         pdf.ln(4)
-        view_labels = ["Skrå volumskisse", "Planvisning (mer ovenfra)", "3D-terrengscene", "Detalj"]
+        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
@@ -9145,8 +9081,8 @@ DB_DIR = Path("qa_database")
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
-if "project_data" not in st.session_state:
-    st.session_state.project_data = {
+def _default_project_data() -> Dict[str, Any]:
+    return {
         "p_name": "",
         "c_name": "",
         "p_desc": "",
@@ -9159,12 +9095,129 @@ if "project_data" not in st.session_state:
         "bta": 0,
         "land": "Norge",
     }
+
+def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict):
+        return _default_project_data()
+    candidate = payload
+    for key in ("project_data_json", "project_data", "data", "payload"):
+        nested = candidate.get(key) if isinstance(candidate, dict) else None
+        if isinstance(nested, str):
+            try:
+                nested = json.loads(nested)
+            except Exception:
+                nested = None
+        if isinstance(nested, dict):
+            candidate = nested
+            break
+    merged = _default_project_data()
+    for key, value in candidate.items():
+        if key in merged:
+            merged[key] = value
+    return merged
+
+def _load_project_data_local() -> Optional[Dict[str, Any]]:
+    if not SSOT_FILE.exists():
+        return None
+    try:
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            return _normalize_project_data_payload(json.load(f))
+    except Exception:
+        return None
+
+def _save_project_data_local(payload: Dict[str, Any]) -> None:
+    try:
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SSOT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def _load_project_data_remote() -> Optional[Dict[str, Any]]:
+    try:
+        import builtly_auth as _builtly_auth  # type: ignore
+    except Exception:
+        return None
+    for fn_name in ("load_project_data", "load_project_data_from_supabase"):
+        loader = getattr(_builtly_auth, fn_name, None)
+        if not callable(loader):
+            continue
+        try:
+            result = loader()
+        except TypeError:
+            try:
+                result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
+            except Exception:
+                continue
+        except Exception:
+            continue
+        normalized = _normalize_project_data_payload(result)
+        if normalized.get("p_name"):
+            return normalized
+    return None
+
+def _save_project_data_remote(payload: Dict[str, Any]) -> None:
+    try:
+        import builtly_auth as _builtly_auth  # type: ignore
+    except Exception:
+        return
+    for fn_name in ("save_project_data_to_session_and_remote", "save_project_data_to_supabase", "save_project_data"):
+        saver = getattr(_builtly_auth, fn_name, None)
+        if not callable(saver):
+            continue
+        try:
+            saver(payload)
+            return
+        except TypeError:
+            try:
+                saver(project_data=payload)
+                return
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+def save_project_data_to_session_and_remote(payload: Dict[str, Any], sync_remote: bool = True) -> Dict[str, Any]:
+    """Public helper for Project Setup / pages: session + ssot.json + best-effort remote."""
+    normalized = _normalize_project_data_payload(payload)
+    st.session_state.project_data = normalized
+    _save_project_data_local(normalized)
+    if sync_remote:
+        _save_project_data_remote(normalized)
+    return normalized
+
+def _bootstrap_project_data() -> Dict[str, Any]:
+    current = st.session_state.get("project_data")
+    if isinstance(current, dict) and current.get("p_name") not in (None, ""):
+        return _normalize_project_data_payload(current)
+
+    remote = _load_project_data_remote()
+    if remote and remote.get("p_name"):
+        return save_project_data_to_session_and_remote(remote, sync_remote=False)
+
+    local = _load_project_data_local()
+    if local and local.get("p_name"):
+        st.session_state.project_data = local
+        # One-time backup to Supabase if local exists but remote was empty/unavailable.
+        if not st.session_state.get("_pd_backup_done", False):
+            _save_project_data_remote(local)
+            st.session_state["_pd_backup_done"] = True
+        return local
+
+    st.session_state.project_data = _default_project_data()
+    return st.session_state.project_data
+
+if "project_data" not in st.session_state:
+    st.session_state.project_data = _default_project_data()
 if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
-if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
-    with open(SSOT_FILE, "r", encoding="utf-8") as f:
-        st.session_state.project_data = json.load(f)
+_bootstrap_project_data()
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = (
