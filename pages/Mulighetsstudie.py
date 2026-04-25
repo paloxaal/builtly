@@ -314,17 +314,30 @@ def clean_pdf_text(text: Any) -> str:
     if text is None:
         return ""
     text = str(text)
-    # Universelle typografi-erstatninger
-    text = text.replace("\u2013", "-").replace("\u2014", "-")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u2026", "...").replace("\u2022", "*")
-    if HAS_DEJAVU:
+    active_font = str(globals().get("PDF_ACTIVE_FONT", PDF_FONT)).lower()
+    uses_unicode_font = active_font != "helvetica"
+    replacements = {
+        "→": "->",
+        "←": "<-",
+        "↔": "<->",
+        "–": "-",
+        "—": "-",
+        "−": "-",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "…": "...",
+        "•": "*",
+        "·": "-",
+        "²": "2",
+        "³": "3",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    if uses_unicode_font:
         return text
-    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
-    text = text.replace("\u00b2", "2").replace("\u00b3", "3")
     return text.encode("latin-1", "replace").decode("latin-1")
-
 
 def ironclad_text_formatter(text: str) -> str:
     text = str(text).replace("$", "").replace("*", "").replace("_", "")
@@ -4406,53 +4419,58 @@ def _draw_badge(
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """Render et mer arkitektfaglig axonometri-diagram med mål på byggene."""
-    canvas_w, canvas_h = 1500, 980
-    right_panel_w = 330
-    margin = 36
-    stage_x0, stage_y0 = margin, 118
-    stage_x1, stage_y1 = canvas_w - right_panel_w - 28, canvas_h - 64
+    """2D konseptoversikt for rapport og UI.
 
-    img = Image.new('RGBA', (canvas_w, canvas_h), (244, 244, 241, 255))
-    draw = ImageDraw.Draw(img, 'RGBA')
-    font_tiny = _pil_font(14)
-    font_micro = _pil_font(16)
-    font_small = _pil_font(18)
-    font_body = _pil_font(22)
-    font_title = _pil_font(28)
-    font_hero = _pil_font(70, bold=True)
+    Brukeren ønsket en tydeligere og mer lesbar konseptoversikt enn den
+    tidligere aksonometriske skissen. Denne versjonen viser derfor et
+    top-down 2D-diagram med tydelig tomteavgrensning, nabokontekst,
+    grøntrom, gårdsrom og en systematisk byggeliste i høyrepanelet.
+    """
+    canvas_w, canvas_h = 1500, 980
+    right_panel_w = 320
+    outer_pad = 24
+    header_h = 108
+    footer_h = 56
+    map_box = (outer_pad, header_h, canvas_w - right_panel_w - 28, canvas_h - footer_h)
+    stage_pad = 26
+    stage_x0, stage_y0 = map_box[0] + stage_pad, map_box[1] + stage_pad
+    stage_x1, stage_y1 = map_box[2] - stage_pad, map_box[3] - stage_pad
+
+    img = Image.new('RGBA', (canvas_w, canvas_h), (246, 245, 241, 255))
+    draw = ImageDraw.Draw(img)
+
+    font_hero = _pil_font(52, bold=True)
+    font_title = _pil_font(18, bold=False)
+    font_section = _pil_font(16, bold=True)
+    font_body = _pil_font(14, bold=False)
+    font_small = _pil_font(12, bold=False)
+    font_micro = _pil_font(11, bold=False)
+    font_tiny = _pil_font(10, bold=False)
 
     geometry = option.geometry or {}
-    site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
     massing_parts = geometry.get('massing_parts', []) or []
-    neighbor_polys = geometry.get('neighbor_polygons', []) or []
-    field_polys = geometry.get('field_polygons', []) or []
-    public_polys = geometry.get('public_realm_polygons', []) or []
-    courtyard_polys = geometry.get('courtyard_polygons', []) or []
-    corridor_polys = geometry.get('view_corridor_polygons', []) or []
+    site_pts = flatten_coord_groups(getattr(site, 'site_boundary_coords', []))
+    buildable_pts = flatten_coord_groups(getattr(site, 'buildable_coords', []))
+    field_polys = geometry_to_coord_groups(geometry.get('field_polygons', []))
+    public_polys = geometry_to_coord_groups(geometry.get('public_realm_polygons', []))
+    courtyard_polys = geometry_to_coord_groups(geometry.get('courtyard_polygons', []))
+    corridor_polys = geometry_to_coord_groups(geometry.get('view_corridor_polygons', []))
 
-    site_pts = flatten_coord_groups(site_coords)
-    if not site_pts:
-        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
-
-    focus_pts: List[List[float]] = list(site_pts)
-    for seq in (field_polys, public_polys, courtyard_polys, corridor_polys):
-        for item in seq:
-            focus_pts.extend(flatten_coord_groups(item.get('coords', [])))
-    for part in massing_parts:
-        focus_pts.extend(flatten_coord_groups(part.get('coords', [])))
+    focus_pts = site_pts or buildable_pts or []
+    if not focus_pts and massing_parts:
+        focus_pts = flatten_coord_groups(massing_parts[0].get('coords', []))
     if not focus_pts:
-        focus_pts = list(site_pts)
+        return img.convert('RGB')
 
     focus_xs = [p[0] for p in focus_pts]
     focus_ys = [p[1] for p in focus_pts]
     focus_cx = (min(focus_xs) + max(focus_xs)) / 2.0
     focus_cy = (min(focus_ys) + max(focus_ys)) / 2.0
     focus_span = max(max(focus_xs) - min(focus_xs), max(focus_ys) - min(focus_ys), 1.0)
+    context_limit = focus_span * 1.9
 
-    context_limit = focus_span * 1.8
     filtered_neighbors = []
-    for neighbor in neighbor_polys:
+    for neighbor in getattr(site, 'neighbors', []) or []:
         coords = flatten_coord_groups(neighbor.get('coords', []))
         if len(coords) < 3:
             continue
@@ -4461,188 +4479,187 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= context_limit:
             filtered_neighbors.append(neighbor)
 
-    all_pts: List[List[float]] = list(focus_pts)
+    all_pts = list(focus_pts)
     for neighbor in filtered_neighbors:
         all_pts.extend(flatten_coord_groups(neighbor.get('coords', [])))
     xs = [p[0] for p in all_pts]
     ys = [p[1] for p in all_pts]
-    cx = (min(xs) + max(xs)) / 2.0
-    cy = (min(ys) + max(ys)) / 2.0
-    span = max(max(xs) - min(xs), max(ys) - min(ys), focus_span * 1.08, 1.0)
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+    pad_x = max(10.0, span_x * 0.08)
+    pad_y = max(10.0, span_y * 0.08)
+    minx -= pad_x
+    maxx += pad_x
+    miny -= pad_y
+    maxy += pad_y
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+    scale = min((stage_x1 - stage_x0) / span_x, (stage_y1 - stage_y0) / span_y)
 
-    ISO_ANGLE = math.radians(30)
-    COS_A = math.cos(ISO_ANGLE)
-    SIN_A = math.sin(ISO_ANGLE)
-    Z_SCALE = 1.12
-    target_screen_span = min((stage_x1 - stage_x0) * 0.88, (stage_y1 - stage_y0) * 0.96)
-    pixel_scale = target_screen_span / max(span * 1.08, 1.0)
-    screen_cx = (stage_x0 + stage_x1) / 2.0
-    screen_cy = (stage_y0 + stage_y1) / 2.0 + 44
+    def project(pt):
+        x, y = float(pt[0]), float(pt[1])
+        px = stage_x0 + (x - minx) * scale
+        py = stage_y1 - (y - miny) * scale
+        return (px, py)
 
-    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
-        dx = (x - cx) * pixel_scale
-        dy = (y - cy) * pixel_scale
-        sx = screen_cx + (dx - dy) * COS_A
-        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
-        return sx, sy
+    def project_coords(coords):
+        pts = [project(p) for p in coords if len(p) >= 2]
+        return pts if len(pts) >= 3 else []
 
-    def iso_pts(coords, z=0.0):
-        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
-
-    def darken(c, factor: float):
-        return (int(c[0] * factor), int(c[1] * factor), int(c[2] * factor), c[3] if len(c) > 3 else 255)
-
-    def draw_flat(coords, fill, outline=None, width=1):
-        pts = iso_pts(coords)
-        if len(pts) < 3:
-            return
-        draw.polygon(pts, fill=fill, outline=outline)
-        if outline and width > 1:
-            draw.line(pts + [pts[0]], fill=outline, width=width)
-
-    def draw_extruded(coords, h, top_c, side_c, out_c, width=1):
-        if not coords or len(coords) < 3:
-            return
-        top_pts = iso_pts(coords, h)
-        base_pts = iso_pts(coords, 0.0)
-        n = min(len(coords), len(top_pts), len(base_pts))
-        if n < 3:
-            return
-        for i in range(n):
-            j = (i + 1) % n
-            bt0, bt1 = base_pts[i], base_pts[j]
-            tp0, tp1 = top_pts[i], top_pts[j]
-            edge_dx = bt1[0] - bt0[0]
-            edge_dy = bt1[1] - bt0[1]
-            face = darken(side_c, 0.72) if edge_dy < 0 or (abs(edge_dy) < 1e-6 and edge_dx > 0) else side_c
-            draw.polygon([bt0, bt1, tp1, tp0], fill=face, outline=out_c)
-        draw.polygon(top_pts, fill=top_c, outline=out_c)
-        if width > 1:
-            draw.line(top_pts + [top_pts[0]], fill=out_c, width=width)
+    def draw_polygon_groups(items, fill, outline=None, width=1):
+        for item in items:
+            coords = flatten_coord_groups(item.get('coords', [])) if isinstance(item, dict) else flatten_coord_groups(item)
+            pts = project_coords(coords)
+            if pts:
+                draw.polygon(pts, fill=fill, outline=outline)
+                if outline and width > 1:
+                    draw.line(pts + [pts[0]], fill=outline, width=width)
 
     def label_bbox(text_value: str, font_obj) -> Tuple[int, int]:
         try:
             bbox = font_obj.getbbox(text_value)
             return bbox[2] - bbox[0], bbox[3] - bbox[1]
         except Exception:
-            return (len(text_value) * 10, 16)
+            return (len(text_value) * 8, 12)
 
     typo_colors = {
-        'Lamell': (64, 126, 188, 245),
-        'Punkthus': (74, 184, 179, 245),
-        'Karré': (66, 103, 155, 245),
-        'Rekkehus': (92, 149, 120, 245),
-        'Tun': (116, 132, 164, 245),
+        'Lamell': (205, 166, 121, 235),
+        'Punkthus': (176, 194, 147, 235),
+        'Karré': (229, 219, 178, 235),
+        'Rekkehus': (181, 201, 158, 235),
+        'Tun': (196, 183, 150, 235),
+    }
+    typo_outline = {
+        'Lamell': (146, 110, 68, 255),
+        'Punkthus': (112, 132, 92, 255),
+        'Karré': (146, 134, 88, 255),
+        'Rekkehus': (118, 136, 98, 255),
+        'Tun': (130, 118, 95, 255),
     }
 
-    draw.rectangle([(0, 0), (canvas_w, canvas_h)], fill=(244, 244, 241, 255))
-    draw.rounded_rectangle([(stage_x0 - 10, stage_y0 - 12), (stage_x1 + 12, stage_y1 + 12)], radius=24, fill=(241, 241, 238, 255), outline=(221, 219, 212, 255))
-    draw.rounded_rectangle([(canvas_w - right_panel_w + 8, 24), (canvas_w - 24, canvas_h - 24)], radius=24, fill=(239, 239, 235, 255), outline=(222, 220, 213, 255))
+    # Bakgrunn og paneler
+    draw.rectangle([(0, 0), (canvas_w, canvas_h)], fill=(246, 245, 241, 255))
+    draw.rounded_rectangle([(map_box[0], map_box[1]), (map_box[2], map_box[3])], radius=24, fill=(243, 242, 238, 255), outline=(224, 222, 215, 255))
+    draw.rounded_rectangle([(canvas_w - right_panel_w, 24), (canvas_w - 24, canvas_h - 24)], radius=24, fill=(242, 241, 237, 255), outline=(224, 222, 215, 255))
 
-    site_iso = iso_pts(site_pts)
-    if len(site_iso) >= 3:
-        draw.polygon(site_iso, fill=(215, 221, 211, 165), outline=(191, 104, 95, 210))
-        draw.line(site_iso + [site_iso[0]], fill=(191, 104, 95, 210), width=2)
-
-    for item in field_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (230, 222, 196, 105), (156, 148, 129, 92), 1)
-    for item in public_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (188, 207, 180, 160), (142, 160, 133, 120), 1)
-    for item in courtyard_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (242, 233, 185, 170), (186, 176, 114, 120), 1)
-    for item in corridor_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (255, 186, 118, 55), (235, 145, 60, 130), 2)
-
-    context_vols = []
+    # Kuntekst / naboer
     for neighbor in filtered_neighbors:
         coords = flatten_coord_groups(neighbor.get('coords', []))
-        if len(coords) < 3:
-            continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
-        context_vols.append((avg_x + avg_y, coords, float(neighbor.get('height_m', 9.0) or 9.0)))
-    for _, coords, h in sorted(context_vols, key=lambda item: item[0]):
-        draw_extruded(coords, h, (228, 228, 226, 255), (214, 214, 211, 255), (202, 202, 198, 160), 1)
+        pts = project_coords(coords)
+        if pts:
+            draw.polygon(pts, fill=(220, 220, 218, 255), outline=(204, 204, 200, 255))
+
+    # Tomtegrense og byggegrense
+    if site_pts:
+        pts = project_coords(site_pts)
+        if pts:
+            draw.polygon(pts, fill=(225, 232, 222, 135), outline=(220, 121, 110, 255))
+            draw.line(pts + [pts[0]], fill=(220, 121, 110, 255), width=2)
+    if buildable_pts:
+        pts = project_coords(buildable_pts)
+        if pts:
+            draw.line(pts + [pts[0]], fill=(114, 168, 205, 200), width=3)
+
+    # Felt og uterom
+    draw_polygon_groups(field_polys, fill=(235, 227, 195, 120), outline=(190, 180, 142, 140), width=1)
+    draw_polygon_groups(public_polys, fill=(202, 219, 194, 150), outline=(153, 172, 142, 170), width=1)
+    draw_polygon_groups(courtyard_polys, fill=(223, 234, 201, 170), outline=(154, 177, 137, 180), width=1)
+    draw_polygon_groups(corridor_polys, fill=(255, 184, 110, 75), outline=(231, 145, 71, 180), width=2)
 
     proposed = []
     for idx, part in enumerate(massing_parts):
         coords = flatten_coord_groups(part.get('coords', []))
-        if len(coords) < 3:
+        pts = project_coords(coords)
+        if not pts:
             continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
         typ = part.get('typology', option.typology)
         base = part.get('color')
         if isinstance(base, list) and len(base) >= 3:
             color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 235)
         else:
-            color = typo_colors.get(typ, (181, 148, 111, 245))
+            color = typo_colors.get(typ, (201, 167, 124, 235))
+        outline = typo_outline.get(typ, (126, 108, 82, 255))
+        try:
+            poly = Polygon([(p[0], p[1]) for p in coords])
+            centroid = poly.centroid
+            cx, cy = project((float(centroid.x), float(centroid.y)))
+        except Exception:
+            avg_x = sum(p[0] for p in pts) / len(pts)
+            avg_y = sum(p[1] for p in pts) / len(pts)
+            cx, cy = avg_x, avg_y
         length_m, depth_m, area_m2 = _part_dimensions(part)
         proposed.append({
-            'sort': avg_x + avg_y,
             'idx': idx,
             'tag': _alpha_num_tag(idx),
-            'coords': coords,
-            'height_m': float(part.get('height_m', option.building_height_m)),
-            'color': color,
             'typology': typ,
-            'name': part.get('name', f'Hus {idx+1}'),
+            'coords': pts,
+            'center': (cx, cy),
+            'color': color,
+            'outline': outline,
             'floors': int(part.get('floors', option.floors) or option.floors),
             'length_m': length_m,
             'depth_m': depth_m,
             'area_m2': area_m2,
         })
 
-    for part in sorted(proposed, key=lambda item: item['sort']):
-        top = part['color']
-        side = darken(part['color'], 0.84)
-        draw_extruded(part['coords'], part['height_m'], top, side, (116, 103, 86, 210), 2)
-        if len(proposed) <= 14:
-            avg_x = sum(p[0] for p in part['coords']) / len(part['coords'])
-            avg_y = sum(p[1] for p in part['coords']) / len(part['coords'])
-            roof_x, roof_y = iso_project(avg_x, avg_y, part['height_m'] + 1.4)
-            badge_y = roof_y - 24
-            draw.line([(roof_x, roof_y - 2), (roof_x, badge_y + 10)], fill=(66, 103, 155, 150), width=2)
-            _draw_badge(draw, (roof_x, badge_y), part['tag'], fill=(255, 255, 255, 230), outline=(66, 103, 155, 190), font=font_small)
+    # Bygg med enkel skygge for lesbarhet
+    for part in proposed:
+        shadow = [(x + 6, y + 5) for x, y in part['coords']]
+        draw.polygon(shadow, fill=(120, 118, 112, 38))
+        draw.polygon(part['coords'], fill=part['color'], outline=part['outline'])
+        draw.line(part['coords'] + [part['coords'][0]], fill=part['outline'], width=2)
+        if len(part['coords']) >= 4:
+            p0, p1 = part['coords'][0], part['coords'][1]
+            draw.line([p0, p1], fill=(255, 255, 255, 85), width=2)
 
-    green_polys = public_polys or courtyard_polys
-    for item in green_polys[:14]:
+    # Felt-/bygg-badges
+    for part in proposed[:12]:
+        bx, by = part['center']
+        _draw_badge(draw, (bx, by - 4), part['tag'], fill=(255, 255, 255, 236), outline=(91, 120, 151, 190), font=font_small)
+
+    # Enkle trær/personlige prikkmarkører inspirert av referanseillustrasjonene
+    green_sources = courtyard_polys or public_polys
+    for item in green_sources[:18]:
         coords = flatten_coord_groups(item.get('coords', []))
         if len(coords) < 3:
             continue
         try:
             poly = Polygon([(p[0], p[1]) for p in coords])
             cent = poly.centroid
-            tx, ty = iso_project(float(cent.x), float(cent.y), 0.0)
-            draw.ellipse([(tx - 9, ty - 32), (tx + 9, ty - 14)], fill=(170, 202, 133, 235), outline=(128, 156, 101, 200))
-            draw.line([(tx, ty - 14), (tx, ty - 2)], fill=(110, 88, 58, 220), width=2)
+            tx, ty = project((float(cent.x), float(cent.y)))
+            draw.ellipse([(tx - 9, ty - 20), (tx + 9, ty - 2)], fill=(189, 214, 156, 230), outline=(143, 165, 118, 200))
+            draw.line([(tx, ty - 2), (tx, ty + 8)], fill=(124, 101, 69, 220), width=2)
         except Exception:
             continue
 
-    draw.text((38, 40), 'KONSEPT', fill=(65, 65, 62, 255), font=font_title)
-    draw.text((34, 72), 'OVERSIKT', fill=(28, 28, 28, 255), font=font_hero)
-    subtitle = 'Volumstudie med mål og typologisk kontroll'
-    draw.text((38, canvas_h - 52), subtitle, fill=(32, 32, 32, 255), font=font_title)
+    # Tittel / orientering
+    draw.text((40, 36), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
+    draw.text((36, 66), 'OVERSIKT', fill=(24, 24, 24, 255), font=font_hero)
+    draw.text((36, canvas_h - 46), 'Volumstudie med mål og typologisk kontroll', fill=(42, 42, 42, 255), font=font_title)
 
-    nx, ny = 72, 154
-    draw.line((nx, ny + 26, nx, ny - 12), fill=(55, 55, 55, 190), width=3)
-    draw.polygon([(nx, ny - 22), (nx - 8, ny - 6), (nx + 8, ny - 6)], fill=(55, 55, 55, 190))
+    nx, ny = 70, 150
+    draw.line((nx, ny + 26, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
+    draw.polygon([(nx, ny - 18), (nx - 8, ny - 2), (nx + 8, ny - 2)], fill=(55, 55, 55, 200))
     draw.text((nx - 7, ny + 32), 'N', fill=(55, 55, 55, 190), font=font_small)
 
-    panel_x = canvas_w - right_panel_w + 28
-    draw.text((panel_x, 56), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_title)
-    draw.text((panel_x, 104), option.typology.upper(), fill=(28, 28, 28, 255), font=font_body)
+    panel_x = canvas_w - right_panel_w + 22
+    unique_typos = []
+    for p in proposed:
+        typ = p['typology']
+        if typ not in unique_typos:
+            unique_typos.append(typ)
+    panel_typology = ', '.join(unique_typos) if unique_typos else option.typology
+    panel_typology = panel_typology.upper()
+    if len(panel_typology) > 22:
+        panel_typology = panel_typology.replace(', ', ',\n')
+
+    draw.text((panel_x, 56), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_section)
+    draw.multiline_text((panel_x, 100), panel_typology, fill=(28, 28, 28, 255), font=font_body, spacing=2)
     hint = _typology_dimension_hint(option.typology)
     if hint:
-        draw.text((panel_x, 136), hint, fill=(92, 90, 84, 255), font=font_micro)
+        draw.text((panel_x, 144), hint, fill=(94, 92, 86, 255), font=font_small)
 
     summary_rows = [
         ('BTA', f"{option.gross_bta_m2:,.0f} m²".replace(',', ' ')),
@@ -4653,37 +4670,37 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         ('Score', f"{option.score:.0f}/100"),
         ('Sol', f"{option.solar_score:.0f}/100"),
     ]
-    py = 188
+    py = 192
     for key, value in summary_rows:
-        draw.text((panel_x, py), key, fill=(94, 92, 86, 255), font=font_micro)
-        draw.text((panel_x + 108, py), value, fill=(30, 30, 30, 255), font=font_micro)
+        draw.text((panel_x, py), key, fill=(96, 94, 90, 255), font=font_small)
+        draw.text((panel_x + 112, py), value, fill=(33, 33, 33, 255), font=font_small)
         py += 30
 
-    draw.text((panel_x, py + 18), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_title)
-    py += 62
-    schedule = sorted(proposed, key=lambda item: item['idx'])[:8]
+    draw.text((panel_x, py + 14), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_section)
+    py += 54
+    schedule = sorted(proposed, key=lambda item: item['idx'])[:9]
     if schedule:
-        for idx, part in enumerate(schedule, start=1):
-            card_h = 58
-            draw.rounded_rectangle([(panel_x, py), (canvas_w - 44, py + card_h)], radius=14, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
-            badge = part.get('tag', _alpha_num_tag(idx - 1))
-            draw.ellipse([(panel_x + 10, py + 12), (panel_x + 34, py + 36)], fill=part['color'], outline=(120, 110, 96, 180))
-            tw, th = label_bbox(badge, font_tiny)
-            draw.text((panel_x + 22 - tw / 2, py + 24 - th / 2), badge, fill=(35, 34, 30, 255), font=font_tiny)
-            title = f"{part.get('tag', _alpha_num_tag(idx - 1))} · {part['typology']} · {part['floors']} et."
-            draw.text((panel_x + 46, py + 9), title, fill=(31, 31, 31, 255), font=font_micro)
+        card_h = 50
+        for part in schedule:
+            draw.rounded_rectangle([(panel_x, py), (canvas_w - 40, py + card_h)], radius=12, fill=(248, 247, 244, 255), outline=(223, 221, 214, 255))
+            draw.ellipse([(panel_x + 10, py + 12), (panel_x + 32, py + 34)], fill=part['color'], outline=part['outline'])
+            tw, th = label_bbox(part['tag'], font_tiny)
+            draw.text((panel_x + 21 - tw / 2, py + 22 - th / 2), part['tag'], fill=(35, 34, 30, 255), font=font_tiny)
+            title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
+            draw.text((panel_x + 42, py + 8), title, fill=(31, 31, 31, 255), font=font_small)
             dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-            area_text = f"fotavtrykk {part['area_m2']:.0f} m²" if part['area_m2'] > 0 else ''
-            draw.text((panel_x + 46, py + 30), dim_text, fill=(64, 62, 58, 255), font=font_micro)
-            if area_text:
+            draw.text((panel_x + 42, py + 26), dim_text, fill=(73, 71, 67, 255), font=font_tiny)
+            if part['area_m2'] > 0:
+                area_text = f"fotavtrykk {part['area_m2']:.0f} m²"
                 aw, _ = label_bbox(area_text, font_tiny)
-                draw.text((canvas_w - 54 - aw, py + 31), area_text, fill=(100, 98, 92, 255), font=font_tiny)
-            py += card_h + 10
+                draw.text((canvas_w - 50 - aw, py + 26), area_text, fill=(103, 100, 95, 255), font=font_tiny)
+            py += card_h + 8
+            if py + card_h > canvas_h - 46:
+                break
     else:
-        draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_micro)
+        draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_small)
 
     return img.convert('RGB')
-
 
 def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render en tydelig plan med byggenes faktiske fotavtrykksmål."""
@@ -6626,6 +6643,7 @@ def build_deterministic_report(
 
 # --- 5. PDF ---
 PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
+PDF_ACTIVE_FONT = PDF_FONT
 
 
 def _register_fonts(pdf: FPDF) -> str:
@@ -7997,8 +8015,9 @@ def create_full_report_pdf(
     # (ny PDF-instans i samme prosess) kan DejaVu-registrering feile stille —
     # vi faller da trygt tilbake til Helvetica for HELE PDF-en for å unngå
     # "Undefined font: dejavu"-crash i header/footer.
-    global PDF_FONT
+    global PDF_FONT, PDF_ACTIVE_FONT
     _active_font = _register_fonts(pdf)
+    PDF_ACTIVE_FONT = _active_font
     if _active_font != PDF_FONT:
         PDF_FONT = _active_font
     pdf.p_name = name.upper()
@@ -8396,7 +8415,7 @@ def create_full_report_pdf(
             "som er valgt for videre bearbeiding."
         )
         pdf.ln(4)
-        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
+        view_labels = ["Konseptoversikt 2D", "Detaljert planvisning", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
