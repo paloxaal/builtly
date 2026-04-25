@@ -28,7 +28,7 @@ from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 from shapely import affinity
 from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
-from shapely.ops import unary_union
+from shapely.ops import unary_union, nearest_points
 
 
 def _truthy_env(name: str, default: bool = False) -> bool:
@@ -4594,6 +4594,142 @@ def _draw_building_callouts(
                 detail = detail[:21] + '…'
             draw.text((bx0 + 37, by0 + 22), detail, fill=(89, 95, 101, 235), font=font_detail)
 
+
+
+def _draw_clearance_measurements(
+    draw: ImageDraw.ImageDraw,
+    parts: List[Dict[str, Any]],
+    site_coords: Any,
+    project_func,
+    *,
+    font,
+    max_pair_labels: int = 10,
+    max_boundary_labels: int = 8,
+) -> None:
+    """Draw measured clearances between buildings and to the plot boundary.
+
+    Labels are intentionally small and diagrammatic. They make it possible to
+    verify the 8 m building-to-building rule directly in the concept overview.
+    """
+    if not parts:
+        return
+
+    def _bbox(txt: str) -> Tuple[int, int]:
+        try:
+            bb = font.getbbox(str(txt))
+            return bb[2] - bb[0], bb[3] - bb[1]
+        except Exception:
+            return max(8, len(str(txt)) * 7), 12
+
+    def _poly_from_part(part: Dict[str, Any]) -> Optional[Polygon]:
+        poly = part.get('poly')
+        if poly is not None and not getattr(poly, 'is_empty', True):
+            return poly
+        coords = flatten_coord_groups(part.get('coords', []))
+        if len(coords) < 3:
+            return None
+        try:
+            p = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            return p if not p.is_empty and p.area > 1.0 else None
+        except Exception:
+            return None
+
+    polys: List[Tuple[Dict[str, Any], Polygon]] = []
+    for part in parts:
+        poly = _poly_from_part(part)
+        if poly is not None:
+            polys.append((part, poly))
+    if not polys:
+        return
+
+    def _draw_measure_line(p1, p2, text_value: str, *, danger: bool = False, dashed: bool = False) -> None:
+        try:
+            s1 = project_func((p1.x, p1.y))
+            s2 = project_func((p2.x, p2.y))
+        except Exception:
+            return
+        if math.hypot(s2[0] - s1[0], s2[1] - s1[1]) < 10.0:
+            return
+        line_color = (188, 52, 52, 210) if danger else (50, 82, 112, 168)
+        if dashed:
+            # Short dashed line without depending on PIL dash support.
+            seg_len = math.hypot(s2[0] - s1[0], s2[1] - s1[1])
+            if seg_len <= 0:
+                return
+            step = 9.0
+            pos = 0.0
+            on = True
+            while pos < seg_len:
+                end = min(seg_len, pos + step * 0.55)
+                if on:
+                    x1 = s1[0] + (s2[0] - s1[0]) * (pos / seg_len)
+                    y1 = s1[1] + (s2[1] - s1[1]) * (pos / seg_len)
+                    x2 = s1[0] + (s2[0] - s1[0]) * (end / seg_len)
+                    y2 = s1[1] + (s2[1] - s1[1]) * (end / seg_len)
+                    draw.line([(x1, y1), (x2, y2)], fill=line_color, width=1)
+                on = not on
+                pos += step
+        else:
+            draw.line([s1, s2], fill=line_color, width=1)
+        mx, my = (s1[0] + s2[0]) / 2.0, (s1[1] + s2[1]) / 2.0
+        tw, th = _bbox(text_value)
+        fill = (255, 248, 238, 238) if danger else (255, 255, 255, 228)
+        outline = (185, 63, 63, 220) if danger else (142, 154, 166, 180)
+        draw.rounded_rectangle([(mx - tw / 2 - 4, my - th / 2 - 3), (mx + tw / 2 + 4, my + th / 2 + 3)], radius=6, fill=fill, outline=outline)
+        draw.text((mx - tw / 2, my - th / 2 - 1), text_value, fill=(35, 39, 45, 245), font=font)
+
+    # Building-to-building: draw shortest relevant clearances, plus closest per building.
+    pair_candidates: List[Tuple[float, int, int, Any, Any]] = []
+    closest_per_idx: Dict[int, Tuple[float, int, int, Any, Any]] = {}
+    for i, (_, poly_a) in enumerate(polys):
+        for j in range(i + 1, len(polys)):
+            poly_b = polys[j][1]
+            dist = float(poly_a.distance(poly_b))
+            if dist > 55.0:
+                continue
+            try:
+                p1, p2 = nearest_points(poly_a, poly_b)
+            except Exception:
+                continue
+            item = (dist, i, j, p1, p2)
+            pair_candidates.append(item)
+            if i not in closest_per_idx or dist < closest_per_idx[i][0]:
+                closest_per_idx[i] = item
+            if j not in closest_per_idx or dist < closest_per_idx[j][0]:
+                closest_per_idx[j] = item
+    chosen_pairs: Dict[Tuple[int, int], Tuple[float, int, int, Any, Any]] = {}
+    for item in sorted(pair_candidates, key=lambda v: v[0])[:max_pair_labels]:
+        chosen_pairs[(item[1], item[2])] = item
+    for item in closest_per_idx.values():
+        if len(chosen_pairs) >= max_pair_labels:
+            break
+        chosen_pairs[(item[1], item[2])] = item
+    for dist, i, j, p1, p2 in sorted(chosen_pairs.values(), key=lambda v: v[0]):
+        txt = f"{dist:.1f} m"
+        _draw_measure_line(p1, p2, txt, danger=dist < 8.0, dashed=False)
+
+    # Building-to-boundary: one nearest plot-boundary distance per building.
+    site_pts = flatten_coord_groups(site_coords)
+    if len(site_pts) >= 3:
+        try:
+            site_poly = Polygon([(float(x), float(y)) for x, y in site_pts]).buffer(0)
+        except Exception:
+            site_poly = None
+        if site_poly is not None and not site_poly.is_empty:
+            boundary_items: List[Tuple[float, int, Any, Any]] = []
+            boundary = site_poly.boundary
+            for i, (_, poly) in enumerate(polys):
+                try:
+                    p1, p2 = nearest_points(poly, boundary)
+                    dist = float(poly.distance(boundary))
+                except Exception:
+                    continue
+                if dist <= 80.0:
+                    boundary_items.append((dist, i, p1, p2))
+            # Prioritér de knappeste avstandene; disse er viktigst å kontrollere.
+            for dist, i, p1, p2 in sorted(boundary_items, key=lambda v: v[0])[:max_boundary_labels]:
+                _draw_measure_line(p1, p2, f"{dist:.1f} m", danger=False, dashed=True)
+
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render a clean 2D concept overview.
 
@@ -4793,9 +4929,10 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         else:
             color = typo_colors.get(typ, (205, 166, 121, 232))
         outline = typo_outline.get(typ, (125, 110, 84, 255))
+        poly_obj = None
         try:
-            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-            c = poly.centroid
+            poly_obj = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            c = poly_obj.centroid
             center = project((c.x, c.y))
         except Exception:
             center = (sum(x for x, _ in pp) / len(pp), sum(y for _, y in pp) / len(pp))
@@ -4812,6 +4949,8 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
             'length_m': length_m,
             'depth_m': depth_m,
             'area_m2': area_m2,
+            'poly': poly_obj,
+            'coords': coords,
         })
 
     for part in proposed:
@@ -4821,6 +4960,17 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
         if len(part['pts']) >= 4:
             draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
+
+    # Measured clearances: building-to-building and building-to-plot-boundary.
+    _draw_clearance_measurements(
+        draw,
+        proposed,
+        site_coords,
+        project,
+        font=font_tiny,
+        max_pair_labels=12 if len(proposed) <= 8 else 10,
+        max_boundary_labels=8 if len(proposed) <= 8 else 6,
+    )
 
     # Building labels are intentionally kept off the footprints.
     _draw_building_callouts(
@@ -4849,7 +4999,7 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     # header/footer
     draw.text((42, 34), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
     draw.text((38, 62), 'OVERSIKT', fill=(25, 25, 25, 255), font=font_hero)
-    draw.text((42, canvas_h - 44), '2D-konseptoversikt med bygg, uterom og siktlinjer', fill=(44, 44, 44, 255), font=font_title)
+    draw.text((42, canvas_h - 44), '2D-konseptoversikt med bygg, uterom, siktlinjer og avstandsmål', fill=(44, 44, 44, 255), font=font_title)
 
     nx, ny = 70, 144
     draw.line((nx, ny + 24, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
@@ -5135,6 +5285,10 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             color = typo_colors.get(typ, (64, 126, 188, 235))
         outline = (31, 55, 95, 190)
         draw_poly(coords, fill=color, outline=outline, width=2)
+        try:
+            poly_obj = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+        except Exception:
+            poly_obj = None
 
         pp = pts(coords)
         cx_l = sum(p[0] for p in pp) / len(pp)
@@ -5151,7 +5305,19 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             'length_m': length_m,
             'depth_m': depth_m,
             'area_m2': area_m2,
+            'coords': coords,
+            'poly': poly_obj,
         })
+
+    _draw_clearance_measurements(
+        draw,
+        plan_callouts,
+        site_coords,
+        lambda pt: proj(pt[0], pt[1]),
+        font=font_tiny,
+        max_pair_labels=12 if len(plan_callouts) <= 8 else 10,
+        max_boundary_labels=8 if len(plan_callouts) <= 8 else 6,
+    )
 
     _draw_building_callouts(
         draw,
