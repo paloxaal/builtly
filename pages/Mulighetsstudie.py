@@ -30,6 +30,49 @@ from shapely import affinity
 from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
 from shapely.ops import unary_union
 
+
+def _truthy_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
+    try:
+        value = int(float(os.environ.get(name, str(default))))
+    except Exception:
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+def _env_float(name: str, default: float, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except Exception:
+        value = default
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
+# Runtime-stabilitet for Render/Streamlit. Hovedknappen skal primært gjøre
+# deterministisk analyse og lokal PDF. Nettverks-/AI-steg holdes utenfor
+# kritisk løp med mindre de eksplisitt aktiveres i env.
+BUILTLY_ENABLE_MAIN_RUN_AI = _truthy_env("BUILTLY_ENABLE_MAIN_RUN_AI", False)
+BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN = _truthy_env("BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN", False)
+BUILTLY_ENABLE_ENVIRONMENT_REMOTE = _truthy_env("BUILTLY_ENABLE_ENVIRONMENT_REMOTE", False)
+BUILTLY_AUTOSAVE_REPORT = _truthy_env("BUILTLY_AUTOSAVE_REPORT", False)
+BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT = _env_int("BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT", 60, 0, 250)
+BUILTLY_CLAUDE_TIMEOUT_SECONDS = _env_float("BUILTLY_CLAUDE_TIMEOUT_SECONDS", 18.0, 3.0, 45.0)
+BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS = _env_float("BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS", 22.0, 5.0, 60.0)
+
 try:
     from pyproj import CRS, Transformer
     HAS_PYPROJ = True
@@ -1523,6 +1566,11 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
             }
         )
     filtered_neighbors.sort(key=lambda item: item.get("distance_m", 0.0))
+    raw_neighbor_count = len(filtered_neighbors)
+    if BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT and len(filtered_neighbors) > BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT:
+        # Behold de nærmeste naboene. Disse betyr mest for sol/skygge og
+        # nabohensyn; resten kan gjøre runtime ustabil på Render.
+        filtered_neighbors = filtered_neighbors[:BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT]
 
     return {
         "site_polygon": site_polygon,
@@ -1533,6 +1581,8 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
         "buildable_area_m2": buildable_area,
         "orientation_deg": orientation_deg,
         "neighbors": filtered_neighbors,
+        "neighbors_raw_count": raw_neighbor_count,
+        "neighbors_runtime_limited": raw_neighbor_count > len(filtered_neighbors),
         "terrain": terrain,
         "source": source,
         "polygon_meta": polygon_meta,
@@ -3262,6 +3312,10 @@ def _should_retry_anthropic_with_fallback(status_code: int, body_text: str) -> b
 def _anthropic_request(payload: Dict[str, Any], timeout: int) -> Optional[Dict[str, Any]]:
     if not ANTHROPIC_API_KEY:
         return None
+    try:
+        timeout = min(float(timeout), BUILTLY_CLAUDE_TIMEOUT_SECONDS)
+    except Exception:
+        timeout = BUILTLY_CLAUDE_TIMEOUT_SECONDS
     models = [ANTHROPIC_MODEL]
     if ANTHROPIC_FALLBACK_MODEL and ANTHROPIC_FALLBACK_MODEL != ANTHROPIC_MODEL:
         models.append(ANTHROPIC_FALLBACK_MODEL)
@@ -3364,7 +3418,7 @@ def _call_claude_vision(
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": content_blocks}],
             },
-            timeout=120,
+            timeout=min(120, BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS),
         )
         if not data:
             return None
@@ -4425,6 +4479,153 @@ def _draw_badge(
     draw.text((x - tw / 2, y - th / 2 - 1), label, fill=text_fill, font=font)
 
 
+
+
+def _draw_building_callouts(
+    draw: ImageDraw.ImageDraw,
+    parts: List[Dict[str, Any]],
+    map_bounds: Tuple[float, float, float, float],
+    *,
+    font_label,
+    font_detail=None,
+    max_items: int = 8,
+) -> None:
+    """Draw elegant off-footprint labels with leader lines.
+
+    Runde 9.1: labels skal ikke ligge oppå byggene. Denne helperen holder
+    byggenes fotavtrykk rent og legger små forklarende etiketter i randsonen
+    rundt selve bebyggelsen, med tynne knekkede lederlinjer tilbake til bygg.
+    """
+    if not parts:
+        return
+    x0, y0, x1, y1 = map_bounds
+    width = max(1.0, x1 - x0)
+    font_detail = font_detail or font_label
+
+    def _bbox(txt: str, font_obj) -> Tuple[int, int]:
+        try:
+            bb = font_obj.getbbox(str(txt))
+            return bb[2] - bb[0], bb[3] - bb[1]
+        except Exception:
+            return max(8, len(str(txt)) * 7), 12
+
+    candidates = list(parts[:max_items])
+    if not candidates:
+        return
+
+    all_x: List[float] = []
+    all_y: List[float] = []
+    for part in candidates:
+        for pt in part.get('pts', []) or []:
+            try:
+                all_x.append(float(pt[0]))
+                all_y.append(float(pt[1]))
+            except Exception:
+                pass
+    if all_x and all_y:
+        bminx, bmaxx = min(all_x), max(all_x)
+        bminy, bmaxy = min(all_y), max(all_y)
+    else:
+        bminx, bmaxx = x0 + width * 0.35, x1 - width * 0.35
+        bminy, bmaxy = y0 + (y1-y0) * 0.35, y1 - (y1-y0) * 0.35
+
+    cx_mid = (bminx + bmaxx) / 2.0
+    box_w = min(142.0, max(112.0, width * 0.17))
+    box_h = 32.0
+    gutter = max(10.0, width * 0.012)
+    leader_gap = 18.0
+
+    left = [p for p in candidates if p.get('center', (cx_mid, 0))[0] <= cx_mid]
+    right = [p for p in candidates if p.get('center', (cx_mid, 0))[0] > cx_mid]
+    if len(left) == 0 or len(right) == 0:
+        ordered = sorted(candidates, key=lambda p: p.get('center', (0, 0))[1])
+        left = ordered[::2]
+        right = ordered[1::2]
+
+    def _column_x(side: str) -> float:
+        if side == 'left':
+            preferred = bminx - leader_gap - box_w
+            return max(x0 + gutter, min(preferred, x1 - gutter - box_w))
+        preferred = bmaxx + leader_gap
+        return max(x0 + gutter, min(preferred, x1 - gutter - box_w))
+
+    def _layout_column(col: List[Dict[str, Any]], side: str) -> List[Tuple[Dict[str, Any], Tuple[float, float, float, float]]]:
+        if not col:
+            return []
+        col = sorted(col, key=lambda p: p.get('center', (0, 0))[1])
+        bx = _column_x(side)
+        min_y = y0 + gutter
+        max_y = y1 - gutter - box_h
+        if max_y < min_y:
+            max_y = min_y
+        # Use evenly distributed anchors when many labels would collide.
+        if len(col) > 1:
+            target_ys = [min_y + i * ((max_y - min_y) / max(len(col) - 1, 1)) for i in range(len(col))]
+        else:
+            cy = float(col[0].get('center', (0, (y0+y1)/2))[1]) - box_h/2.0
+            target_ys = [max(min_y, min(max_y, cy))]
+        result = []
+        for part, by in zip(col, target_ys):
+            # Blend between natural y and evenly spaced y, so labels point neatly
+            # but remain uncluttered.
+            natural = float(part.get('center', (0, by))[1]) - box_h / 2.0
+            by = 0.55 * by + 0.45 * max(min_y, min(max_y, natural))
+            result.append((part, (bx, by, bx + box_w, by + box_h)))
+        # Final collision pass.
+        result.sort(key=lambda item: item[1][1])
+        adjusted = []
+        last_bottom = min_y - 999.0
+        for part, (rx0, ry0, rx1, ry1) in result:
+            ry0 = max(ry0, last_bottom + 6.0)
+            ry0 = min(ry0, max_y)
+            adjusted.append((part, (rx0, ry0, rx1, ry0 + box_h)))
+            last_bottom = ry0 + box_h
+        # If bottom overflow, shift all up.
+        if adjusted and adjusted[-1][1][3] > y1 - gutter:
+            overflow = adjusted[-1][1][3] - (y1 - gutter)
+            adjusted = [(part, (rx0, max(min_y, ry0-overflow), rx1, max(min_y, ry1-overflow))) for part, (rx0, ry0, rx1, ry1) in adjusted]
+        return adjusted
+
+    placements = _layout_column(left, 'left') + _layout_column(right, 'right')
+
+    for part, rect in placements:
+        bx0, by0, bx1, by1 = rect
+        cx, cy = part.get('center', ((bx0 + bx1) / 2.0, (by0 + by1) / 2.0))
+        tag = str(part.get('tag') or '?')
+        typ = str(part.get('typology') or '')
+        floors = part.get('floors')
+        length = float(part.get('length_m', 0.0) or 0.0)
+        depth = float(part.get('depth_m', 0.0) or 0.0)
+        detail_bits = []
+        if floors:
+            detail_bits.append(f"{int(floors)} et.")
+        if length > 0 and depth > 0:
+            detail_bits.append(f"{length:.0f}×{depth:.0f} m")
+        detail = ' / '.join(detail_bits)
+        color = part.get('color') or (198, 198, 190, 230)
+        outline = part.get('outline') or (110, 118, 128, 180)
+
+        label_anchor_x = bx1 if bx0 < cx else bx0
+        label_anchor_y = (by0 + by1) / 2.0
+        side_sign = 1 if bx0 < cx else -1
+        elbow_x = label_anchor_x + side_sign * 14.0
+        elbow_y = cy
+        draw.line([(cx, cy), (elbow_x, elbow_y), (label_anchor_x, label_anchor_y)], fill=(67, 94, 124, 120), width=2)
+        draw.ellipse([(cx - 2.6, cy - 2.6), (cx + 2.6, cy + 2.6)], fill=(67, 94, 124, 170))
+
+        draw.rounded_rectangle([(bx0, by0), (bx1, by1)], radius=11, fill=(255, 255, 255, 214), outline=(178, 187, 196, 150))
+        draw.ellipse([(bx0 + 7, by0 + 7), (bx0 + 25, by0 + 25)], fill=color, outline=outline)
+        tw, th = _bbox(tag, font_label)
+        draw.text((bx0 + 16 - tw / 2.0, by0 + 16 - th / 2.0 - 1), tag, fill=(20, 34, 54, 255), font=font_label)
+        title = f"{tag} · {typ}" if typ else tag
+        if len(title) > 16:
+            title = title[:15] + '…'
+        draw.text((bx0 + 31, by0 + 5), title, fill=(31, 38, 48, 255), font=font_label)
+        if detail:
+            if len(detail) > 19:
+                detail = detail[:18] + '…'
+            draw.text((bx0 + 31, by0 + 20), detail, fill=(89, 95, 101, 235), font=font_detail)
+
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render a clean 2D concept overview.
 
@@ -4653,9 +4854,15 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         if len(part['pts']) >= 4:
             draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
 
-    for part in proposed[:12]:
-        cx, cy = part['center']
-        _draw_badge(draw, (cx, cy - 4), part['tag'], fill=(255, 255, 255, 232), outline=(84, 114, 145, 180), font=font_small, text_fill=(31, 55, 95, 255))
+    # Building labels are intentionally kept off the footprints.
+    _draw_building_callouts(
+        draw,
+        proposed,
+        (map_x0 + inner_pad, map_y0 + inner_pad, map_x1 - inner_pad, map_y1 - inner_pad),
+        font_label=font_tiny,
+        font_detail=font_tiny,
+        max_items=10,
+    )
 
     # trees, restrained
     for item in (courtyard_polys or public_polys)[:16]:
@@ -4947,6 +5154,7 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
         if item.get('coords'):
             draw_line(item.get('coords'), (125, 125, 125, 90), 2, dash=True)
 
+    plan_callouts: List[Dict[str, Any]] = []
     for idx, part in enumerate(massing_parts):
         coords = flatten_coord_groups(part.get('coords', []))
         if len(coords) < 3:
@@ -4957,13 +5165,35 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
             color = tuple(int(v) for v in base_c[:4]) if len(base_c) >= 4 else (int(base_c[0]), int(base_c[1]), int(base_c[2]), 225)
         else:
             color = typo_colors.get(typ, (64, 126, 188, 235))
-        draw_poly(coords, fill=color, outline=(31, 55, 95, 190), width=2)
+        outline = (31, 55, 95, 190)
+        draw_poly(coords, fill=color, outline=outline, width=2)
 
         pp = pts(coords)
         cx_l = sum(p[0] for p in pp) / len(pp)
         cy_l = sum(p[1] for p in pp) / len(pp)
-        tag = _alpha_num_tag(idx)
-        _draw_badge(draw, (cx_l, cy_l), tag, fill=(255, 255, 255, 220), outline=(66, 103, 155, 170), font=font_small, text_fill=(31, 55, 95, 255))
+        length_m, depth_m, area_m2 = _part_dimensions(part)
+        plan_callouts.append({
+            'idx': idx,
+            'tag': _alpha_num_tag(idx),
+            'typology': typ,
+            'pts': pp,
+            'center': (cx_l, cy_l),
+            'color': color,
+            'outline': outline,
+            'floors': int(part.get('floors', option.floors) or option.floors),
+            'length_m': length_m,
+            'depth_m': depth_m,
+            'area_m2': area_m2,
+        })
+
+    _draw_building_callouts(
+        draw,
+        plan_callouts,
+        (map_x0, map_y0, map_x1, map_y1),
+        font_label=font_tiny,
+        font_detail=font_tiny,
+        max_items=10,
+    )
 
     draw_poly(flatten_coord_groups(site_coords), fill=None, outline=(202, 66, 66, 255), width=3)
 
@@ -9388,8 +9618,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if ANTHROPIC_API_KEY:
-    st.success("AI-tekst er tilgjengelig (Claude). Tallsiden beregnes alltid deterministisk først.")
+if ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
+    st.success("AI-tekst er tilgjengelig (Claude) og aktivert i hovedkjøringen.")
+elif ANTHROPIC_API_KEY:
+    st.info("Claude er konfigurert, men AI-rapport i hovedkjøringen er slått av for stabilitet. Manuelle AI-verktøy kan brukes etterpå.")
 elif llm_available:
     st.success("AI-tekst er tilgjengelig (Gemini fallback). Tallsiden beregnes alltid deterministisk først.")
 else:
@@ -9959,12 +10191,20 @@ if run_analysis:
     site.terrain_relief_m = float((terrain_ctx or {}).get("relief_m", 0.0))
 
     site_intelligence_bundle: Dict[str, Any] = {}
-    if HAS_SITE_INTELLIGENCE and geodata_token_ok and site_polygon_input is not None and gdo is not None:
+    if (
+        HAS_SITE_INTELLIGENCE
+        and BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN
+        and geodata_token_ok
+        and site_polygon_input is not None
+        and gdo is not None
+    ):
         try:
             site_intelligence_bundle = build_site_intelligence_bundle(gdo, geodata_context['site_polygon'], search_buffer_m=350.0)
             geodata_context['site_intelligence'] = site_intelligence_bundle
         except Exception as exc:
             site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
+    elif HAS_SITE_INTELLIGENCE and not BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN:
+        site_intelligence_bundle = {'available': False, 'skipped': 'disabled_for_runtime'}
 
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
@@ -10146,7 +10386,7 @@ if run_analysis:
                     latitude_deg=latitude_deg,
                     longitude_deg=longitude_deg,
                     terrain=terrain_ctx,
-                    gdo_client=gdo if geodata_token_ok else None,
+                    gdo_client=gdo if (geodata_token_ok and BUILTLY_ENABLE_ENVIRONMENT_REMOTE) else None,
                 )
             except Exception as exc:
                 environment_data = {"available": False, "error": str(exc)[:120]}
@@ -10202,7 +10442,7 @@ if run_analysis:
     final_report_text = deterministic_report
 
     # --- AI-rapport via Claude (v13: migrert fra Gemini) ---
-    if ANTHROPIC_API_KEY:
+    if ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
         try:
             # Build compact environment summary for AI (v13: støydata + dagslys)
             env_summary = {}
@@ -10281,7 +10521,7 @@ KRAV:
         # AI-analyse av planvisninger (v13)
         pv_analyses: List[str] = []
         scene_imgs_for_pdf = st.session_state.get("ark_scene_images") or auto_scene_images or []
-        if scene_imgs_for_pdf and ANTHROPIC_API_KEY:
+        if scene_imgs_for_pdf and ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
             with st.spinner("Arkitektonisk vurdering av planvisninger (Claude)..."):
                 try:
                     pv_analyses = analyze_plan_views_with_ai(
@@ -10362,11 +10602,11 @@ KRAV:
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
 
-    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
-    # Primær API: pass pdf_bytes slik at filen lastes opp til Supabase Storage.
-    # Uten pdf_bytes lagres bare metadata (navn) — da blir ikke selve PDF-en
-    # søkbar/nedlastbar fra dashboardet.
-    if pdf_bytes:
+    # Dashboard-lagring til Supabase Storage kan variere i svartid. For stabil
+    # hovedkjøring er dette av som standard. PDF-en er fortsatt tilgjengelig via
+    # st.download_button i samme session. Sett BUILTLY_AUTOSAVE_REPORT=1 for å
+    # aktivere automatisk opplasting/metadata-lagring igjen.
+    if pdf_bytes and BUILTLY_AUTOSAVE_REPORT:
         try:
             from builtly_auth import save_report
             _sr_result = save_report(
@@ -10376,27 +10616,22 @@ KRAV:
                 pdf_bytes=pdf_bytes,
                 content_type="application/pdf",
             )
-            # Logg resultat: save_report returnerer True hvis metadata ble lagret
-            # _report_save_debug settes i session med detaljer om storage-upload + DB-insert
             try:
                 import logging as _sr_logging
                 _debug_msg = st.session_state.get("_report_save_debug", "")
-                _sr_logging.getLogger("builtly").info(
-                    "save_report returned %s — %s", _sr_result, _debug_msg
-                )
+                _sr_logging.getLogger("builtly").info("save_report returned %s — %s", _sr_result, _debug_msg)
             except Exception:
                 pass
         except ImportError:
-            pass  # Frontpage not available (standalone run)
+            pass
         except Exception as _sr_err:
-            # Supabase/auth-feil skal ikke stoppe hele flyten
             try:
                 import logging as _sr_logging
-                _sr_logging.getLogger("builtly").warning(
-                    "save_report feilet: %s", _sr_err
-                )
+                _sr_logging.getLogger("builtly").warning("save_report feilet: %s", _sr_err)
             except Exception:
                 pass
+    elif pdf_bytes:
+        st.session_state["_report_save_debug"] = "autosave disabled for runtime stability"
 
     st.rerun()
 
