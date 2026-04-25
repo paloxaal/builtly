@@ -212,11 +212,16 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
             # Makro/mikro-prinsipp: hold makrofeltene rolige, men gi lineære og parkgrep
             # nok armer til å bygge rytme. Karré-grep holdes strammere for å unngå for små blokker.
             if concept_family == ConceptFamily.LINEAR_MIXED:
-                count = max(5, min(count, 7 if density < 1.18 else 8))
+                # Runde 8.1: færre, større makrofelt gir mer lesbare gaterom og
+                # interne akser; flere bygg håndteres inne i hvert felt.
+                count = max(3, min(count, 5 if density < 1.18 else 6))
             elif concept_family == ConceptFamily.CLUSTER_PARK:
-                count = max(5, min(count, 7))
+                # Ett tydelig grønt fellesrom krever større sammenhengende felt,
+                # ikke 6-7 små delfelt med hver sin lokale park.
+                count = max(3, min(count, 4))
             else:  # COURTYARD_URBAN
-                count = max(4, min(count, 6 if density < 1.18 else 7))
+                # Karré trenger feltstørrelse for komplette kvartalsringer.
+                count = max(2, min(count, 4 if density >= 1.18 else 3))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -599,6 +604,34 @@ def pass6_generate_report_text(plan: Masterplan, target_bra_m2: float, ai_report
 # ---------------------------------------------------------------------------
 
 
+def _effective_delfelt_count_for_family(
+    buildable_poly: Polygon,
+    family: ConceptFamily,
+    requested_count: Optional[int],
+    target_bra_m2: float,
+) -> Optional[int]:
+    """Treat phase count as a maximum, not a hard delfelt count.
+
+    Runde 8.1: 6 phases should not automatically become 6 tiny fields. That
+    destroyed gaterom, grønt fellesrom and karré rings. This maps requested
+    phases to concept-appropriate macro fields.
+    """
+    if requested_count is None or requested_count <= 0:
+        return None
+    area = max(float(getattr(buildable_poly, "area", 0.0) or 0.0), 1.0)
+    density = float(target_bra_m2 or 0.0) / area
+    if area <= 2500.0 and density >= 1.85:
+        return 1
+    req = max(1, int(requested_count))
+    if family == ConceptFamily.CLUSTER_PARK:
+        return 3 if area >= 7000.0 else max(1, min(req, 2))
+    if family == ConceptFamily.COURTYARD_URBAN:
+        return max(2, min(req, 3 if density < 1.10 and area < 10000.0 else 4))
+    if family == ConceptFamily.LINEAR_MIXED:
+        return max(3, min(req, 4))
+    return req
+
+
 def plan_masterplan_geometry(
     buildable_poly: Polygon,
     *,
@@ -707,7 +740,12 @@ def generate_concept_masterplans(
                 concept_family=family,
                 target_bra_m2=target_bra_m2,
                 plan_regler=plan_regler,
-                requested_delfelt_count=requested_delfelt_count,
+                requested_delfelt_count=_effective_delfelt_count_for_family(
+                    buildable_poly,
+                    family,
+                    requested_delfelt_count,
+                    target_bra_m2,
+                ),
                 avg_unit_bra_m2=avg_unit_bra_m2,
                 barnehage_config=barnehage_config,
                 latitude_deg=latitude_deg,
