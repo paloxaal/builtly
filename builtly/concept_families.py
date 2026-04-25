@@ -34,6 +34,8 @@ class FieldEnvelope:
     courtyard_reserve_ratio: float = 0.0
     frontage_depth_m: Optional[float] = None
     corridor_width_m: Optional[float] = None
+    central_void_m: float = 0.0
+    gap_between_m: float = 4.0
     macro_structure: Optional[str] = None
     micro_field_pattern: Optional[str] = None
     symmetry_preference: Optional[str] = None
@@ -294,6 +296,8 @@ class ConceptStrategy:
             courtyard_reserve_ratio = env.courtyard_reserve_ratio
             frontage_depth_m = env.frontage_depth_m
             corridor_width_m = env.corridor_width_m
+            central_void_m = env.central_void_m
+            gap_between_m = env.gap_between_m
             macro_structure = env.macro_structure
             micro_field_pattern = env.micro_field_pattern
             symmetry_preference = env.symmetry_preference
@@ -346,14 +350,18 @@ class ConceptStrategy:
                 elif selected_typology == Typology.KARRE and field_area_m2 >= 7500.0:
                     target_building_count = max(target_building_count, min(env.target_building_count, 4))
 
-            if selected_typology == Typology.KARRE and field_area_m2 < 6_000.0:
+            if selected_typology == Typology.KARRE and field_area_m2 < 4_200.0:
                 target_building_count = 1
 
             if selected_typology == Typology.KARRE:
-                if field_area_m2 < 9_000.0:
-                    target_building_count = min(max(target_building_count, 1), 1)
-                elif field_area_m2 < 18_000.0:
+                # Runde 9: høy tetthet på mellomstore felt må kunne gi 2 karréer
+                # med et felles uterom imellom, ellers kollapser BRA til 60% nivå.
+                if field_area_m2 < 6_000.0:
+                    target_building_count = min(max(target_building_count, 1), 1 if density < 2.2 else 2)
+                elif field_area_m2 < 11_000.0:
                     target_building_count = min(max(target_building_count, 1), 2)
+                elif field_area_m2 < 18_000.0:
+                    target_building_count = min(max(target_building_count, 2), 3)
             elif compact_infill and selected_typology in {Typology.LAMELL, Typology.PUNKTHUS}:
                 target_building_count = max(1, min(target_building_count, 2 if field_area_m2 <= 3_500.0 else 3))
 
@@ -394,7 +402,10 @@ class ConceptStrategy:
                     rationale += f" Feltet prioriteres som fler-nodig punktfelt med {target_building_count} tårn."
             elif selected_typology == Typology.KARRE and target_building_count >= 2:
                 micro_field_pattern = micro_field_pattern or 'clustered_frontage_ring'
-                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, ikke bare ett stort volum."
+                if central_void_m <= 0.0:
+                    central_void_m = 22.0 if target_building_count >= 4 else 18.0
+                gap_between_m = max(3.0, float(gap_between_m or 4.0))
+                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, med felles uterom mellom kvartalene."
 
             out.append(FieldParameterChoice(
                 field_id=field.field_id,
@@ -420,6 +431,8 @@ class ConceptStrategy:
                 courtyard_reserve_ratio=courtyard_reserve_ratio,
                 frontage_depth_m=frontage_depth_m,
                 corridor_width_m=corridor_width_m,
+                central_void_m=central_void_m,
+                gap_between_m=gap_between_m,
                 macro_structure=macro_structure,
                 micro_field_pattern=micro_field_pattern,
                 symmetry_preference=symmetry_preference,
@@ -446,7 +459,7 @@ class LinearMixedStrategy(ConceptStrategy):
     family = ConceptFamily.LINEAR_MIXED
     ui_label = "Lineært blandet grep"
     fallback_title = "Lineært blandet boliggrep"
-    fallback_tagline = "Lameller danner hovedstrukturen, mens punkt og karré gir variasjon rundt den interne byaksen."
+    fallback_tagline = "Lameller danner hovedstrukturen, mens punktbygg og karré gir variasjon rundt den interne byaksen."
 
     def _area_shares(self, count: int) -> List[float]:
         if count <= 1:
@@ -478,24 +491,27 @@ class LinearMixedStrategy(ConceptStrategy):
     def envelope_for_field(self, index: int, count: int, field: Optional[Delfelt] = None) -> FieldEnvelope:
         edge = index == 0 or index == count - 1
         center_index = count // 2
-        core = index == center_index and count >= 4
+        # Force a real typological mix: one central karré/courtyard field and
+        # one edge/node field with punkthus where the macro subdivision allows it.
+        core = index == center_index and count >= 3
         near_core = abs(index - center_index) <= 1
         use_karre = core
-        use_punkthus = edge and count >= 5
+        use_punkthus = (index == 0 and count >= 4) or (edge and count >= 5)
         default_typology = Typology.KARRE if use_karre else (Typology.PUNKTHUS if use_punkthus else Typology.LAMELL)
-        field_role = "linear_mixed_core" if core else ("linear_node" if use_punkthus else ("linear_edge" if edge else "linear_band"))
+        field_role = "linear_mixed_core" if use_karre else ("linear_node" if use_punkthus else ("linear_edge" if edge else "linear_band"))
         return FieldEnvelope(
             allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS, Typology.KARRE),
             default_typology=default_typology,
-            default_orientation_offset_deg=(0.0 if default_typology != Typology.PUNKTHUS else 0.0),
+            default_orientation_offset_deg=0.0,
             default_floors=((5, 6) if default_typology == Typology.LAMELL else ((5, 7) if default_typology == Typology.PUNKTHUS else (5, 6))),
             courtyard_kind=(CourtyardKind.URBAN_TORG if use_karre else CourtyardKind.FELLES_BOLIG),
+            tower_size_m=(20 if use_punkthus else None),
             field_role=field_role,
             character=("street_facing" if near_core or use_karre else "open_view"),
-            design_variant=(None if use_karre else (None if use_punkthus else ("rhythmic" if near_core else "terraced"))),
+            design_variant=(None if (use_karre or use_punkthus) else ("rhythmic" if near_core else "terraced")),
             design_karre_shape=("uo" if use_karre else None),
             design_height_pattern=("accent" if use_punkthus else ("stepped" if near_core else "neighbor_step_down")),
-            target_bya_pct=(33.0 if use_karre else (26.0 if use_punkthus else (35.0 if near_core else 32.0))),
+            target_bya_pct=(33.0 if use_karre else (27.0 if use_punkthus else (35.0 if near_core else 32.0))),
             skeleton_mode=("courtyard_frontage" if use_karre else ("park_nodes" if use_punkthus else ("linear_bands_dense" if count >= 4 else "linear_bands"))),
             frontage_mode=("ring" if use_karre else ("node" if use_punkthus else ("double" if near_core else "single"))),
             micro_band_count=(4 if use_karre else (0 if use_punkthus else (7 if near_core else 5))),
@@ -503,6 +519,8 @@ class LinearMixedStrategy(ConceptStrategy):
             courtyard_reserve_ratio=(0.24 if use_karre else (0.22 if use_punkthus else (0.10 if near_core else 0.08))),
             frontage_depth_m=(14.0 if use_karre else (12.0 if use_punkthus else 13.0)),
             corridor_width_m=7.2,
+            central_void_m=(18.0 if use_karre else 0.0),
+            gap_between_m=4.0,
             macro_structure=("spine_court" if use_karre else "spine"),
             micro_field_pattern=("frontage_ring" if use_karre else ("node_cluster" if use_punkthus else ("dense_parallel_bands" if near_core else "parallel_bands"))),
             symmetry_preference=("axial" if use_karre else "bilateral"),
@@ -523,7 +541,6 @@ class LinearMixedStrategy(ConceptStrategy):
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
         del neighbors
         return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
-
 
 class CourtyardUrbanStrategy(ConceptStrategy):
     family = ConceptFamily.COURTYARD_URBAN
@@ -552,7 +569,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
         role = field.field_role if field else "urban_core"
         edge = role in {"street_edge", "urban_edge"} or index in {0, count - 1}
         field_area = float(getattr(getattr(field, "polygon", None), "area", 0.0) or 0.0)
-        use_karre = field_area >= 4_800.0 or not edge
+        use_karre = field_area >= 3_500.0 or not edge
         if role == "neighborhood_edge" and field_area < 4_000.0:
             use_karre = False
         karre_count = 1
@@ -584,6 +601,8 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             courtyard_reserve_ratio=(0.31 if edge else 0.34),
             frontage_depth_m=(15.0 if use_karre else 13.0),
             corridor_width_m=7.5,
+            central_void_m=(22.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
+            gap_between_m=4.0,
             macro_structure="perimeter_block",
             micro_field_pattern=("clustered_frontage_ring" if karre_count >= 2 else ("frontage_ring" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
@@ -602,7 +621,6 @@ class CourtyardUrbanStrategy(ConceptStrategy):
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
         del neighbors
         return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
-
 
 class ClusterParkStrategy(ConceptStrategy):
     family = ConceptFamily.CLUSTER_PARK
@@ -667,7 +685,6 @@ class ClusterParkStrategy(ConceptStrategy):
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
         del neighbors
         return self._make_choices(delfelt, target_bra_m2, plan_regler, self._area_shares(len(delfelt)))
-
 
 STRATEGIES: Dict[ConceptFamily, ConceptStrategy] = {
     ConceptFamily.LINEAR_MIXED: LinearMixedStrategy(),

@@ -190,10 +190,10 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     count = resolve_delfelt_count(buildable_poly, requested_count=requested_count)
     area = max(float(buildable_poly.area), 1.0)
     density = float(target_bra_m2) / area if target_bra_m2 > 0 else 0.0
-    if requested_count is None:
-        compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
-        urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
+    compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
+    urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
 
+    if requested_count is None:
         # Små, tette tomter skal ikke over-fragmenteres. Der skjer variasjonen inne i
         # ett eller to felt – ikke gjennom mange små delfelt.
         if compact_infill:
@@ -209,19 +209,20 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
                 count += 1
             if density >= 1.28 and concept_family != ConceptFamily.COURTYARD_URBAN:
                 count += 1
-            # Makro/mikro-prinsipp: hold makrofeltene rolige, men gi lineære og parkgrep
-            # nok armer til å bygge rytme. Karré-grep holdes strammere for å unngå for små blokker.
-            if concept_family == ConceptFamily.LINEAR_MIXED:
-                # Runde 8.1: færre, større makrofelt gir mer lesbare gaterom og
-                # interne akser; flere bygg håndteres inne i hvert felt.
-                count = max(3, min(count, 5 if density < 1.18 else 6))
-            elif concept_family == ConceptFamily.CLUSTER_PARK:
-                # Ett tydelig grønt fellesrom krever større sammenhengende felt,
-                # ikke 6-7 små delfelt med hver sin lokale park.
-                count = max(3, min(count, 4))
-            else:  # COURTYARD_URBAN
-                # Karré trenger feltstørrelse for komplette kvartalsringer.
-                count = max(2, min(count, 4 if density >= 1.18 else 3))
+
+    # Runde 8.2B: UI-faser skal ikke alltid bli like mange makro-delfelt.
+    # Uansett om count kommer fra UI eller auto, mappes det til konseptets
+    # arkitektoniske makrostruktur. Flere bygg håndteres inne i hvert felt.
+    if compact_infill:
+        count = 1 if area <= 3500.0 else min(max(count, 1), 2)
+    elif urban_infill:
+        count = min(max(count, 2), 3)
+    elif concept_family == ConceptFamily.LINEAR_MIXED:
+        count = max(3, min(count, 4 if area < 18000.0 else 5))
+    elif concept_family == ConceptFamily.CLUSTER_PARK:
+        count = max(3, min(count, 3 if area < 16000.0 else 4))
+    else:  # COURTYARD_URBAN
+        count = max(2, min(count, 2 if area < 18000.0 else 4))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -264,6 +265,8 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 courtyard_reserve_ratio=float(choice.courtyard_reserve_ratio or 0.0),
                 frontage_depth_m=choice.frontage_depth_m,
                 corridor_width_m=choice.corridor_width_m,
+                central_void_m=float(getattr(choice, "central_void_m", 0.0) or 0.0),
+                gap_between_m=float(getattr(choice, "gap_between_m", 4.0) or 4.0),
                 macro_structure=choice.macro_structure,
                 micro_field_pattern=choice.micro_field_pattern,
                 symmetry_preference=choice.symmetry_preference,

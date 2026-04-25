@@ -1873,8 +1873,17 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
     arm = float(spec.segment_depth_m.midpoint() if spec.segment_depth_m else 12.0)
     arm = max(11.5, min(12.5, arm))
 
-    width_candidates = [50.0, 48.0, 46.0, 44.0]
-    side_candidates = [30.0, 28.0, 26.0, 25.0]
+    # Runde 8.2B: større felt bør få tydeligere karré med lengre hovedbygg
+    # og mer raus indre gårdsromsflate. Mindre felt kan fortsatt bruke de
+    # opprinnelige 50 x 40 m-proporsjonene.
+    if float(getattr(field, "polygon", core).area or core.area or 0.0) >= 6500.0:
+        # Runde 9: flere komplette karréer skal gi mer fasade/BRA uten å
+        # overdimensjonere hver enkelt ring. Prioriter 50–60 m fasader.
+        width_candidates = [60.0, 58.0, 56.0, 54.0, 52.0, 50.0, 48.0]
+        side_candidates = [36.0, 34.0, 32.0, 30.0, 28.0]
+    else:
+        width_candidates = [54.0, 52.0, 50.0, 48.0, 46.0, 44.0]
+        side_candidates = [30.0, 28.0, 26.0, 25.0]
     outer_h_candidates = []
     if closed:
         outer_h_candidates = [s + 2.0 * arm for s in side_candidates]
@@ -1917,9 +1926,14 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
                 continue
             if not core.buffer(1e-6).covers(shape):
                 continue
-            dims_score = abs((rx1 - rx0) - 50.0) + abs(outer_h - (52.0 if closed else 40.0))
+            target_w = 58.0 if float(getattr(field, "polygon", core).area or core.area or 0.0) >= 6500.0 else 50.0
+            target_h = (58.0 if closed else 46.0) if target_w >= 58.0 else (52.0 if closed else 40.0)
+            # La dimensjonsmål dominere over ren sentrering. Tidligere kunne
+            # center_pen trekke motoren mot små, lette ringer.
+            dims_score = abs((rx1 - rx0) - target_w) * 1.45 + abs(outer_h - target_h) * 1.15
             center_pen = shape.centroid.distance(core.centroid)
-            score = dims_score + center_pen * 0.2
+            width_bonus = -max(0.0, (rx1 - rx0) - 50.0) * 0.08
+            score = dims_score + center_pen * 0.055 + width_bonus
             if best_score is None or score < best_score:
                 best = shape
                 best_score = score
@@ -2837,8 +2851,10 @@ def _place_lameller_in_bands(skeleton: FieldSkeleton, field: Delfelt, spec: Base
         floors_per = None
         if variant in {"terraced", "rhythmic"} and len(footprints) >= 2:
             total_fp = sum(p.area for p in footprints)
-            base_f = int(round(field.target_bra / max(total_fp, 1.0))) if field.target_bra > 0 else field.floors_min
+            base_f = int(math.ceil(field.target_bra / max(total_fp, 1.0))) if field.target_bra > 0 else field.floors_min
             base_f = max(field.floors_min, min(field.floors_max, base_f))
+            if total_fp * base_f < field.target_bra * 0.86:
+                base_f = field.floors_max
             floors_per = _varied_floors_for_cluster(len(footprints), base_f, field.floors_min, field.floors_max, variation=getattr(field, "design_height_pattern", None) or "stepped")
 
         cand = _evaluate_candidate(footprints, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per)
@@ -3334,26 +3350,131 @@ def compute_architecture_metrics(plan: Masterplan) -> ArchitectureMetrics:
     )
 
 
-def _split_core_for_multi_clusters(core: Polygon, cluster_count: int, *, gap_m: float = 8.0) -> List[Polygon]:
+def _open_side_towards_center(sc: Polygon, center: Point) -> str:
+    dx = float(center.x - sc.centroid.x)
+    dy = float(center.y - sc.centroid.y)
+    if abs(dx) >= abs(dy):
+        return "east" if dx >= 0 else "west"
+    return "north" if dy >= 0 else "south"
+
+
+def _split_core_for_multi_clusters(
+    core: Polygon,
+    cluster_count: int,
+    *,
+    gap_m: float = 8.0,
+    central_void_m: float = 0.0,
+) -> List[Polygon]:
+    """Split karréfelt i flere bykvartaler med fellesrom mellom.
+
+    Runde 9: i stedet for å lage én stor karré eller små symmetriske ringer
+    med tilfeldig gap, lager denne splitten et bevisst felles uterom mellom
+    ringene. For 2 karréer blir dette en hovedgate/torgakse på 18–25 m.
+    For 4 karréer blir dette et 2x2-oppsett med sentral fellespark/torg.
+    """
     if core is None or core.is_empty:
         return []
     cluster_count = max(1, int(cluster_count))
     if cluster_count <= 1:
         return [core]
+
+    minx, miny, maxx, maxy = core.bounds
+    width = maxx - minx
+    height = maxy - miny
+    cx = (minx + maxx) / 2.0
+    cy = (miny + maxy) / 2.0
+    central_void = float(central_void_m or 0.0)
+    if central_void <= 0.0:
+        central_void = 22.0 if cluster_count >= 4 else 18.0
+    central_void = max(14.0, min(26.0, central_void))
+    smau = max(1.5, min(float(gap_m or 4.0) / 2.0, 3.0))
+
+    def _clip_cell(x0: float, y0: float, x1: float, y1: float) -> Optional[Polygon]:
+        if x1 <= x0 + 8.0 or y1 <= y0 + 8.0:
+            return None
+        rect = box(x0, y0, x1, y1)
+        piece = core.intersection(rect).buffer(0)
+        if piece.is_empty:
+            return None
+        trimmed = piece.buffer(-smau).buffer(0)
+        cand = _largest_polygon(trimmed) or _largest_polygon(piece) or piece
+        if cand is None or cand.is_empty or cand.area < 450.0:
+            return None
+        return cand
+
+    parts: List[Polygon] = []
+    # Ønsket celle gir rom for 50–60 m fasade + 25–35 m side i U/O-form.
+    desired_w = 72.0
+    desired_h = 70.0
+    edge_margin = max(2.0, min(8.0, float(gap_m or 4.0)))
+
+    if cluster_count >= 4 and width >= central_void + 2 * 48.0 and height >= central_void + 2 * 42.0:
+        cell_w = min(desired_w, max(48.0, (width - central_void - 2 * edge_margin) / 2.0))
+        cell_h = min(desired_h, max(42.0, (height - central_void - 2 * edge_margin) / 2.0))
+        x_left0 = max(minx + edge_margin, cx - central_void / 2.0 - cell_w)
+        x_left1 = cx - central_void / 2.0
+        x_right0 = cx + central_void / 2.0
+        x_right1 = min(maxx - edge_margin, cx + central_void / 2.0 + cell_w)
+        y_bot0 = max(miny + edge_margin, cy - central_void / 2.0 - cell_h)
+        y_bot1 = cy - central_void / 2.0
+        y_top0 = cy + central_void / 2.0
+        y_top1 = min(maxy - edge_margin, cy + central_void / 2.0 + cell_h)
+        for bounds in [
+            (x_left0, y_bot0, x_left1, y_bot1),
+            (x_right0, y_bot0, x_right1, y_bot1),
+            (x_left0, y_top0, x_left1, y_top1),
+            (x_right0, y_top0, x_right1, y_top1),
+        ]:
+            cell = _clip_cell(*bounds)
+            if cell is not None:
+                parts.append(cell)
+        if len(parts) >= min(cluster_count, 4):
+            parts.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
+            return parts[:cluster_count]
+
+    # 2 karréer side-om-side eller over/under med 18–25 m fellesrom imellom.
+    if cluster_count == 2 and (width >= central_void + 2 * 48.0 or height >= central_void + 2 * 42.0):
+        horizontal = width >= height and width >= central_void + 2 * 48.0
+        if horizontal:
+            cell_w = min(desired_w, max(48.0, (width - central_void - 2 * edge_margin) / 2.0))
+            cell_h = min(desired_h, max(42.0, height - 2 * edge_margin))
+            y0 = max(miny + edge_margin, cy - cell_h / 2.0)
+            y1 = min(maxy - edge_margin, cy + cell_h / 2.0)
+            candidates = [
+                (max(minx + edge_margin, cx - central_void / 2.0 - cell_w), y0, cx - central_void / 2.0, y1),
+                (cx + central_void / 2.0, y0, min(maxx - edge_margin, cx + central_void / 2.0 + cell_w), y1),
+            ]
+        else:
+            cell_w = min(desired_w, max(48.0, width - 2 * edge_margin))
+            cell_h = min(desired_h, max(42.0, (height - central_void - 2 * edge_margin) / 2.0))
+            x0 = max(minx + edge_margin, cx - cell_w / 2.0)
+            x1 = min(maxx - edge_margin, cx + cell_w / 2.0)
+            candidates = [
+                (x0, max(miny + edge_margin, cy - central_void / 2.0 - cell_h), x1, cy - central_void / 2.0),
+                (x0, cy + central_void / 2.0, x1, min(maxy - edge_margin, cy + central_void / 2.0 + cell_h)),
+            ]
+        for bounds in candidates:
+            cell = _clip_cell(*bounds)
+            if cell is not None:
+                parts.append(cell)
+        if len(parts) >= 2:
+            parts.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
+            return parts
+
+    # Fallback: gammel, robust splitting.
     try:
-        parts = subdivide_buildable_polygon(core, count=cluster_count, orientation_deg=0.0)
+        raw_parts = subdivide_buildable_polygon(core, count=cluster_count, orientation_deg=0.0)
     except Exception:
-        axis = "x" if (core.bounds[2] - core.bounds[0]) >= (core.bounds[3] - core.bounds[1]) else "y"
-        parts = _split_poly_evenly(core, cluster_count, axis=axis)
-    shrunk: List[Polygon] = []
-    inner_gap = max(1.5, min(float(gap_m) / 2.0, 4.0))
-    for part in parts:
-        trimmed = part.buffer(-inner_gap).buffer(0)
-        candidate = _largest_polygon(trimmed) or _largest_polygon(part) or part
-        if candidate is not None and not candidate.is_empty and candidate.area > 180.0:
-            shrunk.append(candidate)
-    shrunk.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
-    return shrunk
+        axis = "x" if width >= height else "y"
+        raw_parts = _split_poly_evenly(core, cluster_count, axis=axis)
+    parts = []
+    for part in raw_parts:
+        trimmed = part.buffer(-smau).buffer(0)
+        cand = _largest_polygon(trimmed) or _largest_polygon(part) or part
+        if cand is not None and not cand.is_empty and cand.area > 180.0:
+            parts.append(cand)
+    parts.sort(key=lambda p: (round(p.centroid.y, 3), round(p.centroid.x, 3)))
+    return parts
 
 
 def _karre_candidate_penalty(candidate: Optional[_PlacementCandidate], target_bra: float) -> float:
@@ -3419,7 +3540,8 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
     if cluster_target <= 1:
         return None
 
-    gap_m = max(8.0, float(getattr(field, "corridor_width_m", 0.0) or 8.0))
+    gap_m = max(3.0, float(getattr(field, "gap_between_m", 0.0) or 4.0))
+    central_void_m = float(getattr(field, "central_void_m", 0.0) or (22.0 if cluster_target >= 4 else 18.0))
     cluster_counts = [cluster_target]
     if cluster_target >= 3:
         cluster_counts.append(cluster_target - 1)
@@ -3427,7 +3549,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
 
     candidates: List[_PlacementCandidate] = []
     for cluster_count in cluster_counts:
-        sub_cores = _split_core_for_multi_clusters(core, cluster_count, gap_m=gap_m)
+        sub_cores = _split_core_for_multi_clusters(core, cluster_count, gap_m=gap_m, central_void_m=central_void_m)
         if len(sub_cores) <= 1:
             continue
 
@@ -3435,13 +3557,16 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
         floors_per: List[int] = []
         angle_per: List[float] = []
         total_sub_area = sum(sc.area for sc in sub_cores) or 1.0
+        field_center = core.centroid
         for sc in sub_cores:
             sub_target = float(field.target_bra) * (sc.area / total_sub_area)
+            open_to_common = _open_side_towards_center(sc, field_center)
             sub_field = replace(
                 field,
                 polygon=sc,
                 target_bra=sub_target,
                 target_building_count=1,
+                courtyard_open_side=open_to_common,
                 view_corridor_count=max(0, int(getattr(field, "view_corridor_count", 0) or 0) - 1),
                 micro_band_count=max(2, int(getattr(field, "micro_band_count", 0) or 2) - 1),
                 courtyard_reserve_ratio=min(0.34, max(0.22, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.28))),
@@ -3458,12 +3583,20 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
             continue
 
         scaled_footprints = _scale_cluster_footprints_to_target(combined_footprints, field, floors_per)
+        total_fp_scaled = sum(float(fp.area) for fp in scaled_footprints) or 1.0
+        base_f = int(math.ceil(float(field.target_bra) / total_fp_scaled)) if field.target_bra > 0 else field.floors_min
+        base_f = max(field.floors_min, min(field.floors_max, base_f))
+        # Hvis vi fortsatt ligger under mål eller realiserer færre bygg enn ønsket,
+        # skal etasjeantallet kompensere før vi aksepterer lav BRA.
+        if len(scaled_footprints) < cluster_target or total_fp_scaled * base_f < float(field.target_bra) * 0.86:
+            base_f = field.floors_max
+        floors_per_final = [base_f for _ in scaled_footprints]
         candidate = _evaluate_candidate(
             scaled_footprints,
             field.target_bra,
             (field.floors_min, field.floors_max),
-            floors_per_bygg=floors_per,
-            angle_offset_per_bygg=angle_per,
+            floors_per_bygg=floors_per_final,
+            angle_offset_per_bygg=angle_per[:len(scaled_footprints)],
         )
         if candidate is None:
             continue
@@ -3518,6 +3651,8 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
         cand = _place_multi_karre_clusters(core, field, spec)
         if cand is None:
             cand = _place_karre_from_frontage(skeleton, field, spec)
+        if cand is None:
+            cand = _place_karre_local(core, field, spec)
     elif field.typology == Typology.PUNKTHUS:
         cand = _place_punkthus_on_nodes(skeleton, field, spec)
     elif field.typology == Typology.REKKEHUS:
@@ -3565,7 +3700,18 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
     bra_deficit = 0.0
     build_counter = 1
 
-    for field in delfelt:
+    placement_priority = {
+        Typology.KARRE: 0,
+        Typology.LAMELL: 1,
+        Typology.PUNKTHUS: 2,
+        Typology.REKKEHUS: 3,
+    }
+    ordered_fields = sorted(
+        delfelt,
+        key=lambda f: (placement_priority.get(f.typology, 9), -float(getattr(f, "target_bra", 0.0) or 0.0), str(getattr(f, "field_id", ""))),
+    )
+
+    for field in ordered_fields:
         # core er i globalt rom. Plasseringsalgoritmene (_fit_centered_outer_rect,
         # _place_lameller_local, etc.) antar at koordinataksene matcher delfeltets
         # hovedretning. Vi roterer derfor core til lokalt (aksejustert) system
