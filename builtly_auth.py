@@ -13,12 +13,117 @@ import os
 import html as _html
 import json
 import base64
+import threading
+import queue
+import time
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any, Callable
 import streamlit as st
 import streamlit.components.v1 as components
 
 REPORT_RETENTION_DAYS = 30
+
+
+# ── TIMEOUT / NON-BLOCKING SAFEGUARDS ────────────────────────────────────────
+# Render kills/reconnects Streamlit sessions if Python blocks too long before
+# sending UI. Supabase auth/storage calls can occasionally hang. These helpers
+# make page-load auth restore and project-data persistence best-effort instead
+# of blocking the Streamlit event loop.
+
+def _safe_float_env(name: str, default: float) -> float:
+    try:
+        return float((os.environ.get(name) or "").strip() or default)
+    except Exception:
+        return default
+
+
+BUILTLY_SUPABASE_TIMEOUT_SECONDS = _safe_float_env("BUILTLY_SUPABASE_TIMEOUT_SECONDS", 1.25)
+BUILTLY_AUTH_RESTORE_THROTTLE_SECONDS = _safe_float_env("BUILTLY_AUTH_RESTORE_THROTTLE_SECONDS", 18.0)
+
+
+def _debug_state(key: str, value: str) -> None:
+    try:
+        st.session_state[key] = value
+    except Exception:
+        pass
+
+
+def _run_with_timeout(label: str, fn: Callable[[], Any], default: Any = None, timeout_s: Optional[float] = None) -> Any:
+    """Run a potentially blocking call in a daemon thread with a hard timeout.
+
+    Important: `fn` must not call Streamlit APIs from inside the thread.
+    This is intended for Supabase network operations only. On timeout or error
+    the default is returned and a short debug message is stored in session_state.
+    """
+    timeout_s = BUILTLY_SUPABASE_TIMEOUT_SECONDS if timeout_s is None else float(timeout_s)
+    q: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
+
+    def _runner():
+        try:
+            q.put((True, fn()))
+        except Exception as exc:
+            q.put((False, exc))
+
+    t = threading.Thread(target=_runner, name=f"builtly-{label}", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        _debug_state("_builtly_auth_timeout_debug", f"{label} timed out after {timeout_s:.2f}s")
+        return default
+    try:
+        ok, result = q.get_nowait()
+    except queue.Empty:
+        _debug_state("_builtly_auth_timeout_debug", f"{label} returned no result")
+        return default
+    if ok:
+        return result
+    _debug_state("_builtly_auth_timeout_debug", f"{label} failed: {str(result)[:180]}")
+    return default
+
+
+def _fire_and_forget(label: str, fn: Callable[[], Any]) -> None:
+    """Start a daemon background task and never block Streamlit on it."""
+    def _runner():
+        try:
+            fn()
+        except Exception:
+            pass
+    threading.Thread(target=_runner, name=f"builtly-bg-{label}", daemon=True).start()
+
+
+def _recent_attempt(key: str, token: str, ttl_s: Optional[float] = None) -> bool:
+    """Return True if same token/key was attempted recently in this session."""
+    ttl_s = BUILTLY_AUTH_RESTORE_THROTTLE_SECONDS if ttl_s is None else float(ttl_s)
+    now = time.monotonic()
+    try:
+        prev = st.session_state.get(key) or {}
+        if isinstance(prev, dict) and prev.get("token") == token and (now - float(prev.get("at", 0))) < ttl_s:
+            return True
+        st.session_state[key] = {"token": token, "at": now}
+    except Exception:
+        pass
+    return False
+
+
+def _token_marker(token: str) -> str:
+    return (token or "")[-32:]
+
+
+def _apply_supabase_session(res: Any, update_cookie: bool = True) -> bool:
+    """Copy Supabase session tokens to Streamlit state on the main thread."""
+    session = getattr(res, "session", None)
+    if not session:
+        return False
+    access = getattr(session, "access_token", "") or ""
+    refresh = getattr(session, "refresh_token", "") or ""
+    if access:
+        st.session_state["_sb_access_token"] = access
+    if refresh:
+        st.session_state["_sb_refresh_token"] = refresh
+        if update_cookie:
+            _persist_tokens_to_browser(refresh)
+    return True
+
 
 # ── I18N — user-facing messages ──────────────────────────────────────────────
 
@@ -349,73 +454,58 @@ def resend_verification(email: str, lang: str = "") -> Tuple[bool, str]:
 
 
 def restore_session() -> bool:
-    """Restore Supabase auth session from stored tokens on page reload.
+    """Restore Supabase auth session without blocking page render.
 
-    Call this early in the Streamlit script. If session_state has valid tokens
-    and the user is flagged as authenticated, the Supabase session is
-    re-established (refreshed if expired). Returns True if the session
-    was successfully restored, False otherwise.
-
-    NOTE: Does NOT clear auth state on failure — the caller decides whether
-    to log the user out. This prevents aggressive logouts on transient
-    Supabase API errors.
+    If Supabase is slow/unreachable, keep the existing authenticated
+    Streamlit state instead of forcing the user back to Project Setup.
     """
-    # Nothing to restore
     if not st.session_state.get("user_authenticated"):
         return False
-    access = st.session_state.get("_sb_access_token", "")
-    refresh = st.session_state.get("_sb_refresh_token", "")
+    access = st.session_state.get("_sb_access_token", "") or ""
+    refresh = st.session_state.get("_sb_refresh_token", "") or ""
     if not access or not refresh:
-        return False
+        # If the user is already authenticated in session_state, do not hard fail.
+        return bool(st.session_state.get("user_id"))
 
     sb = _sb()
     if not sb:
-        return False
+        return bool(st.session_state.get("user_id"))
 
-    try:
-        # set_session restores and auto-refreshes if the access token is expired
-        res = sb.auth.set_session(access, refresh)
-        if res and res.session:
-            # Update tokens in case they were refreshed
-            st.session_state["_sb_access_token"] = res.session.access_token
-            st.session_state["_sb_refresh_token"] = res.session.refresh_token
-            _persist_tokens_to_browser(res.session.refresh_token)
-            return True
-        return False
-    except Exception:
-        # Refresh failed — try once more with refresh_session
-        try:
-            res = sb.auth.refresh_session(refresh)
-            if res and res.session:
-                st.session_state["_sb_access_token"] = res.session.access_token
-                st.session_state["_sb_refresh_token"] = res.session.refresh_token
-                _persist_tokens_to_browser(res.session.refresh_token)
-                return True
-        except Exception:
-            pass
-        return False
+    marker = _token_marker(refresh) + ":" + _token_marker(access)
+    if _recent_attempt("_builtly_restore_session_attempt", marker):
+        return True
+
+    res = _run_with_timeout("auth.set_session", lambda: sb.auth.set_session(access, refresh), default=None)
+    if res and getattr(res, "session", None):
+        return _apply_supabase_session(res, update_cookie=True)
+
+    # One fast fallback. If it times out, keep existing state and let a later rerun try again.
+    res = _run_with_timeout("auth.refresh_session", lambda: sb.auth.refresh_session(refresh), default=None)
+    if res and getattr(res, "session", None):
+        return _apply_supabase_session(res, update_cookie=True)
+
+    # Avoid aggressive logout on transient Supabase/API/network failures.
+    return bool(st.session_state.get("user_authenticated"))
 
 
 def try_restore_from_browser() -> bool:
-    """Restore session from browser cookie (or fallback _brt query param).
+    """Restore session from browser cookie without blocking Streamlit.
 
-    Reads the 'builtly_rt' cookie from the HTTP request headers. The cookie
-    is set by _persist_tokens_to_browser() after login. Because cookies are
-    sent automatically with every HTTP request, no JS redirect is needed.
-
-    Returns True if session was restored, False otherwise.
+    Slow Supabase refresh/profile/report calls are bounded by timeout. On
+    timeout we do NOT clear the browser cookie; we just skip restore for this
+    run so the app can render instead of hanging the _stcore/stream request.
     """
-    # Primary: read refresh token from HTTP cookie header
     rt = _read_cookie("builtly_rt")
-
-    # Fallback: check _brt query param (legacy localStorage redirect flow)
     if not rt:
         try:
             rt = st.query_params.get("_brt", "")
         except Exception:
             rt = ""
-
     if not rt:
+        return False
+
+    token_key = _token_marker(rt)
+    if _recent_attempt("_builtly_browser_restore_attempt", token_key):
         return False
 
     sb = _sb()
@@ -423,51 +513,55 @@ def try_restore_from_browser() -> bool:
         _remove_brt_param()
         return False
 
+    res = _run_with_timeout("auth.refresh_session(cookie)", lambda: sb.auth.refresh_session(rt), default=None)
+    if not (res and getattr(res, "session", None) and getattr(res, "user", None)):
+        # Do not clear browser token on timeout/transient failure. A later rerun
+        # may succeed, and clearing it causes unnecessary bounce-to-setup loops.
+        _remove_brt_param()
+        return False
+
+    user = res.user
+    meta = getattr(user, "user_metadata", None) or {}
+    profile = {}
+
+    row = _run_with_timeout(
+        "profile.select.restore",
+        lambda: sb.table("profiles").select("*").eq("id", user.id).single().execute(),
+        default=None,
+    )
     try:
-        res = sb.auth.refresh_session(rt)
-        if res and res.session and res.user:
-            meta = res.user.user_metadata or {}
-            profile = {}
-            try:
-                row = sb.table("profiles").select("*").eq("id", res.user.id).single().execute()
-                profile = row.data or {}
-            except Exception:
-                pass
-
-            st.session_state.update({
-                "user_authenticated": True,
-                "user_email": res.user.email,
-                "user_id": res.user.id,
-                "user_name": profile.get("full_name") or meta.get("full_name", ""),
-                "user_company": profile.get("company", ""),
-                "user_countries": profile.get("countries", []),
-                "user_plan": profile.get("plan", "") or "",
-                "user_payment_method": profile.get("payment_method", "") or "",
-                "user_account_status": profile.get("account_status", "active"),
-                "site_access_granted": True,
-                "_sb_access_token": res.session.access_token,
-                "_sb_refresh_token": res.session.refresh_token,
-            })
-
-            # Load reports
-            try:
-                reps = sb.table("reports").select("*").eq("user_id", res.user.id)\
-                    .order("created_at", desc=True).execute()
-                st.session_state.user_reports = reps.data or []
-            except Exception:
-                st.session_state.user_reports = []
-
-            # Update browser cookie with fresh tokens
-            _persist_tokens_to_browser(res.session.refresh_token)
-            _remove_brt_param()
-            return True
+        profile = row.data or {} if row else {}
     except Exception:
-        pass
+        profile = {}
 
-    # Failed — clear browser tokens and query param
-    _clear_browser_tokens()
+    st.session_state.update({
+        "user_authenticated": True,
+        "user_email": getattr(user, "email", ""),
+        "user_id": getattr(user, "id", ""),
+        "user_name": profile.get("full_name") or meta.get("full_name", ""),
+        "user_company": profile.get("company", ""),
+        "user_countries": profile.get("countries", []),
+        "user_plan": profile.get("plan", "") or "",
+        "user_payment_method": profile.get("payment_method", "") or "",
+        "user_account_status": profile.get("account_status", "active"),
+        "site_access_granted": True,
+        "_sb_access_token": res.session.access_token,
+        "_sb_refresh_token": res.session.refresh_token,
+    })
+
+    reps = _run_with_timeout(
+        "reports.select.restore",
+        lambda: sb.table("reports").select("*").eq("user_id", user.id).order("created_at", desc=True).execute(),
+        default=None,
+    )
+    try:
+        st.session_state.user_reports = reps.data or [] if reps else []
+    except Exception:
+        st.session_state.user_reports = []
+
+    _persist_tokens_to_browser(res.session.refresh_token)
     _remove_brt_param()
-    return False
+    return True
 
 
 def _read_cookie(name: str) -> str:
@@ -496,18 +590,23 @@ def inject_browser_token_reader():
 
 
 def _persist_tokens_to_browser(refresh_token: str):
-    """Write refresh token to browser cookie AND localStorage (belt & suspenders)."""
+    """Write refresh token to browser cookie/localStorage, but not on every rerun."""
+    if not refresh_token:
+        return
+    marker = _token_marker(refresh_token)
+    try:
+        if st.session_state.get("_builtly_browser_token_marker") == marker:
+            return
+        st.session_state["_builtly_browser_token_marker"] = marker
+    except Exception:
+        pass
     safe_rt = _html.escape(refresh_token, quote=True)
     max_age = 60 * 60 * 24 * 7  # 7 days
     components.html(f"""<script>
     (function() {{
         try {{
-            // Set cookie on parent document (readable by Streamlit server)
             var cookieStr = 'builtly_rt={safe_rt}; path=/; max-age={max_age}; SameSite=Lax';
-            try {{ window.parent.document.cookie = cookieStr; }} catch(e) {{
-                document.cookie = cookieStr;
-            }}
-            // Also keep localStorage as fallback
+            try {{ window.parent.document.cookie = cookieStr; }} catch(e) {{ document.cookie = cookieStr; }}
             localStorage.setItem('builtly_rt', '{safe_rt}');
         }} catch(e) {{}}
     }})();
@@ -755,32 +854,18 @@ def _upload_report_bytes(
         return False, "", f"Upload feilet: {e}"
 
 
+def _save_project_data_remote(uid: str, sb: Any, project_data: Dict) -> Any:
+    return sb.table("profiles").update({
+        "project_data_json": project_data,
+        "project_data_updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", uid).execute()
+
+
 def save_project_data(project_data: Dict) -> Tuple[bool, str]:
-    """Lagre brukerens project_data til Supabase-profil.
+    """Persist project_data to Supabase with a hard timeout.
 
-    Løsning for at ssot.json er ephemeral på Render. Project_data lagres
-    som JSON-blob på `profiles.project_data_json`-kolonnen. Ved
-    sidelasting kan vi restaurere fra denne i stedet for å vise
-    "sett opp prosjekt"-siden.
-
-    Args:
-        project_data: Dict med p_name, c_name, adresse, kommune, osv.
-            Hele dicten lagres; den kan inneholde mer enn de dokumenterte
-            feltene.
-
-    Returns:
-        (success, error_message). Hvis success=False, forklarer
-        error_message hvorfor (f.eks. "ikke logget inn", "kolonnen
-        mangler", "Supabase-feil").
-
-    Merk:
-        Krever at `profiles`-tabellen har en JSONB-kolonne `project_data_json`.
-        Hvis den mangler må du kjøre følgende i Supabase SQL-editor:
-
-            ALTER TABLE profiles ADD COLUMN project_data_json JSONB;
-
-        Funksjonen feiler stille (returnerer False) hvis kolonnen ikke
-        finnes, slik at appen ikke krasjer.
+    Returns quickly even if Supabase is slow. This function is safe to call
+    from Project Setup without risking a page-load timeout.
     """
     if not isinstance(project_data, dict):
         return False, "project_data er ikke en dict"
@@ -790,46 +875,39 @@ def save_project_data(project_data: Dict) -> Tuple[bool, str]:
     sb = _sb()
     if not sb:
         return False, "Supabase ikke konfigurert"
-    try:
-        # Bruk upsert for å unngå feil hvis profil-rad ikke finnes.
-        # update_() er trygg: hvis project_data_json-kolonnen mangler,
-        # kaster Supabase en feil som vi fanger.
-        sb.table("profiles").update({
-            "project_data_json": project_data,
-            "project_data_updated_at": datetime.utcnow().isoformat(),
-        }).eq("id", uid).execute()
-        return True, ""
-    except Exception as exc:
-        # Vanligst: kolonnen project_data_json finnes ikke i tabellen.
-        return False, str(exc)
+    res = _run_with_timeout(
+        "project_data.save",
+        lambda: _save_project_data_remote(uid, sb, dict(project_data)),
+        default=None,
+    )
+    if res is None:
+        return False, st.session_state.get("_builtly_auth_timeout_debug", "Supabase timeout/feil ved lagring")
+    return True, ""
 
 
 def load_project_data() -> Optional[Dict]:
-    """Last brukerens project_data fra Supabase-profil.
-
-    Returns:
-        Dict med project_data hvis funnet, None ellers. Fjerner "" og
-        "Nytt Prosjekt" som p_name siden disse betyr "ikke satt opp".
-    """
+    """Load user's project_data from Supabase profile with timeout."""
     uid = st.session_state.get("user_id", "")
     if not uid:
         return None
     sb = _sb()
     if not sb:
         return None
+    row = _run_with_timeout(
+        "project_data.load",
+        lambda: sb.table("profiles").select("project_data_json").eq("id", uid).single().execute(),
+        default=None,
+    )
+    if row is None:
+        return None
     try:
-        row = sb.table("profiles").select("project_data_json")\
-            .eq("id", uid).single().execute()
         pdj = (row.data or {}).get("project_data_json")
         if not pdj:
             return None
-        # Supabase returnerer JSONB som allerede-parset dict, men noen
-        # klienter gir string. Håndter begge.
         if isinstance(pdj, str):
             pdj = json.loads(pdj)
         if not isinstance(pdj, dict):
             return None
-        # Tom prosjekt teller som "ikke satt opp"
         if pdj.get("p_name") in ("", "Nytt Prosjekt", None):
             return None
         return pdj
@@ -838,20 +916,18 @@ def load_project_data() -> Optional[Dict]:
 
 
 def save_project_data_to_session_and_remote(project_data: Dict) -> None:
-    """Praktisk helper: oppdater session_state OG persist til Supabase.
+    """Update session_state and persist remotely in the background."""
+    try:
+        payload = dict(project_data)
+        st.session_state["project_data"] = payload
+    except Exception:
+        payload = project_data if isinstance(project_data, dict) else {}
 
-    Brukes fra Project Setup og andre sider som endrer project_data.
-    Feiler stille hvis Supabase ikke er tilgjengelig.
-    """
-    try:
-        st.session_state["project_data"] = dict(project_data)
-    except Exception:
-        pass
-    # Best-effort remote persist
-    try:
-        save_project_data(project_data)
-    except Exception:
-        pass
+    uid = st.session_state.get("user_id", "")
+    sb = _sb()
+    if not uid or not sb or not isinstance(payload, dict):
+        return
+    _fire_and_forget("project_data.save", lambda: _save_project_data_remote(uid, sb, payload))
 
 
 
