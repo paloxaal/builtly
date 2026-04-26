@@ -61,18 +61,19 @@ class FieldEnvelope:
 #   på mindre felt.
 # - Punkthus styres mot ca. 20 x 20 m.
 _AREA_PER_BUILDING_RULES: Dict[Typology, Tuple[float, float]] = {
-    # Litt strammere arealregler enn før slik at store tomter faktisk kan få
-    # flere bygg og mer urban rytme, uten å tvinge fram urimelig små volum.
-    Typology.KARRE: (2600.0, 6200.0),
-    Typology.LAMELL: (1400.0, 2800.0),
-    Typology.PUNKTHUS: (1100.0, 2000.0),
+    # Runde 2 tetthet: store tomter skal kunne få flere bygg og høyere
+    # utnyttelse. Disse tallene er ikke absolutte minstekrav, men styrer
+    # hvor tidlig motoren forsøker flere volum per felt.
+    Typology.KARRE: (2400.0, 5600.0),
+    Typology.LAMELL: (1300.0, 2600.0),
+    Typology.PUNKTHUS: (950.0, 1800.0),
     Typology.REKKEHUS: (350.0, 700.0),
 }
 
 _COUNT_CEILINGS: Dict[Typology, int] = {
-    Typology.KARRE: 6,
-    Typology.LAMELL: 14,
-    Typology.PUNKTHUS: 10,
+    Typology.KARRE: 7,
+    Typology.LAMELL: 16,
+    Typology.PUNKTHUS: 12,
     Typology.REKKEHUS: 16,
 }
 
@@ -194,21 +195,23 @@ def _recommended_building_count(
         typical_bra_per_building = 6.5 * 10.0 * avg_f
 
     if typology == Typology.KARRE:
-        # Karré skal kunne danne en liten kvartalsstruktur, ikke bare ett stort
-        # isolert volum. Ved høy tetthet prioriterer vi flere U/O-karréer som
-        # kan stå mot hverandre med et lesbart fellesrom imellom.
-        if field_area_m2 < 5200.0:
-            target = 1 if density < 2.15 else 2
-        elif field_area_m2 < 9000.0:
-            target = 2 if density >= 1.45 else 1
-        elif field_area_m2 < 14000.0:
-            target = 3 if density >= 1.55 else 2
+        # Runde 2 tetthet: et karré-alternativ skal leses som kvartalsstruktur,
+        # ikke som tre isolerte objekter. På store felt og ved høy %-BRA må vi
+        # derfor starte tidligere med 3-6 karré-/U-volumer.
+        if field_area_m2 < 4200.0:
+            target = 1 if density < 1.75 else 2
+        elif field_area_m2 < 7200.0:
+            target = 2 if density < 1.65 else 3
+        elif field_area_m2 < 11000.0:
+            target = 3 if density < 1.85 else 4
+        elif field_area_m2 < 16500.0:
+            target = 4 if density < 1.75 else 5
+        elif field_area_m2 < 24000.0:
+            target = 5 if density < 1.60 else 6
         else:
-            target = max(2, int(round(field_area_m2 / 6500.0)))
-            if density >= 1.45 and target < max_count:
+            target = max(5, int(round(field_area_m2 / 4700.0)))
+            if density >= 1.25 and target < max_count:
                 target += 1
-            elif density <= 0.85 and target > min_count:
-                target -= 1
         if fallback_count > 0:
             target = max(target, min(fallback_count, max_count))
         return max(min_count, min(max_count, target))
@@ -222,28 +225,28 @@ def _recommended_building_count(
     elif density <= 0.72 and target > min_count:
         target -= 1
 
-    # Densifisering: store tomter med høy BRA-overstyring skal ikke stoppe på
-    # for få bygg. Vi løfter derfor minimumsambisjonen for lamell/punkthus på
-    # større felt, men holder igjen på småhusnære felt senere i strategien.
+    # Høy %-BRA på stor tomt må gi flere bygg, ikke bare høyere etasjer.
     if typology == Typology.LAMELL:
-        if field_area_m2 >= 8_000.0:
-            baseline = 4 if density >= 0.95 else 3
-            if density >= 1.15:
+        if field_area_m2 >= 7000.0:
+            baseline = 4 if density >= 0.90 else 3
+            if density >= 1.10:
                 baseline = 5
-            if field_area_m2 >= 14_000.0 and density >= 1.20:
+            if field_area_m2 >= 14000.0 and density >= 1.15:
                 baseline = 6
-            if field_area_m2 >= 22_000.0 and density >= 1.25:
+            if field_area_m2 >= 22000.0 and density >= 1.20:
                 baseline = 7
             target = max(target, min(max_count, baseline))
         if density >= 1.35 and target < max_count:
             target += 1
     elif typology == Typology.PUNKTHUS:
-        if field_area_m2 >= 7_000.0:
-            baseline = 4 if density >= 0.95 else 3
-            if density >= 1.15:
+        if field_area_m2 >= 6000.0:
+            baseline = 4 if density >= 0.90 else 3
+            if density >= 1.10:
                 baseline = 5
-            if field_area_m2 >= 14_000.0 and density >= 1.20:
+            if field_area_m2 >= 14000.0 and density >= 1.15:
                 baseline = 6
+            if field_area_m2 >= 22000.0 and density >= 1.25:
+                baseline = 7
             target = max(target, min(max_count, baseline))
         if density >= 1.30 and target < max_count:
             target += 1
@@ -258,11 +261,11 @@ def _recommended_building_count(
 def _scaled_micro_band_count(base_count: int, typology: Typology, target_count: int) -> int:
     base = max(1, int(base_count or 0))
     if typology == Typology.LAMELL:
-        return max(base, min(8, int(math.ceil(target_count / 2.0)) + 1))
+        return max(base, min(10, int(math.ceil(target_count / 2.0)) + 1))
     if typology == Typology.PUNKTHUS:
-        return max(base, min(6, int(math.ceil(target_count / 2.5)) + 1))
+        return max(base, min(8, int(math.ceil(target_count / 2.5)) + 1))
     if typology == Typology.KARRE:
-        return max(base, min(5, target_count + 1))
+        return max(base, min(8, target_count + 1))
     return max(base, target_count)
 
 
@@ -350,7 +353,7 @@ class ConceptStrategy:
                 if karre_support <= 0.0:
                     selected_typology = _fallback_typology_for_field(field.polygon, density)
                     rationale += " Feltformen er for smal eller for liten for et proporsjonalt karrégrep; feltet faller derfor tilbake til lamell/punkthus."
-                elif field_area_m2 < 10_000.0 and karre_support < 0.90 and density < 1.85:
+                elif field_area_m2 < 8_000.0 and karre_support < 0.82 and density < 1.65:
                     selected_typology = _fallback_typology_for_field(field.polygon, density)
                     rationale += " Under ca. 10 000 m² får lamell/punkthus normalt prioritet; karré beholdes bare når både form og tetthet støtter det tydelig."
                 else:
@@ -384,7 +387,7 @@ class ConceptStrategy:
                 elif selected_typology == Typology.KARRE and field_area_m2 >= 4800.0:
                     target_building_count = max(target_building_count, min(env.target_building_count, 5))
 
-            if selected_typology == Typology.KARRE and field_area_m2 < 3_800.0:
+            if selected_typology == Typology.KARRE and field_area_m2 < 3_400.0 and density < 1.75:
                 target_building_count = 1
 
             if selected_typology == Typology.KARRE:
@@ -392,69 +395,71 @@ class ConceptStrategy:
                 # med et felles uterom imellom, ellers kollapser BRA og planen
                 # leses som to isolerte objektbygg.
                 if field_area_m2 < 5_200.0:
-                    target_building_count = min(max(target_building_count, 1), 2)
+                    target_building_count = min(max(target_building_count, 1), 1 if density < 2.15 else 2)
                 elif field_area_m2 < 9_000.0:
-                    target_building_count = min(max(target_building_count, 2), 3 if density >= 1.55 else 2)
+                    target_building_count = min(max(target_building_count, 2), 3 if density >= 1.75 else 2)
                 elif field_area_m2 < 14_000.0:
-                    target_building_count = min(max(target_building_count, 3), 4 if density >= 1.45 else 3)
+                    target_building_count = min(max(target_building_count, 2), 4 if density >= 1.65 else 3)
                 elif field_area_m2 < 22_000.0:
-                    target_building_count = min(max(target_building_count, 4), 5 if density >= 1.35 else 4)
-                else:
-                    target_building_count = min(max(target_building_count, 4), 6 if density >= 1.25 else 5)
+                    target_building_count = min(max(target_building_count, 3), 5)
             elif compact_infill and selected_typology in {Typology.LAMELL, Typology.PUNKTHUS}:
                 target_building_count = max(1, min(target_building_count, 2 if field_area_m2 <= 3_500.0 else 3))
 
-            # Høy tetthet på store felt skal gi flere bygg og en tydeligere
-            # bymessig struktur med store, lesbare uterom – ikke bare ett par
-            # løse volumer på mye restareal.
+            # Runde 2: tetthetsstyrt kvalitetslag. Når brukeren setter høy %-BRA
+            # på store felt, skal planen faktisk forsøke å nå målet gjennom flere
+            # bygg, tettere kanter og tydelige uterom – ikke la store restflater bli
+            # ubebygd. Småhusnære felt holdes noe mer tilbake.
             field_character = env.character or field.character
             field_role_effective = env.field_role or field.field_role
-            large_plot = field_area_m2 >= 8_000.0
-            dense_target = density >= 1.15
-            very_dense_target = density >= 1.35
+            large_plot = field_area_m2 >= 7_000.0
+            dense_target = density >= 1.05
+            very_dense_target = density >= 1.25
+            smallhouse_edge = field_character == 'neighborhood_edge'
+            urban_edge_like = field_role_effective in {'urban_edge', 'street_edge', 'urban_core', 'linear_mixed_core'} or not smallhouse_edge
             if not compact_infill and large_plot and dense_target:
                 composition_strictness = max(composition_strictness, 0.90)
                 if selected_typology == Typology.LAMELL:
-                    lamell_min = 5 if field_area_m2 < 16_000.0 else 6
-                    if very_dense_target and field_area_m2 >= 22_000.0:
+                    lamell_min = 5 if field_area_m2 < 14_000.0 else 6
+                    if very_dense_target and field_area_m2 >= 20_000.0:
                         lamell_min = 7
-                    if field_character == 'neighborhood_edge':
-                        lamell_min = max(3, lamell_min - 1)
+                    if smallhouse_edge:
+                        lamell_min = max(4, lamell_min - 1)
                     target_building_count = max(target_building_count, lamell_min)
-                    target_bya_pct = max(float(target_bya_pct or 0.0), 28.0 if field_character == 'neighborhood_edge' else 32.0)
-                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.18 if field_character == 'neighborhood_edge' else 0.14)
-                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.15 if field_character == 'neighborhood_edge' else 0.12)
+                    target_bya_pct = max(float(target_bya_pct or 0.0), 30.0 if urban_edge_like else 26.0)
+                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.16 if urban_edge_like else 0.22)
+                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.12 if urban_edge_like else 0.16)
                     frontage_mode = frontage_mode or 'double'
-                    micro_field_pattern = 'dense_parallel_bands' if target_building_count >= 6 else (micro_field_pattern or 'parallel_bands')
+                    micro_field_pattern = 'dense_parallel_bands'
                     lamell_rhythm_mode = lamell_rhythm_mode or 'staggered'
-                    rationale += " Høy utnyttelse på stort felt gir derfor flere lameller og tettere radstruktur, samtidig som det reserveres ett tydelig hovedrom mellom byggene."
+                    rationale += " Høy utnyttelse gir flere lameller og tettere radstruktur, men med hovedrom mellom rekkene."
                 elif selected_typology == Typology.PUNKTHUS:
                     tower_min = 5 if field_area_m2 < 14_000.0 else 6
                     if very_dense_target and field_area_m2 >= 20_000.0:
                         tower_min = 7
-                    if field_character == 'neighborhood_edge':
+                    if smallhouse_edge:
                         tower_min = max(4, tower_min - 1)
                     target_building_count = max(target_building_count, tower_min)
-                    target_bya_pct = max(float(target_bya_pct or 0.0), 26.0 if field_character == 'neighborhood_edge' else 30.0)
-                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.20 if field_character == 'neighborhood_edge' else 0.16)
-                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.16 if field_character == 'neighborhood_edge' else 0.12)
+                    target_bya_pct = max(float(target_bya_pct or 0.0), 28.0 if urban_edge_like else 24.0)
+                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.18 if urban_edge_like else 0.22)
+                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.13 if urban_edge_like else 0.17)
                     node_layout_mode = 'perimeter_ring_dense' if target_building_count >= 6 else (node_layout_mode or 'perimeter_ring')
-                    rationale += " Høy utnyttelse på stort felt gir derfor en tettere klynge av punkthus som definerer et lesbart felles uterom i stedet for store restflater."
+                    rationale += " Høy utnyttelse gir en tettere punkthusklynge som definerer et felles grønt rom."
                 elif selected_typology == Typology.KARRE:
-                    karre_min = 3 if field_area_m2 < 14_000.0 else 4
-                    if very_dense_target and field_area_m2 >= 20_000.0:
+                    karre_min = 3 if field_area_m2 < 12_000.0 else 4
+                    if very_dense_target and field_area_m2 >= 18_000.0:
                         karre_min = 5
-                    if field_character == 'neighborhood_edge':
+                    if smallhouse_edge:
                         karre_min = max(2, karre_min - 1)
                     target_building_count = max(target_building_count, karre_min)
-                    target_bya_pct = max(float(target_bya_pct or 0.0), 30.0 if field_character == 'neighborhood_edge' else 34.0)
-                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.22 if field_character == 'neighborhood_edge' else 0.18)
-                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.16 if field_character == 'neighborhood_edge' else 0.12)
-                    central_void_m = 20.0 if target_building_count >= 4 else max(18.0, float(central_void_m or 18.0))
-                    gap_between_m = max(8.0, float(gap_between_m or 8.0))
-                    rationale += " Høy utnyttelse på stort felt løses her som flere karré-/U-volumer som sammen omslutter et større grønt uterom."
-                if field_role_effective in {'urban_edge', 'street_edge', 'urban_core'} and field_character != 'neighborhood_edge':
-                    floors_max = max(floors_max, min(env.default_floors[1] + 1, 8))
+                    target_bya_pct = max(float(target_bya_pct or 0.0), 38.0 if urban_edge_like else 32.0)
+                    courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.18 if urban_edge_like else 0.24)
+                    public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.12 if urban_edge_like else 0.16)
+                    central_void_m = max(18.0, min(float(central_void_m or 20.0), 24.0))
+                    gap_between_m = max(8.0, min(float(gap_between_m or 8.0), 12.0))
+                    micro_field_pattern = 'clustered_frontage_ring'
+                    rationale += " Høy utnyttelse løses som flere karré-/U-volumer rundt ett eller flere store uterom."
+                if urban_edge_like and not smallhouse_edge:
+                    floors_max = max(floors_max, min(floors_max + 1, 8))
 
             micro_band_count = _scaled_micro_band_count(micro_band_count_base, selected_typology, max(target_building_count, 1))
             view_corridor_count = _scaled_view_corridor_count(view_corridor_count_base, selected_typology, max(target_building_count, 1))
@@ -594,7 +599,7 @@ class LinearMixedStrategy(ConceptStrategy):
             allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS, Typology.KARRE),
             default_typology=default_typology,
             default_orientation_offset_deg=0.0,
-            default_floors=((5, 7) if default_typology == Typology.LAMELL else ((5, 7) if default_typology == Typology.PUNKTHUS else (5, 6))),
+            default_floors=((5, 6) if default_typology == Typology.LAMELL else ((5, 7) if default_typology == Typology.PUNKTHUS else (5, 6))),
             courtyard_kind=(CourtyardKind.URBAN_TORG if use_karre else CourtyardKind.FELLES_BOLIG),
             tower_size_m=(20 if use_punkthus else None),
             field_role=field_role,
@@ -602,31 +607,31 @@ class LinearMixedStrategy(ConceptStrategy):
             design_variant=(None if (use_karre or use_punkthus) else ("rhythmic" if near_core else "terraced")),
             design_karre_shape=("uo" if use_karre else None),
             design_height_pattern=("accent" if use_punkthus else ("stepped" if near_core else "neighbor_step_down")),
-            target_bya_pct=(37.0 if use_karre else (27.0 if use_punkthus else (36.0 if near_core else 33.0))),
+            target_bya_pct=(33.0 if use_karre else (27.0 if use_punkthus else (35.0 if near_core else 32.0))),
             skeleton_mode=("courtyard_frontage" if use_karre else ("park_nodes" if use_punkthus else ("linear_bands_dense" if count >= 4 else "linear_bands"))),
             frontage_mode=("ring" if use_karre else ("node" if use_punkthus else ("double" if near_core else "single"))),
-            micro_band_count=(5 if use_karre else (0 if use_punkthus else (8 if near_core else 6))),
-            view_corridor_count=(1 if use_karre else (1 if use_punkthus or edge else 1)),
-            courtyard_reserve_ratio=(0.21 if use_karre else (0.20 if use_punkthus else (0.08 if near_core else 0.06))),
+            micro_band_count=(4 if use_karre else (0 if use_punkthus else (7 if near_core else 5))),
+            view_corridor_count=(1 if use_karre else (1 if edge else 2)),
+            courtyard_reserve_ratio=(0.24 if use_karre else (0.22 if use_punkthus else (0.10 if near_core else 0.08))),
             frontage_depth_m=(14.0 if use_karre else (12.0 if use_punkthus else 13.0)),
-            corridor_width_m=7.0,
-            central_void_m=(16.0 if use_karre else 0.0),
-            gap_between_m=(10.0 if use_karre else (14.0 if use_punkthus else 10.0)),
+            corridor_width_m=7.2,
+            central_void_m=(18.0 if use_karre else 0.0),
+            gap_between_m=8.0,
             macro_structure=("spine_court" if use_karre else "spine"),
             micro_field_pattern=("frontage_ring" if use_karre else ("node_cluster" if use_punkthus else ("dense_parallel_bands" if near_core else "parallel_bands"))),
             symmetry_preference=("axial" if use_karre else "bilateral"),
-            composition_strictness=(0.988 if use_karre else 0.968),
+            composition_strictness=(0.985 if use_karre else 0.96),
             frontage_zone_ratio=(0.30 if use_karre else 0.24),
-            public_realm_ratio=(0.15 if use_karre else (0.17 if use_punkthus else 0.10)),
+            public_realm_ratio=(0.16 if use_karre else (0.18 if use_punkthus else 0.12)),
             node_symmetry=(use_punkthus or use_karre),
             frontage_primary_side="south",
             frontage_secondary_side=("west" if use_karre or near_core else None),
             lamell_rhythm_mode=(None if default_typology != Typology.LAMELL else ("mirrored" if near_core else "paired")),
-            node_layout_mode=("perimeter_ring" if use_punkthus else None),
+            node_layout_mode=("green_room_edges" if use_punkthus else None),
             courtyard_open_side=("south" if use_karre else None),
-            target_building_count=(1 if use_karre else (4 if use_punkthus else (6 if near_core else 5))),
-            frontage_emphasis=(0.99 if use_karre else 0.96),
-            rhythm_strength=(0.95 if use_punkthus else 0.985),
+            target_building_count=(1 if use_karre else (3 if use_punkthus else (5 if near_core else 4))),
+            frontage_emphasis=(0.99 if use_karre else 0.95),
+            rhythm_strength=(0.94 if use_punkthus else 0.98),
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
@@ -660,20 +665,18 @@ class CourtyardUrbanStrategy(ConceptStrategy):
         role = field.field_role if field else "urban_core"
         edge = role in {"street_edge", "urban_edge"} or index in {0, count - 1}
         field_area = float(getattr(getattr(field, "polygon", None), "area", 0.0) or 0.0)
-        use_karre = field_area >= 3_200.0 or not edge
-        if role == "neighborhood_edge" and field_area < 3_600.0:
+        use_karre = field_area >= 3_500.0 or not edge
+        if role == "neighborhood_edge" and field_area < 4_000.0:
             use_karre = False
         karre_count = 1
-        if use_karre and field_area >= 4_200.0:
+        if use_karre and field_area >= 4_800.0:
             karre_count = 2
-        if use_karre and field_area >= 7_000.0:
+        if use_karre and field_area >= 8_500.0:
             karre_count = 3
-        if use_karre and field_area >= 11_000.0:
+        if use_karre and field_area >= 14_000.0:
             karre_count = 4
-        if use_karre and field_area >= 16_000.0:
+        if use_karre and field_area >= 22_000.0:
             karre_count = 5
-        if use_karre and field_area >= 24_000.0:
-            karre_count = 6
 
         return FieldEnvelope(
             allowed_typologies=(Typology.KARRE, Typology.LAMELL),
@@ -686,29 +689,29 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             design_karre_shape=("uo_chamfered" if edge else "uo"),
             design_height_pattern=("neighbor_step_down" if (field and field.character == "neighborhood_edge") else "stepped"),
             design_variant=(None if use_karre else "terraced"),
-            target_bya_pct=(48.0 if karre_count >= 5 else (46.0 if karre_count >= 3 else 43.0)),
+            target_bya_pct=(39.0 if karre_count >= 3 else (37.0 if karre_count >= 2 else 34.0)),
             skeleton_mode=("courtyard_frontage" if use_karre else "linear_bands"),
             frontage_mode=("quad" if edge and use_karre else ("ring" if use_karre else "double")),
-            micro_band_count=(9 if karre_count >= 5 else 8 if karre_count >= 3 else 7),
-            view_corridor_count=(1 if karre_count <= 4 else 2),
-            courtyard_reserve_ratio=(0.24 if edge else 0.26),
+            micro_band_count=(7 if karre_count >= 4 else 6 if karre_count >= 2 else 5),
+            view_corridor_count=(1 if karre_count <= 2 else 2),
+            courtyard_reserve_ratio=(0.31 if edge else 0.34),
             frontage_depth_m=(15.0 if use_karre else 13.0),
-            corridor_width_m=7.2,
-            central_void_m=(24.0 if karre_count >= 4 else (18.0 if karre_count >= 2 else 0.0)),
-            gap_between_m=(12.0 if karre_count >= 3 else 10.0),
+            corridor_width_m=7.5,
+            central_void_m=(22.0 if karre_count >= 4 else (18.0 if karre_count >= 2 else 0.0)),
+            gap_between_m=8.0,
             macro_structure="perimeter_block",
             micro_field_pattern=("clustered_frontage_ring" if karre_count >= 2 else ("frontage_ring" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
-            composition_strictness=0.990,
+            composition_strictness=0.988,
             frontage_zone_ratio=0.30,
-            public_realm_ratio=0.18,
+            public_realm_ratio=0.22,
             node_symmetry=True,
             frontage_primary_side="south",
             frontage_secondary_side="west",
             courtyard_open_side=("west" if edge else "south"),
-            target_building_count=(karre_count if use_karre else (5 if field_area >= 6_000.0 else 4)),
+            target_building_count=(karre_count if use_karre else (4 if field_area >= 6_000.0 else 3)),
             frontage_emphasis=0.99,
-            rhythm_strength=0.92,
+            rhythm_strength=0.90,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
@@ -739,40 +742,40 @@ class ClusterParkStrategy(ConceptStrategy):
         return [edge] + [mid_share] * middle + [edge]
 
     def envelope_for_field(self, index: int, count: int, field: Optional[Delfelt] = None) -> FieldEnvelope:
-        center_like = index == count // 2
+        center_like = (index == count // 2) if count <= 3 else index in {max(0, count // 2 - 1), count // 2}
         use_punkthus = center_like and count >= 3
         return FieldEnvelope(
             allowed_typologies=(Typology.LAMELL, Typology.PUNKTHUS),
             default_typology=Typology.PUNKTHUS if use_punkthus else Typology.LAMELL,
             default_orientation_offset_deg=90.0 if (not use_punkthus and index % 2) else 0.0,
-            default_floors=(5, 7) if use_punkthus else (5, 6),
+            default_floors=(5, 6) if use_punkthus else (4, 5),
             courtyard_kind=CourtyardKind.PARKKANT,
             tower_size_m=20 if use_punkthus else None,
             field_role=("park_node" if use_punkthus else "park_edge"),
             character=("open_view" if use_punkthus else "sheltered"),
             design_variant=(None if use_punkthus else "varied"),
             design_height_pattern=("accent" if use_punkthus else "stepped"),
-            target_bya_pct=(26.0 if use_punkthus else 29.0),
-            skeleton_mode=("park_nodes" if use_punkthus else "courtyard_frontage"),
-            frontage_mode=("node" if use_punkthus else "ring"),
-            micro_band_count=(0 if use_punkthus else 5),
-            view_corridor_count=1,
-            courtyard_reserve_ratio=(0.26 if use_punkthus else 0.22),
+            target_bya_pct=(24.0 if use_punkthus else 23.0),
+            skeleton_mode=("park_nodes" if use_punkthus else "park_bands"),
+            frontage_mode=("node" if use_punkthus else "edge"),
+            micro_band_count=(0 if use_punkthus else 4),
+            view_corridor_count=(1 if use_punkthus else 2),
+            courtyard_reserve_ratio=(0.31 if use_punkthus else 0.28),
             frontage_depth_m=(12.0 if use_punkthus else 13.0),
-            corridor_width_m=6.8,
+            corridor_width_m=7.0,
             macro_structure="park_cluster",
-            micro_field_pattern=("node_cluster" if use_punkthus else "frontage_ring"),
+            micro_field_pattern=("node_cluster" if use_punkthus else "park_bands"),
             symmetry_preference="axial",
-            composition_strictness=0.972,
-            frontage_zone_ratio=0.20,
-            public_realm_ratio=0.18,
+            composition_strictness=0.96,
+            frontage_zone_ratio=0.18,
+            public_realm_ratio=0.25,
             node_symmetry=use_punkthus,
             frontage_primary_side=(None if use_punkthus else "south"),
             frontage_secondary_side=(None if use_punkthus else "west"),
-            node_layout_mode=("perimeter_ring" if use_punkthus else None),
-            target_building_count=(5 if use_punkthus else 5),
-            frontage_emphasis=0.96,
-            rhythm_strength=0.92,
+            node_layout_mode=("green_room_ring" if use_punkthus else "green_room_edges"),
+            target_building_count=(4 if use_punkthus else 4),
+            frontage_emphasis=0.90,
+            rhythm_strength=0.88,
         )
 
     def propose(self, delfelt: Sequence[Delfelt], target_bra_m2: float, plan_regler: Optional[PlanRegler] = None, neighbors: Optional[Sequence[dict]] = None) -> List[FieldParameterChoice]:
