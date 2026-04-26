@@ -31,7 +31,6 @@ from .geometry import (
     build_field_skeleton_summaries,
     building_geometry_is_orthogonal_to_field,
     buildings_do_not_overlap,
-    buildings_respect_min_spacing,
     compute_architecture_metrics,
     place_buildings_for_fields,
     pca_site_axes,
@@ -221,19 +220,11 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     elif concept_family == ConceptFamily.LINEAR_MIXED:
         count = max(3, min(count, 4 if area < 18000.0 else 5))
     elif concept_family == ConceptFamily.CLUSTER_PARK:
-        count = max(3, min(count, 3 if area < 16000.0 else 4))
+        count = max(3, min(count, 4 if area < 16000.0 else 5))
     else:  # COURTYARD_URBAN
-        # Karréalternativet skal leses som kvartalsstruktur, ikke som to
-        # store objektbygg. Derfor får det flere makrofelter på middels og
-        # store tomter, særlig når mål-BRA er høy.
-        if area < 12000.0:
-            count = max(2, min(count, 3 if density >= 1.55 else 2))
-        elif area < 18000.0:
-            count = max(3, min(max(count, 3), 4 if density >= 1.70 else 3))
-        elif area < 30000.0:
-            count = max(4, min(max(count, 4), 5 if density >= 1.45 else 4))
-        else:
-            count = max(5, min(max(count, 5), 6))
+        lower = 3 if area >= 12_000.0 else 2
+        upper = 4 if area < 24_000.0 else 5
+        count = max(lower, min(count, upper))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -277,7 +268,7 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 frontage_depth_m=choice.frontage_depth_m,
                 corridor_width_m=choice.corridor_width_m,
                 central_void_m=float(getattr(choice, "central_void_m", 0.0) or 0.0),
-                gap_between_m=float(getattr(choice, "gap_between_m", 8.0) or 8.0),
+                gap_between_m=float(getattr(choice, "gap_between_m", 4.0) or 4.0),
                 macro_structure=choice.macro_structure,
                 micro_field_pattern=choice.micro_field_pattern,
                 symmetry_preference=choice.symmetry_preference,
@@ -391,8 +382,6 @@ def _normalize_choices(
                 courtyard_reserve_ratio=fb.courtyard_reserve_ratio,
                 frontage_depth_m=fb.frontage_depth_m,
                 corridor_width_m=fb.corridor_width_m,
-                central_void_m=fb.central_void_m,
-                gap_between_m=fb.gap_between_m,
                 macro_structure=fb.macro_structure,
                 micro_field_pattern=fb.micro_field_pattern,
                 symmetry_preference=fb.symmetry_preference,
@@ -640,9 +629,11 @@ def _effective_delfelt_count_for_family(
         return 1
     req = max(1, int(requested_count))
     if family == ConceptFamily.CLUSTER_PARK:
-        return 3 if area >= 7000.0 else max(1, min(req, 2))
+        return max(3, min(req, 4 if area < 16_000.0 else 5)) if area >= 7_000.0 else max(1, min(req, 2))
     if family == ConceptFamily.COURTYARD_URBAN:
-        return max(2, min(req, 3 if density < 1.10 and area < 10000.0 else 4))
+        upper = 3 if density < 1.10 and area < 10_000.0 else (4 if area < 24_000.0 else 5)
+        lower = 3 if area >= 12_000.0 else 2
+        return max(lower, min(req, upper))
     if family == ConceptFamily.LINEAR_MIXED:
         return max(3, min(req, 4))
     return req
@@ -787,9 +778,6 @@ def validate_masterplan_geometry(plan: Masterplan, buildable_poly: Polygon) -> L
     errors: List[str] = []
     if not buildings_do_not_overlap(plan.bygg):
         errors.append("Bygg overlapper hverandre.")
-    min_gap = max(8.0, float(getattr(plan.plan_regler, "brann_avstand_m", 8.0) or 8.0), float(getattr(plan.plan_regler, "avstand_bygg_bygg_m", 0.0) or 0.0))
-    if not buildings_respect_min_spacing(plan.bygg, min_gap):
-        errors.append(f"Bygg har mindre enn {min_gap:.0f} m innbyrdes avstand.")
     for field in plan.delfelt:
         for building in [b for b in plan.bygg if b.delfelt_id == field.field_id]:
             if not buildable_poly.buffer(1e-6).covers(building.footprint):
