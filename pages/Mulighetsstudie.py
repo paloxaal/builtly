@@ -4674,12 +4674,18 @@ def _draw_clearance_measurements(
         else:
             draw.line([s1, s2], fill=line_color, width=1)
 
-        # små endestreker gjør målet lesbart uten store labels
+        # Små pilspisser gjør det tydelig hvilken avstand som måles.
         nx = -(s2[1] - s1[1]) / max(seg_len, 1.0)
         ny = (s2[0] - s1[0]) / max(seg_len, 1.0)
-        tick = 3.5
-        draw.line([(s1[0] - nx*tick, s1[1] - ny*tick), (s1[0] + nx*tick, s1[1] + ny*tick)], fill=line_color, width=1)
-        draw.line([(s2[0] - nx*tick, s2[1] - ny*tick), (s2[0] + nx*tick, s2[1] + ny*tick)], fill=line_color, width=1)
+        tx = (s2[0] - s1[0]) / max(seg_len, 1.0)
+        ty = (s2[1] - s1[1]) / max(seg_len, 1.0)
+        arrow = 6.0
+        spread = 2.6
+        for (px, py, sign) in ((s1[0], s1[1], 1.0), (s2[0], s2[1], -1.0)):
+            tip = (px, py)
+            left = (px + sign * tx * arrow + nx * spread, py + sign * ty * arrow + ny * spread)
+            right = (px + sign * tx * arrow - nx * spread, py + sign * ty * arrow - ny * spread)
+            draw.polygon([tip, left, right], fill=line_color)
 
         mx, my = (s1[0] + s2[0]) / 2.0, (s1[1] + s2[1]) / 2.0
         tw, th = _bbox(text_value)
@@ -4731,7 +4737,9 @@ def _draw_clearance_measurements(
         if item[0] <= 18.0 or item[0] < 8.0:
             chosen_pairs[(item[1], item[2])] = item
     for dist, i, j, p1, p2 in sorted(chosen_pairs.values(), key=lambda v: v[0]):
-        txt = f"{dist:.1f} m"
+        tag_i = str(polys[i][0].get('tag', i + 1))
+        tag_j = str(polys[j][0].get('tag', j + 1))
+        txt = f"{tag_i}-{tag_j}: {dist:.1f} m"
         _draw_measure_line(p1, p2, txt, danger=dist < 8.0, dashed=False)
 
     # Building-to-boundary: one nearest plot-boundary distance per building.
@@ -4754,7 +4762,8 @@ def _draw_clearance_measurements(
                     boundary_items.append((dist, i, p1, p2))
             # Prioritér de knappeste avstandene; disse er viktigst å kontrollere.
             for dist, i, p1, p2 in sorted(boundary_items, key=lambda v: v[0])[:max_boundary_labels]:
-                _draw_measure_line(p1, p2, f"{dist:.1f} m", danger=False, dashed=True)
+                tag_i = str(polys[i][0].get('tag', i + 1))
+                _draw_measure_line(p1, p2, f"{tag_i}-grense: {dist:.1f} m", danger=False, dashed=True)
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render a clean 2D concept overview.
@@ -4994,8 +5003,8 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         site_coords,
         project,
         font=font_tiny,
-        max_pair_labels=6 if len(proposed) <= 8 else 5,
-        max_boundary_labels=3 if len(proposed) <= 8 else 2,
+        max_pair_labels=8 if len(proposed) <= 10 else 6,
+        max_boundary_labels=4 if len(proposed) <= 10 else 3,
     )
 
     # Building labels are intentionally kept off the footprints.
