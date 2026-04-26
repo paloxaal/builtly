@@ -1306,30 +1306,20 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
 
     For retningsavhengige typologier (lamell, rekkehus) blir sol-scoren viktig.
     For retningsuavhengige typologier (karré, punkthus) er den nøytral.
-
-    V6: underdekning på BRA straffes tydeligere enn før. Dette gjør at når
-    %-BRA-overstyring er satt høyt, velger motoren kandidater som faktisk har
-    sjanse til å levere målet, og ikke for luftige varianter med god komposisjon
-    men for lite areal.
     """
     if not candidates:
         return None
 
     def combined_score(item: _PlacementCandidate) -> Tuple[float, float, int]:
-        # Primary score: hvor godt BRA-målet treffes. Underdekning straffes
-        # hardere enn overshoot slik at vi prioriterer å nå minstemålet.
+        # Primary score: hvor godt BRA-målet treffes
         deficit = max(0.0, field.target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - field.target_bra)
-        deficit_ratio = deficit / max(field.target_bra, 1.0)
-        deficit_multiplier = 1.0 + min(1.2, deficit_ratio * 1.6)
-        bra_score = deficit * deficit_multiplier + overshoot * 0.20
-        if deficit_ratio > 0.06:
-            bra_score += field.target_bra * 0.06 * min(1.0, deficit_ratio)
+        bra_score = deficit + overshoot * 0.25
 
         # Solar penalty: for lamell/rekkehus, straffer nord-sør-orientering
         global_angle = (field.orientation_deg + item.angle_offset_deg) % 180.0
         solar_bonus = _solar_orientation_bonus(global_angle, typology)
-        solar_penalty = field.target_bra * 0.16 * (1.0 - solar_bonus)
+        solar_penalty = field.target_bra * 0.20 * (1.0 - solar_bonus)
 
         # Variasjons-bonus: foretrekk "varied" (blandede lengder) og "rotated"
         # (per-bygg rotasjon) fremfor "single" (uniformt stort rektangel) når BRA
@@ -3190,13 +3180,7 @@ def _choose_best_structured(
     skeleton: FieldSkeleton,
     field: Delfelt,
 ) -> Optional[_PlacementCandidate]:
-    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA.
-
-    V6: strukturscore er fortsatt viktig, men kandidater som havner tydelig under
-    BRA-målet taper oftere mot mer arealeffektive løsninger. Dette svarer direkte
-    på ønsket om at 100 %% BRA-overstyring skal gi minst 100 %% BRA når det er
-    fysisk mulig innen feltenes parametre.
-    """
+    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA."""
     pool = [c for c in candidates if c is not None and c.footprints]
     if not pool:
         return None
@@ -3205,14 +3189,11 @@ def _choose_best_structured(
     def score(item: _PlacementCandidate) -> Tuple[float, float, float, int]:
         deficit = max(0.0, target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - target_bra)
-        deficit_ratio = deficit / max(target_bra, 1.0)
-        bra_penalty = deficit * (1.25 + min(1.0, deficit_ratio * 1.7)) + overshoot * 0.18
-        if deficit_ratio > 0.05:
-            bra_penalty += target_bra * 0.08 * min(1.0, deficit_ratio)
+        bra_penalty = deficit + overshoot * 0.22
         structure = _candidate_structure_score(item.footprints, skeleton, field)
-        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.12 + strictness * 0.10)
+        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.14 + strictness * 0.13)
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
-        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * 0.010
+        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * 0.012
         return (bra_penalty + structure_penalty + count_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
     return min(pool, key=score)
@@ -3736,53 +3717,6 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
         return None
     return _evaluate_candidate(combined_footprints, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per, angle_offset_per_bygg=angle_per)
 
-
-def _top_up_field_bra_minimum(buildings: List[Bygg], field: Delfelt, target_bra: float) -> None:
-    """Hev etasjer på eksisterende bygg til vi når minimum BRA, hvis mulig.
-
-    Hensikt: Når %-BRA-overstyring brukes skal løsningen i utgangspunktet ikke
-    stoppe på 90-95 %% av målet bare fordi en litt luftigere kandidat vant på
-    komposisjon. Vi gjør derfor en enkel og robust top-up ved å legge etasjer på
-    eksisterende bygg innenfor floors_max. Fotavtrykk og uterom beholdes, men
-    volumet strammes opp.
-    """
-    if not buildings or target_bra <= 0:
-        return
-    current = sum(b.bra_m2 for b in buildings)
-    tolerance = max(40.0, target_bra * 0.005)
-    if current + tolerance >= target_bra:
-        return
-
-    order = sorted(
-        range(len(buildings)),
-        key=lambda i: (
-            buildings[i].floors,
-            -float(getattr(buildings[i].footprint, 'area', 0.0) or 0.0),
-            0 if buildings[i].typology in {Typology.KARRE, Typology.LAMELL} else 1,
-            buildings[i].bygg_id,
-        ),
-    )
-    if not order:
-        return
-
-    max_rounds = max(1, int(field.floors_max - field.floors_min) + 3)
-    rounds = 0
-    progressed = True
-    while current + tolerance < target_bra and progressed and rounds < max_rounds:
-        progressed = False
-        rounds += 1
-        for idx in order:
-            b = buildings[idx]
-            if b.floors >= field.floors_max:
-                continue
-            b.floors += 1
-            b.height_m = _height_for(field.typology, b.floors)
-            current += b.footprint_m2
-            progressed = True
-            if current + tolerance >= target_bra:
-                break
-
-
 def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], plan_regler: Optional[PlanRegler] = None) -> Tuple[List[Bygg], float]:
     rules = plan_regler or PlanRegler()
     accepted: List[Bygg] = []
@@ -3868,7 +3802,6 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
             global_geoms.append((footprint_global, angle_global, field.typology, height_m))
             build_counter += 1
 
-        _top_up_field_bra_minimum(placed_for_field, field, float(field.target_bra or 0.0))
         accepted.extend(placed_for_field)
         achieved_bra = sum(b.bra_m2 for b in placed_for_field)
         bra_deficit += max(0.0, field.target_bra - achieved_bra)
