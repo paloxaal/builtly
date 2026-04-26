@@ -2113,6 +2113,15 @@ def _slot_count_for_band(band: Polygon, count_hint: int, pattern: Optional[str])
             splits = 2 if width >= 72 else 1
         else:
             splits = 2 if height >= 84 else 1
+    elif pattern == "green_room_edges":
+        # Green-room-first: split edge bands enough to let several buildings
+        # define the same common room without filling the room itself.
+        if long_span >= 118 and count_hint >= 7:
+            splits = 3
+        elif long_span >= 66 and count_hint >= 4:
+            splits = 2
+        else:
+            splits = 1
     elif pattern == "park_bands":
         splits = 2 if long_span >= 84 else 1
     elif pattern == "node_cluster":
@@ -2146,6 +2155,139 @@ def _build_micro_fields_from_bands(bands: Sequence[Polygon], count_hint: int, pa
     return [m for m in micro if m.area > 60.0]
 
 
+
+def _compose_green_room_linear_skeleton(core: Polygon, field: Delfelt) -> Optional[FieldSkeleton]:
+    """Compose a lamell/edge field by reserving the green room first.
+
+    Buildings become edges around one legible shared outdoor room instead of
+    loose objects in leftover strips. The room is compact at high density so
+    %-BRA can still be achieved.
+    """
+    if core is None or core.is_empty or float(core.area) < 600.0:
+        return None
+    minx, miny, maxx, maxy = core.bounds
+    width = maxx - minx
+    height = maxy - miny
+    if width < 34.0 or height < 28.0:
+        return None
+
+    target_count = max(2, int(getattr(field, "target_building_count", 0) or 4))
+    density = float(getattr(field, "target_bra", 0.0) or 0.0) / max(float(core.area), 1.0)
+    base_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.0) or getattr(field, "public_realm_ratio", 0.0) or 0.12)
+    if density >= 1.25:
+        room_ratio = max(0.08, min(0.14, base_ratio))
+    elif density >= 1.00:
+        room_ratio = max(0.09, min(0.16, base_ratio))
+    else:
+        room_ratio = max(0.10, min(0.20, base_ratio))
+
+    scale = max(0.26, min(0.46, math.sqrt(room_ratio)))
+    if width >= height:
+        room_w = width * min(0.55, scale * 1.18)
+        room_h = height * min(0.46, scale * 0.96)
+    else:
+        room_w = width * min(0.46, scale * 0.96)
+        room_h = height * min(0.55, scale * 1.18)
+    courtyard = _safe_center_rect(core, room_w, room_h)
+    if courtyard is None or courtyard.is_empty or courtyard.area < max(120.0, core.area * 0.05):
+        return None
+
+    cminx, cminy, cmaxx, cmaxy = courtyard.bounds
+    side_geoms = {
+        "north": core.intersection(box(minx - 1.0, cmaxy, maxx + 1.0, maxy + 1.0)).buffer(0),
+        "south": core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, cminy)).buffer(0),
+        "west": core.intersection(box(minx - 1.0, cminy, cminx, cmaxy)).buffer(0),
+        "east": core.intersection(box(cmaxx, cminy, maxx + 1.0, cmaxy)).buffer(0),
+    }
+
+    frontage_depth = float(getattr(field, "frontage_depth_m", None) or 12.5)
+    corridor_w = min(float(getattr(field, "corridor_width_m", None) or 6.5), 7.0)
+    primary_side, secondary_side = _preferred_frontage_sides(
+        field,
+        "south",
+        "north" if getattr(field, "frontage_mode", None) == "double" else None,
+    )
+
+    frontages: List[SkeletonFrontage] = []
+    frontage_zones: List[Polygon] = []
+    for side in [primary_side, secondary_side, "east", "west"]:
+        if not side:
+            continue
+        line = _line_from_bounds(core, side)
+        if line is not None:
+            frontages.append(SkeletonFrontage(role=f"{side}_frontage", line=line))
+        zone = _strip_from_side(core, side, frontage_depth)
+        if zone is not None and not zone.is_empty:
+            frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
+
+    corridors: List[Polygon] = []
+    if int(getattr(field, "view_corridor_count", 0) or 0) > 0:
+        cx = (cminx + cmaxx) / 2.0
+        cy = (cminy + cmaxy) / 2.0
+        if width >= height:
+            cor = core.intersection(box(cx - corridor_w / 2.0, miny - 1.0, cx + corridor_w / 2.0, maxy + 1.0)).buffer(0)
+        else:
+            cor = core.intersection(box(minx - 1.0, cy - corridor_w / 2.0, maxx + 1.0, cy + corridor_w / 2.0)).buffer(0)
+        corridors.extend([p for p in _flatten_polygons(cor) if p.area > 40.0])
+
+    bands: List[Polygon] = []
+    for side in ("south", "north", "west", "east"):
+        geom = side_geoms.get(side)
+        if geom is None or geom.is_empty:
+            continue
+        for part in _flatten_polygons(geom):
+            if part.area <= 80.0:
+                continue
+            bx0, by0, bx1, by1 = part.bounds
+            if (bx1 - bx0) < 10.0 or (by1 - by0) < 8.0:
+                continue
+            bands.append(part)
+    if not bands:
+        return None
+    if corridors:
+        cutter = unary_union(corridors).buffer(0)
+        bands = [p for band in bands for p in _flatten_polygons(band.difference(cutter).buffer(0)) if p.area > 80.0]
+    if not bands:
+        return None
+
+    micro_fields = _build_micro_fields_from_bands(
+        bands,
+        target_count,
+        "green_room_edges",
+        getattr(field, "symmetry_preference", None) or "axial",
+    )
+    build_slots = [m for m in micro_fields if m.area > 60.0]
+    if not build_slots:
+        return None
+
+    macro_axis = _axis_line(courtyard, axis="x") if width >= height else _axis_line(courtyard, axis="y")
+    symmetry_axis = _axis_line(courtyard, axis="y") if width >= height else _axis_line(courtyard, axis="x")
+    public_realm = [courtyard] + corridors
+    return FieldSkeleton(
+        field_id=field.field_id,
+        mode="green_room_edges",
+        local_orientation_deg=0.0,
+        frontage_lines=frontages,
+        build_bands=bands,
+        courtyard_reserve=courtyard,
+        view_corridors=[c for c in corridors if not c.is_empty and c.area > 40.0],
+        accent_nodes=[],
+        open_edges=[],
+        frontage_depth_m=frontage_depth,
+        corridor_width_m=corridor_w,
+        macro_axis=macro_axis,
+        symmetry_axis=symmetry_axis,
+        frontage_zones=frontage_zones,
+        micro_fields=build_slots,
+        public_realm=public_realm,
+        reserved_open_space=public_realm,
+        frontage_primary_side=primary_side,
+        frontage_secondary_side=secondary_side,
+        build_slots=build_slots,
+        node_layout_mode=getattr(field, "node_layout_mode", None),
+    )
+
+
 def _compose_linear_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
@@ -2158,6 +2300,11 @@ def _compose_linear_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     frontage_zone_ratio = float(getattr(field, "frontage_zone_ratio", 0.22) or 0.22)
     primary_side, secondary_side = _preferred_frontage_sides(field, "south", "north" if getattr(field, "frontage_mode", None) == "double" else None)
     pattern = getattr(field, "micro_field_pattern", None)
+
+    if getattr(field, "macro_structure", None) == "green_room_first" or pattern == "green_room_edges":
+        green_skeleton = _compose_green_room_linear_skeleton(core, field)
+        if green_skeleton is not None:
+            return green_skeleton
 
     if pattern == "dense_parallel_bands":
         frontages: List[SkeletonFrontage] = []
@@ -2726,7 +2873,16 @@ def _ordered_slots_for_lamell(slots: Sequence[Polygon], skeleton: FieldSkeleton)
                 metric = coord
         return (fr, metric, -sum(p.area for p in row))
 
-    rows.sort(key=_row_sort_key)
+    if skeleton.mode == "green_room_edges" and skeleton.courtyard_reserve is not None:
+        room = skeleton.courtyard_reserve
+        rcx, rcy = room.centroid.x, room.centroid.y
+        rows.sort(key=lambda row: (
+            min(p.distance(room) for p in row),
+            abs(sum(float(p.centroid.x) for p in row) / max(len(row), 1) - rcx) + abs(sum(float(p.centroid.y) for p in row) / max(len(row), 1) - rcy),
+            -sum(p.area for p in row),
+        ))
+    else:
+        rows.sort(key=_row_sort_key)
 
     ordered_rows: List[List[Polygon]] = []
     for row in rows:
@@ -3140,6 +3296,24 @@ def _candidate_structure_score(
             room_score = 0.55 * openness + 0.45 * proximity
         else:
             room_score = 0.65 * openness + 0.35 * proximity
+
+        # Green-room-first bonus: prefer layouts where at least two-three sides
+        # of the outdoor room are framed by buildings, as in the architect
+        # reference where green commons are defined by building edges.
+        try:
+            rminx, rminy, rmaxx, rmaxy = reserve.bounds
+            margin = max(6.0, min(12.0, max(rmaxx - rminx, rmaxy - rminy) * 0.12))
+            side_zones = [
+                box(rminx - margin, rmaxy, rmaxx + margin, rmaxy + margin),
+                box(rminx - margin, rminy - margin, rmaxx + margin, rminy),
+                box(rminx - margin, rminy - margin, rminx, rmaxy + margin),
+                box(rmaxx, rminy - margin, rmaxx + margin, rmaxy + margin),
+            ]
+            framed = sum(1 for z in side_zones if union.intersection(z).area > 20.0)
+            enclosure_bonus = min(1.0, framed / 3.0)
+            room_score = max(room_score, 0.45 * room_score + 0.55 * enclosure_bonus)
+        except Exception:
+            pass
 
     corridor_score = 0.60
     if skeleton.view_corridors:
