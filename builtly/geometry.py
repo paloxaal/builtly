@@ -1525,16 +1525,51 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
 
     I tillegg gis hvert bygg varierte etasjetall (én aksent som stikker opp)
     for å bryte monotoni. Aksenten plasseres i et sentralt bygg.
+
+    COMPACT INFILL-MODUS:
+    Når feltets target_bya_pct er ≥75 (typisk Sagatomta-scenarie: liten tomt
+    1500-3000m² med 200-300% utnyttelse), aktiveres en mer aggressiv plassering:
+      - Spacing reduseres mot brannavstand (8m hard grense)
+      - Tower-størrelser utvides til 16-22m (var kun 20)
+      - Grid-cap utvides fra 3×3 til 5×5
+    Dette forhindrer at et 1800m²-felt blir under-utnyttet med kun 1 tårn
+    når både BYA-mål og BRA-mål krever flere/mindre tårn.
+    For normale konsepter (CourtyardUrban 29-31, LinearMixed 33-35,
+    ClusterPark 22-23) trigges ikke compact-modus, så all eksisterende
+    oppførsel er bevart.
     """
+    # COMPACT INFILL-DETEKTERING
+    target_bya_pct = float(getattr(field, "target_bya_pct", 0.0) or 0.0)
+    is_compact_infill = target_bya_pct >= 75.0
+
     candidates: List[Tuple[_PlacementCandidate, int, int]] = []  # (cand, cols, rows)
-    sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
+    if is_compact_infill:
+        # I compact-modus IGNORERES envelope-sitt tower_size_m (som typisk
+        # er låst til 20m fra concept_families.py linje ~392). Vi prøver
+        # flere størrelser for å finne den som faktisk passer på den lille
+        # tomten. Dette er nødvendig fordi 2× 20m-tårn + 8m gap = 48m bredde
+        # = passer ikke i 45m felt — fixen ville da kollapse til 1 tårn og
+        # under-utnytte.
+        sizes = [22, 20, 18, 16]
+        max_grid_cap = 5
+    else:
+        sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
+        max_grid_cap = 3
+
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
     height = maxy - miny
     for size in sizes:
-        spacing = max(float(spec.min_spacing_m), float(field.floors_max) * 1.5)
-        max_cols = max(1, min(3, int((width + spacing) // (size + spacing))))
-        max_rows = max(1, min(3, int((height + spacing) // (size + spacing))))
+        if is_compact_infill:
+            # Reduser spacing mot brannavstand. 8m er HARD GRENSE og må respekteres
+            # (PlanRegler.brann_avstand_m default). Vi tillater ned til 8m, ikke under.
+            # Tidligere min: max(10, floors_max*1.5) → typisk 10-13m.
+            # Compact min: max(8, floors_max*0.7) → typisk 8-9m.
+            spacing = max(8.0, float(field.floors_max) * 0.7)
+        else:
+            spacing = max(float(spec.min_spacing_m), float(field.floors_max) * 1.5)
+        max_cols = max(1, min(max_grid_cap, int((width + spacing) // (size + spacing))))
+        max_rows = max(1, min(max_grid_cap, int((height + spacing) // (size + spacing))))
         for cols in range(1, max_cols + 1):
             for rows in range(1, max_rows + 1):
                 x_offsets = _centered_offsets(cols, float(size), spacing, width)
@@ -1593,7 +1628,11 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
             cluster_penalty = 0.0  # enkeltbygg, ikke relevant
         else:
             aspect = max(cols, rows) / min(cols, rows)
-            cluster_penalty = field.target_bra * 0.12 * (aspect - 1.0)
+            # I compact-modus dempes klynge-straffen — lineære arrangement
+            # (1×3, 2×3) er ofte den eneste måten å få plass til flere tårn
+            # på smale tomter, og det bør ikke straffes hardt.
+            cluster_factor = 0.06 if is_compact_infill else 0.12
+            cluster_penalty = field.target_bra * cluster_factor * (aspect - 1.0)
 
         return (bra_score + cluster_penalty, -cand.total_bra, len(cand.footprints))
 
