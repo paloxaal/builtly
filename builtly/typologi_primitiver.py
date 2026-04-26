@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 """Typologi-primitiver (uke 2 av arkitektkvalitet-løftet).
 
 Dette modulet definerer de tre bygningstypologiene som Builtly-motoren
@@ -116,7 +117,11 @@ class KvartalParameters:
     # Feltareal-krav
     min_field_area_m2: float = 10_000.0
     # O vs U (åpen karré)
-    prefer_open_side_for_single: bool = True  # enkelt-kvartal -> U-form
+    # ENDRET (uke 3): default FALSE — vi ønsker lukket O-ring som standard
+    # fordi U-formen gir visuelle artefakter i 3D (rendres som ikke-konveks
+    # polygon → pil-lignende extrusion). Kan fortsatt settes True eksplisitt
+    # hvis konseptet krever åpen karré.
+    prefer_open_side_for_single: bool = False
 
 
 PROFILE_LAMELL: Dict[MasterplanProfile, LamellParameters] = {
@@ -277,6 +282,7 @@ def plan_lamell_for_field(
     profile: MasterplanProfile = MasterplanProfile.FORSTAD,
     axes_corridor_polygons: Optional[List[Polygon]] = None,
     orientation_deg: float = 0.0,
+    tight_mode: bool = False,
 ) -> TypologiPlan:
     """Plasser lameller i parallelle rader i et delfelt.
 
@@ -290,10 +296,23 @@ def plan_lamell_for_field(
       4. Hver lamell: lengde i [length_min, length_max], dybde
          depth_preferred_m.
       5. Bestem antall og etasjer for å matche target_bra.
+
+    tight_mode (uke 4): reduserer gap_between og gap_end_to_end med
+    ~25%, og tillater 1.4x BRA-overskridelse — gir tettere lineær
+    struktur som matcher "lineært blandet boliggrep"-konseptet.
     """
     params = PROFILE_LAMELL[profile]
     floors_min = floors_min if floors_min is not None else params.floors_default_min
     floors_max = floors_max if floors_max is not None else params.floors_default_max
+
+    # tight_mode: reduser gap for tettere plassering
+    if tight_mode:
+        # 25% reduksjon i gaps — går fra 20m til 15m mellom rader, 12m til 9m mellom ender
+        gap_between = params.gap_between_m * 0.75
+        gap_end_to_end = params.gap_end_to_end_m * 0.75
+    else:
+        gap_between = params.gap_between_m
+        gap_end_to_end = params.gap_end_to_end_m
 
     plan = TypologiPlan(typologi=TypologiKind.LAMELL)
 
@@ -315,15 +334,15 @@ def plan_lamell_for_field(
 
     # Antall rader (parallelle lameller i dybderetning)
     # rad_pitch = lamell_dybde + gap_between
-    rad_pitch = params.depth_preferred_m + params.gap_between_m
-    n_rows = max(1, int((short_span_m + params.gap_between_m) / rad_pitch))
+    rad_pitch = params.depth_preferred_m + gap_between
+    n_rows = max(1, int((short_span_m + gap_between) / rad_pitch))
 
     # Antall lameller per rad
     # kol_pitch = lamell_lengde + gap_end_to_end
     lamell_len_try = params.length_preferred_m
-    n_cols = max(1, int((long_span_m + params.gap_end_to_end_m) / (lamell_len_try + params.gap_end_to_end_m)))
+    n_cols = max(1, int((long_span_m + gap_end_to_end) / (lamell_len_try + gap_end_to_end)))
     # Juster lengden for å fylle raden jevnt
-    actual_len = (long_span_m - (n_cols - 1) * params.gap_end_to_end_m) / n_cols
+    actual_len = (long_span_m - (n_cols - 1) * gap_end_to_end) / n_cols
     actual_len = max(params.length_min_m, min(params.length_max_m, actual_len))
 
     # Beslutning: er dette et "infill"-scenarie (høy tetthet)?
@@ -337,7 +356,10 @@ def plan_lamell_for_field(
     avg_bra_per_lamell = actual_len * params.depth_preferred_m * avg_floors
     n_total = n_rows * n_cols
     if not is_infill and target_bra_m2 > 0 and avg_bra_per_lamell > 0:
+        # tight_mode: tillat 1.4x BRA-overskridelse for å få tettere struktur
         max_by_bra = max(1, int(round(target_bra_m2 / avg_bra_per_lamell)))
+        if tight_mode:
+            max_by_bra = max(max_by_bra, int(max_by_bra * 1.4))
         if n_total > max_by_bra:
             # Reduser rader først (lavere tetthet, bedre sol)
             while n_rows > 1 and n_rows * n_cols > max_by_bra:
@@ -354,8 +376,8 @@ def plan_lamell_for_field(
                 n_cols -= 1
 
     # Sentrer grid i bbox
-    total_cols_m = n_cols * actual_len + (n_cols - 1) * params.gap_end_to_end_m
-    total_rows_m = n_rows * params.depth_preferred_m + (n_rows - 1) * params.gap_between_m
+    total_cols_m = n_cols * actual_len + (n_cols - 1) * gap_end_to_end
+    total_rows_m = n_rows * params.depth_preferred_m + (n_rows - 1) * gap_between
 
     if lamell_is_horizontal:
         offset_x = minx + (width_m - total_cols_m) / 2.0
@@ -369,13 +391,13 @@ def plan_lamell_for_field(
     for row in range(n_rows):
         for col in range(n_cols):
             if lamell_is_horizontal:
-                x0 = offset_x + col * (actual_len + params.gap_end_to_end_m)
+                x0 = offset_x + col * (actual_len + gap_end_to_end)
                 y0 = offset_y + row * rad_pitch
                 x1 = x0 + actual_len
                 y1 = y0 + params.depth_preferred_m
             else:
                 x0 = offset_x + row * rad_pitch
-                y0 = offset_y + col * (actual_len + params.gap_end_to_end_m)
+                y0 = offset_y + col * (actual_len + gap_end_to_end)
                 x1 = x0 + params.depth_preferred_m
                 y1 = y0 + actual_len
             rect = box(x0, y0, x1, y1)
@@ -396,9 +418,10 @@ def plan_lamell_for_field(
     # Juster etasjer for å treffe target_bra
     _adjust_floors_to_target(plan, target_bra_m2, floors_min, floors_max)
     plan.recompute_totals()
+    tight_tag = " [tett]" if tight_mode else ""
     plan.notes.append(
         f"{len(plan.bygninger)} lameller á {actual_len:.0f}×{params.depth_preferred_m:.0f}m "
-        f"i {n_rows} rad(er) × {n_cols} kol"
+        f"i {n_rows} rad(er) × {n_cols} kol{tight_tag}"
     )
     return plan
 
@@ -609,10 +632,22 @@ def plan_karre_for_field(
     avg_floors = (floors_min + floors_max) / 2.0
     bra_per_karre = ring_footprint_area * avg_floors
 
+    # UKE 4-FORBEDRING: Prioriter flere komplette ringer over BRA-presisjon,
+    # men ikke overdriv. Gammel logikk ga én stor ring når arkitekturen ba om
+    # 2-4. Ny logikk tillater 1.5x BRA-overskridelse og 2+ ringer.
     n_total = n_rows * n_cols
+    field_is_large = (working_poly.area >= 8000.0)
+    wants_multi = (target_building_count and target_building_count >= 2)
+
     if target_bra_m2 > 0 and bra_per_karre > 0:
         max_by_bra = max(1, int(round(target_bra_m2 / bra_per_karre)))
-        while n_total > max_by_bra and (n_rows > 1 or n_cols > 1):
+        # Soft cap: tillat opp til 1.5x max_by_bra hvis feltet er stort ELLER
+        # target_building_count ≥ 2. For mindre felt/enkelt-bygg, hold streng cap.
+        if field_is_large or wants_multi:
+            soft_cap = max(max_by_bra, max(2, int(max_by_bra * 1.5)))
+        else:
+            soft_cap = max_by_bra
+        while n_total > soft_cap and (n_rows > 1 or n_cols > 1):
             if n_cols >= n_rows and n_cols > 1:
                 n_cols -= 1
             elif n_rows > 1:
@@ -620,6 +655,7 @@ def plan_karre_for_field(
             n_total = n_rows * n_cols
 
     if target_building_count and target_building_count > 0:
+        # target_building_count er en STERK signal — respekter den
         while n_total > target_building_count and (n_rows > 1 or n_cols > 1):
             if n_cols >= n_rows and n_cols > 1:
                 n_cols -= 1
@@ -672,26 +708,36 @@ def plan_karre_for_field(
             )
             plan.kvartaler.append(kv)
 
-            # Bygg ring-footprint som én polygon (outer - courtyard)
-            if courtyard.is_empty:
-                ring = outer
-            else:
-                ring = outer.difference(courtyard)
-            if hasattr(ring, "geoms"):
-                parts = [g for g in ring.geoms if isinstance(g, Polygon)]
-                if parts:
-                    ring = max(parts, key=lambda g: g.area)
-            if not isinstance(ring, Polygon) or ring.is_empty:
-                continue
-            plan.bygninger.append(Bygning(
-                bygg_id=f"K{idx}",
-                polygon=ring.buffer(0),
-                length_m=length_used,
-                depth_m=depth_used,
-                floors=floors_min,
-                typologi=TypologiKind.KARRE,
-                role="ring" if not open_side else "u_ring",
-            ))
+            # UKE 3-FIX: Produser ÉN Bygning per arm (nord/sør/øst/vest),
+            # ikke én ring-polygon. Årsak: rendering-laget (legacy_page_bridge
+            # ._coord_groups) plukker kun polygon.exterior — hull (gårdsrom)
+            # går tapt og rendres som solid klump. 4 separate armer rendres
+            # korrekt som 4 avlange bygg rundt gårdsrom.
+            #
+            # Dim per arm:
+            #   nord/sør-arm: length × arm_depth (f.eks. 50×12m)
+            #   øst/vest-arm: arm_depth × inner_depth (f.eks. 12×4m for 28m karré)
+            #
+            # Arm-bygninger får samme floors som ringen. _adjust_floors_to_target
+            # justerer senere etasjer for å treffe BRA.
+            karre_sub_idx = 0
+            for arm_side, arm_poly in arms.items():
+                if arm_poly is None or arm_poly.is_empty or arm_poly.area < 8.0:
+                    continue
+                # Dimensjoner for denne armen (for dim-label)
+                minx, miny, maxx, maxy = arm_poly.bounds
+                arm_length = max(maxx - minx, maxy - miny)
+                arm_depth = min(maxx - minx, maxy - miny)
+                karre_sub_idx += 1
+                plan.bygninger.append(Bygning(
+                    bygg_id=f"K{idx}{arm_side[0].upper()}",  # f.eks. K1N, K1S, K1E, K1W
+                    polygon=arm_poly.buffer(0),
+                    length_m=arm_length,
+                    depth_m=arm_depth,
+                    floors=floors_min,
+                    typologi=TypologiKind.KARRE,
+                    role=f"arm_{arm_side}",
+                ))
 
     _adjust_floors_to_target(plan, target_bra_m2, floors_min, floors_max)
     plan.recompute_totals()
@@ -956,6 +1002,172 @@ def select_typology_for_field(
             f"i {field_area:.0f} m² → punkthus")
 
 
+# ---------------------------------------------------------------------------
+# KLYNGE-planner (bygg rundt sentralt grønt fellesrom)
+# ---------------------------------------------------------------------------
+
+
+def plan_klynge_rundt_gront_for_field(
+    field_poly: Polygon,
+    *,
+    target_bra_m2: float,
+    target_building_count: int = 0,
+    floors_min: Optional[int] = None,
+    floors_max: Optional[int] = None,
+    profile: MasterplanProfile = MasterplanProfile.FORSTAD,
+    axes_corridor_polygons: Optional[List[Polygon]] = None,
+    green_ratio: float = 0.30,
+) -> TypologiPlan:
+    """Plasser bygg i klynge rundt et sentralt reservert grønt rom.
+
+    Algoritme:
+    1. Reserver sentral elliptisk grønn sone (green_ratio av feltareal, min 400m²)
+    2. Plasser bygninger i 8 posisjoner langs ytterringen (N, NE, E, SE, S, SW, W, NW)
+    3. Orienter hver bygning tangentialt til det grønne rommet
+    4. Bygg-type avhenger av posisjon:
+       - Hjørner (NE, SE, SW, NW): punkthus 20×20m
+       - Kant-sentrum (N, S): lamell 50×13m, orientert tangentialt
+       - Kant-sentrum (E, W): lamell 50×13m, orientert tangentialt
+    5. target_building_count reduserer kvantumet
+
+    Dette gir klassisk "park-kvartal"-struktur der bygg former en ramme
+    rundt det grønne fellesrommet, åpen både visuelt og fysisk.
+
+    NB: Den sentrale grønne sonen blir synlig som "hull" i delfelt-wash i
+    arkitekturdiagrammet (ingen bygg inni den). I 3D er det bare fravær
+    av bygg der.
+    """
+    params_lamell = PROFILE_LAMELL[profile]
+    params_punkt = PROFILE_PUNKTHUS[profile]
+
+    # Bruk minste floors som default
+    if floors_min is None:
+        floors_min = min(params_lamell.floors_default_min, params_punkt.floors_default_min)
+    if floors_max is None:
+        floors_max = max(params_lamell.floors_default_max, params_punkt.floors_default_max)
+
+    plan = TypologiPlan(typologi=TypologiKind.PUNKTHUS)  # klynge = mix, men reg. som punkthus-base
+
+    working_poly = _subtract_corridors(field_poly, axes_corridor_polygons)
+    bbox = _bbox_inside_field(working_poly, setback_m=3.0)
+    if bbox is None:
+        plan.notes.append(f"Kunne ikke plassere klynge (felt {field_poly.area:.0f} m² for smalt)")
+        return plan
+    minx, miny, maxx, maxy = bbox
+    cx = (minx + maxx) / 2.0
+    cy = (miny + maxy) / 2.0
+    width_m = maxx - minx
+    height_m = maxy - miny
+
+    # Dimensjoner for sentral grønn sone (elliptisk; vi bruker bbox-tilnærming)
+    field_area = working_poly.area
+    green_area = max(400.0, field_area * green_ratio)
+
+    # Adaptiv: små felt trenger mindre grønnsone og kortere bygg-ring
+    # For felt under ~5000m² bruker vi kompakt ring med mindre bygg.
+    compact_mode = field_area < 5000.0
+
+    if compact_mode:
+        # Kompakt: grønn sone 10-15m radius, bygg ring tett rundt
+        green_r_x = min(width_m * 0.25, 15.0)
+        green_r_y = min(height_m * 0.25, 15.0)
+        green_r_x = max(6.0, green_r_x)
+        green_r_y = max(6.0, green_r_y)
+    else:
+        # Grønn sone som ellipse: halv-akser proporsjonal til bbox-aspect
+        green_r_x = min(width_m * 0.30, (green_area / math.pi) ** 0.5)
+        green_r_y = min(height_m * 0.30, (green_area / math.pi) ** 0.5)
+        green_r_x = max(10.0, green_r_x)
+        green_r_y = max(10.0, green_r_y)
+
+    # Ring-radius for bygg: litt utenfor grønnsonen, med buffer
+    # I kompakt-modus bruker vi smalere lameller for å passe
+    lamell_L = params_lamell.length_preferred_m if not compact_mode else min(45.0, width_m - 10.0)
+    lamell_D = params_lamell.depth_preferred_m
+    ring_buffer = 5.0 if compact_mode else 6.0
+    ring_r_x = green_r_x + ring_buffer + lamell_D / 2.0
+    ring_r_y = green_r_y + ring_buffer + lamell_D / 2.0
+
+    # Definer kandidat-plasseringer (8 posisjoner)
+    # Hver: (vinkel i grader fra øst, type, orientering)
+    #   - LAMELL: tangential til ringen (fasade mot grønt)
+    #   - PUNKTHUS: akseparallel
+    candidates = [
+        (90,  "lamell", "N"),   # nord, tangential horisontal
+        (45,  "punkt", "NE"),
+        (0,   "lamell", "E"),   # øst, tangential vertikal
+        (315, "punkt", "SE"),
+        (270, "lamell", "S"),   # sør
+        (225, "punkt", "SW"),
+        (180, "lamell", "W"),   # vest
+        (135, "punkt", "NW"),
+    ]
+
+    placed: List[Bygning] = []
+    idx_lamell = 0
+    idx_punkt = 0
+
+    for angle_deg, kind, label in candidates:
+        rad = math.radians(angle_deg)
+        x = cx + ring_r_x * math.cos(rad)
+        y = cy + ring_r_y * math.sin(rad)
+
+        if kind == "lamell":
+            # Lamell: orienter langsiden tangentialt til grønnsonen
+            # tangent-vinkel = angle + 90°, men vi vil ha akseparallel hvor mulig
+            L = lamell_L
+            D = lamell_D
+            # Bruk enkel akseparallel: N/S lameller horisontalt, E/W vertikalt
+            if label in ("N", "S"):
+                # Horisontal lamell (lang side øst-vest)
+                rect = box(x - L/2, y - D/2, x + L/2, y + D/2)
+            else:  # E, W
+                # Vertikal lamell (lang side nord-sør)
+                rect = box(x - D/2, y - L/2, x + D/2, y + L/2)
+            if not working_poly.buffer(1.0).covers(rect):
+                continue
+            idx_lamell += 1
+            placed.append(Bygning(
+                bygg_id=f"L{idx_lamell}",
+                polygon=rect.buffer(0),
+                length_m=L,
+                depth_m=D,
+                floors=floors_min,
+                typologi=TypologiKind.LAMELL,
+                role=f"park_edge_{label.lower()}",
+            ))
+        else:  # punkthus i hjørnene
+            S = params_punkt.side_m
+            rect = box(x - S/2, y - S/2, x + S/2, y + S/2)
+            if not working_poly.buffer(1.0).covers(rect):
+                continue
+            idx_punkt += 1
+            placed.append(Bygning(
+                bygg_id=f"P{idx_punkt}",
+                polygon=rect.buffer(0),
+                length_m=S,
+                depth_m=S,
+                floors=floors_min + 1,  # punkthus litt høyere (landmark)
+                typologi=TypologiKind.PUNKTHUS,
+                role=f"park_corner_{label.lower()}",
+            ))
+
+    # Cap totalt bygg basert på target_building_count (hvis satt)
+    if target_building_count > 0 and len(placed) > target_building_count:
+        # Beholde de som er best plasserte: prioriter kant-lameller og diagonal-punkthus
+        # Alternative 1: beholde bare hver annen (opprettholder symmetri)
+        placed = placed[:target_building_count]
+
+    plan.bygninger = placed
+    _adjust_floors_to_target(plan, target_bra_m2, floors_min, floors_max)
+    plan.recompute_totals()
+    plan.notes.append(
+        f"{len(placed)} bygg rundt grønt fellesrom (ca {green_area:.0f}m² grønt, "
+        f"ring {ring_r_x*2:.0f}×{ring_r_y*2:.0f}m)"
+    )
+    return plan
+
+
 def plan_typologi_for_field(
     field_poly: Polygon,
     *,
@@ -966,11 +1178,16 @@ def plan_typologi_for_field(
     floors_max: Optional[int] = None,
     profile: MasterplanProfile = MasterplanProfile.FORSTAD,
     axes_corridor_polygons: Optional[List[Polygon]] = None,
+    tight_mode: bool = False,
 ) -> TypologiPlan:
     """Orkestrator: velg typologi og lag plan.
 
     Kjører selector, kaller rett plan-funksjon, og lagrer
     fallback_reason hvis selector valgte noe annet enn ønsket.
+
+    tight_mode: signaliserer til plan_lamell_for_field at vi ønsker
+    tettere plassering (mindre gaps). Brukes for "lineært blandet"-
+    konseptet der hovedgrepet er tette, parallelle lameller.
     """
     chosen, reason = select_typology_for_field(
         field_poly,
@@ -989,6 +1206,7 @@ def plan_typologi_for_field(
             floors_max=floors_max,
             profile=profile,
             axes_corridor_polygons=axes_corridor_polygons,
+            tight_mode=tight_mode,
         )
     elif chosen == TypologiKind.PUNKTHUS:
         plan = plan_punkthus_for_field(
