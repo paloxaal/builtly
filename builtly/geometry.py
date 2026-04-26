@@ -2342,9 +2342,7 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     elif getattr(field, "design_karre_shape", None) in {"uo", "uo_chamfered"}:
         open_edges = [primary_side]
 
-    # Runde 3: litt strammere reserve for urbane karréer gir høyere utnyttelse
-    # uten å miste gårdsrommet som lesbart hovedgrep.
-    scale = max(0.40, min(0.72, reserve_ratio ** 0.5))
+    scale = max(0.44, min(0.78, reserve_ratio ** 0.5))
     courtyard = _safe_center_rect(core, width * scale, height * scale)
     if courtyard is None:
         courtyard = _safe_center_rect(core, width * 0.56, height * 0.56)
@@ -2919,7 +2917,6 @@ def _place_karre_from_frontage(skeleton: FieldSkeleton, field: Delfelt, spec: Ba
         reserve = skeleton.courtyard_reserve
         rx0, ry0, rx1, ry1 = reserve.bounds
         arm = float(spec.segment_depth_m.midpoint() if spec.segment_depth_m else 12.0)
-        arm = max(12.0, arm * 1.08)
         outer = box(rx0 - arm, ry0 - arm, rx1 + arm, ry1 + arm).intersection(core).buffer(0)
         core = _largest_polygon(outer) or core
     cand = _evaluate_karre_shapes(core, field, spec)
@@ -3448,18 +3445,17 @@ def _split_core_for_multi_clusters(
             return None
         trimmed = piece.buffer(-smau).buffer(0)
         cand = _largest_polygon(trimmed) or _largest_polygon(piece) or piece
-        if cand is None or cand.is_empty or cand.area < 300.0:
+        if cand is None or cand.is_empty or cand.area < 450.0:
             return None
         return cand
 
     parts: List[Polygon] = []
-    # Runde 3: litt mindre minimumsceller gjør at flere mellomstore felt faktisk
-    # kan deles i 2-4 proporsjonale karréer rundt et felles uterom.
-    desired_w = 58.0
-    desired_h = 52.0
-    min_cell_w = 34.0
-    min_cell_h = 30.0
-    edge_margin = max(3.0, min(8.0, float(gap_m or 8.0) * 0.85))
+    # Ønsket celle gir rom for 50–60 m fasade + 25–35 m side i U/O-form.
+    desired_w = 62.0
+    desired_h = 56.0
+    min_cell_w = 42.0
+    min_cell_h = 38.0
+    edge_margin = max(4.0, min(10.0, float(gap_m or 8.0)))
 
     if cluster_count >= 4 and width >= central_void + 2 * min_cell_w and height >= central_void + 2 * min_cell_h:
         cell_w = min(desired_w, max(min_cell_w, (width - central_void - 2 * edge_margin) / 2.0))
@@ -3578,9 +3574,7 @@ def _scale_cluster_footprints_to_target(
     if target_fp <= 1.0:
         return list(polys)
     scale = math.sqrt(target_fp / total_fp)
-    # Runde 3: karré-klynger får noe større skalering mot mål-BRA enn andre
-    # typologier, slik at volumene ikke stopper unødig tidlig på for lav BYA.
-    max_scale = 1.24 if getattr(field, 'typology', None) == Typology.KARRE else 1.08
+    max_scale = 1.18 if getattr(field, 'typology', None) == Typology.KARRE else 1.08
     scale = max(0.78, min(max_scale, scale))
     if abs(scale - 1.0) < 1e-3:
         return list(polys)
@@ -3597,13 +3591,11 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
         return None
 
     gap_m = max(8.0, float(getattr(field, "gap_between_m", 0.0) or 8.0))
-    central_void_m = float(getattr(field, "central_void_m", 0.0) or (24.0 if cluster_target >= 4 else 17.0))
+    central_void_m = float(getattr(field, "central_void_m", 0.0) or (22.0 if cluster_target >= 4 else 18.0))
     cluster_counts = [cluster_target]
     if cluster_target >= 3:
         cluster_counts.append(cluster_target - 1)
-    if cluster_target >= 2:
-        cluster_counts.append(cluster_target + 1)
-    cluster_counts = [c for c in dict.fromkeys(cluster_counts) if 2 <= c <= 7]
+    cluster_counts = [c for c in dict.fromkeys(cluster_counts) if c >= 2]
 
     candidates: List[_PlacementCandidate] = []
     for cluster_count in cluster_counts:
@@ -3627,8 +3619,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
                 courtyard_open_side=open_to_common,
                 view_corridor_count=max(0, int(getattr(field, "view_corridor_count", 0) or 0) - 1),
                 micro_band_count=max(2, int(getattr(field, "micro_band_count", 0) or 2) - 1),
-                courtyard_reserve_ratio=min(0.28, max(0.16, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.22))),
-                target_bya_pct=max(float(getattr(field, "target_bya_pct", 0.0) or 0.0), 44.0),
+                courtyard_reserve_ratio=min(0.30, max(0.18, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.24))),
             )
             sub_cand = _best_subcore_karre_candidate(sc, sub_field, spec)
             if sub_cand is None:
@@ -3645,11 +3636,9 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
         total_fp_scaled = sum(float(fp.area) for fp in scaled_footprints) or 1.0
         base_f = int(math.ceil(float(field.target_bra) / total_fp_scaled)) if field.target_bra > 0 else field.floors_min
         base_f = max(field.floors_min, min(field.floors_max, base_f))
-        # Runde 3: hvis klyngene fortsatt leverer for lite BRA eller for få bygg,
-        # toppes etasjetallet mer offensivt opp før kandidaten forkastes.
-        if len(scaled_footprints) < cluster_target or total_fp_scaled * base_f < float(field.target_bra) * 0.90:
-            base_f = max(base_f, field.floors_max - (0 if len(scaled_footprints) < cluster_target else 1))
-        if total_fp_scaled * base_f < float(field.target_bra) * 0.82:
+        # Hvis vi fortsatt ligger under mål eller realiserer færre bygg enn ønsket,
+        # skal etasjeantallet kompensere før vi aksepterer lav BRA.
+        if len(scaled_footprints) < cluster_target or total_fp_scaled * base_f < float(field.target_bra) * 0.86:
             base_f = field.floors_max
         floors_per_final = [base_f for _ in scaled_footprints]
         candidate = _evaluate_candidate(
@@ -3670,7 +3659,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
 
     def _cluster_score(item: _PlacementCandidate) -> Tuple[float, float, float]:
         penalty = _karre_candidate_penalty(item, field.target_bra)
-        count_pen = abs(len(item.footprints) - cluster_target) * float(field.target_bra) * 0.05
+        count_pen = abs(len(item.footprints) - cluster_target) * float(field.target_bra) * 0.03
         areas = [float(fp.area) for fp in item.footprints if fp is not None and not fp.is_empty]
         diversity_bonus = -sum(areas) * 0.01 if areas else 0.0
         return (penalty + count_pen, diversity_bonus, -float(item.total_bra))
