@@ -311,20 +311,40 @@ def _pil_font(size: int = 14, bold: bool = False) -> "ImageFont.FreeTypeFont":
 
 
 def clean_pdf_text(text: Any) -> str:
+    """Sanitize text for PDF output.
+
+    FPDF can still fall back to Helvetica even if DejaVu exists locally.
+    Therefore normalize fragile characters such as arrows before every PDF write,
+    and only keep broader Unicode when the active PDF font supports it.
+    """
     if text is None:
         return ""
     text = str(text)
-    # Universelle typografi-erstatninger
-    text = text.replace("\u2013", "-").replace("\u2014", "-")
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
-    text = text.replace("\u2026", "...").replace("\u2022", "*")
-    if HAS_DEJAVU:
+    active_font = str(globals().get("PDF_ACTIVE_FONT", PDF_FONT)).lower()
+    uses_unicode_font = active_font != "helvetica"
+    replacements = {
+        "\u2192": "->",
+        "\u2190": "<-",
+        "\u2194": "<->",
+        "\u21d2": "=>",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u2026": "...",
+        "\u2022": "*",
+        "\u00b7": "-",
+        "\u00b2": "2",
+        "\u00b3": "3",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    if uses_unicode_font:
         return text
-    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
-    text = text.replace("\u00b2", "2").replace("\u00b3", "3")
     return text.encode("latin-1", "replace").decode("latin-1")
-
 
 def ironclad_text_formatter(text: str) -> str:
     text = str(text).replace("$", "").replace("*", "").replace("_", "")
@@ -4406,243 +4426,278 @@ def _draw_badge(
 
 
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """Render et mer arkitektfaglig axonometri-diagram med mål på byggene."""
+    """Render a clean 2D concept overview.
+
+    The previous axonometric overview made the massing hard to read. This view is
+    intentionally top-down: it prioritizes urban structure, public realm,
+    courtyard/park rooms, sight lines and building footprints.
+    """
     canvas_w, canvas_h = 1500, 980
     right_panel_w = 330
-    margin = 36
-    stage_x0, stage_y0 = margin, 118
-    stage_x1, stage_y1 = canvas_w - right_panel_w - 28, canvas_h - 64
+    header_h = 116
+    footer_h = 58
+    margin = 28
+    map_x0, map_y0 = margin, header_h
+    map_x1 = canvas_w - right_panel_w - margin
+    map_y1 = canvas_h - footer_h
 
-    img = Image.new('RGBA', (canvas_w, canvas_h), (244, 244, 241, 255))
+    img = Image.new('RGBA', (canvas_w, canvas_h), (246, 245, 241, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
-    font_tiny = _pil_font(14)
-    font_micro = _pil_font(16)
-    font_small = _pil_font(18)
-    font_body = _pil_font(22)
+
+    font_hero = _pil_font(56, bold=True)
     font_title = _pil_font(28)
-    font_hero = _pil_font(70, bold=True)
+    font_section = _pil_font(19, bold=True)
+    font_body = _pil_font(17)
+    font_small = _pil_font(14)
+    font_tiny = _pil_font(12)
 
     geometry = option.geometry or {}
     site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = geometry.get('buildable_polygon_coords') or site_coords
     massing_parts = geometry.get('massing_parts', []) or []
     neighbor_polys = geometry.get('neighbor_polygons', []) or []
     field_polys = geometry.get('field_polygons', []) or []
     public_polys = geometry.get('public_realm_polygons', []) or []
     courtyard_polys = geometry.get('courtyard_polygons', []) or []
     corridor_polys = geometry.get('view_corridor_polygons', []) or []
+    macro_axes = geometry.get('macro_axes', []) or []
+    symmetry_axes = geometry.get('symmetry_axes', []) or []
 
     site_pts = flatten_coord_groups(site_coords)
-    if not site_pts:
-        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
-
-    focus_pts: List[List[float]] = list(site_pts)
+    buildable_pts = flatten_coord_groups(buildable_coords)
+    focus_pts: List[List[float]] = list(site_pts or buildable_pts)
     for seq in (field_polys, public_polys, courtyard_polys, corridor_polys):
         for item in seq:
             focus_pts.extend(flatten_coord_groups(item.get('coords', [])))
     for part in massing_parts:
         focus_pts.extend(flatten_coord_groups(part.get('coords', [])))
     if not focus_pts:
-        focus_pts = list(site_pts)
+        focus_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
 
-    focus_xs = [p[0] for p in focus_pts]
-    focus_ys = [p[1] for p in focus_pts]
-    focus_cx = (min(focus_xs) + max(focus_xs)) / 2.0
-    focus_cy = (min(focus_ys) + max(focus_ys)) / 2.0
-    focus_span = max(max(focus_xs) - min(focus_xs), max(focus_ys) - min(focus_ys), 1.0)
+    fx = [p[0] for p in focus_pts]
+    fy = [p[1] for p in focus_pts]
+    focus_cx = (min(fx) + max(fx)) / 2.0
+    focus_cy = (min(fy) + max(fy)) / 2.0
+    focus_span = max(max(fx) - min(fx), max(fy) - min(fy), 1.0)
 
-    context_limit = focus_span * 1.8
     filtered_neighbors = []
     for neighbor in neighbor_polys:
-        coords = flatten_coord_groups(neighbor.get('coords', []))
+        coords = flatten_coord_groups(neighbor.get('coords') or neighbor.get('polygon_coords') or [])
         if len(coords) < 3:
             continue
         avg_x = sum(p[0] for p in coords) / len(coords)
         avg_y = sum(p[1] for p in coords) / len(coords)
-        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= context_limit:
-            filtered_neighbors.append(neighbor)
+        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= focus_span * 1.8:
+            filtered_neighbors.append({'coords': coords})
 
     all_pts: List[List[float]] = list(focus_pts)
     for neighbor in filtered_neighbors:
-        all_pts.extend(flatten_coord_groups(neighbor.get('coords', [])))
+        all_pts.extend(neighbor['coords'])
     xs = [p[0] for p in all_pts]
     ys = [p[1] for p in all_pts]
-    cx = (min(xs) + max(xs)) / 2.0
-    cy = (min(ys) + max(ys)) / 2.0
-    span = max(max(xs) - min(xs), max(ys) - min(ys), focus_span * 1.08, 1.0)
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+    pad_x = max(8.0, span_x * 0.07)
+    pad_y = max(8.0, span_y * 0.07)
+    minx -= pad_x
+    maxx += pad_x
+    miny -= pad_y
+    maxy += pad_y
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
 
-    ISO_ANGLE = math.radians(30)
-    COS_A = math.cos(ISO_ANGLE)
-    SIN_A = math.sin(ISO_ANGLE)
-    Z_SCALE = 1.12
-    target_screen_span = min((stage_x1 - stage_x0) * 0.88, (stage_y1 - stage_y0) * 0.96)
-    pixel_scale = target_screen_span / max(span * 1.08, 1.0)
-    screen_cx = (stage_x0 + stage_x1) / 2.0
-    screen_cy = (stage_y0 + stage_y1) / 2.0 + 44
+    inner_pad = 26
+    sx0, sy0 = map_x0 + inner_pad, map_y0 + inner_pad
+    sx1, sy1 = map_x1 - inner_pad, map_y1 - inner_pad
+    scale = min((sx1 - sx0) / span_x, (sy1 - sy0) / span_y)
 
-    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
-        dx = (x - cx) * pixel_scale
-        dy = (y - cy) * pixel_scale
-        sx = screen_cx + (dx - dy) * COS_A
-        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
-        return sx, sy
+    def project(pt: Any) -> Tuple[float, float]:
+        x, y = float(pt[0]), float(pt[1])
+        return sx0 + (x - minx) * scale, sy1 - (y - miny) * scale
 
-    def iso_pts(coords, z=0.0):
-        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
-
-    def darken(c, factor: float):
-        return (int(c[0] * factor), int(c[1] * factor), int(c[2] * factor), c[3] if len(c) > 3 else 255)
-
-    def draw_flat(coords, fill, outline=None, width=1):
-        pts = iso_pts(coords)
-        if len(pts) < 3:
-            return
-        draw.polygon(pts, fill=fill, outline=outline)
-        if outline and width > 1:
-            draw.line(pts + [pts[0]], fill=outline, width=width)
-
-    def draw_extruded(coords, h, top_c, side_c, out_c, width=1):
-        if not coords or len(coords) < 3:
-            return
-        top_pts = iso_pts(coords, h)
-        base_pts = iso_pts(coords, 0.0)
-        n = min(len(coords), len(top_pts), len(base_pts))
-        if n < 3:
-            return
-        for i in range(n):
-            j = (i + 1) % n
-            bt0, bt1 = base_pts[i], base_pts[j]
-            tp0, tp1 = top_pts[i], top_pts[j]
-            edge_dx = bt1[0] - bt0[0]
-            edge_dy = bt1[1] - bt0[1]
-            face = darken(side_c, 0.72) if edge_dy < 0 or (abs(edge_dy) < 1e-6 and edge_dx > 0) else side_c
-            draw.polygon([bt0, bt1, tp1, tp0], fill=face, outline=out_c)
-        draw.polygon(top_pts, fill=top_c, outline=out_c)
-        if width > 1:
-            draw.line(top_pts + [top_pts[0]], fill=out_c, width=width)
+    def pts_from_coords(coords: Any) -> List[Tuple[float, float]]:
+        pts = [project(p) for p in flatten_coord_groups(coords) if len(p) >= 2]
+        return pts if len(pts) >= 3 else []
 
     def label_bbox(text_value: str, font_obj) -> Tuple[int, int]:
         try:
-            bbox = font_obj.getbbox(text_value)
+            bbox = font_obj.getbbox(str(text_value))
             return bbox[2] - bbox[0], bbox[3] - bbox[1]
         except Exception:
-            return (len(text_value) * 10, 16)
+            return (len(str(text_value)) * 8, 12)
+
+    def draw_poly(coords: Any, fill, outline=None, width: int = 1):
+        pp = pts_from_coords(coords)
+        if len(pp) < 3:
+            return
+        draw.polygon(pp, fill=fill, outline=outline)
+        if outline and width > 1:
+            draw.line(pp + [pp[0]], fill=outline, width=width)
+
+    def draw_line(coords: Any, fill, width: int = 2, dash: bool = False):
+        pp = [project(p) for p in coords if len(p) >= 2]
+        if len(pp) < 2:
+            return
+        if not dash:
+            draw.line(pp, fill=fill, width=width)
+            return
+        for a, b in zip(pp, pp[1:]):
+            seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
+            if seg_len <= 0:
+                continue
+            step = 12.0
+            s = 0.0
+            on = True
+            while s < seg_len:
+                e = min(seg_len, s + step * 0.62)
+                if on:
+                    x1 = a[0] + (b[0] - a[0]) * (s / seg_len)
+                    y1 = a[1] + (b[1] - a[1]) * (s / seg_len)
+                    x2 = a[0] + (b[0] - a[0]) * (e / seg_len)
+                    y2 = a[1] + (b[1] - a[1]) * (e / seg_len)
+                    draw.line([(x1, y1), (x2, y2)], fill=fill, width=width)
+                on = not on
+                s += step
 
     typo_colors = {
-        'Lamell': (64, 126, 188, 245),
-        'Punkthus': (74, 184, 179, 245),
-        'Karré': (66, 103, 155, 245),
-        'Rekkehus': (92, 149, 120, 245),
-        'Tun': (116, 132, 164, 245),
+        'Lamell': (205, 166, 121, 232),
+        'Punkthus': (176, 194, 147, 232),
+        'Karré': (229, 219, 178, 236),
+        'Rekkehus': (181, 201, 158, 232),
+        'Tun': (196, 183, 150, 232),
+        'Podium + Tårn': (188, 118, 96, 232),
+        'Tårn': (83, 145, 191, 232),
+    }
+    typo_outline = {
+        'Lamell': (138, 101, 64, 255),
+        'Punkthus': (105, 128, 88, 255),
+        'Karré': (144, 132, 86, 255),
+        'Rekkehus': (116, 138, 94, 255),
+        'Tun': (126, 116, 93, 255),
+        'Podium + Tårn': (126, 74, 60, 255),
+        'Tårn': (52, 94, 130, 255),
     }
 
-    draw.rectangle([(0, 0), (canvas_w, canvas_h)], fill=(244, 244, 241, 255))
-    draw.rounded_rectangle([(stage_x0 - 10, stage_y0 - 12), (stage_x1 + 12, stage_y1 + 12)], radius=24, fill=(241, 241, 238, 255), outline=(221, 219, 212, 255))
-    draw.rounded_rectangle([(canvas_w - right_panel_w + 8, 24), (canvas_w - 24, canvas_h - 24)], radius=24, fill=(239, 239, 235, 255), outline=(222, 220, 213, 255))
+    # page frames
+    draw.rounded_rectangle([(22, 20), (canvas_w - 22, canvas_h - 20)], radius=26, fill=(250, 250, 247, 255), outline=(228, 226, 220, 255))
+    draw.rounded_rectangle([(map_x0, map_y0), (map_x1, map_y1)], radius=22, fill=(244, 244, 240, 255), outline=(222, 220, 214, 255))
+    panel_x0 = canvas_w - right_panel_w
+    draw.rounded_rectangle([(panel_x0, 38), (canvas_w - 24, canvas_h - 28)], radius=24, fill=(242, 241, 237, 255), outline=(222, 220, 214, 255))
 
-    site_iso = iso_pts(site_pts)
-    if len(site_iso) >= 3:
-        draw.polygon(site_iso, fill=(215, 221, 211, 165), outline=(191, 104, 95, 210))
-        draw.line(site_iso + [site_iso[0]], fill=(191, 104, 95, 210), width=2)
+    # context
+    for neighbor in filtered_neighbors:
+        draw_poly(neighbor['coords'], fill=(219, 219, 217, 255), outline=(201, 202, 199, 225), width=1)
+
+    # base layers
+    draw_poly(site_coords, fill=(227, 232, 220, 128), outline=(220, 108, 96, 255), width=3)
+    draw_poly(buildable_coords, fill=(222, 236, 241, 88), outline=(98, 158, 197, 220), width=2)
 
     for item in field_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (230, 222, 196, 105), (156, 148, 129, 92), 1)
+        draw_poly(item.get('coords', []), fill=(235, 227, 196, 95), outline=(177, 168, 130, 150), width=1)
     for item in public_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (188, 207, 180, 160), (142, 160, 133, 120), 1)
+        draw_poly(item.get('coords', []), fill=(199, 219, 191, 155), outline=(142, 169, 132, 170), width=1)
     for item in courtyard_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (242, 233, 185, 170), (186, 176, 114, 120), 1)
+        draw_poly(item.get('coords', []), fill=(224, 235, 202, 180), outline=(148, 175, 128, 190), width=1)
     for item in corridor_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_flat(coords, (255, 186, 118, 55), (235, 145, 60, 130), 2)
+        draw_poly(item.get('coords', []), fill=(255, 183, 107, 65), outline=(230, 143, 61, 170), width=2)
 
-    context_vols = []
-    for neighbor in filtered_neighbors:
-        coords = flatten_coord_groups(neighbor.get('coords', []))
-        if len(coords) < 3:
-            continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
-        context_vols.append((avg_x + avg_y, coords, float(neighbor.get('height_m', 9.0) or 9.0)))
-    for _, coords, h in sorted(context_vols, key=lambda item: item[0]):
-        draw_extruded(coords, h, (228, 228, 226, 255), (214, 214, 211, 255), (202, 202, 198, 160), 1)
+    # axes and sightlines
+    for axis in macro_axes:
+        if axis.get('coords'):
+            draw_line(axis.get('coords'), fill=(73, 111, 152, 125), width=4, dash=False)
+    for axis in symmetry_axes:
+        if axis.get('coords'):
+            draw_line(axis.get('coords'), fill=(73, 180, 220, 135), width=2, dash=True)
 
     proposed = []
     for idx, part in enumerate(massing_parts):
         coords = flatten_coord_groups(part.get('coords', []))
-        if len(coords) < 3:
+        pp = pts_from_coords(coords)
+        if len(pp) < 3:
             continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
         typ = part.get('typology', option.typology)
         base = part.get('color')
         if isinstance(base, list) and len(base) >= 3:
-            color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 235)
+            color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 232)
         else:
-            color = typo_colors.get(typ, (181, 148, 111, 245))
+            color = typo_colors.get(typ, (205, 166, 121, 232))
+        outline = typo_outline.get(typ, (125, 110, 84, 255))
+        try:
+            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            c = poly.centroid
+            center = project((c.x, c.y))
+        except Exception:
+            center = (sum(x for x, _ in pp) / len(pp), sum(y for _, y in pp) / len(pp))
         length_m, depth_m, area_m2 = _part_dimensions(part)
         proposed.append({
-            'sort': avg_x + avg_y,
             'idx': idx,
             'tag': _alpha_num_tag(idx),
-            'coords': coords,
-            'height_m': float(part.get('height_m', option.building_height_m)),
-            'color': color,
+            'pts': pp,
+            'center': center,
             'typology': typ,
-            'name': part.get('name', f'Hus {idx+1}'),
+            'color': color,
+            'outline': outline,
             'floors': int(part.get('floors', option.floors) or option.floors),
             'length_m': length_m,
             'depth_m': depth_m,
             'area_m2': area_m2,
         })
 
-    for part in sorted(proposed, key=lambda item: item['sort']):
-        top = part['color']
-        side = darken(part['color'], 0.84)
-        draw_extruded(part['coords'], part['height_m'], top, side, (116, 103, 86, 210), 2)
-        if len(proposed) <= 14:
-            avg_x = sum(p[0] for p in part['coords']) / len(part['coords'])
-            avg_y = sum(p[1] for p in part['coords']) / len(part['coords'])
-            roof_x, roof_y = iso_project(avg_x, avg_y, part['height_m'] + 1.4)
-            badge_y = roof_y - 24
-            draw.line([(roof_x, roof_y - 2), (roof_x, badge_y + 10)], fill=(66, 103, 155, 150), width=2)
-            _draw_badge(draw, (roof_x, badge_y), part['tag'], fill=(255, 255, 255, 230), outline=(66, 103, 155, 190), font=font_small)
+    for part in proposed:
+        shadow = [(x + 5, y + 4) for x, y in part['pts']]
+        draw.polygon(shadow, fill=(90, 90, 90, 32))
+        draw.polygon(part['pts'], fill=part['color'], outline=part['outline'])
+        draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
+        if len(part['pts']) >= 4:
+            draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
 
-    green_polys = public_polys or courtyard_polys
-    for item in green_polys[:14]:
+    for part in proposed[:12]:
+        cx, cy = part['center']
+        _draw_badge(draw, (cx, cy - 4), part['tag'], fill=(255, 255, 255, 232), outline=(84, 114, 145, 180), font=font_small, text_fill=(31, 55, 95, 255))
+
+    # trees, restrained
+    for item in (courtyard_polys or public_polys)[:16]:
         coords = flatten_coord_groups(item.get('coords', []))
         if len(coords) < 3:
             continue
         try:
-            poly = Polygon([(p[0], p[1]) for p in coords])
-            cent = poly.centroid
-            tx, ty = iso_project(float(cent.x), float(cent.y), 0.0)
-            draw.ellipse([(tx - 9, ty - 32), (tx + 9, ty - 14)], fill=(170, 202, 133, 235), outline=(128, 156, 101, 200))
-            draw.line([(tx, ty - 14), (tx, ty - 2)], fill=(110, 88, 58, 220), width=2)
+            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
+            c = poly.centroid
+            tx, ty = project((c.x, c.y))
+            draw.ellipse([(tx - 8, ty - 20), (tx + 8, ty - 4)], fill=(180, 209, 149, 225), outline=(131, 161, 104, 180))
+            draw.line([(tx, ty - 4), (tx, ty + 8)], fill=(112, 92, 66, 210), width=2)
         except Exception:
             continue
 
-    draw.text((38, 40), 'KONSEPT', fill=(65, 65, 62, 255), font=font_title)
-    draw.text((34, 72), 'OVERSIKT', fill=(28, 28, 28, 255), font=font_hero)
-    subtitle = 'Volumstudie med mål og typologisk kontroll'
-    draw.text((38, canvas_h - 52), subtitle, fill=(32, 32, 32, 255), font=font_title)
+    # header/footer
+    draw.text((42, 34), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
+    draw.text((38, 62), 'OVERSIKT', fill=(25, 25, 25, 255), font=font_hero)
+    draw.text((42, canvas_h - 44), '2D-konseptoversikt med bygg, uterom og siktlinjer', fill=(44, 44, 44, 255), font=font_title)
 
-    nx, ny = 72, 154
-    draw.line((nx, ny + 26, nx, ny - 12), fill=(55, 55, 55, 190), width=3)
-    draw.polygon([(nx, ny - 22), (nx - 8, ny - 6), (nx + 8, ny - 6)], fill=(55, 55, 55, 190))
-    draw.text((nx - 7, ny + 32), 'N', fill=(55, 55, 55, 190), font=font_small)
+    nx, ny = 70, 144
+    draw.line((nx, ny + 24, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
+    draw.polygon([(nx, ny - 18), (nx - 8, ny - 2), (nx + 8, ny - 2)], fill=(55, 55, 55, 200))
+    draw.text((nx - 7, ny + 30), 'N', fill=(55, 55, 55, 190), font=font_small)
 
-    panel_x = canvas_w - right_panel_w + 28
-    draw.text((panel_x, 56), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_title)
-    draw.text((panel_x, 104), option.typology.upper(), fill=(28, 28, 28, 255), font=font_body)
+    # panel
+    panel_x = panel_x0 + 22
+    unique_typos = []
+    for p in proposed:
+        typ = p['typology']
+        if typ not in unique_typos:
+            unique_typos.append(typ)
+    panel_typology = ', '.join(unique_typos) if unique_typos else option.typology
+    panel_typology = panel_typology.upper()
+    if len(panel_typology) > 24:
+        panel_typology = panel_typology.replace(', ', ',\n')
+
+    draw.text((panel_x, 58), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_section)
+    draw.multiline_text((panel_x, 100), panel_typology, fill=(28, 28, 28, 255), font=font_body, spacing=3)
     hint = _typology_dimension_hint(option.typology)
     if hint:
-        draw.text((panel_x, 136), hint, fill=(92, 90, 84, 255), font=font_micro)
+        draw.text((panel_x, 148), hint, fill=(94, 92, 86, 255), font=font_small)
 
     summary_rows = [
         ('BTA', f"{option.gross_bta_m2:,.0f} m²".replace(',', ' ')),
@@ -4653,38 +4708,33 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         ('Score', f"{option.score:.0f}/100"),
         ('Sol', f"{option.solar_score:.0f}/100"),
     ]
-    py = 188
+    py = 198
     for key, value in summary_rows:
-        draw.text((panel_x, py), key, fill=(94, 92, 86, 255), font=font_micro)
-        draw.text((panel_x + 108, py), value, fill=(30, 30, 30, 255), font=font_micro)
-        py += 30
+        draw.text((panel_x, py), key, fill=(96, 94, 90, 255), font=font_small)
+        draw.text((panel_x + 112, py), value, fill=(33, 33, 33, 255), font=font_small)
+        py += 28
 
-    draw.text((panel_x, py + 18), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_title)
-    py += 62
-    schedule = sorted(proposed, key=lambda item: item['idx'])[:8]
-    if schedule:
-        for idx, part in enumerate(schedule, start=1):
-            card_h = 58
-            draw.rounded_rectangle([(panel_x, py), (canvas_w - 44, py + card_h)], radius=14, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
-            badge = part.get('tag', _alpha_num_tag(idx - 1))
-            draw.ellipse([(panel_x + 10, py + 12), (panel_x + 34, py + 36)], fill=part['color'], outline=(120, 110, 96, 180))
-            tw, th = label_bbox(badge, font_tiny)
-            draw.text((panel_x + 22 - tw / 2, py + 24 - th / 2), badge, fill=(35, 34, 30, 255), font=font_tiny)
-            title = f"{part.get('tag', _alpha_num_tag(idx - 1))} · {part['typology']} · {part['floors']} et."
-            draw.text((panel_x + 46, py + 9), title, fill=(31, 31, 31, 255), font=font_micro)
-            dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-            area_text = f"fotavtrykk {part['area_m2']:.0f} m²" if part['area_m2'] > 0 else ''
-            draw.text((panel_x + 46, py + 30), dim_text, fill=(64, 62, 58, 255), font=font_micro)
-            if area_text:
-                aw, _ = label_bbox(area_text, font_tiny)
-                draw.text((canvas_w - 54 - aw, py + 31), area_text, fill=(100, 98, 92, 255), font=font_tiny)
-            py += card_h + 10
-    else:
-        draw.text((panel_x, py), 'Ingen byggdata tilgjengelig.', fill=(96, 92, 84, 255), font=font_micro)
+    draw.text((panel_x, py + 14), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_section)
+    py += 50
+    card_h = 50
+    for part in sorted(proposed, key=lambda item: item['idx'])[:9]:
+        if py + card_h > canvas_h - 44:
+            break
+        draw.rounded_rectangle([(panel_x, py), (canvas_w - 42, py + card_h)], radius=12, fill=(248, 247, 244, 255), outline=(223, 221, 214, 255))
+        draw.ellipse([(panel_x + 10, py + 12), (panel_x + 32, py + 34)], fill=part['color'], outline=part['outline'])
+        tw, th = label_bbox(part['tag'], font_tiny)
+        draw.text((panel_x + 21 - tw / 2, py + 22 - th / 2), part['tag'], fill=(35, 34, 30, 255), font=font_tiny)
+        title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
+        draw.text((panel_x + 42, py + 8), title, fill=(31, 31, 31, 255), font=font_small)
+        dim_text = _format_dimensions(part['length_m'], part['depth_m'])
+        draw.text((panel_x + 42, py + 26), dim_text, fill=(73, 71, 67, 255), font=font_tiny)
+        if part['area_m2'] > 0:
+            area_text = f"fotavtrykk {part['area_m2']:.0f} m²"
+            aw, _ = label_bbox(area_text, font_tiny)
+            draw.text((canvas_w - 50 - aw, py + 26), area_text, fill=(103, 100, 95, 255), font=font_tiny)
+        py += card_h + 8
 
     return img.convert('RGB')
-
-
 def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     """Render en tydelig plan med byggenes faktiske fotavtrykksmål."""
     canvas_w, canvas_h = 1500, 980
@@ -6626,6 +6676,7 @@ def build_deterministic_report(
 
 # --- 5. PDF ---
 PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
+PDF_ACTIVE_FONT = PDF_FONT
 
 
 def _register_fonts(pdf: FPDF) -> str:
@@ -7997,8 +8048,9 @@ def create_full_report_pdf(
     # (ny PDF-instans i samme prosess) kan DejaVu-registrering feile stille —
     # vi faller da trygt tilbake til Helvetica for HELE PDF-en for å unngå
     # "Undefined font: dejavu"-crash i header/footer.
-    global PDF_FONT
+    global PDF_FONT, PDF_ACTIVE_FONT
     _active_font = _register_fonts(pdf)
+    PDF_ACTIVE_FONT = _active_font
     if _active_font != PDF_FONT:
         PDF_FONT = _active_font
     pdf.p_name = name.upper()
@@ -8396,7 +8448,7 @@ def create_full_report_pdf(
             "som er valgt for videre bearbeiding."
         )
         pdf.ln(4)
-        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
+        view_labels = ["Konseptoversikt 2D", "Detaljert planvisning", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
@@ -9081,6 +9133,15 @@ DB_DIR = Path("qa_database")
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
+# Project-data bootstrap must never block Streamlit startup.
+# R8.2C hotfix: the previous implementation tried Supabase before local ssot.json.
+# If Supabase/http stalled, _stcore/stream stayed open with 0 bytes until the host
+# killed the session, and the user was sent back to Project Setup.
+# The new order is: Session -> local ssot.json -> optional Supabase with hard timeout.
+
+_PD_REMOTE_TIMEOUT_S = 5.0
+
+
 def _default_project_data() -> Dict[str, Any]:
     return {
         "p_name": "",
@@ -9096,6 +9157,11 @@ def _default_project_data() -> Dict[str, Any]:
         "land": "Norge",
     }
 
+
+def _project_data_has_identity(payload: Any) -> bool:
+    return isinstance(payload, dict) and str(payload.get("p_name") or "").strip() not in ("", "Nytt Prosjekt")
+
+
 def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
     if isinstance(payload, str):
         try:
@@ -9104,6 +9170,7 @@ def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
             payload = {}
     if not isinstance(payload, dict):
         return _default_project_data()
+
     candidate = payload
     for key in ("project_data_json", "project_data", "data", "payload"):
         nested = candidate.get(key) if isinstance(candidate, dict) else None
@@ -9115,102 +9182,178 @@ def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
         if isinstance(nested, dict):
             candidate = nested
             break
+
     merged = _default_project_data()
     for key, value in candidate.items():
         if key in merged:
             merged[key] = value
     return merged
 
+
 def _load_project_data_local() -> Optional[Dict[str, Any]]:
     if not SSOT_FILE.exists():
         return None
     try:
         with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            return _normalize_project_data_payload(json.load(f))
+            normalized = _normalize_project_data_payload(json.load(f))
+        return normalized if _project_data_has_identity(normalized) else None
     except Exception:
+        # Korrupt ssot.json skal ikke knekke appen eller sende brukeren i loop.
         return None
+
 
 def _save_project_data_local(payload: Dict[str, Any]) -> None:
     try:
         DB_DIR.mkdir(parents=True, exist_ok=True)
         with open(SSOT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            json.dump(_normalize_project_data_payload(payload), f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-def _load_project_data_remote() -> Optional[Dict[str, Any]]:
-    try:
-        import builtly_auth as _builtly_auth  # type: ignore
-    except Exception:
-        return None
-    for fn_name in ("load_project_data", "load_project_data_from_supabase"):
-        loader = getattr(_builtly_auth, fn_name, None)
-        if not callable(loader):
-            continue
-        try:
-            result = loader()
-        except TypeError:
-            try:
-                result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
-            except Exception:
-                continue
-        except Exception:
-            continue
-        normalized = _normalize_project_data_payload(result)
-        if normalized.get("p_name"):
-            return normalized
-    return None
 
-def _save_project_data_remote(payload: Dict[str, Any]) -> None:
-    try:
-        import builtly_auth as _builtly_auth  # type: ignore
-    except Exception:
-        return
-    for fn_name in ("save_project_data_to_session_and_remote", "save_project_data_to_supabase", "save_project_data"):
-        saver = getattr(_builtly_auth, fn_name, None)
-        if not callable(saver):
-            continue
+def _call_project_data_with_timeout(func, timeout_s: float = _PD_REMOTE_TIMEOUT_S, default: Any = None) -> Any:
+    """Run a risky auth/Supabase call without blocking Streamlit startup."""
+    import queue
+    import threading
+
+    q: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
+
+    def _runner() -> None:
         try:
-            saver(payload)
-            return
-        except TypeError:
+            q.put((True, func()))
+        except Exception as exc:
             try:
-                saver(project_data=payload)
-                return
+                q.put((False, exc))
             except Exception:
                 pass
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    try:
+        ok, value = q.get(timeout=max(0.05, float(timeout_s)))
+    except queue.Empty:
+        return default
+    if not ok:
+        return default
+    return value
+
+
+def _load_project_data_remote(timeout_s: float = _PD_REMOTE_TIMEOUT_S) -> Optional[Dict[str, Any]]:
+    def _load() -> Optional[Dict[str, Any]]:
+        try:
+            import builtly_auth as _builtly_auth  # type: ignore
         except Exception:
-            pass
+            return None
+        for fn_name in ("load_project_data", "load_project_data_from_supabase"):
+            loader = getattr(_builtly_auth, fn_name, None)
+            if not callable(loader):
+                continue
+            try:
+                result = loader()
+            except TypeError:
+                try:
+                    result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            normalized = _normalize_project_data_payload(result)
+            if _project_data_has_identity(normalized):
+                return normalized
+        return None
+
+    return _call_project_data_with_timeout(_load, timeout_s=timeout_s, default=None)
+
+
+def _save_project_data_remote_async(payload: Dict[str, Any]) -> None:
+    """Best-effort Supabase save. Never block the UI/session stream."""
+    import threading
+
+    normalized = _normalize_project_data_payload(payload)
+
+    def _save() -> None:
+        try:
+            import builtly_auth as _builtly_auth  # type: ignore
+        except Exception:
+            return
+        # Use pure remote savers only. Avoid calling helpers that also mutate
+        # st.session_state from a background thread.
+        for fn_name in ("save_project_data_to_supabase", "save_project_data"):
+            saver = getattr(_builtly_auth, fn_name, None)
+            if not callable(saver):
+                continue
+            try:
+                saver(normalized)
+                return
+            except TypeError:
+                try:
+                    saver(project_data=normalized)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_save, daemon=True).start()
+
 
 def save_project_data_to_session_and_remote(payload: Dict[str, Any], sync_remote: bool = True) -> Dict[str, Any]:
-    """Public helper for Project Setup / pages: session + ssot.json + best-effort remote."""
+    """Project Setup helper: update session + ssot.json immediately, remote async."""
     normalized = _normalize_project_data_payload(payload)
     st.session_state.project_data = normalized
     _save_project_data_local(normalized)
     if sync_remote:
-        _save_project_data_remote(normalized)
+        _save_project_data_remote_async(normalized)
     return normalized
+
 
 def _bootstrap_project_data() -> Dict[str, Any]:
     current = st.session_state.get("project_data")
-    if isinstance(current, dict) and current.get("p_name") not in (None, ""):
-        return _normalize_project_data_payload(current)
+    if _project_data_has_identity(current):
+        normalized = _normalize_project_data_payload(current)
+        st.session_state.project_data = normalized
+        return normalized
 
-    remote = _load_project_data_remote()
-    if remote and remote.get("p_name"):
-        return save_project_data_to_session_and_remote(remote, sync_remote=False)
-
+    # 1) Local first. This is fast and avoids Project Setup on reconnects.
     local = _load_project_data_local()
-    if local and local.get("p_name"):
+    if local and _project_data_has_identity(local):
         st.session_state.project_data = local
-        # One-time backup to Supabase if local exists but remote was empty/unavailable.
         if not st.session_state.get("_pd_backup_done", False):
-            _save_project_data_remote(local)
+            _save_project_data_remote_async(local)
             st.session_state["_pd_backup_done"] = True
         return local
 
+    # 2) Remote only if session + local are empty.
+    # FIX (timeout-bug, runde 2): tidligere ble _pd_remote_attempted-flagget
+    # satt FØR vi visste om Supabase faktisk svarte. Når Supabase hadde
+    # cold-start eller var treig (1.2s timeout var altfor kort), ble
+    # flagget satt → senere reloads forsøkte IKKE Supabase igjen → bruker
+    # ble fast i default-state og havnet i Project Setup-loop.
+    #
+    # Ny logikk:
+    #   1. Throttle med tidsstempel istedenfor permanent flagg
+    #   2. Ved suksess: lagres tidsstempel + flagg = True (data er nå lokalt
+    #      cachet via save_project_data_to_session_and_remote)
+    #   3. Ved feil/timeout: lagres bare tidsstempel, slik at vi prøver
+    #      igjen etter minst 10 sekunder (forhindrer thread-spam ved
+    #      mange Streamlit-reruns men gir flere sjanser).
+    import time as _time
+    _pd_last_attempt = float(st.session_state.get("_pd_remote_last_attempt_ts", 0.0) or 0.0)
+    _pd_now = _time.time()
+    if (
+        not st.session_state.get("_pd_remote_attempted", False)
+        and (_pd_now - _pd_last_attempt) >= 10.0
+    ):
+        st.session_state["_pd_remote_last_attempt_ts"] = _pd_now
+        remote = _load_project_data_remote(timeout_s=_PD_REMOTE_TIMEOUT_S)
+        if remote and _project_data_has_identity(remote):
+            st.session_state["_pd_remote_attempted"] = True
+            return save_project_data_to_session_and_remote(remote, sync_remote=False)
+
+    # 3) Keep a valid default without blocking.
     st.session_state.project_data = _default_project_data()
     return st.session_state.project_data
+
 
 if "project_data" not in st.session_state:
     st.session_state.project_data = _default_project_data()
