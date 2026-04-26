@@ -712,7 +712,8 @@ def _lamell_row_spacing(field: Delfelt, spec: BaseTypologySpec, rules: Optional[
     length_min = float(getattr(getattr(spec, 'length_m', None), 'min_m', 40.0) or 40.0)
     length_max = float(getattr(getattr(spec, 'length_m', None), 'max_m', length_min) or length_min)
     typical_length = max(length_min, (length_min + length_max) / 2.0)
-    half_length_rule = max(_minimum_building_spacing_m(rule_obj), min(36.0, 0.50 * typical_length))
+    # Bruk ca. 40 % av lamell-lengden som kvalitativ hovedregel for parallelle rader.
+    half_length_rule = max(_minimum_building_spacing_m(rule_obj), min(34.0, 0.40 * typical_length))
     return max(base, half_length_rule)
 
 
@@ -763,21 +764,22 @@ def _parallel_lamell_spacing_requirement(
 
     lamell_height = max(float(height_a_m), float(height_b_m))
     fire_req = _minimum_building_spacing_m(rules)
-    half_length_req = max(fire_req, min(38.0, 0.50 * max(tangent_len, 0.0)))
-    solar_req = max(fire_req, min(38.0, max(0.55 * lamell_height + 2.0, half_length_req)))
+    half_length_req = max(fire_req, min(34.0, 0.40 * max(tangent_len, 0.0)))
+    solar_req = max(fire_req, min(34.0, max(0.52 * lamell_height + 2.0, half_length_req)))
 
     # Stor overlap i lengderetningen = fasade mot fasade.
-    # Hovedregel: parallelle lameller skal ha omtrent en halv bygningslengde mellom seg.
+    # Hovedregel: parallelle lameller skal ha omtrent 40 % av lamell-lengden mellom seg.
+    # Dette er strammere enn tidligere, men fortsatt over eksplisitt brannavstand.
     if tangent_overlap >= max(8.0, 0.35 * tangent_len):
         return solar_req
 
     # Gavel-mot-gavel eller tydelig forskjøvet: hold minst brannavstand,
     # men krev fortsatt noe mer hvis lengdeoverlappet begynner å bli betydelig.
     if tangent_gap > 0.0 or normal_gap <= 4.0:
-        partial_overlap_req = max(fire_req, min(30.0, 0.42 * max(tangent_overlap, 0.0)))
+        partial_overlap_req = max(fire_req, min(28.0, 0.38 * max(tangent_overlap, 0.0)))
         return partial_overlap_req if tangent_overlap >= 12.0 else fire_req
 
-    return max(fire_req, min(32.0, 0.45 * max(tangent_len, 0.0)))
+    return max(fire_req, min(30.0, 0.40 * max(tangent_len, 0.0)))
 
 
 def _building_spacing_ok(candidate: Polygon, candidate_angle_deg: float, candidate_typology: Typology, candidate_height_m: float,
@@ -3207,18 +3209,22 @@ def _choose_best_structured(
     if not pool:
         return None
     strictness = float(getattr(field, "composition_strictness", 0.88) or 0.88)
+    density = float(target_bra or 0.0) / max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or 0.0), 1.0)
 
     def score(item: _PlacementCandidate) -> Tuple[float, float, float, int]:
         deficit = max(0.0, target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - target_bra)
         deficit_ratio = deficit / max(target_bra, 1.0)
-        bra_penalty = deficit * (1.25 + min(1.0, deficit_ratio * 1.7)) + overshoot * 0.18
-        if deficit_ratio > 0.05:
-            bra_penalty += target_bra * 0.08 * min(1.0, deficit_ratio)
+        bra_penalty = deficit * (1.45 + min(1.35, deficit_ratio * 2.4)) + overshoot * 0.16
+        if deficit_ratio > 0.02:
+            bra_penalty += target_bra * (0.10 if density >= 1.0 else 0.06) * min(1.0, deficit_ratio * 1.5)
+        if deficit_ratio > 0.10:
+            bra_penalty += target_bra * 0.12 * min(1.0, deficit_ratio)
         structure = _candidate_structure_score(item.footprints, skeleton, field)
-        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.12 + strictness * 0.10)
+        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.10 + strictness * 0.09)
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
-        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * 0.010
+        count_weight = 0.016 if density >= 1.10 else 0.012
+        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * count_weight
         return (bra_penalty + structure_penalty + count_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
     return min(pool, key=score)
@@ -3574,7 +3580,11 @@ def _scale_cluster_footprints_to_target(
     if target_fp <= 1.0:
         return list(polys)
     scale = math.sqrt(target_fp / total_fp)
-    max_scale = 1.18 if getattr(field, 'typology', None) == Typology.KARRE else 1.08
+    density = float(getattr(field, 'target_bra', 0.0) or 0.0) / max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or 0.0), 1.0)
+    if getattr(field, 'typology', None) == Typology.KARRE:
+        max_scale = 1.28 if density >= 1.10 else 1.22
+    else:
+        max_scale = 1.12 if density >= 1.10 else 1.08
     scale = max(0.78, min(max_scale, scale))
     if abs(scale - 1.0) < 1e-3:
         return list(polys)
@@ -3591,10 +3601,13 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
         return None
 
     gap_m = max(8.0, float(getattr(field, "gap_between_m", 0.0) or 8.0))
-    central_void_m = float(getattr(field, "central_void_m", 0.0) or (22.0 if cluster_target >= 4 else 18.0))
+    density = float(getattr(field, 'target_bra', 0.0) or 0.0) / max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or 0.0), 1.0)
+    central_void_m = float(getattr(field, "central_void_m", 0.0) or (20.0 if cluster_target >= 4 else 17.0))
     cluster_counts = [cluster_target]
     if cluster_target >= 3:
         cluster_counts.append(cluster_target - 1)
+    if density >= 1.20 and cluster_target >= 3:
+        cluster_counts.append(cluster_target + 1)
     cluster_counts = [c for c in dict.fromkeys(cluster_counts) if c >= 2]
 
     candidates: List[_PlacementCandidate] = []
@@ -3619,7 +3632,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
                 courtyard_open_side=open_to_common,
                 view_corridor_count=max(0, int(getattr(field, "view_corridor_count", 0) or 0) - 1),
                 micro_band_count=max(2, int(getattr(field, "micro_band_count", 0) or 2) - 1),
-                courtyard_reserve_ratio=min(0.30, max(0.18, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.24))),
+                courtyard_reserve_ratio=min(0.26, max(0.14, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.20))),
             )
             sub_cand = _best_subcore_karre_candidate(sc, sub_field, spec)
             if sub_cand is None:
