@@ -28,50 +28,7 @@ from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFont
 from shapely import affinity
 from shapely.geometry import MultiPolygon, Point, Polygon, box, shape
-from shapely.ops import unary_union, nearest_points
-
-
-def _truthy_env(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
-    try:
-        value = int(float(os.environ.get(name, str(default))))
-    except Exception:
-        value = default
-    if min_value is not None:
-        value = max(min_value, value)
-    if max_value is not None:
-        value = min(max_value, value)
-    return value
-
-
-def _env_float(name: str, default: float, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
-    try:
-        value = float(os.environ.get(name, str(default)))
-    except Exception:
-        value = default
-    if min_value is not None:
-        value = max(min_value, value)
-    if max_value is not None:
-        value = min(max_value, value)
-    return value
-
-
-# Runtime-stabilitet for Render/Streamlit. Hovedknappen skal primært gjøre
-# deterministisk analyse og lokal PDF. Nettverks-/AI-steg holdes utenfor
-# kritisk løp med mindre de eksplisitt aktiveres i env.
-BUILTLY_ENABLE_MAIN_RUN_AI = _truthy_env("BUILTLY_ENABLE_MAIN_RUN_AI", False)
-BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN = _truthy_env("BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN", False)
-BUILTLY_ENABLE_ENVIRONMENT_REMOTE = _truthy_env("BUILTLY_ENABLE_ENVIRONMENT_REMOTE", False)
-BUILTLY_AUTOSAVE_REPORT = _truthy_env("BUILTLY_AUTOSAVE_REPORT", False)
-BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT = _env_int("BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT", 60, 0, 250)
-BUILTLY_CLAUDE_TIMEOUT_SECONDS = _env_float("BUILTLY_CLAUDE_TIMEOUT_SECONDS", 18.0, 3.0, 45.0)
-BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS = _env_float("BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS", 22.0, 5.0, 60.0)
+from shapely.ops import unary_union
 
 try:
     from pyproj import CRS, Transformer
@@ -183,6 +140,42 @@ try:
     inject_keepalive()
 except Exception:
     # Hvis modulen ikke finnes (f.eks. eldre deploy), bare fortsett.
+    pass
+
+# --- Auth + project_data restore ---
+# Ved reload eller ny session får vi en tom Streamlit-session. Uten dette
+# steget havner bruker på "Du må sette opp prosjektdata"-siden fordi både
+# auth og project_data er borte. Vi restaurerer begge fra browserens cookie
+# (builtly_rt) og Supabase-profil.
+try:
+    from builtly_auth import try_restore_from_browser
+    _auth_restored = try_restore_from_browser()
+    if _auth_restored:
+        # Auth OK — forsøk å laste project_data fra Supabase (hvis satt)
+        # slik at bruker ikke må sette opp prosjektet på nytt ved hver
+        # container-restart (Render ephemeral disk).
+        try:
+            from builtly_auth import _sb
+            _sb_client = _sb()
+            _user_id = st.session_state.get("user_id", "")
+            if _sb_client and _user_id:
+                _row = _sb_client.table("profiles").select("project_data_json")\
+                    .eq("id", _user_id).single().execute()
+                _pdj = (_row.data or {}).get("project_data_json")
+                if _pdj:
+                    try:
+                        if isinstance(_pdj, str):
+                            _pdj = json.loads(_pdj)
+                        if isinstance(_pdj, dict) and _pdj.get("p_name"):
+                            st.session_state["project_data"] = _pdj
+                    except Exception:
+                        pass
+        except Exception:
+            # Supabase-kolonnen project_data_json finnes kanskje ikke ennå.
+            # Det er OK — vi faller tilbake til ssot.json-lagringen.
+            pass
+except Exception:
+    # builtly_auth kan være utilgjengelig i lokalt dev-miljø.
     pass
 
 google_key = os.environ.get("GOOGLE_API_KEY")
@@ -354,40 +347,20 @@ def _pil_font(size: int = 14, bold: bool = False) -> "ImageFont.FreeTypeFont":
 
 
 def clean_pdf_text(text: Any) -> str:
-    """Sanitize text for PDF output.
-
-    FPDF can still fall back to Helvetica even if DejaVu exists locally.
-    Therefore normalize fragile characters such as arrows before every PDF write,
-    and only keep broader Unicode when the active PDF font supports it.
-    """
     if text is None:
         return ""
     text = str(text)
-    active_font = str(globals().get("PDF_ACTIVE_FONT", PDF_FONT)).lower()
-    uses_unicode_font = active_font != "helvetica"
-    replacements = {
-        "\u2192": "->",
-        "\u2190": "<-",
-        "\u2194": "<->",
-        "\u21d2": "=>",
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2212": "-",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u2026": "...",
-        "\u2022": "*",
-        "\u00b7": "-",
-        "\u00b2": "2",
-        "\u00b3": "3",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    if uses_unicode_font:
+    # Universelle typografi-erstatninger
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    text = text.replace("\u201c", '"').replace("\u201d", '"')
+    text = text.replace("\u2018", "'").replace("\u2019", "'")
+    text = text.replace("\u2026", "...").replace("\u2022", "*")
+    if HAS_DEJAVU:
         return text
+    # Fallback: latin-1 for Helvetica — æøå er gyldige i latin-1, behold dem
+    text = text.replace("\u00b2", "2").replace("\u00b3", "3")
     return text.encode("latin-1", "replace").decode("latin-1")
+
 
 def ironclad_text_formatter(text: str) -> str:
     text = str(text).replace("$", "").replace("*", "").replace("_", "")
@@ -1566,11 +1539,6 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
             }
         )
     filtered_neighbors.sort(key=lambda item: item.get("distance_m", 0.0))
-    raw_neighbor_count = len(filtered_neighbors)
-    if BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT and len(filtered_neighbors) > BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT:
-        # Behold de nærmeste naboene. Disse betyr mest for sol/skygge og
-        # nabohensyn; resten kan gjøre runtime ustabil på Render.
-        filtered_neighbors = filtered_neighbors[:BUILTLY_MAIN_RUN_NEIGHBOR_LIMIT]
 
     return {
         "site_polygon": site_polygon,
@@ -1581,8 +1549,6 @@ def prepare_site_context(site: "SiteInputs", site_polygon_input: Optional[Polygo
         "buildable_area_m2": buildable_area,
         "orientation_deg": orientation_deg,
         "neighbors": filtered_neighbors,
-        "neighbors_raw_count": raw_neighbor_count,
-        "neighbors_runtime_limited": raw_neighbor_count > len(filtered_neighbors),
         "terrain": terrain,
         "source": source,
         "polygon_meta": polygon_meta,
@@ -2461,15 +2427,15 @@ def build_massing_parts(
 
     # Fargepalett per typologi
     COLORS = {
-        "Lamell":        [64, 126, 188, 0.82],    # Builtly blå
-        "Punkthus":      [74, 184, 179, 0.82],    # cyan/teal
-        "Tun":           [116, 132, 164, 0.82],   # dempet blågrå
-        "Rekke":         [92, 149, 120, 0.82],    # grønn
-        "Podium + Tårn": [188, 118, 96, 0.84],    # varm aksent
-        "Karré":         [66, 103, 155, 0.84],    # Builtly aksentblå
-        "Tårn":          [31, 55, 95, 0.86],      # navy
+        "Lamell":        [34, 197, 94, 0.80],    # groenn
+        "Punkthus":      [56, 189, 248, 0.80],   # blaa
+        "Tun":           [168, 130, 240, 0.80],   # lilla
+        "Rekke":         [250, 180, 60, 0.80],    # gul/oransje
+        "Podium + Tårn": [220, 80, 120, 0.80],    # rosa/roed
+        "Karré":         [100, 200, 180, 0.80],   # teal
+        "Tårn":          [56, 140, 248, 0.80],    # moerkere blaa
     }
-    base_color = COLORS.get(typology, [64, 126, 188, 0.82])
+    base_color = COLORS.get(typology, [34, 197, 94, 0.80])
 
     if typology == "Podium + Tårn" and len(components) >= 1:
         # Podium: lav og bred (2 etg). Tårn: høyt og smalt (dobbel høyde av podium eller mer)
@@ -2946,12 +2912,12 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                     }
                     # Bygg massing_parts fra AI-bygninger
                     PART_COLORS = {
-                        "Lamell": [64, 126, 188, 210], "Punkthus": [74, 184, 179, 210],
-                        "Tun": [116, 132, 164, 210], "Rekke": [92, 149, 120, 210],
-                        "Karré": [66, 103, 155, 216], "Tårn": [31, 55, 95, 220],
-                        "Podium + Tårn": [188, 118, 96, 220],
+                        "Lamell": [34, 197, 94, 200], "Punkthus": [56, 189, 248, 200],
+                        "Tun": [168, 130, 240, 200], "Rekke": [250, 180, 60, 200],
+                        "Karré": [100, 200, 180, 200], "Tårn": [56, 140, 248, 200],
+                        "Podium + Tårn": [220, 80, 120, 200],
                     }
-                    base_color = PART_COLORS.get(typology, [64, 126, 188, 210])
+                    base_color = PART_COLORS.get(typology, [34, 197, 94, 200])
                     ai_massing = []
                     for bld in ai_buildings:
                         bld_poly = bld.get("polygon")
@@ -2962,7 +2928,7 @@ def generate_options(site: SiteInputs, mix_specs: List[MixSpec], geodata_context
                         if role == "wing":
                             color = [int(c * 0.8) for c in base_color[:3]] + [180]
                         elif role == "tower":
-                            color = [31, 55, 95, 230]
+                            color = [56, 140, 248, 230]
                         ai_massing.append({
                             "name": bld.get("name", typology),
                             "height_m": float(bld.get("height_m", site.floor_to_floor_m * 4)),
@@ -3312,10 +3278,6 @@ def _should_retry_anthropic_with_fallback(status_code: int, body_text: str) -> b
 def _anthropic_request(payload: Dict[str, Any], timeout: int) -> Optional[Dict[str, Any]]:
     if not ANTHROPIC_API_KEY:
         return None
-    try:
-        timeout = min(float(timeout), BUILTLY_CLAUDE_TIMEOUT_SECONDS)
-    except Exception:
-        timeout = BUILTLY_CLAUDE_TIMEOUT_SECONDS
     models = [ANTHROPIC_MODEL]
     if ANTHROPIC_FALLBACK_MODEL and ANTHROPIC_FALLBACK_MODEL != ANTHROPIC_MODEL:
         models.append(ANTHROPIC_FALLBACK_MODEL)
@@ -3418,7 +3380,7 @@ def _call_claude_vision(
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": content_blocks}],
             },
-            timeout=min(120, BUILTLY_CLAUDE_VISION_TIMEOUT_SECONDS),
+            timeout=120,
         )
         if not data:
             return None
@@ -4364,796 +4326,224 @@ def build_environment_analysis(
     return env
 
 
-
-def _coord_groups_to_polygon(coord_groups: Any) -> Optional[Polygon]:
-    pts = flatten_coord_groups(coord_groups or [])
-    if len(pts) < 3:
-        return None
-    try:
-        poly = Polygon([(float(x), float(y)) for x, y in pts]).buffer(0)
-        if poly.is_empty:
-            return None
-        if isinstance(poly, MultiPolygon):
-            poly = max(poly.geoms, key=lambda g: g.area)
-        return poly
-    except Exception:
-        return None
-
-
-def _polygon_dimensions(poly: Any) -> Tuple[float, float]:
-    if poly is None or getattr(poly, "is_empty", True):
-        return 0.0, 0.0
-    try:
-        rect = poly.minimum_rotated_rectangle
-        coords = list(rect.exterior.coords)
-        lengths: List[float] = []
-        for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
-            edge = math.hypot(float(x2) - float(x1), float(y2) - float(y1))
-            if edge > 1e-6:
-                lengths.append(edge)
-        if not lengths:
-            return 0.0, 0.0
-        return float(max(lengths)), float(min(lengths))
-    except Exception:
-        try:
-            minx, miny, maxx, maxy = poly.bounds
-            return float(maxx - minx), float(maxy - miny)
-        except Exception:
-            return 0.0, 0.0
-
-
-def _part_dimensions(part: Dict[str, Any]) -> Tuple[float, float, float]:
-    length = float(part.get('width_m', 0.0) or 0.0)
-    depth = float(part.get('depth_m', 0.0) or 0.0)
-    area = float(part.get('area_m2', 0.0) or 0.0)
-    if length > 0.0 and depth > 0.0:
-        if area <= 0.0:
-            area = length * depth
-        return length, depth, area
-    poly = _coord_groups_to_polygon(part.get('coords') or [])
-    if poly is None:
-        return 0.0, 0.0, area
-    if area <= 0.0:
-        area = float(poly.area)
-    if length <= 0.0 or depth <= 0.0:
-        length, depth = _polygon_dimensions(poly)
-    return length, depth, area
-
-
-def _format_dimensions(length_m: float, depth_m: float) -> str:
-    if length_m <= 0.0 or depth_m <= 0.0:
-        return 'mål ikke tilgjengelig'
-    return f"{length_m:.0f} × {depth_m:.0f} m"
-
-
-def _typology_dimension_hint(typology: str) -> str:
-    t = (typology or '').lower()
-    if 'lamell' in t:
-        return 'mål: 55-65 × 12-14 m'
-    if 'punkt' in t:
-        return 'mål: ca. 20 × 20 m'
-    if 'karr' in t:
-        return 'mål: bunn 50 m · sider 25-30 m · dybde 12 m'
-    return ''
-
-
-def _alpha_num_tag(index: int) -> str:
-    idx = max(0, int(index))
-    tag = ''
-    while True:
-        idx, rem = divmod(idx, 26)
-        tag = chr(65 + rem) + tag
-        if idx == 0:
-            break
-        idx -= 1
-    return tag
-
-
-def _draw_badge(
-    draw: ImageDraw.ImageDraw,
-    center: Tuple[float, float],
-    text_value: str,
-    *,
-    fill: Tuple[int, int, int, int],
-    outline: Tuple[int, int, int, int],
-    font,
-    text_fill: Tuple[int, int, int, int] = (24, 24, 24, 255),
-) -> None:
-    label = str(text_value or '').strip() or '?'
-    try:
-        bbox = font.getbbox(label)
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-    except Exception:
-        tw = len(label) * 8
-        th = 14
-    pad_x = 11 if len(label) == 1 else 13
-    pad_y = 7
-    x, y = center
-    draw.rounded_rectangle(
-        [(x - tw / 2 - pad_x, y - th / 2 - pad_y), (x + tw / 2 + pad_x, y + th / 2 + pad_y)],
-        radius=12,
-        fill=fill,
-        outline=outline,
-    )
-    draw.text((x - tw / 2, y - th / 2 - 1), label, fill=text_fill, font=font)
-
-
-
-
-def _draw_building_callouts(
-    draw: ImageDraw.ImageDraw,
-    parts: List[Dict[str, Any]],
-    map_bounds: Tuple[float, float, float, float],
-    *,
-    font_label,
-    font_detail=None,
-    max_items: int = 12,
-) -> None:
-    """Draw compact building labels outside the footprints with leader lines.
-
-    The 2D concept drawings should not place text on top of buildings. This
-    helper keeps the plan clean by moving labels to the side and connecting them
-    with restrained leader lines.
-    """
-    if not parts:
-        return
-    x0, y0, x1, y1 = map_bounds
-    width = max(1.0, x1 - x0)
-    height = max(1.0, y1 - y0)
-    cx_mid = (x0 + x1) / 2.0
-    cy_mid = (y0 + y1) / 2.0
-    font_detail = font_detail or font_label
-
-    def _bbox(txt: str, font_obj) -> Tuple[int, int]:
-        try:
-            bb = font_obj.getbbox(str(txt))
-            return bb[2] - bb[0], bb[3] - bb[1]
-        except Exception:
-            return max(8, len(str(txt)) * 7), 12
-
-    candidates = list(parts[:max_items])
-    left = [p for p in candidates if p.get('center', (cx_mid, cy_mid))[0] <= cx_mid]
-    right = [p for p in candidates if p.get('center', (cx_mid, cy_mid))[0] > cx_mid]
-
-    # If everything ends on one side, split by y-position so labels still breathe.
-    if len(left) == 0 or len(right) == 0:
-        ordered = sorted(candidates, key=lambda p: p.get('center', (0, 0))[1])
-        left = ordered[::2]
-        right = ordered[1::2]
-
-    def _layout_column(col: List[Dict[str, Any]], side: str) -> List[Tuple[Dict[str, Any], Tuple[float, float, float, float]]]:
-        if not col:
-            return []
-        col = sorted(col, key=lambda p: p.get('center', (0, 0))[1])
-        box_w = min(152.0, max(116.0, width * 0.20))
-        box_h = 38.0
-        gutter = max(8.0, width * 0.012)
-        if side == 'left':
-            bx = x0 + gutter
-        else:
-            bx = x1 - gutter - box_w
-        min_y = y0 + gutter
-        max_y = y1 - gutter - box_h
-        result = []
-        used_y: List[float] = []
-        for idx, part in enumerate(col):
-            target_y = float(part.get('center', (0, cy_mid))[1]) - box_h / 2.0
-            by = max(min_y, min(max_y, target_y))
-            for prev_y in used_y:
-                if abs(by - prev_y) < box_h + 6:
-                    by = prev_y + box_h + 6
-            if by > max_y:
-                by = max_y
-                # Back-propagate gently if we hit the bottom.
-                if result:
-                    shift = max(0.0, (used_y[-1] + box_h + 6) - max_y)
-                    if shift > 0:
-                        result = [(rp, (rx0, max(min_y, ry0-shift), rx1, max(min_y, ry1-shift))) for rp, (rx0, ry0, rx1, ry1) in result]
-                        used_y = [max(min_y, y-shift) for y in used_y]
-            used_y.append(by)
-            result.append((part, (bx, by, bx + box_w, by + box_h)))
-        return result
-
-    placements = _layout_column(left, 'left') + _layout_column(right, 'right')
-
-    for part, rect in placements:
-        bx0, by0, bx1, by1 = rect
-        cx, cy = part.get('center', ((bx0 + bx1) / 2.0, (by0 + by1) / 2.0))
-        tag = str(part.get('tag') or '?')
-        typ = str(part.get('typology') or '')
-        floors = part.get('floors')
-        length = float(part.get('length_m', 0.0) or 0.0)
-        depth = float(part.get('depth_m', 0.0) or 0.0)
-        detail_bits = []
-        if floors:
-            detail_bits.append(f"{int(floors)} et.")
-        if length > 0 and depth > 0:
-            detail_bits.append(f"{length:.0f}×{depth:.0f} m")
-        detail = ' · '.join(detail_bits)
-        color = part.get('color') or (198, 198, 190, 230)
-        outline = part.get('outline') or (110, 118, 128, 180)
-
-        # Leader line: short orthogonal elbow, kept pale so it supports rather than dominates.
-        label_anchor_x = bx1 if bx0 < cx else bx0
-        label_anchor_y = (by0 + by1) / 2.0
-        elbow_x = label_anchor_x + (10 if bx0 < cx else -10)
-        draw.line([(cx, cy), (elbow_x, cy), (label_anchor_x, label_anchor_y)], fill=(63, 94, 126, 150), width=2)
-        draw.ellipse([(cx - 3, cy - 3), (cx + 3, cy + 3)], fill=(63, 94, 126, 180))
-
-        draw.rounded_rectangle([(bx0, by0), (bx1, by1)], radius=12, fill=(255, 255, 255, 226), outline=(174, 184, 194, 170))
-        draw.ellipse([(bx0 + 9, by0 + 9), (bx0 + 29, by0 + 29)], fill=color, outline=outline)
-        tw, th = _bbox(tag, font_label)
-        draw.text((bx0 + 19 - tw / 2.0, by0 + 19 - th / 2.0 - 1), tag, fill=(20, 34, 54, 255), font=font_label)
-        title = f"{tag} · {typ}" if typ else tag
-        if len(title) > 17:
-            title = title[:16] + '…'
-        draw.text((bx0 + 37, by0 + 7), title, fill=(31, 38, 48, 255), font=font_label)
-        if detail:
-            if len(detail) > 22:
-                detail = detail[:21] + '…'
-            draw.text((bx0 + 37, by0 + 22), detail, fill=(89, 95, 101, 235), font=font_detail)
-
-
-
-def _draw_clearance_measurements(
-    draw: ImageDraw.ImageDraw,
-    parts: List[Dict[str, Any]],
-    site_coords: Any,
-    project_func,
-    *,
-    font,
-    max_pair_labels: int = 6,
-    max_boundary_labels: int = 3,
-) -> None:
-    """Draw measured clearances between buildings and to the plot boundary.
-
-    Labels are intentionally small and diagrammatic. They make it possible to
-    verify the 8 m building-to-building rule directly in the concept overview.
-    """
-    if not parts:
-        return
-
-    def _bbox(txt: str) -> Tuple[int, int]:
-        try:
-            bb = font.getbbox(str(txt))
-            return bb[2] - bb[0], bb[3] - bb[1]
-        except Exception:
-            return max(8, len(str(txt)) * 7), 12
-
-    def _poly_from_part(part: Dict[str, Any]) -> Optional[Polygon]:
-        poly = part.get('poly')
-        if poly is not None and not getattr(poly, 'is_empty', True):
-            return poly
-        coords = flatten_coord_groups(part.get('coords', []))
-        if len(coords) < 3:
-            return None
-        try:
-            p = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-            return p if not p.is_empty and p.area > 1.0 else None
-        except Exception:
-            return None
-
-    polys: List[Tuple[Dict[str, Any], Polygon]] = []
-    for part in parts:
-        poly = _poly_from_part(part)
-        if poly is not None:
-            polys.append((part, poly))
-    if not polys:
-        return
-
-    used_label_boxes: List[Tuple[float, float, float, float]] = []
-
-    def _boxes_overlap(a, b, pad: float = 2.0) -> bool:
-        return not (a[2] + pad < b[0] or b[2] + pad < a[0] or a[3] + pad < b[1] or b[3] + pad < a[1])
-
-    def _draw_measure_line(p1, p2, text_value: str, *, danger: bool = False, dashed: bool = False) -> None:
-        try:
-            s1 = project_func((p1.x, p1.y))
-            s2 = project_func((p2.x, p2.y))
-        except Exception:
-            return
-        seg_len = math.hypot(s2[0] - s1[0], s2[1] - s1[1])
-        if seg_len < 12.0:
-            return
-        line_color = (188, 52, 52, 215) if danger else (50, 82, 112, 136)
-        if dashed:
-            step = 10.0
-            pos = 0.0
-            on = True
-            while pos < seg_len:
-                end = min(seg_len, pos + step * 0.50)
-                if on:
-                    x1 = s1[0] + (s2[0] - s1[0]) * (pos / seg_len)
-                    y1 = s1[1] + (s2[1] - s1[1]) * (pos / seg_len)
-                    x2 = s1[0] + (s2[0] - s1[0]) * (end / seg_len)
-                    y2 = s1[1] + (s2[1] - s1[1]) * (end / seg_len)
-                    draw.line([(x1, y1), (x2, y2)], fill=line_color, width=1)
-                on = not on
-                pos += step
-        else:
-            draw.line([s1, s2], fill=line_color, width=1)
-
-        # små endestreker gjør målet lesbart uten store labels
-        nx = -(s2[1] - s1[1]) / max(seg_len, 1.0)
-        ny = (s2[0] - s1[0]) / max(seg_len, 1.0)
-        tick = 3.5
-        draw.line([(s1[0] - nx*tick, s1[1] - ny*tick), (s1[0] + nx*tick, s1[1] + ny*tick)], fill=line_color, width=1)
-        draw.line([(s2[0] - nx*tick, s2[1] - ny*tick), (s2[0] + nx*tick, s2[1] + ny*tick)], fill=line_color, width=1)
-
-        mx, my = (s1[0] + s2[0]) / 2.0, (s1[1] + s2[1]) / 2.0
-        tw, th = _bbox(text_value)
-        # Prøv label litt ut fra målelinjen for å unngå klynge av tekst midt i planen.
-        positions = []
-        for offset in (8.0, -8.0, 15.0, -15.0, 0.0):
-            lx = mx + nx * offset
-            ly = my + ny * offset
-            positions.append((lx, ly, (lx - tw/2 - 3, ly - th/2 - 2, lx + tw/2 + 3, ly + th/2 + 2)))
-        chosen = None
-        for lx, ly, rect in positions:
-            if danger or not any(_boxes_overlap(rect, used) for used in used_label_boxes):
-                chosen = (lx, ly, rect)
-                break
-        if chosen is None:
-            return
-        lx, ly, rect = chosen
-        used_label_boxes.append(rect)
-        fill = (255, 248, 238, 238) if danger else (255, 255, 255, 215)
-        outline = (185, 63, 63, 220) if danger else (142, 154, 166, 145)
-        draw.rounded_rectangle([rect[:2], rect[2:]], radius=5, fill=fill, outline=outline)
-        draw.text((lx - tw / 2, ly - th / 2 - 1), text_value, fill=(35, 39, 45, 235), font=font)
-
-    # Building-to-building: draw shortest relevant clearances, plus closest per building.
-    pair_candidates: List[Tuple[float, int, int, Any, Any]] = []
-    closest_per_idx: Dict[int, Tuple[float, int, int, Any, Any]] = {}
-    for i, (_, poly_a) in enumerate(polys):
-        for j in range(i + 1, len(polys)):
-            poly_b = polys[j][1]
-            dist = float(poly_a.distance(poly_b))
-            if dist > 32.0 and dist >= 8.0:
-                continue
-            try:
-                p1, p2 = nearest_points(poly_a, poly_b)
-            except Exception:
-                continue
-            item = (dist, i, j, p1, p2)
-            pair_candidates.append(item)
-            if i not in closest_per_idx or dist < closest_per_idx[i][0]:
-                closest_per_idx[i] = item
-            if j not in closest_per_idx or dist < closest_per_idx[j][0]:
-                closest_per_idx[j] = item
-    chosen_pairs: Dict[Tuple[int, int], Tuple[float, int, int, Any, Any]] = {}
-    for item in sorted(pair_candidates, key=lambda v: (0 if v[0] < 8.0 else 1, v[0]))[:max_pair_labels]:
-        chosen_pairs[(item[1], item[2])] = item
-    for item in closest_per_idx.values():
-        if len(chosen_pairs) >= max_pair_labels:
-            break
-        if item[0] <= 18.0 or item[0] < 8.0:
-            chosen_pairs[(item[1], item[2])] = item
-    for dist, i, j, p1, p2 in sorted(chosen_pairs.values(), key=lambda v: v[0]):
-        txt = f"{dist:.1f} m"
-        _draw_measure_line(p1, p2, txt, danger=dist < 8.0, dashed=False)
-
-    # Building-to-boundary: one nearest plot-boundary distance per building.
-    site_pts = flatten_coord_groups(site_coords)
-    if len(site_pts) >= 3:
-        try:
-            site_poly = Polygon([(float(x), float(y)) for x, y in site_pts]).buffer(0)
-        except Exception:
-            site_poly = None
-        if site_poly is not None and not site_poly.is_empty:
-            boundary_items: List[Tuple[float, int, Any, Any]] = []
-            boundary = site_poly.boundary
-            for i, (_, poly) in enumerate(polys):
-                try:
-                    p1, p2 = nearest_points(poly, boundary)
-                    dist = float(poly.distance(boundary))
-                except Exception:
-                    continue
-                if dist <= 36.0:
-                    boundary_items.append((dist, i, p1, p2))
-            # Prioritér de knappeste avstandene; disse er viktigst å kontrollere.
-            for dist, i, p1, p2 in sorted(boundary_items, key=lambda v: v[0])[:max_boundary_labels]:
-                _draw_measure_line(p1, p2, f"{dist:.1f} m", danger=False, dashed=True)
-
 def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """Render a clean 2D concept overview.
-
-    The previous axonometric overview made the massing hard to read. This view is
-    intentionally top-down: it prioritizes urban structure, public realm,
-    courtyard/park rooms, sight lines and building footprints.
     """
-    canvas_w, canvas_h = 1500, 980
-    right_panel_w = 330
-    header_h = 116
-    footer_h = 58
-    margin = 28
-    map_x0, map_y0 = margin, header_h
-    map_x1 = canvas_w - right_panel_w - margin
-    map_y1 = canvas_h - footer_h
-
-    img = Image.new('RGBA', (canvas_w, canvas_h), (246, 245, 241, 255))
+    Isometrisk 3D-volumskisse.
+    Viser foreslåtte volumer, nabobygg og tomtegrense fra skrå vinkel
+    slik at siktlinjer, hoyder og romlige forhold er tydelige.
+    """
+    canvas_w, canvas_h = 1100, 900
+    img = Image.new('RGBA', (canvas_w, canvas_h), (6, 17, 26, 255))
     draw = ImageDraw.Draw(img, 'RGBA')
+    font = _pil_font(16)
+    font_bold = _pil_font(16, bold=True)
+    font_info = _pil_font(14)
+    font_north = _pil_font(18, bold=True)
 
-    font_hero = _pil_font(56, bold=True)
-    font_title = _pil_font(28)
-    font_section = _pil_font(19, bold=True)
-    font_body = _pil_font(17)
-    font_small = _pil_font(14)
-    font_tiny = _pil_font(12)
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    footprint_coords = option.geometry.get('footprint_polygon_coords') or []
+    shadow_coords = option.geometry.get('winter_shadow_polygon_coords') or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+    massing_parts = option.geometry.get('massing_parts', []) or []
 
-    geometry = option.geometry or {}
-    site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
-    buildable_coords = geometry.get('buildable_polygon_coords') or site_coords
-    massing_parts = geometry.get('massing_parts', []) or []
-    neighbor_polys = geometry.get('neighbor_polygons', []) or []
-    field_polys = geometry.get('field_polygons', []) or []
-    public_polys = geometry.get('public_realm_polygons', []) or []
-    courtyard_polys = geometry.get('courtyard_polygons', []) or []
-    corridor_polys = geometry.get('view_corridor_polygons', []) or []
-    macro_axes = geometry.get('macro_axes', []) or []
-    symmetry_axes = geometry.get('symmetry_axes', []) or []
-
-    site_pts = flatten_coord_groups(site_coords)
-    buildable_pts = flatten_coord_groups(buildable_coords)
-    focus_pts: List[List[float]] = list(site_pts or buildable_pts)
-    for seq in (field_polys, public_polys, courtyard_polys, corridor_polys):
-        for item in seq:
-            focus_pts.extend(flatten_coord_groups(item.get('coords', [])))
-    for part in massing_parts:
-        focus_pts.extend(flatten_coord_groups(part.get('coords', [])))
-    if not focus_pts:
-        focus_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
-
-    fx = [p[0] for p in focus_pts]
-    fy = [p[1] for p in focus_pts]
-    focus_cx = (min(fx) + max(fx)) / 2.0
-    focus_cy = (min(fy) + max(fy)) / 2.0
-    focus_span = max(max(fx) - min(fx), max(fy) - min(fy), 1.0)
-
-    filtered_neighbors = []
-    for neighbor in neighbor_polys:
-        coords = flatten_coord_groups(neighbor.get('coords') or neighbor.get('polygon_coords') or [])
-        if len(coords) < 3:
-            continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
-        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= focus_span * 1.8:
-            filtered_neighbors.append({'coords': coords})
-
-    all_pts: List[List[float]] = list(focus_pts)
-    for neighbor in filtered_neighbors:
-        all_pts.extend(neighbor['coords'])
-    xs = [p[0] for p in all_pts]
-    ys = [p[1] for p in all_pts]
-    minx, maxx = min(xs), max(xs)
-    miny, maxy = min(ys), max(ys)
-    span_x = max(maxx - minx, 1.0)
-    span_y = max(maxy - miny, 1.0)
-    pad_x = max(8.0, span_x * 0.07)
-    pad_y = max(8.0, span_y * 0.07)
-    minx -= pad_x
-    maxx += pad_x
-    miny -= pad_y
-    maxy += pad_y
-    span_x = max(maxx - minx, 1.0)
-    span_y = max(maxy - miny, 1.0)
-
-    inner_pad = 26
-    sx0, sy0 = map_x0 + inner_pad, map_y0 + inner_pad
-    sx1, sy1 = map_x1 - inner_pad, map_y1 - inner_pad
-    scale = min((sx1 - sx0) / span_x, (sy1 - sy0) / span_y)
-
-    def project(pt: Any) -> Tuple[float, float]:
-        x, y = float(pt[0]), float(pt[1])
-        return sx0 + (x - minx) * scale, sy1 - (y - miny) * scale
-
-    def pts_from_coords(coords: Any) -> List[Tuple[float, float]]:
-        pts = [project(p) for p in flatten_coord_groups(coords) if len(p) >= 2]
-        return pts if len(pts) >= 3 else []
-
-    def label_bbox(text_value: str, font_obj) -> Tuple[int, int]:
-        try:
-            bbox = font_obj.getbbox(str(text_value))
-            return bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except Exception:
-            return (len(str(text_value)) * 8, 12)
-
-    def draw_poly(coords: Any, fill, outline=None, width: int = 1):
-        pp = pts_from_coords(coords)
-        if len(pp) < 3:
-            return
-        draw.polygon(pp, fill=fill, outline=outline)
-        if outline and width > 1:
-            draw.line(pp + [pp[0]], fill=outline, width=width)
-
-    def draw_line(coords: Any, fill, width: int = 2, dash: bool = False):
-        pp = [project(p) for p in coords if len(p) >= 2]
-        if len(pp) < 2:
-            return
-        if not dash:
-            draw.line(pp, fill=fill, width=width)
-            return
-        for a, b in zip(pp, pp[1:]):
-            seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
-            if seg_len <= 0:
-                continue
-            step = 12.0
-            s = 0.0
-            on = True
-            while s < seg_len:
-                e = min(seg_len, s + step * 0.62)
-                if on:
-                    x1 = a[0] + (b[0] - a[0]) * (s / seg_len)
-                    y1 = a[1] + (b[1] - a[1]) * (s / seg_len)
-                    x2 = a[0] + (b[0] - a[0]) * (e / seg_len)
-                    y2 = a[1] + (b[1] - a[1]) * (e / seg_len)
-                    draw.line([(x1, y1), (x2, y2)], fill=fill, width=width)
-                on = not on
-                s += step
-
-    typo_colors = {
-        'Lamell': (205, 166, 121, 232),
-        'Punkthus': (176, 194, 147, 232),
-        'Karré': (229, 219, 178, 236),
-        'Rekkehus': (181, 201, 158, 232),
-        'Tun': (196, 183, 150, 232),
-        'Podium + Tårn': (188, 118, 96, 232),
-        'Tårn': (83, 145, 191, 232),
-    }
-    typo_outline = {
-        'Lamell': (138, 101, 64, 255),
-        'Punkthus': (105, 128, 88, 255),
-        'Karré': (144, 132, 86, 255),
-        'Rekkehus': (116, 138, 94, 255),
-        'Tun': (126, 116, 93, 255),
-        'Podium + Tårn': (126, 74, 60, 255),
-        'Tårn': (52, 94, 130, 255),
-    }
-
-    # page frames
-    draw.rounded_rectangle([(22, 20), (canvas_w - 22, canvas_h - 20)], radius=26, fill=(250, 250, 247, 255), outline=(228, 226, 220, 255))
-    draw.rounded_rectangle([(map_x0, map_y0), (map_x1, map_y1)], radius=22, fill=(244, 244, 240, 255), outline=(222, 220, 214, 255))
-    panel_x0 = canvas_w - right_panel_w
-    draw.rounded_rectangle([(panel_x0, 38), (canvas_w - 24, canvas_h - 28)], radius=24, fill=(242, 241, 237, 255), outline=(222, 220, 214, 255))
-
-    # context
-    for neighbor in filtered_neighbors:
-        draw_poly(neighbor['coords'], fill=(219, 219, 217, 255), outline=(201, 202, 199, 225), width=1)
-
-    # base layers
-    draw_poly(site_coords, fill=(227, 232, 220, 128), outline=(220, 108, 96, 255), width=3)
-    draw_poly(buildable_coords, fill=(222, 236, 241, 88), outline=(98, 158, 197, 220), width=2)
-
-    for item in field_polys:
-        draw_poly(item.get('coords', []), fill=(235, 227, 196, 95), outline=(177, 168, 130, 150), width=1)
-    for item in public_polys:
-        draw_poly(item.get('coords', []), fill=(199, 219, 191, 155), outline=(142, 169, 132, 170), width=1)
-    for item in courtyard_polys:
-        draw_poly(item.get('coords', []), fill=(224, 235, 202, 180), outline=(148, 175, 128, 190), width=1)
-    for item in corridor_polys:
-        draw_poly(item.get('coords', []), fill=(255, 183, 107, 65), outline=(230, 143, 61, 170), width=2)
-
-    # axes and sightlines
-    for axis in macro_axes:
-        if axis.get('coords'):
-            draw_line(axis.get('coords'), fill=(73, 111, 152, 125), width=4, dash=False)
-    for axis in symmetry_axes:
-        if axis.get('coords'):
-            draw_line(axis.get('coords'), fill=(73, 180, 220, 135), width=2, dash=True)
-
-    proposed = []
-    for idx, part in enumerate(massing_parts):
-        coords = flatten_coord_groups(part.get('coords', []))
-        pp = pts_from_coords(coords)
-        if len(pp) < 3:
-            continue
-        typ = part.get('typology', option.typology)
-        base = part.get('color')
-        if isinstance(base, list) and len(base) >= 3:
-            color = tuple(int(v) for v in base[:4]) if len(base) >= 4 else (int(base[0]), int(base[1]), int(base[2]), 232)
-        else:
-            color = typo_colors.get(typ, (205, 166, 121, 232))
-        outline = typo_outline.get(typ, (125, 110, 84, 255))
-        poly_obj = None
-        try:
-            poly_obj = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-            c = poly_obj.centroid
-            center = project((c.x, c.y))
-        except Exception:
-            center = (sum(x for x, _ in pp) / len(pp), sum(y for _, y in pp) / len(pp))
-        length_m, depth_m, area_m2 = _part_dimensions(part)
-        proposed.append({
-            'idx': idx,
-            'tag': _alpha_num_tag(idx),
-            'pts': pp,
-            'center': center,
-            'typology': typ,
-            'color': color,
-            'outline': outline,
-            'floors': int(part.get('floors', option.floors) or option.floors),
-            'length_m': length_m,
-            'depth_m': depth_m,
-            'area_m2': area_m2,
-            'poly': poly_obj,
-            'coords': coords,
-        })
-
-    for part in proposed:
-        shadow = [(x + 5, y + 4) for x, y in part['pts']]
-        draw.polygon(shadow, fill=(90, 90, 90, 32))
-        draw.polygon(part['pts'], fill=part['color'], outline=part['outline'])
-        draw.line(part['pts'] + [part['pts'][0]], fill=part['outline'], width=2)
-        if len(part['pts']) >= 4:
-            draw.line([part['pts'][0], part['pts'][1]], fill=(255, 255, 255, 95), width=2)
-
-    # Measured clearances: building-to-building and building-to-plot-boundary.
-    _draw_clearance_measurements(
-        draw,
-        proposed,
-        site_coords,
-        project,
-        font=font_tiny,
-        max_pair_labels=6 if len(proposed) <= 8 else 5,
-        max_boundary_labels=3 if len(proposed) <= 8 else 2,
-    )
-
-    # Building labels are intentionally kept off the footprints.
-    _draw_building_callouts(
-        draw,
-        proposed,
-        (map_x0 + inner_pad, map_y0 + inner_pad, map_x1 - inner_pad, map_y1 - inner_pad),
-        font_label=font_tiny,
-        font_detail=font_tiny,
-        max_items=10,
-    )
-
-    # trees, restrained
-    for item in (courtyard_polys or public_polys)[:16]:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) < 3:
-            continue
-        try:
-            poly = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-            c = poly.centroid
-            tx, ty = project((c.x, c.y))
-            draw.ellipse([(tx - 8, ty - 20), (tx + 8, ty - 4)], fill=(180, 209, 149, 225), outline=(131, 161, 104, 180))
-            draw.line([(tx, ty - 4), (tx, ty + 8)], fill=(112, 92, 66, 210), width=2)
-        except Exception:
-            continue
-
-    # header/footer
-    draw.text((42, 34), 'KONSEPT', fill=(66, 66, 62, 255), font=font_title)
-    draw.text((38, 62), 'OVERSIKT', fill=(25, 25, 25, 255), font=font_hero)
-    draw.text((42, canvas_h - 44), '2D-konseptoversikt med bygg, uterom, siktlinjer og avstandsmål', fill=(44, 44, 44, 255), font=font_title)
-
-    nx, ny = 70, 144
-    draw.line((nx, ny + 24, nx, ny - 8), fill=(55, 55, 55, 200), width=3)
-    draw.polygon([(nx, ny - 18), (nx - 8, ny - 2), (nx + 8, ny - 2)], fill=(55, 55, 55, 200))
-    draw.text((nx - 7, ny + 30), 'N', fill=(55, 55, 55, 190), font=font_small)
-
-    # panel
-    panel_x = panel_x0 + 22
-    unique_typos = []
-    for p in proposed:
-        typ = p['typology']
-        if typ not in unique_typos:
-            unique_typos.append(typ)
-    panel_typology = ', '.join(unique_typos) if unique_typos else option.typology
-    panel_typology = panel_typology.upper()
-    if len(panel_typology) > 24:
-        panel_typology = panel_typology.replace(', ', ',\n')
-
-    draw.text((panel_x, 58), 'ANBEFALTE MÅL', fill=(44, 44, 44, 255), font=font_section)
-    draw.multiline_text((panel_x, 100), panel_typology, fill=(28, 28, 28, 255), font=font_body, spacing=3)
-    hint = _typology_dimension_hint(option.typology)
-    if hint:
-        draw.text((panel_x, 148), hint, fill=(94, 92, 86, 255), font=font_small)
-
-    summary_rows = [
-        ('BTA', f"{option.gross_bta_m2:,.0f} m²".replace(',', ' ')),
-        ('BRA', f"{option.saleable_area_m2:,.0f} m²".replace(',', ' ')),
-        ('Bygg', str(len(proposed))),
-        ('Boliger', f"ca. {option.unit_count}"),
-        ('Etasjer', f"{option.floors}"),
-        ('Score', f"{option.score:.0f}/100"),
-        ('Sol', f"{option.solar_score:.0f}/100"),
-    ]
-    py = 198
-    for key, value in summary_rows:
-        draw.text((panel_x, py), key, fill=(96, 94, 90, 255), font=font_small)
-        draw.text((panel_x + 112, py), value, fill=(33, 33, 33, 255), font=font_small)
-        py += 28
-
-    draw.text((panel_x, py + 14), 'BYGGDIMENSJONER', fill=(44, 44, 44, 255), font=font_section)
-    py += 50
-    card_h = 50
-    for part in sorted(proposed, key=lambda item: item['idx'])[:9]:
-        if py + card_h > canvas_h - 44:
-            break
-        draw.rounded_rectangle([(panel_x, py), (canvas_w - 42, py + card_h)], radius=12, fill=(248, 247, 244, 255), outline=(223, 221, 214, 255))
-        draw.ellipse([(panel_x + 10, py + 12), (panel_x + 32, py + 34)], fill=part['color'], outline=part['outline'])
-        tw, th = label_bbox(part['tag'], font_tiny)
-        draw.text((panel_x + 21 - tw / 2, py + 22 - th / 2), part['tag'], fill=(35, 34, 30, 255), font=font_tiny)
-        title = f"{part['tag']} · {part['typology']} · {part['floors']} et."
-        draw.text((panel_x + 42, py + 8), title, fill=(31, 31, 31, 255), font=font_small)
-        dim_text = _format_dimensions(part['length_m'], part['depth_m'])
-        draw.text((panel_x + 42, py + 26), dim_text, fill=(73, 71, 67, 255), font=font_tiny)
-        if part['area_m2'] > 0:
-            area_text = f"fotavtrykk {part['area_m2']:.0f} m²"
-            aw, _ = label_bbox(area_text, font_tiny)
-            draw.text((canvas_w - 50 - aw, py + 26), area_text, fill=(103, 100, 95, 255), font=font_tiny)
-        py += card_h + 8
-
-    return img.convert('RGB')
-def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
-    """Render en tydelig plan med byggenes faktiske fotavtrykksmål."""
-    canvas_w, canvas_h = 1500, 980
-    left_panel_w = 360
-    img = Image.new('RGBA', (canvas_w, canvas_h), (243, 243, 240, 255))
-    draw = ImageDraw.Draw(img, 'RGBA')
-    font_tiny = _pil_font(14)
-    font_micro = _pil_font(16)
-    font_small = _pil_font(18)
-    font_body = _pil_font(22)
-    font_title = _pil_font(28)
-    font_hero = _pil_font(70, bold=True)
-
-    geometry = option.geometry or {}
-    site_coords = geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
-    buildable_coords = geometry.get('buildable_polygon_coords') or site_coords
-    massing_parts = geometry.get('massing_parts', []) or []
-    neighbor_polys = geometry.get('neighbor_polygons', []) or []
-    field_polys = geometry.get('field_polygons', []) or []
-    public_polys = geometry.get('public_realm_polygons', []) or []
-    courtyard_polys = geometry.get('courtyard_polygons', []) or []
-    corridor_polys = geometry.get('view_corridor_polygons', []) or []
-    macro_axes = geometry.get('macro_axes', []) or []
-    symmetry_axes = geometry.get('symmetry_axes', []) or []
+    # --- Isometrisk projeksjon ---
+    ISO_ANGLE = math.radians(30)
+    COS_A = math.cos(ISO_ANGLE)
+    SIN_A = math.sin(ISO_ANGLE)
+    Z_SCALE = 1.2
 
     site_pts = flatten_coord_groups(site_coords)
     if not site_pts:
         site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
-    focus_pts: List[List[float]] = list(site_pts)
-    for seq in (field_polys, public_polys, courtyard_polys, corridor_polys):
-        for item in seq:
-            focus_pts.extend(flatten_coord_groups(item.get('coords', [])))
-    for part in massing_parts:
-        focus_pts.extend(flatten_coord_groups(part.get('coords', [])))
-    if not focus_pts:
-        focus_pts = list(site_pts)
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
 
-    focus_xs = [p[0] for p in focus_pts]
-    focus_ys = [p[1] for p in focus_pts]
-    focus_cx = (min(focus_xs) + max(focus_xs)) / 2.0
-    focus_cy = (min(focus_ys) + max(focus_ys)) / 2.0
-    focus_span = max(max(focus_xs) - min(focus_xs), max(focus_ys) - min(focus_ys), 1.0)
+    target_screen_span = min(canvas_w, canvas_h) * 0.48
+    pixel_scale = target_screen_span / site_span
 
-    filtered_neighbors = []
-    context_limit = focus_span * 1.8
+    screen_cx = canvas_w * 0.50
+    screen_cy = canvas_h * 0.65  # Langt ned for å gi maks plass til høyde
+
+    def iso_project(x: float, y: float, z: float = 0.0) -> Tuple[float, float]:
+        dx = (x - cx) * pixel_scale
+        dy = (y - cy) * pixel_scale
+        sx = screen_cx + (dx - dy) * COS_A
+        sy = screen_cy + (dx + dy) * SIN_A * 0.5 - z * pixel_scale * Z_SCALE
+        return sx, sy
+
+    def iso_pts(coords, z=0.0):
+        return [iso_project(p[0], p[1], z) for p in coords if len(p) >= 2]
+
+    def darken(c, f):
+        return (int(c[0]*f), int(c[1]*f), int(c[2]*f), int(c[3]) if len(c)>3 else 255)
+
+    def lighten(c, a):
+        return (min(255,int(c[0]+a)), min(255,int(c[1]+a)), min(255,int(c[2]+a)), int(c[3]) if len(c)>3 else 255)
+
+    def draw_iso_flat(coords, z, fill, outline, w=1):
+        pts = iso_pts(coords, z)
+        if len(pts) < 3:
+            return
+        draw.polygon(pts, fill=fill, outline=outline)
+        if w > 1:
+            draw.line(pts + [pts[0]], fill=outline, width=w)
+
+    def draw_extruded(coords, h, top_c, side_c, out_c, w=1):
+        if not coords or len(coords) < 3 or h <= 0:
+            return 0.0
+        top_pts = iso_pts(coords, h)
+        base_pts = iso_pts(coords, 0.0)
+        if len(top_pts) < 3:
+            return 0.0
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            bt0, bt1 = base_pts[i], base_pts[j]
+            tp0, tp1 = top_pts[i], top_pts[j]
+            edge_dx = bt1[0] - bt0[0]
+            edge_dy = bt1[1] - bt0[1]
+            if edge_dy < 0 or (edge_dy == 0 and edge_dx > 0):
+                draw.polygon([bt0, bt1, tp1, tp0], fill=darken(side_c, 0.60), outline=out_c)
+            elif edge_dx > 0 or edge_dy > 0:
+                draw.polygon([bt0, bt1, tp1, tp0], fill=side_c, outline=out_c)
+        draw.polygon(top_pts, fill=top_c, outline=out_c)
+        if w > 1:
+            draw.line(top_pts + [top_pts[0]], fill=out_c, width=w)
+        return sum(p[0] for p in coords)/len(coords) - cx + sum(p[1] for p in coords)/len(coords) - cy
+
+    # --- Samle volumer for depth-sorting ---
+    volumes = []
+    view_radius = site_span * 0.45
     for neighbor in neighbor_polys:
-        coords = flatten_coord_groups(neighbor.get('coords') or neighbor.get('polygon_coords') or [])
-        if len(coords) < 3:
+        ncoords = flatten_coord_groups(neighbor.get('coords', []))
+        if not ncoords:
             continue
-        avg_x = sum(p[0] for p in coords) / len(coords)
-        avg_y = sum(p[1] for p in coords) / len(coords)
-        if max(abs(avg_x - focus_cx), abs(avg_y - focus_cy)) <= context_limit:
-            filtered_neighbors.append({'coords': coords})
+        avg_x = sum(p[0] for p in ncoords) / len(ncoords)
+        avg_y = sum(p[1] for p in ncoords) / len(ncoords)
+        if math.hypot(avg_x - cx, avg_y - cy) > view_radius:
+            continue
+        volumes.append({'coords': ncoords, 'height_m': float(neighbor.get('height_m', 9.0)),
+                        'type': 'neighbor', 'depth': (avg_x - cx) + (avg_y - cy)})
 
-    all_pts: List[List[float]] = list(focus_pts)
-    for neighbor in filtered_neighbors:
-        all_pts.extend(neighbor['coords'])
-    xs = [p[0] for p in all_pts]
-    ys = [p[1] for p in all_pts]
-    cx = (min(xs) + max(xs)) / 2.0
-    cy = (min(ys) + max(ys)) / 2.0
-    span = max(max(xs) - min(xs), max(ys) - min(ys), focus_span * 1.08, 1.0)
+    if massing_parts:
+        for part in massing_parts:
+            pcoords = flatten_coord_groups(part.get('coords', []))
+            if not pcoords:
+                continue
+            avg_x = sum(p[0] for p in pcoords) / len(pcoords)
+            avg_y = sum(p[1] for p in pcoords) / len(pcoords)
+            volumes.append({'coords': pcoords, 'height_m': float(part.get('height_m', option.building_height_m)),
+                            'name': part.get('name', option.typology),
+                            'color': tuple(part.get('color', [34,197,94,200])),
+                            'floors': int(part.get('floors', option.floors)),
+                            'type': 'proposed', 'depth': (avg_x - cx) + (avg_y - cy)})
+    else:
+        fcoords = flatten_coord_groups(footprint_coords)
+        if fcoords:
+            avg_x = sum(p[0] for p in fcoords) / len(fcoords)
+            avg_y = sum(p[1] for p in fcoords) / len(fcoords)
+            volumes.append({'coords': fcoords, 'height_m': option.building_height_m,
+                            'name': option.typology, 'color': (34,197,94,200),
+                            'floors': option.floors, 'type': 'proposed',
+                            'depth': (avg_x - cx) + (avg_y - cy)})
 
-    map_x0, map_y0 = left_panel_w + 26, 34
-    map_x1, map_y1 = canvas_w - 30, canvas_h - 34
-    scale = min((map_x1 - map_x0) / max(span * 1.08, 1.0), (map_y1 - map_y0) / max(span * 1.08, 1.0))
-    ox = (map_x0 + map_x1) / 2.0
-    oy = (map_y0 + map_y1) / 2.0
+    volumes.sort(key=lambda v: v['depth'])
+
+    # --- TEGNING ---
+    # Himmelgradient
+    for row in range(canvas_h // 2):
+        t = row / (canvas_h / 2.0)
+        draw.line([(0, row), (canvas_w, row)], fill=(int(6+t*10), int(17+t*18), int(26+t*28), 255))
+
+    # Bakkeplan: tomt
+    draw_iso_flat(flatten_coord_groups(site_coords), 0.0, (15,28,42,200), (80,100,130,180), 2)
+    draw_iso_flat(flatten_coord_groups(buildable_coords), 0.0, (56,189,248,15), (56,189,248,80), 1)
+    draw_iso_flat(flatten_coord_groups(shadow_coords), 0.0, (255,213,79,20), (255,213,79,50), 1)
+
+    # Volumer
+    for vol in volumes:
+        coords, h = vol['coords'], vol['height_m']
+        if vol['type'] == 'neighbor':
+            # Dempet naboer: lav alpha så Gemini tolker dem som "kontekst-wireframes"
+            # i stedet for solid grå bygninger. Verdier satt slik at de er synlige for
+            # menneskelig bruker men ikke dominerende for Gemini.
+            alpha = min(95, int(45 + h * 3))
+            draw_extruded(coords, h, (130,140,155,alpha), (100,110,125,alpha), (160,170,185,min(130,alpha+25)), 1)
+            # Nabohøyde-label (grå, over bygget)
+            if h > 3:
+                avg_x = sum(p[0] for p in coords) / len(coords)
+                avg_y = sum(p[1] for p in coords) / len(coords)
+                lx, ly = iso_project(avg_x, avg_y, h * 1.05)
+                draw.text((lx - 10, ly - 6), f"{h:.0f}m", fill=(180,190,205,160), font=font_info)
+        else:
+            base = vol.get('color', (34,197,94,200))
+            base = tuple(int(v) if v > 1 else int(v * 255) for v in base)  # handle 0.0-1.0 alpha
+            if len(base) < 4:
+                base = (base[0], base[1], base[2], 220)
+            draw_extruded(coords, h, (int(base[0]),int(base[1]),int(base[2]),230), darken(base, 0.72), lighten(base, 50), 2)
+            # Hoyde-label
+            avg_x = sum(p[0] for p in coords) / len(coords)
+            avg_y = sum(p[1] for p in coords) / len(coords)
+            lx, ly = iso_project(avg_x, avg_y, h * 1.08)
+            floors = vol.get('floors', 0)
+            draw.text((lx - 22, ly - 10), f"{floors}et / {h:.0f}m", fill=(255,255,255,240), font=font_bold)
+
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay+22, ax, ay-16), fill=(245,247,251,200), width=3)
+    draw.polygon([(ax, ay-25), (ax-7, ay-7), (ax+7, ay-7)], fill=(245,247,251,200))
+    draw.text((ax-4, ay+26), 'N', fill=(245,247,251,180), font=font_north)
+
+    # Infopanel
+    yt = canvas_h - 75
+    draw.rectangle([(0, yt-4), (canvas_w, canvas_h)], fill=(6,17,26,230))
+    n_parts = len(massing_parts)
+    title = f"{option.name} | {option.typology}"
+    if n_parts > 1:
+        title += f" | {n_parts} deler"
+    draw.text((30, yt), title, fill=(245,247,251,255), font=font_bold)
+    draw.text((30, yt+16), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | {option.floors} et. | Høyde {option.building_height_m:.1f} m | Sol {option.solar_score:.0f}/100", fill=(200,211,223,255), font=font_info)
+    draw.text((30, yt+32), f"Fotavtrykk {option.footprint_area_m2:.0f} m2 | Uteareal sol {option.sunlit_open_space_pct:.0f}% | Naboer {option.neighbor_count} | Byggefelt {option.buildable_area_m2:.0f} m2", fill=(159,176,195,255), font=font_info)
+    draw.text((30, yt+48), f"Vinterskygge {option.winter_noon_shadow_m:.0f} m | Score {option.score:.0f}/100 | {option.geometry.get('site_source', '')}", fill=(130,145,165,255), font=font_info)
+
+    return img.convert('RGB')
+
+
+def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
+    """
+    Planvisning (fugleperspektiv / top-down) av volumskisse.
+    Viser tomtegrense, byggefelt, fotavtrykk og bygninger med etasjefarge-koding.
+    """
+    canvas_w, canvas_h = 1100, 780
+    img = Image.new('RGBA', (canvas_w, canvas_h), (240, 243, 248, 255))
+    draw = ImageDraw.Draw(img, 'RGBA')
+    font = _pil_font(14)
+    font_bold = _pil_font(14, bold=True)
+    font_north = _pil_font(16, bold=True)
+
+    site_coords = option.geometry.get('site_polygon_coords') or geometry_to_coord_groups(box(0, 0, site.site_width_m, site.site_depth_m))
+    buildable_coords = option.geometry.get('buildable_polygon_coords') or site_coords
+    massing_parts = option.geometry.get('massing_parts', []) or []
+    neighbor_polys = option.geometry.get('neighbor_polygons', [])
+
+    site_pts = flatten_coord_groups(site_coords)
+    if not site_pts:
+        site_pts = [[0.0, 0.0], [site.site_width_m, site.site_depth_m]]
+    sxs = [p[0] for p in site_pts]
+    sys_ = [p[1] for p in site_pts]
+    cx = (min(sxs) + max(sxs)) / 2.0
+    cy = (min(sys_) + max(sys_)) / 2.0
+    site_span = max(max(sxs) - min(sxs), max(sys_) - min(sys_), 1.0)
+
+    margin = 60
+    target_span = min(canvas_w, canvas_h) - 2 * margin
+    scale = target_span / site_span
+    ox = canvas_w / 2.0
+    oy = canvas_h / 2.0
 
     def proj(x: float, y: float) -> Tuple[float, float]:
         return ox + (x - cx) * scale, oy + (y - cy) * scale
@@ -5161,219 +4551,75 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
     def pts(coords):
         return [proj(p[0], p[1]) for p in coords if len(p) >= 2]
 
-    def draw_poly(coords, fill=None, outline=None, width=1):
-        pp = pts(coords)
+    # Tomtegrense
+    sp = pts(flatten_coord_groups(site_coords))
+    if len(sp) >= 3:
+        draw.polygon(sp, fill=(220, 225, 233, 180), outline=(100, 110, 130, 220))
+
+    # Byggefelt
+    bp = pts(flatten_coord_groups(buildable_coords))
+    if len(bp) >= 3:
+        draw.polygon(bp, fill=(200, 218, 240, 60), outline=(56, 140, 248, 120))
+
+    # Nabobygg
+    for neighbor in neighbor_polys:
+        ncoords = neighbor.get('coords') or neighbor.get('polygon_coords', [])
+        if isinstance(ncoords, str):
+            continue
+        np_ = pts(flatten_coord_groups(ncoords))
+        if len(np_) >= 3:
+            draw.polygon(np_, fill=(180, 185, 195, 120), outline=(140, 145, 155, 180))
+
+    # Bygningsvolumer
+    for part in massing_parts:
+        pcoords = flatten_coord_groups(part.get('coords', []))
+        if not pcoords:
+            continue
+        pp = pts(pcoords)
         if len(pp) < 3:
-            return
-        draw.polygon(pp, fill=fill, outline=outline)
-        if outline and width > 1:
-            draw.line(pp + [pp[0]], fill=outline, width=width)
-
-    def draw_line(coords, fill, width=2, dash=False):
-        pp = pts(coords)
-        if len(pp) < 2:
-            return
-        if not dash:
-            draw.line(pp, fill=fill, width=width)
-            return
-        for a, b in zip(pp, pp[1:]):
-            seg_len = math.hypot(b[0] - a[0], b[1] - a[1])
-            if seg_len <= 0:
-                continue
-            step = 12.0
-            on = True
-            start = 0.0
-            while start < seg_len:
-                end = min(seg_len, start + step * 0.65)
-                if on:
-                    x1 = a[0] + (b[0] - a[0]) * (start / seg_len)
-                    y1 = a[1] + (b[1] - a[1]) * (start / seg_len)
-                    x2 = a[0] + (b[0] - a[0]) * (end / seg_len)
-                    y2 = a[1] + (b[1] - a[1]) * (end / seg_len)
-                    draw.line([(x1, y1), (x2, y2)], fill=fill, width=width)
-                on = not on
-                start += step
-
-    def label_bbox(text_value: str, font_obj) -> Tuple[int, int]:
-        try:
-            bbox = font_obj.getbbox(text_value)
-            return bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except Exception:
-            return (len(text_value) * 10, 16)
-
-    typo_colors = {
-        'Lamell': (64, 126, 188, 235),
-        'Punkthus': (74, 184, 179, 235),
-        'Karré': (66, 103, 155, 235),
-        'Rekkehus': (92, 149, 120, 235),
-        'Tun': (116, 132, 164, 235),
-    }
-
-    draw.rectangle([(0, 0), (left_panel_w, canvas_h)], fill=(240, 240, 237, 255))
-    draw.text((46, 52), 'DETALJREGULERING', fill=(66, 66, 66, 255), font=font_title)
-    draw.text((46, 102), 'FELT', fill=(28, 28, 28, 255), font=font_hero)
-    intro = 'Planen viser fotavtrykk, grøntstruktur og faktiske byggmål slik at lamell, punkt og karré er enklere å vurdere.'
-    draw.text((46, 228), intro, fill=(86, 86, 86, 255), font=font_small)
-
-    draw.text((46, 314), 'TOMTELOGIKK', fill=(44, 44, 44, 255), font=font_title)
-    draw.text((46, 356), f"Typologi: {option.typology}", fill=(30, 30, 30, 255), font=font_micro)
-    hint = _typology_dimension_hint(option.typology)
-    if hint:
-        draw.text((46, 384), hint, fill=(94, 92, 86, 255), font=font_micro)
-    stats = [
-        ('BTA', f"{option.gross_bta_m2:,.0f} m²".replace(',', ' ')),
-        ('BRA', f"{option.saleable_area_m2:,.0f} m²".replace(',', ' ')),
-        ('Bygg', str(len(massing_parts))),
-        ('Boliger', f"ca. {option.unit_count}"),
-        ('Etasjer', f"opptil {option.floors}"),
-        ('Score', f"{option.score:.0f}/100"),
-    ]
-    sy = 436
-    for key, value in stats:
-        draw.text((46, sy), key, fill=(74, 74, 74, 255), font=font_micro)
-        draw.text((162, sy), value, fill=(28, 28, 28, 255), font=font_micro)
-        sy += 28
-
-    draw.text((46, 634), 'BYGGMÅL', fill=(44, 44, 44, 255), font=font_title)
-    schedule = []
-    for idx, part in enumerate(massing_parts[:9], start=1):
-        length_m, depth_m, area_m2 = _part_dimensions(part)
-        schedule.append((idx, part, length_m, depth_m, area_m2))
-    sy = 678
-    if schedule:
-        for idx, part, length_m, depth_m, area_m2 in schedule:
-            card_h = 52
-            draw.rounded_rectangle([(42, sy), (left_panel_w - 22, sy + card_h)], radius=12, fill=(246, 245, 241, 255), outline=(220, 218, 210, 255))
-            badge_color = tuple(int(v) for v in ((part.get('color') or typo_colors.get(part.get('typology', option.typology), (173,141,106,235)))[:4])) if isinstance(part.get('color'), list) else typo_colors.get(part.get('typology', option.typology), (173,141,106,235))
-            draw.ellipse([(52, sy + 12), (76, sy + 36)], fill=badge_color, outline=(115, 108, 96, 180))
-            label = _alpha_num_tag(idx - 1)
-            tw, th = label_bbox(label, font_tiny)
-            draw.text((64 - tw / 2, sy + 24 - th / 2), label, fill=(32, 32, 32, 255), font=font_tiny)
-            draw.text((88, sy + 10), _format_dimensions(length_m, depth_m), fill=(32, 32, 32, 255), font=font_micro)
-            meta = f"{part.get('typology', option.typology)} · {int(part.get('floors', option.floors) or option.floors)} et. · {area_m2:.0f} m²"
-            draw.text((88, sy + 30), meta, fill=(88, 86, 80, 255), font=font_tiny)
-            sy += card_h + 8
-            if sy > canvas_h - 88:
-                break
-    else:
-        draw.text((46, sy), 'Ingen byggdata tilgjengelig.', fill=(88, 86, 80, 255), font=font_micro)
-
-    draw.rectangle([(map_x0 - 4, map_y0 - 4), (map_x1 + 4, map_y1 + 4)], fill=(237, 237, 234, 255))
-
-    for neighbor in filtered_neighbors:
-        draw_poly(neighbor['coords'], fill=(231, 229, 225, 255), outline=(195, 192, 186, 200), width=1)
-
-    draw_poly(flatten_coord_groups(buildable_coords), fill=(235, 231, 219, 200), outline=(98, 94, 88, 120), width=1)
-    for item in field_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) < 3:
             continue
-        draw_poly(coords, fill=(231, 224, 192, 96), outline=(74, 74, 74, 150), width=2)
-        pp = pts(coords)
-        cx_l = sum(p[0] for p in pp) / len(pp)
-        cy_l = sum(p[1] for p in pp) / len(pp)
-        label = str(item.get('label') or item.get('field_id') or '').replace('Delfelt', 'FELT').upper()
-        if label:
-            tw, th = label_bbox(label, font_small)
-            draw.rounded_rectangle([(cx_l - tw / 2 - 8, cy_l - th / 2 - 3), (cx_l + tw / 2 + 8, cy_l + th / 2 + 5)], radius=10, fill=(244, 241, 232, 200), outline=(96, 92, 84, 100))
-            draw.text((cx_l - tw / 2, cy_l - th / 2), label, fill=(38, 38, 38, 235), font=font_small)
+        base_c = part.get('color', [34, 197, 94, 200])
+        base_c = tuple(int(v) if v > 1 else int(v * 255) for v in base_c)
+        if len(base_c) < 4:
+            base_c = (base_c[0], base_c[1], base_c[2], 200)
+        draw.polygon(pp, fill=base_c, outline=(255, 255, 255, 220))
+        draw.line(pp + [pp[0]], fill=(255, 255, 255, 220), width=2)
 
-    for item in public_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_poly(coords, fill=(198, 214, 184, 150), outline=(152, 170, 140, 120), width=1)
-    for item in courtyard_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_poly(coords, fill=(243, 236, 184, 180), outline=(184, 176, 118, 140), width=1)
-    for item in corridor_polys:
-        coords = flatten_coord_groups(item.get('coords', []))
-        if len(coords) >= 3:
-            draw_poly(coords, fill=(255, 180, 102, 46), outline=(245, 140, 54, 140), width=2)
+        # Label
+        avg_x = sum(p[0] for p in pp) / len(pp)
+        avg_y = sum(p[1] for p in pp) / len(pp)
+        floors = part.get('floors', 0)
+        name = part.get('name', '')
+        draw.text((avg_x - 20, avg_y - 8), f"{name}", fill=(30, 30, 30, 255), font=font)
+        draw.text((avg_x - 15, avg_y + 4), f"{floors} et.", fill=(60, 60, 60, 220), font=font)
 
-    for item in macro_axes:
-        if item.get('coords'):
-            draw_line(item.get('coords'), (95, 95, 95, 120), 3)
-    for item in symmetry_axes:
-        if item.get('coords'):
-            draw_line(item.get('coords'), (125, 125, 125, 90), 2, dash=True)
+    # Nordpil
+    ax, ay = canvas_w - 55, 50
+    draw.line((ax, ay + 22, ax, ay - 16), fill=(60, 70, 90, 200), width=3)
+    draw.polygon([(ax, ay - 25), (ax - 7, ay - 7), (ax + 7, ay - 7)], fill=(60, 70, 90, 200))
+    draw.text((ax - 4, ay + 26), 'N', fill=(60, 70, 90, 200), font=font_north)
 
-    plan_callouts: List[Dict[str, Any]] = []
-    for idx, part in enumerate(massing_parts):
-        coords = flatten_coord_groups(part.get('coords', []))
-        if len(coords) < 3:
-            continue
-        typ = part.get('typology', option.typology)
-        base_c = part.get('color')
-        if isinstance(base_c, list) and len(base_c) >= 3:
-            color = tuple(int(v) for v in base_c[:4]) if len(base_c) >= 4 else (int(base_c[0]), int(base_c[1]), int(base_c[2]), 225)
-        else:
-            color = typo_colors.get(typ, (64, 126, 188, 235))
-        outline = (31, 55, 95, 190)
-        draw_poly(coords, fill=color, outline=outline, width=2)
-        try:
-            poly_obj = Polygon([(float(x), float(y)) for x, y in coords]).buffer(0)
-        except Exception:
-            poly_obj = None
-
-        pp = pts(coords)
-        cx_l = sum(p[0] for p in pp) / len(pp)
-        cy_l = sum(p[1] for p in pp) / len(pp)
-        length_m, depth_m, area_m2 = _part_dimensions(part)
-        plan_callouts.append({
-            'idx': idx,
-            'tag': _alpha_num_tag(idx),
-            'typology': typ,
-            'center': (cx_l, cy_l),
-            'color': color,
-            'outline': outline,
-            'floors': int(part.get('floors', option.floors) or option.floors),
-            'length_m': length_m,
-            'depth_m': depth_m,
-            'area_m2': area_m2,
-            'coords': coords,
-            'poly': poly_obj,
-        })
-
-    _draw_clearance_measurements(
-        draw,
-        plan_callouts,
-        site_coords,
-        lambda pt: proj(pt[0], pt[1]),
-        font=font_tiny,
-        max_pair_labels=6 if len(plan_callouts) <= 8 else 5,
-        max_boundary_labels=3 if len(plan_callouts) <= 8 else 2,
-    )
-
-    _draw_building_callouts(
-        draw,
-        plan_callouts,
-        (map_x0, map_y0, map_x1, map_y1),
-        font_label=font_tiny,
-        font_detail=font_tiny,
-        max_items=10,
-    )
-
-    draw_poly(flatten_coord_groups(site_coords), fill=None, outline=(202, 66, 66, 255), width=3)
-
-    nx, ny = canvas_w - 88, 68
-    draw.line((nx, ny + 24, nx, ny - 10), fill=(55, 55, 55, 210), width=3)
-    draw.polygon([(nx, ny - 22), (nx - 8, ny - 4), (nx + 8, ny - 4)], fill=(55, 55, 55, 210))
-    draw.text((nx - 7, ny + 30), 'N', fill=(55, 55, 55, 210), font=font_small)
-    scale_bar_m = 20.0
-    while scale_bar_m * scale < 70:
+    # Målestokk
+    scale_bar_m = 10.0
+    while scale_bar_m * scale < 40:
         scale_bar_m *= 2
-    while scale_bar_m * scale > 220:
+    while scale_bar_m * scale > 200:
         scale_bar_m /= 2
     bar_px = scale_bar_m * scale
-    bx, by_s = map_x0 + 18, canvas_h - 58
-    draw.line([(bx, by_s), (bx + bar_px, by_s)], fill=(70, 70, 70, 220), width=3)
-    draw.line([(bx, by_s - 6), (bx, by_s + 6)], fill=(70, 70, 70, 220), width=3)
-    draw.line([(bx + bar_px, by_s - 6), (bx + bar_px, by_s + 6)], fill=(70, 70, 70, 220), width=3)
-    draw.text((bx + bar_px / 2 - 16, by_s - 24), f"{scale_bar_m:.0f} m", fill=(70, 70, 70, 220), font=font_small)
+    bx, by_s = 40, canvas_h - 50
+    draw.line([(bx, by_s), (bx + bar_px, by_s)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx, by_s - 4), (bx, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.line([(bx + bar_px, by_s - 4), (bx + bar_px, by_s + 4)], fill=(60, 70, 90, 200), width=2)
+    draw.text((bx + bar_px / 2 - 10, by_s - 16), f"{scale_bar_m:.0f} m", fill=(60, 70, 90, 220), font=font)
+
+    # Infopanel
+    yt = canvas_h - 35
+    draw.rectangle([(0, yt - 2), (canvas_w, canvas_h)], fill=(240, 243, 248, 240))
+    title = f"PLANVISNING | {option.name} | {option.typology}"
+    draw.text((30, yt), title, fill=(26, 43, 72, 255), font=font_bold)
+    draw.text((30, yt + 14), f"BTA {option.gross_bta_m2:.0f} m2 | {option.unit_count} boliger | Fotavtrykk {option.footprint_area_m2:.0f} m2", fill=(80, 90, 110, 220), font=font)
 
     return img.convert('RGB')
-
 
 
 def render_sketch_views(site: SiteInputs, sketch_option: OptionResult) -> List[Image.Image]:
@@ -5409,18 +4655,12 @@ def build_geodata_scene_payload(site: SiteInputs, option: OptionResult, scene_co
     footprint_rings = project_coord_groups_to_lonlat(geometry.get('footprint_polygon_coords') or [], src_crs=src_crs)
 
     massing_parts = []
-    for idx, part in enumerate(geometry.get('massing_parts', []) or []):
-        length_m, depth_m, area_m2 = _part_dimensions(part)
+    for part in geometry.get('massing_parts', []) or []:
         massing_parts.append({
             'name': part.get('name', option.typology),
-            'tag': _alpha_num_tag(idx),
             'height_m': float(part.get('height_m', option.building_height_m)),
             'floors': int(part.get('floors', option.floors)),
-            'typology': part.get('typology', option.typology),
-            'width_m': round(length_m, 1),
-            'depth_m': round(depth_m, 1),
-            'area_m2': round(area_m2, 1),
-            'color': part.get('color', [64, 126, 188, 0.82]),
+            'color': part.get('color', [34, 197, 94, 0.80]),
             'rings': project_coord_groups_to_lonlat(part.get('coords') or [], src_crs=src_crs),
         })
 
@@ -7065,7 +6305,6 @@ def build_deterministic_report(
 
 # --- 5. PDF ---
 PDF_FONT = "DejaVu" if HAS_DEJAVU else "Helvetica"
-PDF_ACTIVE_FONT = PDF_FONT
 
 
 def _register_fonts(pdf: FPDF) -> str:
@@ -7395,6 +6634,483 @@ def _render_context_summary(options: List[OptionResult], site: "SiteInputs", env
             draw.text((x + 18, env_y + 110), value, fill=color, font=font_value)
 
     return img
+
+
+
+
+# --- ARKITEKTURDIAGRAM (Fase 2) -----------------------------------------
+#
+# Ren planvisning (SVG) som bruker struktur fra bridge Fase 1:
+# - tomtegrense (rød)
+# - nabobygg (grå kontekst)
+# - delfelt-vasker (lyse typologi-farger)
+# - public realm / courtyard reserve
+# - view corridors
+# - volumer i typologi-farger (ikke fase-farger)
+# - minimale labels (FELT 1, A/B/C)
+# - nord-pil
+#
+# Bruker geometrien Fase 1 eksporterer fra masterplan_engine via bridge.
+
+
+def _arkdiag_bounds(all_coords: List[List[List[float]]], padding_m: float = 30.0) -> Tuple[float, float, float, float]:
+    """Finn bounds fra alle koordinat-ringer med padding. Returnerer (minx, miny, maxx, maxy)."""
+    if not all_coords:
+        return (0.0, 0.0, 100.0, 100.0)
+    xs: List[float] = []
+    ys: List[float] = []
+    for ring in all_coords:
+        for pt in ring:
+            xs.append(float(pt[0]))
+            ys.append(float(pt[1]))
+    if not xs:
+        return (0.0, 0.0, 100.0, 100.0)
+    return (min(xs) - padding_m, min(ys) - padding_m, max(xs) + padding_m, max(ys) + padding_m)
+
+
+def _arkdiag_flatten(coord_groups: Any) -> List[List[List[float]]]:
+    """Normaliser coord_groups til liste av ringer. Tåler None og single-ring."""
+    if not coord_groups:
+        return []
+    if isinstance(coord_groups, list) and coord_groups and isinstance(coord_groups[0], list):
+        if coord_groups[0] and isinstance(coord_groups[0][0], (int, float)):
+            # Enkeltring, ikke gruppe
+            return [coord_groups]
+        return coord_groups
+    return []
+
+
+def _arkdiag_poly_d(ring: List[List[float]], to_px) -> str:
+    """SVG-path `d`-streng for et polygon-ring."""
+    if len(ring) < 2:
+        return ""
+    parts = []
+    for i, pt in enumerate(ring):
+        x, y = to_px(float(pt[0]), float(pt[1]))
+        parts.append(f"{'M' if i == 0 else 'L'}{x:.1f},{y:.1f}")
+    parts.append("Z")
+    return " ".join(parts)
+
+
+def _arkdiag_centroid_px(ring: List[List[float]], to_px) -> Tuple[float, float]:
+    """Beregn centroid i pixel-koord for label-plassering."""
+    if not ring:
+        return (0.0, 0.0)
+    xs = [float(pt[0]) for pt in ring]
+    ys = [float(pt[1]) for pt in ring]
+    cx = sum(xs) / len(xs)
+    cy = sum(ys) / len(ys)
+    return to_px(cx, cy)
+
+
+def render_arkitekturdiagram_svg(
+    geometry: Dict[str, Any],
+    width_px: int = 900,
+    height_px: int = 640,
+    show_labels: bool = True,
+    show_public_realm: bool = True,
+    show_view_corridors: bool = True,
+    show_field_washes: bool = True,
+    north_rotation_deg: float = 0.0,
+    style: str = "felt",
+) -> str:
+    """Returner SVG-streng med arkitekt-tegnet planvisning.
+
+    Bruker masterplan-motorens eksporterte felt/skeleton-lag. Tegner i rolig,
+    arkitektonisk stil (ikke dashboard-stil).
+
+    Parametre:
+        style: "felt" (hvit bakgrunn, svarte feltomriss, store FELT-labels —
+            som detaljregulering-diagram) eller "oversikt" (varmere palett,
+            landskap synlig — som konseptdiagram).
+    """
+    # Samle alle coords for bounds
+    all_coords: List[List[List[float]]] = []
+    for key in ("site_polygon_coords", "neighbor_polygons", "field_polygons"):
+        val = geometry.get(key) or []
+        if key == "neighbor_polygons":
+            for n in val:
+                all_coords.extend(_arkdiag_flatten(n.get("coords") or []))
+        elif key == "site_polygon_coords":
+            all_coords.extend(_arkdiag_flatten(val))
+        else:
+            for f in val:
+                all_coords.extend(_arkdiag_flatten(f.get("coords") or []))
+
+    if not all_coords:
+        return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width_px}" height="{height_px}"><text x="20" y="30" fill="#888" font-family="Inter,sans-serif" font-size="14">Ingen geometri å tegne</text></svg>'
+
+    minx, miny, maxx, maxy = _arkdiag_bounds(all_coords, padding_m=40.0)
+    span_x = max(maxx - minx, 1.0)
+    span_y = max(maxy - miny, 1.0)
+    # Bevare aspekt: skalér til minste akse, sentrer
+    scale = min(width_px / span_x, height_px / span_y) * 0.92
+    offset_x = (width_px - span_x * scale) / 2
+    offset_y = (height_px - span_y * scale) / 2
+
+    def to_px(x: float, y: float) -> Tuple[float, float]:
+        # SVG y peker ned — inverter Y-aksen
+        px = (x - minx) * scale + offset_x
+        py = height_px - ((y - miny) * scale + offset_y)
+        return (px, py)
+
+    # Stilkonfigurasjon — tre moduser
+    if style == "felt":
+        # Builtly mørkt tema — matcher resten av appens designsystem.
+        # Feltene får duse beige-brune fargetoner (delsempede palettfarger
+        # fra Builtly-designet) mot en mørkeblå bakgrunn. Typografi er
+        # hvit Inter med lett letter-spacing for lesbarhet.
+        bg_color = "#0b1420"              # builtly mørk bakgrunn
+        neighbor_fill = "#2a3447"         # dus gråblå (nabobygg)
+        neighbor_stroke = "#3c4a5e"
+        neighbor_opacity = "0.88"
+        site_stroke = "#f87171"           # rød-oransje tomtegrense
+        site_stroke_width = "1.6"
+        field_fill = "#3a3224"            # mørk beige-brun felt-vask
+        field_stroke = "#c8a876"          # varm lys-beige kant
+        field_stroke_width = "1.4"
+        field_dasharray = ""
+        public_fill = "#1e4d3c"           # mørk grønn offentlig rom
+        public_opacity = "0.55"
+        courtyard_fill = "#2a4a3c"        # mørk grønn gårdsrom
+        courtyard_opacity = "0.48"
+        corridor_fill = "#4a3e1a"         # mørk okergul siktkorridor
+        corridor_opacity = "0.32"
+        building_stroke = "#e8dcc0"       # lys beige bygning-kant
+        building_stroke_width = "0.6"
+        label_color = "#ffffff"           # hvit label
+        label_size_field = 14             # mindre, mer elegant
+        label_size_building = 9
+        label_weight_field = "700"
+        # Masterplan-akser (uke 1): diskret grønn stripe i felt-stil
+        axis_corridor_fill = "#4a5c38"
+        axis_corridor_opacity = "0.48"
+        axis_corridor_stroke = "#7a9a5c"
+        axis_line_stroke = "#a8c78c"
+        axis_line_width = "0.8"
+        axis_line_dasharray = "3,2"
+        torg_fill = "#5a7248"
+        torg_stroke = "#8aa66c"
+        torg_opacity = "0.65"
+    else:
+        # "oversikt" — varm konseptmodus
+        bg_color = "#f2efe7"
+        neighbor_fill = "#c8c4b8"
+        neighbor_stroke = "#a8a39a"
+        neighbor_opacity = "0.78"
+        site_stroke = "#c03030"
+        site_stroke_width = "2.5"
+        field_fill = "#d9cfb0"
+        field_stroke = "#847a65"
+        field_stroke_width = "0.5"
+        field_dasharray = "4,3"
+        public_fill = "#9aa890"
+        public_opacity = "0.58"
+        courtyard_fill = "#b5c4a8"
+        courtyard_opacity = "0.48"
+        corridor_fill = "#e6d888"
+        corridor_opacity = "0.32"
+        building_stroke = "#3d342a"
+        building_stroke_width = "0.7"
+        label_color = "#5c4a38"
+        label_size_field = 11
+        label_size_building = 13
+        label_weight_field = "600"
+        # Masterplan-akser (uke 1): markant grønn stripe i oversikt-stil
+        axis_corridor_fill = "#8fa67a"
+        axis_corridor_opacity = "0.55"
+        axis_corridor_stroke = "#6a7e54"
+        axis_line_stroke = "#4d5f3a"
+        axis_line_width = "1.0"
+        axis_line_dasharray = "5,3"
+        torg_fill = "#b5c28e"
+        torg_stroke = "#6a7e54"
+        torg_opacity = "0.72"
+
+    svg: List[str] = []
+    svg.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width_px} {height_px}" '
+        f'width="{width_px}" height="{height_px}" style="background:{bg_color};font-family:Inter,-apple-system,sans-serif;">'
+    )
+    # Eksplisitt bakgrunnsrektangel — style="background:..." rendres ikke
+    # konsistent i alle SVG-viewere (f.eks. cairosvg og noen PDF-konvertere
+    # ignorerer det). Derfor tegner vi en full-size rect i stedet.
+    svg.append(
+        f'<rect x="0" y="0" width="{width_px}" height="{height_px}" fill="{bg_color}"/>'
+    )
+
+    # ---- Lag 1: Nabobygg (grå kontekst) ----
+    for n in (geometry.get("neighbor_polygons") or []):
+        rings = _arkdiag_flatten(n.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{neighbor_fill}" stroke="{neighbor_stroke}" '
+                    f'stroke-width="0.6" opacity="{neighbor_opacity}"/>'
+                )
+
+    # ---- Lag 2: Delfelt-vasker (før tomtegrense og volumer) ----
+    if show_field_washes:
+        for f in (geometry.get("field_polygons") or []):
+            rings = _arkdiag_flatten(f.get("coords") or [])
+            # I "felt"-stil: solid beige fill + svart solid kant (som referanse 2)
+            # I "oversikt"-stil: typologi-fargepalett med stiplet kant
+            if style == "felt":
+                fill = field_fill
+                stroke = field_stroke
+                strokew = field_stroke_width
+                dasharray = ""
+                opacity = "0.92"
+            else:
+                typ_color = f.get("typology_color") or [184, 176, 160, 50]
+                fill = f"rgba({typ_color[0]},{typ_color[1]},{typ_color[2]},{typ_color[3]/255:.2f})"
+                stroke = field_stroke
+                strokew = field_stroke_width
+                dasharray = field_dasharray
+                opacity = "0.85"
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    dash_attr = f'stroke-dasharray="{dasharray}" ' if dasharray else ''
+                    svg.append(
+                        f'<path d="{d}" fill="{fill}" stroke="{stroke}" '
+                        f'stroke-width="{strokew}" {dash_attr}opacity="{opacity}"/>'
+                    )
+
+    # ---- Lag 3: Tomtegrense (rød) ----
+    site_coords = _arkdiag_flatten(geometry.get("site_polygon_coords") or [])
+    for ring in site_coords:
+        d = _arkdiag_poly_d(ring, to_px)
+        if d:
+            svg.append(
+                f'<path d="{d}" fill="none" stroke="{site_stroke}" '
+                f'stroke-width="{site_stroke_width}" stroke-linejoin="round"/>'
+            )
+
+    # ---- Lag 3.5: Masterplan-akser (uke 1) — gjennomgående grøntkorridor ----
+    # Tegnes FØR public realm slik at den ligger som grunnlag for landskapet,
+    # ikke over det. Aksene skal være det mest fremtredende strukturelle
+    # grepet etter selve tomtegrensen.
+    for ax in (geometry.get("masterplan_axes_polygons") or []):
+        rings = _arkdiag_flatten(ax.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{axis_corridor_fill}" '
+                    f'stroke="{axis_corridor_stroke}" stroke-width="0.5" '
+                    f'opacity="{axis_corridor_opacity}"/>'
+                )
+    # Stiplet akse-linje gjennom korridoren (understreker "akse"-karakteren)
+    for line_key in ("primary_axis_line", "secondary_axis_line"):
+        line_coords = geometry.get(line_key) or []
+        if not line_coords or len(line_coords) < 2:
+            continue
+        pts = [to_px(float(p[0]), float(p[1])) for p in line_coords]
+        d_line = "M " + " L ".join(f"{px:.1f} {py:.1f}" for px, py in pts)
+        svg.append(
+            f'<path d="{d_line}" fill="none" stroke="{axis_line_stroke}" '
+            f'stroke-width="{axis_line_width}" stroke-dasharray="{axis_line_dasharray}" '
+            f'opacity="0.75"/>'
+        )
+    # Torg — sirkler (tegnes over korridoren for kontrast)
+    for tp in (geometry.get("torg_polygons") or []):
+        rings = _arkdiag_flatten(tp.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{torg_fill}" stroke="{torg_stroke}" '
+                    f'stroke-width="0.8" opacity="{torg_opacity}"/>'
+                )
+
+    # ---- Lag 4: Public realm ----
+    if show_public_realm:
+        for p in (geometry.get("public_realm_polygons") or []):
+            rings = _arkdiag_flatten(p.get("coords") or [])
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    svg.append(
+                        f'<path d="{d}" fill="{public_fill}" stroke="none" '
+                        f'opacity="{public_opacity}"/>'
+                    )
+
+    # ---- Lag 5: Courtyard reserve ----
+    for c in (geometry.get("courtyard_reserve_polygons") or []):
+        rings = _arkdiag_flatten(c.get("coords") or [])
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{courtyard_fill}" stroke="none" '
+                    f'opacity="{courtyard_opacity}"/>'
+                )
+
+    # ---- Lag 6: View corridors ----
+    if show_view_corridors:
+        for v in (geometry.get("view_corridor_polygons") or []):
+            rings = _arkdiag_flatten(v.get("coords") or [])
+            for ring in rings:
+                d = _arkdiag_poly_d(ring, to_px)
+                if d:
+                    svg.append(
+                        f'<path d="{d}" fill="{corridor_fill}" stroke="none" '
+                        f'opacity="{corridor_opacity}"/>'
+                    )
+
+    # ---- Lag 7: Volumer ----
+    for mp in (geometry.get("massing_parts") or []):
+        rings = _arkdiag_flatten(mp.get("coords") or [])
+        if style == "felt":
+            # Hvite volumer med svart kant (som detaljregulering)
+            fill_color = "#f5f2e8"
+        else:
+            typ_color = mp.get("typology_color") or mp.get("color") or [180, 160, 130, 235]
+            fill_color = f"rgb({typ_color[0]},{typ_color[1]},{typ_color[2]})"
+        for ring in rings:
+            d = _arkdiag_poly_d(ring, to_px)
+            if d:
+                svg.append(
+                    f'<path d="{d}" fill="{fill_color}" stroke="{building_stroke}" '
+                    f'stroke-width="{building_stroke_width}" stroke-linejoin="round"/>'
+                )
+
+    # ---- Lag 8: Labels ----
+    if show_labels:
+        # Felt-labels (FELT 1, FELT 2, ...) med collision-avoidance.
+        # Problem: når felt er små eller nær hverandre, havner label-
+        # posisjonene (centroider) oppå hverandre og blir uleselige.
+        # Løsning: samle alle labels først, beregn collision-bokser,
+        # og push labels vekk fra hverandre iterativt.
+
+        # Samle label-kandidater
+        field_labels: List[Dict[str, Any]] = []
+        for f in (geometry.get("field_polygons") or []):
+            rings = _arkdiag_flatten(f.get("coords") or [])
+            if not rings:
+                continue
+            cx, cy = _arkdiag_centroid_px(rings[0], to_px)
+            label = f.get("label") or f.get("field_id", "")
+            short = label
+            if label.lower().startswith("delfelt "):
+                short = f"FELT {label.split()[-1]}"
+            elif label.startswith("DF"):
+                short = f"FELT {label[2:]}"
+            # Estimert bredde: ~0.58 × font-size per tegn for sans-serif
+            est_w = len(short) * label_size_field * 0.58
+            est_h = label_size_field * 1.2
+            field_labels.append({
+                "short": short,
+                "cx": cx,
+                "cy": cy,
+                "w": est_w,
+                "h": est_h,
+            })
+
+        # Enkel force-based displacement: iterer noen runder, push overlappende
+        # bokser fra hverandre.
+        def _boxes_overlap(a, b, margin: float = 4.0) -> bool:
+            ax1, ay1 = a["cx"] - a["w"]/2 - margin, a["cy"] - a["h"]/2 - margin
+            ax2, ay2 = a["cx"] + a["w"]/2 + margin, a["cy"] + a["h"]/2 + margin
+            bx1, by1 = b["cx"] - b["w"]/2 - margin, b["cy"] - b["h"]/2 - margin
+            bx2, by2 = b["cx"] + b["w"]/2 + margin, b["cy"] + b["h"]/2 + margin
+            return not (ax2 < bx1 or bx2 < ax1 or ay2 < by1 or by2 < ay1)
+
+        for _iteration in range(60):
+            moved = False
+            for i in range(len(field_labels)):
+                for j in range(i + 1, len(field_labels)):
+                    a, b = field_labels[i], field_labels[j]
+                    if _boxes_overlap(a, b, margin=6.0):
+                        # Push a og b fra hverandre langs vektor mellom sentre
+                        dx = b["cx"] - a["cx"]
+                        dy = b["cy"] - a["cy"]
+                        dist = max((dx*dx + dy*dy) ** 0.5, 0.01)
+                        # Normaliser og skalér push
+                        push = 3.5
+                        a["cx"] -= (dx / dist) * push
+                        a["cy"] -= (dy / dist) * push
+                        b["cx"] += (dx / dist) * push
+                        b["cy"] += (dy / dist) * push
+                        moved = True
+            if not moved:
+                break
+
+        # Tegn labels med halo/skygge for lesbarhet mot mørk bakgrunn
+        for lbl in field_labels:
+            cx, cy, short = lbl["cx"], lbl["cy"], lbl["short"]
+            if style == "felt":
+                # Mørk tema: hvit tekst med subtil skygge/halo
+                # Dobbel SVG <text>: først mørk halo, så hvit tekst oppå
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="#0b1420" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" dominant-baseline="middle" '
+                    f'letter-spacing="0.08em" stroke="#0b1420" stroke-width="3.5" '
+                    f'stroke-linejoin="round" opacity="0.85">{short}</text>'
+                )
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="{label_color}" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" dominant-baseline="middle" '
+                    f'letter-spacing="0.08em">{short}</text>'
+                )
+            else:
+                # Oversikt-stil: diskret, sparset
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy:.0f}" text-anchor="middle" '
+                    f'fill="{label_color}" font-size="{label_size_field}" '
+                    f'font-weight="{label_weight_field}" '
+                    f'letter-spacing="0.12em" opacity="0.58">{short}</text>'
+                )
+        # Bygg-labels — i "felt"-stil dropper vi dem helt (som referanse 2)
+        if style != "felt":
+            for i, mp in enumerate(geometry.get("massing_parts") or []):
+                rings = _arkdiag_flatten(mp.get("coords") or [])
+                if not rings:
+                    continue
+                cx, cy = _arkdiag_centroid_px(rings[0], to_px)
+                short_letter = chr(ord('A') + i) if i < 26 else (mp.get("name") or f"B{i+1}")
+                svg.append(
+                    f'<text x="{cx:.0f}" y="{cy + 4:.0f}" text-anchor="middle" '
+                    f'fill="#f5f3ee" font-size="{label_size_building}" '
+                    f'font-weight="700">{short_letter}</text>'
+                )
+
+    # ---- Lag 9: Nord-pil ----
+    arrow_x = width_px - 44
+    arrow_y = 38
+    arrow_bg = "rgba(255,255,255,0.95)" if style == "felt" else "rgba(242,239,231,0.9)"
+    arrow_stroke = "#1c1c1c" if style == "felt" else "#847a65"
+    arrow_fill = "#1c1c1c" if style == "felt" else "#3d342a"
+    svg.append(
+        f'<g transform="translate({arrow_x},{arrow_y}) rotate({-north_rotation_deg})">'
+        f'<circle cx="0" cy="0" r="20" fill="{arrow_bg}" stroke="{arrow_stroke}" stroke-width="0.8"/>'
+        f'<path d="M0,-14 L5,6 L0,2 L-5,6 Z" fill="{arrow_fill}"/>'
+        f'<text x="0" y="-22" text-anchor="middle" fill="{arrow_fill}" font-size="10" font-weight="700">N</text>'
+        f'</g>'
+    )
+
+    # ---- Skala-linje (nederst venstre) ----
+    scale_m = 50.0
+    if span_x < 200:
+        scale_m = 20.0
+    elif span_x > 500:
+        scale_m = 100.0
+    scale_px = scale_m * scale
+    scale_x0 = 24
+    scale_y = height_px - 24
+    scale_color = "#1c1c1c" if style == "felt" else "#3d342a"
+    svg.append(
+        f'<line x1="{scale_x0}" y1="{scale_y}" x2="{scale_x0 + scale_px}" y2="{scale_y}" '
+        f'stroke="{scale_color}" stroke-width="1.8"/>'
+        f'<text x="{scale_x0}" y="{scale_y - 6}" fill="{scale_color}" font-size="10" font-weight="600">{scale_m:.0f} m</text>'
+    )
+
+    svg.append("</svg>")
+    return "".join(svg)
 
 
 # --- SOL/SKYGGE SNAPSHOT RENDERING (v11) ---
@@ -8437,9 +8153,8 @@ def create_full_report_pdf(
     # (ny PDF-instans i samme prosess) kan DejaVu-registrering feile stille —
     # vi faller da trygt tilbake til Helvetica for HELE PDF-en for å unngå
     # "Undefined font: dejavu"-crash i header/footer.
-    global PDF_FONT, PDF_ACTIVE_FONT
+    global PDF_FONT
     _active_font = _register_fonts(pdf)
-    PDF_ACTIVE_FONT = _active_font
     if _active_font != PDF_FONT:
         PDF_FONT = _active_font
     pdf.p_name = name.upper()
@@ -8837,7 +8552,7 @@ def create_full_report_pdf(
             "som er valgt for videre bearbeiding."
         )
         pdf.ln(4)
-        view_labels = ["Konseptoversikt 2D", "Detaljert planvisning", "3D-terrengscene", "Detalj"]
+        view_labels = ["Isometrisk volumskisse", "Planvisning (fugleperspektiv)", "3D-terrengscene", "Detalj"]
         for i, image in enumerate(manual_sketch_images):
             pdf.check_space(100)
             lbl = view_labels[i] if i < len(view_labels) else f"Visning {i + 1}"
@@ -9522,17 +9237,8 @@ DB_DIR = Path("qa_database")
 SSOT_FILE = DB_DIR / "ssot.json"
 IMG_DIR = DB_DIR / "project_images"
 
-# Project-data bootstrap must never block Streamlit startup.
-# R8.2C hotfix: the previous implementation tried Supabase before local ssot.json.
-# If Supabase/http stalled, _stcore/stream stayed open with 0 bytes until the host
-# killed the session, and the user was sent back to Project Setup.
-# The new order is: Session -> local ssot.json -> optional Supabase with hard timeout.
-
-_PD_REMOTE_TIMEOUT_S = 1.2
-
-
-def _default_project_data() -> Dict[str, Any]:
-    return {
+if "project_data" not in st.session_state:
+    st.session_state.project_data = {
         "p_name": "",
         "c_name": "",
         "p_desc": "",
@@ -9545,191 +9251,52 @@ def _default_project_data() -> Dict[str, Any]:
         "bta": 0,
         "land": "Norge",
     }
-
-
-def _project_data_has_identity(payload: Any) -> bool:
-    return isinstance(payload, dict) and str(payload.get("p_name") or "").strip() not in ("", "Nytt Prosjekt")
-
-
-def _normalize_project_data_payload(payload: Any) -> Dict[str, Any]:
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
-    if not isinstance(payload, dict):
-        return _default_project_data()
-
-    candidate = payload
-    for key in ("project_data_json", "project_data", "data", "payload"):
-        nested = candidate.get(key) if isinstance(candidate, dict) else None
-        if isinstance(nested, str):
-            try:
-                nested = json.loads(nested)
-            except Exception:
-                nested = None
-        if isinstance(nested, dict):
-            candidate = nested
-            break
-
-    merged = _default_project_data()
-    for key, value in candidate.items():
-        if key in merged:
-            merged[key] = value
-    return merged
-
-
-def _load_project_data_local() -> Optional[Dict[str, Any]]:
-    if not SSOT_FILE.exists():
-        return None
-    try:
-        with open(SSOT_FILE, "r", encoding="utf-8") as f:
-            normalized = _normalize_project_data_payload(json.load(f))
-        return normalized if _project_data_has_identity(normalized) else None
-    except Exception:
-        # Korrupt ssot.json skal ikke knekke appen eller sende brukeren i loop.
-        return None
-
-
-def _save_project_data_local(payload: Dict[str, Any]) -> None:
-    try:
-        DB_DIR.mkdir(parents=True, exist_ok=True)
-        with open(SSOT_FILE, "w", encoding="utf-8") as f:
-            json.dump(_normalize_project_data_payload(payload), f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def _call_project_data_with_timeout(func, timeout_s: float = _PD_REMOTE_TIMEOUT_S, default: Any = None) -> Any:
-    """Run a risky auth/Supabase call without blocking Streamlit startup."""
-    import queue
-    import threading
-
-    q: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
-
-    def _runner() -> None:
-        try:
-            q.put((True, func()))
-        except Exception as exc:
-            try:
-                q.put((False, exc))
-            except Exception:
-                pass
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    try:
-        ok, value = q.get(timeout=max(0.05, float(timeout_s)))
-    except queue.Empty:
-        return default
-    if not ok:
-        return default
-    return value
-
-
-def _load_project_data_remote(timeout_s: float = _PD_REMOTE_TIMEOUT_S) -> Optional[Dict[str, Any]]:
-    def _load() -> Optional[Dict[str, Any]]:
-        try:
-            import builtly_auth as _builtly_auth  # type: ignore
-        except Exception:
-            return None
-        for fn_name in ("load_project_data", "load_project_data_from_supabase"):
-            loader = getattr(_builtly_auth, fn_name, None)
-            if not callable(loader):
-                continue
-            try:
-                result = loader()
-            except TypeError:
-                try:
-                    result = loader(project_name=st.session_state.get("project_data", {}).get("p_name", ""))
-                except Exception:
-                    continue
-            except Exception:
-                continue
-            normalized = _normalize_project_data_payload(result)
-            if _project_data_has_identity(normalized):
-                return normalized
-        return None
-
-    return _call_project_data_with_timeout(_load, timeout_s=timeout_s, default=None)
-
-
-def _save_project_data_remote_async(payload: Dict[str, Any]) -> None:
-    """Best-effort Supabase save. Never block the UI/session stream."""
-    import threading
-
-    normalized = _normalize_project_data_payload(payload)
-
-    def _save() -> None:
-        try:
-            import builtly_auth as _builtly_auth  # type: ignore
-        except Exception:
-            return
-        # Use pure remote savers only. Avoid calling helpers that also mutate
-        # st.session_state from a background thread.
-        for fn_name in ("save_project_data_to_supabase", "save_project_data"):
-            saver = getattr(_builtly_auth, fn_name, None)
-            if not callable(saver):
-                continue
-            try:
-                saver(normalized)
-                return
-            except TypeError:
-                try:
-                    saver(project_data=normalized)
-                    return
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-    threading.Thread(target=_save, daemon=True).start()
-
-
-def save_project_data_to_session_and_remote(payload: Dict[str, Any], sync_remote: bool = True) -> Dict[str, Any]:
-    """Project Setup helper: update session + ssot.json immediately, remote async."""
-    normalized = _normalize_project_data_payload(payload)
-    st.session_state.project_data = normalized
-    _save_project_data_local(normalized)
-    if sync_remote:
-        _save_project_data_remote_async(normalized)
-    return normalized
-
-
-def _bootstrap_project_data() -> Dict[str, Any]:
-    current = st.session_state.get("project_data")
-    if _project_data_has_identity(current):
-        normalized = _normalize_project_data_payload(current)
-        st.session_state.project_data = normalized
-        return normalized
-
-    # 1) Local first. This is fast and avoids Project Setup on reconnects.
-    local = _load_project_data_local()
-    if local and _project_data_has_identity(local):
-        st.session_state.project_data = local
-        if not st.session_state.get("_pd_backup_done", False):
-            _save_project_data_remote_async(local)
-            st.session_state["_pd_backup_done"] = True
-        return local
-
-    # 2) Remote only if session + local are empty, and only once per session.
-    if not st.session_state.get("_pd_remote_attempted", False):
-        st.session_state["_pd_remote_attempted"] = True
-        remote = _load_project_data_remote(timeout_s=_PD_REMOTE_TIMEOUT_S)
-        if remote and _project_data_has_identity(remote):
-            return save_project_data_to_session_and_remote(remote, sync_remote=False)
-
-    # 3) Keep a valid default without blocking.
-    st.session_state.project_data = _default_project_data()
-    return st.session_state.project_data
-
-
-if "project_data" not in st.session_state:
-    st.session_state.project_data = _default_project_data()
 if "ark_kart" not in st.session_state:
     st.session_state.ark_kart = None
 
-_bootstrap_project_data()
+if st.session_state.project_data.get("p_name") == "" and SSOT_FILE.exists():
+    try:
+        with open(SSOT_FILE, "r", encoding="utf-8") as f:
+            st.session_state.project_data = json.load(f)
+    except Exception:
+        # Korrupt fil eller I/O-feil — bare fortsett, Supabase er neste fallback
+        pass
+
+# Fallback til Supabase hvis ssot.json ikke finnes eller var tom. Dette er
+# kritisk på Render der disk er ephemeral og ssot.json forsvinner ved
+# container-restart. Supabase-profilen vedvarer.
+if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
+    try:
+        from builtly_auth import load_project_data
+        _remote_pd = load_project_data()
+        if _remote_pd and _remote_pd.get("p_name"):
+            st.session_state.project_data = _remote_pd
+            # Skriv også tilbake til ssot.json slik at lokal disk holdes
+            # synkronisert (hvis den finnes midlertidig).
+            try:
+                DB_DIR.mkdir(parents=True, exist_ok=True)
+                with open(SSOT_FILE, "w", encoding="utf-8") as _f:
+                    json.dump(_remote_pd, _f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+# Hvis ssot.json HAR data men Supabase mangler kopi (f.eks. første gang
+# etter at denne koden er deployet), backup project_data til Supabase som
+# beskyttelse mot neste container-restart. Gjøres kun én gang per session
+# via session_state-flagg slik at vi ikke hamrer Supabase.
+if (st.session_state.project_data.get("p_name")
+        and st.session_state.project_data.get("p_name") not in ["", "Nytt Prosjekt"]
+        and not st.session_state.get("_pd_backup_done")):
+    try:
+        from builtly_auth import save_project_data
+        _ok, _ = save_project_data(st.session_state.project_data)
+        if _ok:
+            st.session_state["_pd_backup_done"] = True
+    except Exception:
+        # Supabase-kolonnen mangler kanskje — ikke blokker brukeren
+        pass
 
 if st.session_state.project_data.get("p_name") in ["", "Nytt Prosjekt"]:
     logo_html = (
@@ -9777,10 +9344,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
-    st.success("AI-tekst er tilgjengelig (Claude) og aktivert i hovedkjøringen.")
-elif ANTHROPIC_API_KEY:
-    st.info("Claude er konfigurert, men AI-rapport i hovedkjøringen er slått av for stabilitet. Manuelle AI-verktøy kan brukes etterpå.")
+if ANTHROPIC_API_KEY:
+    st.success("AI-tekst er tilgjengelig (Claude). Tallsiden beregnes alltid deterministisk først.")
 elif llm_available:
     st.success("AI-tekst er tilgjengelig (Gemini fallback). Tallsiden beregnes alltid deterministisk først.")
 else:
@@ -10350,20 +9915,12 @@ if run_analysis:
     site.terrain_relief_m = float((terrain_ctx or {}).get("relief_m", 0.0))
 
     site_intelligence_bundle: Dict[str, Any] = {}
-    if (
-        HAS_SITE_INTELLIGENCE
-        and BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN
-        and geodata_token_ok
-        and site_polygon_input is not None
-        and gdo is not None
-    ):
+    if HAS_SITE_INTELLIGENCE and geodata_token_ok and site_polygon_input is not None and gdo is not None:
         try:
             site_intelligence_bundle = build_site_intelligence_bundle(gdo, geodata_context['site_polygon'], search_buffer_m=350.0)
             geodata_context['site_intelligence'] = site_intelligence_bundle
         except Exception as exc:
             site_intelligence_bundle = {'available': False, 'error': str(exc)[:160]}
-    elif HAS_SITE_INTELLIGENCE and not BUILTLY_ENABLE_SITE_INTELLIGENCE_MAIN_RUN:
-        site_intelligence_bundle = {'available': False, 'skipped': 'disabled_for_runtime'}
 
     ai_label = " + AI-plassering (Claude)" if HAS_AI_PLANNER else ""
     bra_label = f" | %-BRA {site.utnyttelsesgrad_bra_pct:.0f}%" if site.utnyttelsesgrad_bra_pct > 0 else ""
@@ -10545,7 +10102,7 @@ if run_analysis:
                     latitude_deg=latitude_deg,
                     longitude_deg=longitude_deg,
                     terrain=terrain_ctx,
-                    gdo_client=gdo if (geodata_token_ok and BUILTLY_ENABLE_ENVIRONMENT_REMOTE) else None,
+                    gdo_client=gdo if geodata_token_ok else None,
                 )
             except Exception as exc:
                 environment_data = {"available": False, "error": str(exc)[:120]}
@@ -10601,7 +10158,7 @@ if run_analysis:
     final_report_text = deterministic_report
 
     # --- AI-rapport via Claude (v13: migrert fra Gemini) ---
-    if ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
+    if ANTHROPIC_API_KEY:
         try:
             # Build compact environment summary for AI (v13: støydata + dagslys)
             env_summary = {}
@@ -10680,7 +10237,7 @@ KRAV:
         # AI-analyse av planvisninger (v13)
         pv_analyses: List[str] = []
         scene_imgs_for_pdf = st.session_state.get("ark_scene_images") or auto_scene_images or []
-        if scene_imgs_for_pdf and ANTHROPIC_API_KEY and BUILTLY_ENABLE_MAIN_RUN_AI:
+        if scene_imgs_for_pdf and ANTHROPIC_API_KEY:
             with st.spinner("Arkitektonisk vurdering av planvisninger (Claude)..."):
                 try:
                     pv_analyses = analyze_plan_views_with_ai(
@@ -10761,11 +10318,11 @@ KRAV:
     st.session_state.generated_ark_pdf = pdf_bytes
     st.session_state.generated_ark_filename = f"Builtly_ARK_{p_name}_v3.pdf"
 
-    # Dashboard-lagring til Supabase Storage kan variere i svartid. For stabil
-    # hovedkjøring er dette av som standard. PDF-en er fortsatt tilgjengelig via
-    # st.download_button i samme session. Sett BUILTLY_AUTOSAVE_REPORT=1 for å
-    # aktivere automatisk opplasting/metadata-lagring igjen.
-    if pdf_bytes and BUILTLY_AUTOSAVE_REPORT:
+    # Save report to user dashboard (kun hvis PDF faktisk ble generert)
+    # Primær API: pass pdf_bytes slik at filen lastes opp til Supabase Storage.
+    # Uten pdf_bytes lagres bare metadata (navn) — da blir ikke selve PDF-en
+    # søkbar/nedlastbar fra dashboardet.
+    if pdf_bytes:
         try:
             from builtly_auth import save_report
             _sr_result = save_report(
@@ -10775,22 +10332,27 @@ KRAV:
                 pdf_bytes=pdf_bytes,
                 content_type="application/pdf",
             )
+            # Logg resultat: save_report returnerer True hvis metadata ble lagret
+            # _report_save_debug settes i session med detaljer om storage-upload + DB-insert
             try:
                 import logging as _sr_logging
                 _debug_msg = st.session_state.get("_report_save_debug", "")
-                _sr_logging.getLogger("builtly").info("save_report returned %s — %s", _sr_result, _debug_msg)
+                _sr_logging.getLogger("builtly").info(
+                    "save_report returned %s — %s", _sr_result, _debug_msg
+                )
             except Exception:
                 pass
         except ImportError:
-            pass
+            pass  # Frontpage not available (standalone run)
         except Exception as _sr_err:
+            # Supabase/auth-feil skal ikke stoppe hele flyten
             try:
                 import logging as _sr_logging
-                _sr_logging.getLogger("builtly").warning("save_report feilet: %s", _sr_err)
+                _sr_logging.getLogger("builtly").warning(
+                    "save_report feilet: %s", _sr_err
+                )
             except Exception:
                 pass
-    elif pdf_bytes:
-        st.session_state["_report_save_debug"] = "autosave disabled for runtime stability"
 
     st.rerun()
 
@@ -11354,6 +10916,161 @@ if "analysis_results" in st.session_state:
                     f"</div></div>",
                     unsafe_allow_html=True,
                 )
+
+    # --- ARKITEKTURDIAGRAM (Fase 2) -----------------------------------------
+    st.markdown("<div class='section-header'>Arkitekturdiagram</div>", unsafe_allow_html=True)
+    st.caption("Ren planvisning som viser hvordan motoren tenker — felt, offentlig rom, siktkorridorer og volumer. Fokus på struktur og lesbarhet, ikke dashboard-informasjon.")
+
+    # Valg av alternativ for diagrammet
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        ark_opt_names = [opt.name for opt in options]
+        ark_sel_name = st.selectbox(
+            "Velg alternativ for arkitekturdiagram",
+            ark_opt_names,
+            index=0,
+            key="arkdiag_select",
+        )
+    with col_b:
+        ark_style = st.selectbox(
+            "Stil",
+            options=["volumskisse", "felt", "oversikt"],
+            index=0,
+            key="arkdiag_style",
+            help=(
+                "'volumskisse': isometrisk 3D-visning med bygg-labels og "
+                "dim-tabell (Builtly oversikt-stil). "
+                "'felt': plan-visning i Builtly mørkt tema med FELT-labels. "
+                "'oversikt': varm palett, lys bakgrunn (detaljregulering-stil)."
+            ),
+        )
+    ark_sel_opt = next((opt for opt in options if opt.name == ark_sel_name), options[0])
+    ark_geometry = getattr(ark_sel_opt, "geometry", {}) or {}
+
+    # Lag-togglere (utvikler/debugg-vennlig) — ikke relevant for volumskisse
+    if ark_style != "volumskisse":
+        with st.expander("Lagvalg", expanded=False):
+            tc1, tc2, tc3, tc4 = st.columns(4)
+            show_fields = tc1.checkbox("Delfelt-vasker", value=True, key="ark_show_fields")
+            show_public = tc2.checkbox("Offentlig rom", value=True, key="ark_show_public")
+            show_corridors = tc3.checkbox("Siktkorridorer", value=True, key="ark_show_corridors")
+            show_labels = tc4.checkbox("Tekstlabels", value=True, key="ark_show_labels")
+    else:
+        show_fields = show_public = show_corridors = show_labels = True
+
+    # Hent nord-rotasjon fra site hvis tilgjengelig
+    _north_rot = float(site_result.get("north_rotation_deg", 0.0) or 0.0)
+
+    # Generer diagram basert på valgt stil
+    try:
+        if ark_style == "volumskisse":
+            # Bruk den flotte isometriske volumskisse-rendereren som allerede
+            # finnes (samme som brukes i Volumskisser-kortene lenger opp).
+            # Dette gir Builtly mørkt tema, BYGGDIMENSJONER-panel og arkitekt-
+            # lesbar 3D-projeksjon.
+            try:
+                _plan_img = render_plan_diagram(SiteInputs(**site_result), ark_sel_opt)
+                # Vis i full bredde, samme som nettleser-bredden
+                st.image(_plan_img, use_container_width=True)
+            except Exception as exc:
+                st.caption(f"Volumskisse kunne ikke genereres: {exc}")
+        else:
+            # SVG-basert plan-visning (felt eller oversikt-stil)
+            _ark_svg = render_arkitekturdiagram_svg(
+                ark_geometry,
+                width_px=900,
+                height_px=640,
+                show_labels=show_labels,
+                show_public_realm=show_public,
+                show_view_corridors=show_corridors,
+                show_field_washes=show_fields,
+                north_rotation_deg=_north_rot,
+                style=ark_style,
+            )
+            # Wrapper: transparent bakgrunn slik at SVG-ens egen bakgrunn vises.
+            # Tidligere tvang vi hvit/beige ytre div som overdekket SVG-ens
+            # Builtly mørke tema. Nå bruker vi `transparent` + border-radius for
+            # at SVG-ens interne <rect fill="{bg_color}"> bestemmer bakgrunnen.
+            st.markdown(
+                f'<div style="background:transparent;border-radius:10px;padding:0;overflow:hidden;">{_ark_svg}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Info-rad under diagrammet
+        _field_count = len(ark_geometry.get("field_polygons") or [])
+        _building_count = len(ark_geometry.get("massing_parts") or [])
+        _realm_count = len(ark_geometry.get("public_realm_polygons") or [])
+        _corridor_count = len(ark_geometry.get("view_corridor_polygons") or [])
+        _neighbor_count = len(ark_geometry.get("neighbor_polygons") or [])
+
+        info_parts = [
+            f"**{_building_count}** volumer",
+            f"**{_field_count}** delfelt",
+        ]
+        if _realm_count:
+            info_parts.append(f"**{_realm_count}** offentlige rom")
+        if _corridor_count:
+            info_parts.append(f"**{_corridor_count}** siktkorridorer")
+        if _neighbor_count:
+            info_parts.append(f"**{_neighbor_count}** nabobygg")
+        st.caption(" · ".join(info_parts))
+
+        # Statistikk-panel per felt (som i FELT-referansen)
+        if _field_count > 0 and ark_style == "felt":
+            with st.expander("📊 Statistikk per felt", expanded=False):
+                field_data = []
+                _mp_ref = st.session_state.get("_current_masterplan")
+                for f in (ark_geometry.get("field_polygons") or []):
+                    fid = f.get("field_id", "")
+                    label = f.get("label", fid)
+                    # Finn delfelt i masterplan for nøkkeltall
+                    field_area = 0.0
+                    field_bta = 0.0
+                    field_bra = 0.0
+                    field_building_count = 0
+                    if _mp_ref is not None:
+                        for df in getattr(_mp_ref.best_plan if hasattr(_mp_ref, 'best_plan') else _mp_ref, 'delfelt', []):
+                            if df.field_id == fid:
+                                try:
+                                    field_area = float(df.polygon.area)
+                                except Exception:
+                                    field_area = 0.0
+                                # Tell bygg og akkumuler BRA/BTA
+                                plan_obj = _mp_ref.best_plan if hasattr(_mp_ref, 'best_plan') else _mp_ref
+                                for b in plan_obj.bygg:
+                                    if getattr(b, 'delfelt_id', '') == fid:
+                                        field_building_count += 1
+                                        field_bra += float(getattr(b, 'bra_m2', 0) or 0)
+                                        field_bta += float(getattr(b, 'bta_m2', getattr(b, 'footprint_m2', 0) * getattr(b, 'floors', 1)) or 0)
+                                break
+
+                    bya_pct = (field_bta / field_area * 100) if field_area > 0 else 0.0
+                    bra_pct = (field_bra / field_area * 100) if field_area > 0 else 0.0
+
+                    field_data.append({
+                        "Felt": label,
+                        "Areal": f"{field_area:,.0f} m²".replace(",", " "),
+                        "BTA": f"{field_bta:,.0f} m²".replace(",", " "),
+                        "BRA": f"{field_bra:,.0f} m²".replace(",", " "),
+                        "%-BRA": f"{bra_pct:.0f}%",
+                        "BYA": f"{bya_pct:.0f}%",
+                        "Bygg": field_building_count,
+                        "Typologi": f.get("typology", ""),
+                    })
+                if field_data:
+                    st.dataframe(field_data, use_container_width=True, hide_index=True)
+
+        # Nedlastingsknapp for SVG
+        st.download_button(
+            "⬇ Last ned arkitekturdiagram (SVG)",
+            data=_ark_svg.encode("utf-8"),
+            file_name=f"arkitekturdiagram_{ark_style}_{ark_sel_name.replace(' ','_')}.svg",
+            mime="image/svg+xml",
+            type="secondary",
+            key="ark_svg_dl",
+        )
+    except Exception as _ark_exc:
+        st.caption(f"Arkitekturdiagram kunne ikke genereres: {_ark_exc}")
 
     # --- INTERAKTIV BYGNINGSEDITOR ---
     st.markdown("<div class='section-header'>Planeditor — tegn og juster bygningsvolumer</div>", unsafe_allow_html=True)
@@ -12811,6 +12528,10 @@ render();
             type="primary",
             use_container_width=True,
         )
+        # Vis sist lagring-debug hvis tilgjengelig
+        _save_dbg = st.session_state.get("_report_save_debug")
+        if _save_dbg:
+            st.caption(f"Supabase: {_save_dbg}")
     elif pdf_error:
         # PDF-gen ble forsøkt men feilet — vis faktisk årsak
         st.error(
@@ -12821,3 +12542,63 @@ render();
         )
     else:
         st.warning("PDF er ikke generert ennå. Kjør tomtestudie først.")
+        # Diagnose — hjelp brukeren forstå hvorfor
+        with st.expander("🔍 Hvorfor ser jeg ikke PDF?", expanded=False):
+            _session_has_results = "analysis_results" in st.session_state
+            _session_has_pdf_key = "generated_ark_pdf" in st.session_state
+            _pdf_val = st.session_state.get("generated_ark_pdf")
+            _pdf_type = type(_pdf_val).__name__ if _pdf_val is not None else "None"
+            _pdf_len = len(_pdf_val) if isinstance(_pdf_val, (bytes, bytearray)) else "N/A"
+            _save_dbg = st.session_state.get("_report_save_debug", "(ikke kjørt)")
+            st.code(
+                f"analysis_results finnes: {_session_has_results}\n"
+                f"generated_ark_pdf i session: {_session_has_pdf_key}\n"
+                f"generated_ark_pdf type: {_pdf_type}\n"
+                f"generated_ark_pdf lengde: {_pdf_len} bytes\n"
+                f"pdf_generation_error: {pdf_error or '(ingen)'}\n"
+                f"save_report debug: {_save_dbg}\n\n"
+                "Mulige årsaker:\n"
+                "  1. 'Kjør tomtestudie'-knappen ble aldri trykket (trykk den øverst)\n"
+                "  2. PDF-generering feilet men feilmeldingen forsvant før den ble "
+                "lagret (f.eks. ved en av-rerun midt i kjøringen)\n"
+                "  3. Session state mistet PDF-dataen mellom reruns — sjekk at "
+                "keepalive virker og at du ikke refresher siden",
+                language="text",
+            )
+            if st.button("Prøv å bygge PDF på nytt fra eksisterende analyse", key="retry_pdf_build"):
+                try:
+                    _retry_result = st.session_state.get("analysis_results", {})
+                    _retry_options_raw = _retry_result.get("options", [])
+                    _retry_options = [OptionResult(**o) if isinstance(o, dict) else o for o in _retry_options_raw]
+                    _retry_site_dict = _retry_result.get("site", {})
+                    _retry_site = SiteInputs(**_retry_site_dict) if _retry_site_dict else None
+                    _retry_pd = st.session_state.get("project_data", {})
+                    _retry_name = _retry_pd.get("p_name", "Prosjekt")
+                    if not _retry_options or _retry_site is None:
+                        st.error("Mangler analysis_results — kjør tomtestudie på nytt.")
+                    else:
+                        with st.spinner("Bygger PDF på nytt..."):
+                            _retry_pdf = create_full_report_pdf(
+                                name=_retry_name,
+                                client=_retry_pd.get("c_name", "Ukjent"),
+                                land=_retry_pd.get("land", "Norge"),
+                                report_text=_retry_result.get("report_text", ""),
+                                options=_retry_options,
+                                option_images=_retry_result.get("option_images", []),
+                                visual_attachments=_retry_result.get("visual_attachments", []),
+                                site=_retry_site,
+                                environment_data=_retry_result.get("environment"),
+                                masterplan=st.session_state.get("_current_masterplan"),
+                            )
+                        if _retry_pdf:
+                            st.session_state["generated_ark_pdf"] = _retry_pdf
+                            st.session_state["generated_ark_filename"] = f"Builtly_ARK_{_retry_name}_retry.pdf"
+                            st.session_state.pop("pdf_generation_error", None)
+                            st.success(f"PDF bygget på nytt ({len(_retry_pdf)} bytes). Last ned under.")
+                            st.rerun()
+                        else:
+                            st.error("PDF-gen returnerte tom verdi.")
+                except Exception as _retry_err:
+                    import traceback as _retry_tb
+                    st.error(f"Retry feilet: {type(_retry_err).__name__}: {_retry_err}")
+                    st.code(_retry_tb.format_exc(), language="python")
