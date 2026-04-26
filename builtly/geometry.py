@@ -710,16 +710,12 @@ def _lamell_row_spacing(field: Delfelt, spec: BaseTypologySpec, rules: Optional[
     height_m = _height_for(Typology.LAMELL, int(getattr(field, 'floors_max', 4) or 4))
     base = _required_spacing(Typology.LAMELL, height_m, rule_obj)
     target_count = max(1, int(getattr(field, 'target_building_count', 0) or 1))
-    # Tett bymessig struktur trenger fortsatt 8 m minimum, men ikke mer enn
-    # nødvendig. Store target counts får moderert radavstand slik at store
-    # tomter ikke kollapser til 4-5 lameller.
     if target_count >= 8:
-        return max(_minimum_building_spacing_m(rule_obj), min(8.0, base))
-    if target_count >= 6:
         return max(_minimum_building_spacing_m(rule_obj), min(9.0, base))
-    if target_count >= 4:
-        return max(_minimum_building_spacing_m(rule_obj), min(9.5, base))
-    return max(_minimum_building_spacing_m(rule_obj), min(10.5, base))
+    if target_count >= 6:
+        return max(_minimum_building_spacing_m(rule_obj), min(10.0, base))
+    return max(_minimum_building_spacing_m(rule_obj), base)
+
 
 def _is_parallel(angle_a: float, angle_b: float, tol: float = 1e-3) -> bool:
     diff = abs(((angle_a - angle_b) + 180.0) % 180.0)
@@ -1176,7 +1172,7 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
         # ikke så stor at store delfelt kollapser til bare 4-6 bygg. Bruk den
         # samme modererte spacing-funksjonen som den globale valideringen.
         spacing = _lamell_row_spacing(field, spec)
-        max_rows = max(1, min((5 if int(getattr(field, 'target_building_count', 0) or 0) >= 6 else 4), int((height + spacing) // (depth + spacing))))
+        max_rows = max(1, min(4, int((height + spacing) // (depth + spacing))))
         for rows in range(1, max_rows + 1):
             offsets = _centered_offsets(rows, depth, spacing, height)
             if offsets is None:
@@ -1202,7 +1198,7 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                 y0 = miny + off
                 rects = _fit_varied_lameller_in_segment(
                     local_poly, y0, depth, aesthetic_min_length, spec.length_m.max_m,
-                    min_spacing=max(6.5, spacing - 1.0),
+                    min_spacing=8.0,
                 )
                 footprints_varied.extend(rects)
 
@@ -1306,59 +1302,85 @@ def _place_lameller_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
 
 
 def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfelt, typology: Typology) -> Optional[_PlacementCandidate]:
-    """Velg beste kandidat med både BRA-oppnåelse, sol og kompositorisk kvalitet."""
+    """Velg beste kandidat med både BRA-oppnåelse og sol-orientering.
+
+    For retningsavhengige typologier (lamell, rekkehus) blir sol-scoren viktig.
+    For retningsuavhengige typologier (karré, punkthus) er den nøytral.
+
+    V6: underdekning på BRA straffes tydeligere enn før. Dette gjør at når
+    %-BRA-overstyring er satt høyt, velger motoren kandidater som faktisk har
+    sjanse til å levere målet, og ikke for luftige varianter med god komposisjon
+    men for lite areal.
+    """
     if not candidates:
         return None
 
-    target_count = max(1, int(getattr(field, "target_building_count", 0) or 1))
-
     def combined_score(item: _PlacementCandidate) -> Tuple[float, float, int]:
+        # Primary score: hvor godt BRA-målet treffes. Underdekning straffes
+        # hardere enn overshoot slik at vi prioriterer å nå minstemålet.
         deficit = max(0.0, field.target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - field.target_bra)
-        bra_score = deficit + overshoot * 0.24
+        deficit_ratio = deficit / max(field.target_bra, 1.0)
+        deficit_multiplier = 1.0 + min(1.2, deficit_ratio * 1.6)
+        bra_score = deficit * deficit_multiplier + overshoot * 0.20
+        if deficit_ratio > 0.06:
+            bra_score += field.target_bra * 0.06 * min(1.0, deficit_ratio)
 
+        # Solar penalty: for lamell/rekkehus, straffer nord-sør-orientering
         global_angle = (field.orientation_deg + item.angle_offset_deg) % 180.0
         solar_bonus = _solar_orientation_bonus(global_angle, typology)
-        solar_penalty = field.target_bra * 0.18 * (1.0 - solar_bonus)
+        solar_penalty = field.target_bra * 0.16 * (1.0 - solar_bonus)
 
+        # Variasjons-bonus: foretrekk "varied" (blandede lengder) og "rotated"
+        # (per-bygg rotasjon) fremfor "single" (uniformt stort rektangel) når BRA
+        # er tilnærmet likt. Bonus er moderat (~5% av target_bra) slik at BRA
+        # fortsatt dominerer ved reelle forskjeller.
         variant = getattr(item, "_variant", "single")
         variation_bonus = 0.0
         if variant == "varied" and len(item.footprints) >= 2:
-            variation_bonus = -(field.target_bra * 0.07)
-        elif variant == "rotated" and len(item.footprints) >= 2:
             variation_bonus = -(field.target_bra * 0.05)
+        elif variant == "rotated" and len(item.footprints) >= 2:
+            variation_bonus = -(field.target_bra * 0.04)
         elif variant == "terraced" and len(item.footprints) >= 2:
-            variation_bonus = -(field.target_bra * 0.08)
+            # Terraced har ingen BRA-tap vs. single men gir sterk visuell effekt.
+            # Gi den en moderat bonus.
+            variation_bonus = -(field.target_bra * 0.06)
 
+        # AI-direktiv-bonus: hvis field.design_variant er satt (AI ba om en
+        # spesifikk variant), gi en MODERAT bonus til matchende kandidat.
+        # Bonus er 5% av target_bra — bare en tie-breaker når BRA er nær likt.
+        # Tidligere (15%) kunne overstyre reelle BRA-tap. Vi lar heller motoren
+        # velge single/uo hvis de er klart best, selv om AI foreslo noe annet.
         directive_bonus = 0.0
         design_variant = getattr(field, "design_variant", None)
         if design_variant is not None and variant == design_variant:
-            directive_bonus = -(field.target_bra * 0.06)
+            directive_bonus = -(field.target_bra * 0.05)
 
+        # Character-bonus: feltets kontekstuelle karakter påvirker hvilke
+        # varianter som foretrekkes (i tillegg til AI-direktiv). Liten bonus
+        # (3%) som bare virker som tie-breaker. Sum av ideelle bonuses per
+        # character:
+        #   street_facing → terraced/rotated (markant)
+        #   sheltered     → single (rolig)
+        #   neighborhood_edge → terraced (trapper mot naboen)
+        #   open_view     → ingen spesifikk preferanse for lamell
         character_bonus = 0.0
         field_char = getattr(field, "character", None)
         if field_char == "street_facing":
-            if variant in ("terraced", "rotated", "varied") and len(item.footprints) >= 2:
-                character_bonus = -(field.target_bra * 0.035)
+            if variant in ("terraced", "rotated") and len(item.footprints) >= 2:
+                character_bonus = -(field.target_bra * 0.03)
         elif field_char == "sheltered":
-            if variant in ("single", "varied"):
-                character_bonus = -(field.target_bra * 0.025)
+            if variant == "single":
+                character_bonus = -(field.target_bra * 0.03)
         elif field_char == "neighborhood_edge":
             if variant == "terraced" and len(item.footprints) >= 2:
-                character_bonus = -(field.target_bra * 0.045)
+                character_bonus = -(field.target_bra * 0.04)
 
-        count_penalty = abs(len(item.footprints) - target_count) * (field.target_bra * 0.02)
-        density_bonus = 0.0
-        if len(item.footprints) >= max(2, target_count - 1) and item.total_bra >= field.target_bra * 0.94:
-            density_bonus = -(field.target_bra * 0.03)
-
-        return (
-            bra_score + solar_penalty + variation_bonus + directive_bonus + character_bonus + count_penalty + density_bonus,
-            -item.total_bra,
-            abs(len(item.footprints) - target_count),
-        )
+        return (bra_score + solar_penalty + variation_bonus + directive_bonus + character_bonus,
+                -item.total_bra, len(item.footprints))
 
     return min(candidates, key=combined_score)
+
 
 def _varied_floors_for_cluster(
     n_buildings: int,
@@ -1522,25 +1544,28 @@ def _varied_floors_for_cluster(
 
 
 def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
-    """Plasser punkthus i noe tettere og mer urbane klynger."""
-    candidates: List[Tuple[_PlacementCandidate, int, int]] = []
-    target_count = max(1, int(getattr(field, "target_building_count", 0) or 1))
+    """Plasser punkthus i et delfelt. Vi genererer flere grid-layouts
+    (1x1, 1x2, 2x1, 2x2, 2x3, 3x2, 3x3) og velger den som balanserer
+    BRA-oppnåelse med kompakt klynge-form og arkitektonisk variasjon.
+
+    Et kvadratisk arrangement (cols≈rows) er arkitektonisk bedre enn en lang
+    "togrekke" fordi klyngen får tydeligere fellesrom mellom tårnene. Vi scorer
+    derfor cols×rows-konfigurasjoner med en klynge-bonus for forholdstall nær 1.
+
+    I tillegg gis hvert bygg varierte etasjetall (én aksent som stikker opp)
+    for å bryte monotoni. Aksenten plasseres i et sentralt bygg.
+    """
+    candidates: List[Tuple[_PlacementCandidate, int, int]] = []  # (cand, cols, rows)
     sizes = [field.tower_size_m] if field.tower_size_m else list(spec.allowed_tower_sizes_m)
     minx, miny, maxx, maxy = core.bounds
     width = maxx - minx
     height = maxy - miny
-
     for size in sizes:
-        base_spacing = max(6.0, min(float(spec.min_spacing_m), float(field.floors_max) * 1.25))
-        spacing = max(6.0, base_spacing - (1.0 if target_count >= 5 else 0.0))
-        max_grid = 4 if target_count >= 6 else 3
-        max_cols = max(1, min(max_grid, int((width + spacing) // (size + spacing))))
-        max_rows = max(1, min(max_grid, int((height + spacing) // (size + spacing))))
+        spacing = max(float(spec.min_spacing_m), float(field.floors_max) * 1.5)
+        max_cols = max(1, min(3, int((width + spacing) // (size + spacing))))
+        max_rows = max(1, min(3, int((height + spacing) // (size + spacing))))
         for cols in range(1, max_cols + 1):
             for rows in range(1, max_rows + 1):
-                total_count = cols * rows
-                if total_count > max(target_count + 2, 8):
-                    continue
                 x_offsets = _centered_offsets(cols, float(size), spacing, width)
                 y_offsets = _centered_offsets(rows, float(size), spacing, height)
                 if x_offsets is None or y_offsets is None:
@@ -1556,13 +1581,15 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
                         footprints.append(rect)
                     if not valid:
                         break
-                if not valid or not footprints:
+                if not valid:
                     continue
+                # Beregn base floors som i _evaluate_candidate (target_bra / total_fp)
                 total_fp_tmp = sum(p.area for p in footprints)
                 if total_fp_tmp <= 0:
                     continue
                 base_floors = int(round(field.target_bra / total_fp_tmp)) if field.target_bra > 0 else field.floors_min
                 base_floors = max(field.floors_min, min(field.floors_max, base_floors))
+                # AI-direktiv kan overstyre default-variation. Ellers: accent hvis 3+ bygg.
                 ai_hp = getattr(field, "design_height_pattern", None)
                 if ai_hp in ("uniform", "accent", "stepped", "paired"):
                     variation = ai_hp
@@ -1587,19 +1614,21 @@ def _place_punkthus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec)
         cand, cols, rows = item
         deficit = max(0.0, field.target_bra - cand.total_bra)
         overshoot = max(0.0, cand.total_bra - field.target_bra)
-        bra_score = deficit + overshoot * 0.24
+        bra_score = deficit + overshoot * 0.25
+
+        # Klynge-bonus: kvadratisk (cols == rows) er best, lineær (1xN) er verst
         total_count = cols * rows
         if total_count <= 1:
-            cluster_penalty = 0.0
+            cluster_penalty = 0.0  # enkeltbygg, ikke relevant
         else:
             aspect = max(cols, rows) / min(cols, rows)
-            cluster_penalty = field.target_bra * 0.10 * (aspect - 1.0)
-        count_penalty = abs(total_count - target_count) * (field.target_bra * 0.015)
-        density_bonus = -(field.target_bra * 0.025) if total_count >= max(3, target_count - 1) and cand.total_bra >= field.target_bra * 0.93 else 0.0
-        return (bra_score + cluster_penalty + count_penalty + density_bonus, -cand.total_bra, abs(total_count - target_count))
+            cluster_penalty = field.target_bra * 0.12 * (aspect - 1.0)
+
+        return (bra_score + cluster_penalty, -cand.total_bra, len(cand.footprints))
 
     best = min(candidates, key=punkthus_score)
     return best[0]
+
 
 def _place_rekkehus_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
     candidates: List[_PlacementCandidate] = []
@@ -2311,7 +2340,7 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     elif getattr(field, "design_karre_shape", None) in {"uo", "uo_chamfered"}:
         open_edges = [primary_side]
 
-    scale = max(0.38, min(0.66, reserve_ratio ** 0.5))
+    scale = max(0.44, min(0.78, reserve_ratio ** 0.5))
     courtyard = _safe_center_rect(core, width * scale, height * scale)
     if courtyard is None:
         courtyard = _safe_center_rect(core, width * 0.56, height * 0.56)
@@ -2353,8 +2382,8 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     for band in bands:
         bminx, bminy, bmaxx, bmaxy = band.bounds
         horizontal = (bmaxx - bminx) >= (bmaxy - bminy)
-        split_count = 2 if horizontal and (bmaxx - bminx) >= 62 else 1
-        if getattr(field, "composition_strictness", 0.0) >= 0.95 and horizontal and (bmaxx - bminx) >= 92:
+        split_count = 2 if horizontal and (bmaxx - bminx) >= 78 else 1
+        if getattr(field, "composition_strictness", 0.0) >= 0.95 and horizontal and (bmaxx - bminx) >= 110:
             split_count = 3
         micro_fields.extend(_split_band_symmetric(band, split_count, axis=("x" if horizontal else "y")) or [band])
     build_slots = [m for m in micro_fields if m.area > 60.0]
@@ -2395,7 +2424,7 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     frontage_depth = float(getattr(field, "frontage_depth_m", None) or 11.5)
     corridor_w = float(getattr(field, "corridor_width_m", None) or 11.0)
     primary_side, secondary_side = _preferred_frontage_sides(field, "west", "east")
-    scale = max(0.42, min(0.68, reserve_ratio ** 0.5))
+    scale = max(0.52, min(0.80, reserve_ratio ** 0.5))
     park = _safe_center_rect(core, width * scale, height * scale)
     if park is None:
         park = _safe_center_rect(core, width * 0.56, height * 0.56)
@@ -3161,7 +3190,13 @@ def _choose_best_structured(
     skeleton: FieldSkeleton,
     field: Delfelt,
 ) -> Optional[_PlacementCandidate]:
-    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA."""
+    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA.
+
+    V6: strukturscore er fortsatt viktig, men kandidater som havner tydelig under
+    BRA-målet taper oftere mot mer arealeffektive løsninger. Dette svarer direkte
+    på ønsket om at 100 %% BRA-overstyring skal gi minst 100 %% BRA når det er
+    fysisk mulig innen feltenes parametre.
+    """
     pool = [c for c in candidates if c is not None and c.footprints]
     if not pool:
         return None
@@ -3170,11 +3205,14 @@ def _choose_best_structured(
     def score(item: _PlacementCandidate) -> Tuple[float, float, float, int]:
         deficit = max(0.0, target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - target_bra)
-        bra_penalty = deficit + overshoot * 0.22
+        deficit_ratio = deficit / max(target_bra, 1.0)
+        bra_penalty = deficit * (1.25 + min(1.0, deficit_ratio * 1.7)) + overshoot * 0.18
+        if deficit_ratio > 0.05:
+            bra_penalty += target_bra * 0.08 * min(1.0, deficit_ratio)
         structure = _candidate_structure_score(item.footprints, skeleton, field)
-        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.14 + strictness * 0.13)
+        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.12 + strictness * 0.10)
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
-        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * 0.012
+        count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * 0.010
         return (bra_penalty + structure_penalty + count_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
     return min(pool, key=score)
@@ -3540,156 +3578,6 @@ def _scale_cluster_footprints_to_target(
     return scaled
 
 
-
-def _compact_karre_shape_for_cell(cell_core: Polygon, field: Delfelt, spec: BaseTypologySpec, group_center: Point) -> Optional[Polygon]:
-    """Create a compact U/L/solid karré-like footprint inside one grid cell."""
-    if cell_core is None or cell_core.is_empty or cell_core.area < 120.0:
-        return None
-    sub = _largest_polygon(cell_core) or cell_core
-    minx, miny, maxx, maxy = sub.bounds
-    width = maxx - minx
-    height = maxy - miny
-    if width < 18.0 or height < 18.0:
-        return None
-
-    arm = float(spec.segment_depth_m.midpoint() if getattr(spec, "segment_depth_m", None) else 11.5)
-    arm = max(9.0, min(11.5, arm, min(width, height) * 0.32))
-    outer_w = max(18.0, min(width - 0.5, 54.0))
-    outer_h = max(18.0, min(height - 0.5, 46.0))
-    outer = _fit_centered_outer_rect(sub, outer_w, outer_h)
-    if outer is None:
-        cx, cy = sub.centroid.x, sub.centroid.y
-        outer = box(cx - outer_w / 2.0, cy - outer_h / 2.0, cx + outer_w / 2.0, cy + outer_h / 2.0)
-        if not sub.buffer(1e-6).covers(outer):
-            for shrink in (0.92, 0.84, 0.76, 0.68):
-                cand = affinity.scale(outer, xfact=shrink, yfact=shrink, origin=outer.centroid).buffer(0)
-                if sub.buffer(1e-6).covers(cand):
-                    outer = cand
-                    break
-            else:
-                return None
-
-    ox0, oy0, ox1, oy1 = outer.bounds
-    ow = ox1 - ox0
-    oh = oy1 - oy0
-    open_side = _open_side_towards_center(outer, group_center)
-
-    shape: Optional[Polygon] = None
-    # U-shape where possible.
-    if ow >= 2.0 * arm + 12.0 and oh >= 2.0 * arm + 10.0:
-        bottom = box(ox0, oy0, ox1, oy0 + arm)
-        top = box(ox0, oy1 - arm, ox1, oy1)
-        left = box(ox0, oy0, ox0 + arm, oy1)
-        right = box(ox1 - arm, oy0, ox1, oy1)
-        if open_side == "north":
-            pieces = [bottom, left, right]
-        elif open_side == "south":
-            pieces = [top, left, right]
-        elif open_side == "east":
-            pieces = [bottom, left, top]
-        else:
-            pieces = [bottom, right, top]
-        shape = unary_union(pieces).buffer(0)
-    # L-shape fallback.
-    if shape is None or shape.is_empty or not sub.buffer(1e-6).covers(shape):
-        if ow >= arm * 2.0 and oh >= arm * 2.0:
-            if open_side in {"north", "east"}:
-                pieces = [box(ox0, oy0, ox1, oy0 + arm), box(ox0, oy0, ox0 + arm, oy1)]
-            else:
-                pieces = [box(ox0, oy1 - arm, ox1, oy1), box(ox1 - arm, oy0, ox1, oy1)]
-            shape = unary_union(pieces).buffer(0)
-    # Solid compact block fallback when a full U/L does not fit.
-    if shape is None or shape.is_empty or not sub.buffer(1e-6).covers(shape):
-        block_w = min(ow, max(24.0, min(42.0, ow)))
-        block_h = min(oh, max(13.0, min(20.0, oh)))
-        cx, cy = outer.centroid.x, outer.centroid.y
-        shape = box(cx - block_w / 2.0, cy - block_h / 2.0, cx + block_w / 2.0, cy + block_h / 2.0).buffer(0)
-        if not sub.buffer(1e-6).covers(shape):
-            return None
-
-    if shape is None or shape.is_empty or shape.area < 110.0:
-        return None
-    return shape.buffer(0)
-
-
-def _place_compact_karre_grid(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
-    """Fallback/alternative for dense urban karré grids.
-
-    This is intentionally more robust than the courtyard ring splitter: it lays
-    out several compact U/L blocks in a 2x2/3x2-like grid with at least 8 m clear
-    distance between cells. It is used to avoid the weak 1-2-building outcome.
-    """
-    if core is None or core.is_empty:
-        return None
-    target = max(2, int(getattr(field, "target_building_count", 0) or 2))
-    target = min(target, 8)
-    minx, miny, maxx, maxy = core.bounds
-    width = maxx - minx
-    height = maxy - miny
-    gap = max(8.0, _minimum_building_spacing_m(PlanRegler()))
-    edge = max(1.0, min(5.0, gap / 2.0))
-
-    candidates: List[_PlacementCandidate] = []
-    for n in range(target, max(1, target - 4), -1):
-        aspect = width / max(height, 1.0)
-        cols = max(1, min(n, int(math.ceil(math.sqrt(n * max(aspect, 0.45))))))
-        rows = max(1, int(math.ceil(n / cols)))
-        if rows > cols + 1 and width >= height:
-            cols, rows = rows, cols
-        cell_w = (width - 2.0 * edge - (cols - 1) * gap) / max(cols, 1)
-        cell_h = (height - 2.0 * edge - (rows - 1) * gap) / max(rows, 1)
-        if cell_w < 22.0 or cell_h < 22.0:
-            continue
-
-        cells: List[Polygon] = []
-        for r in range(rows):
-            for c in range(cols):
-                if len(cells) >= n:
-                    break
-                x0 = minx + edge + c * (cell_w + gap)
-                y0 = miny + edge + r * (cell_h + gap)
-                cells.append(box(x0, y0, x0 + cell_w, y0 + cell_h))
-            if len(cells) >= n:
-                break
-
-        group_center = core.centroid
-        footprints: List[Polygon] = []
-        for cell in cells:
-            clipped = core.intersection(cell).buffer(0)
-            shape = _compact_karre_shape_for_cell(clipped, field, spec, group_center)
-            if shape is not None and core.buffer(1e-6).covers(shape):
-                if all(shape.distance(other) + 1e-6 >= gap for other in footprints):
-                    footprints.append(shape)
-        if len(footprints) < max(2, min(n, target) - 1):
-            continue
-
-        floors = int(max(field.floors_min, min(field.floors_max, field.floors_max)))
-        floors_per = [floors for _ in footprints]
-        cand = _evaluate_candidate(
-            footprints,
-            field.target_bra,
-            (field.floors_min, field.floors_max),
-            floors_per_bygg=floors_per,
-        )
-        if cand:
-            cand._variant = f"compact_karre_grid_x{len(footprints)}"
-            candidates.append(cand)
-
-    if not candidates:
-        return None
-
-    target_bra = float(field.target_bra or 0.0)
-    target_count = max(2, int(getattr(field, "target_building_count", 0) or 2))
-
-    def _score(item: _PlacementCandidate) -> Tuple[float, float, int]:
-        penalty = _karre_candidate_penalty(item, target_bra)
-        count_pen = abs(len(item.footprints) - target_count) * max(target_bra, 1.0) * 0.018
-        return (penalty + count_pen, -float(item.total_bra), abs(len(item.footprints) - target_count))
-
-    return min(candidates, key=_score)
-
-
-
 def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
     cluster_target = max(1, int(getattr(field, "target_building_count", 0) or 1))
     if cluster_target <= 1:
@@ -3803,26 +3691,11 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     if field.typology == Typology.LAMELL:
         cand = _place_lameller_in_bands(skeleton, field, spec)
     elif field.typology == Typology.KARRE:
-        karre_candidates: List[_PlacementCandidate] = []
-        for maybe in (
-            _place_compact_karre_grid(core, field, spec),
-            _place_multi_karre_clusters(core, field, spec),
-            _place_karre_from_frontage(skeleton, field, spec),
-            _place_karre_local(core, field, spec),
-        ):
-            if maybe is not None and maybe.footprints:
-                karre_candidates.append(maybe)
-        if karre_candidates:
-            target_count = max(1, int(getattr(field, "target_building_count", 0) or 1))
-            cand = min(
-                karre_candidates,
-                key=lambda item: (
-                    _karre_candidate_penalty(item, field.target_bra)
-                    + abs(len(item.footprints) - target_count) * max(float(field.target_bra or 1.0), 1.0) * 0.018,
-                    -float(item.total_bra),
-                    abs(len(item.footprints) - target_count),
-                ),
-            )
+        cand = _place_multi_karre_clusters(core, field, spec)
+        if cand is None:
+            cand = _place_karre_from_frontage(skeleton, field, spec)
+        if cand is None:
+            cand = _place_karre_local(core, field, spec)
     elif field.typology == Typology.PUNKTHUS:
         cand = _place_punkthus_on_nodes(skeleton, field, spec)
     elif field.typology == Typology.REKKEHUS:
@@ -3862,6 +3735,53 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     if not combined_footprints:
         return None
     return _evaluate_candidate(combined_footprints, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per, angle_offset_per_bygg=angle_per)
+
+
+def _top_up_field_bra_minimum(buildings: List[Bygg], field: Delfelt, target_bra: float) -> None:
+    """Hev etasjer på eksisterende bygg til vi når minimum BRA, hvis mulig.
+
+    Hensikt: Når %-BRA-overstyring brukes skal løsningen i utgangspunktet ikke
+    stoppe på 90-95 %% av målet bare fordi en litt luftigere kandidat vant på
+    komposisjon. Vi gjør derfor en enkel og robust top-up ved å legge etasjer på
+    eksisterende bygg innenfor floors_max. Fotavtrykk og uterom beholdes, men
+    volumet strammes opp.
+    """
+    if not buildings or target_bra <= 0:
+        return
+    current = sum(b.bra_m2 for b in buildings)
+    tolerance = max(40.0, target_bra * 0.005)
+    if current + tolerance >= target_bra:
+        return
+
+    order = sorted(
+        range(len(buildings)),
+        key=lambda i: (
+            buildings[i].floors,
+            -float(getattr(buildings[i].footprint, 'area', 0.0) or 0.0),
+            0 if buildings[i].typology in {Typology.KARRE, Typology.LAMELL} else 1,
+            buildings[i].bygg_id,
+        ),
+    )
+    if not order:
+        return
+
+    max_rounds = max(1, int(field.floors_max - field.floors_min) + 3)
+    rounds = 0
+    progressed = True
+    while current + tolerance < target_bra and progressed and rounds < max_rounds:
+        progressed = False
+        rounds += 1
+        for idx in order:
+            b = buildings[idx]
+            if b.floors >= field.floors_max:
+                continue
+            b.floors += 1
+            b.height_m = _height_for(field.typology, b.floors)
+            current += b.footprint_m2
+            progressed = True
+            if current + tolerance >= target_bra:
+                break
+
 
 def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], plan_regler: Optional[PlanRegler] = None) -> Tuple[List[Bygg], float]:
     rules = plan_regler or PlanRegler()
@@ -3948,6 +3868,7 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
             global_geoms.append((footprint_global, angle_global, field.typology, height_m))
             build_counter += 1
 
+        _top_up_field_bra_minimum(placed_for_field, field, float(field.target_bra or 0.0))
         accepted.extend(placed_for_field)
         achieved_bra = sum(b.bra_m2 for b in placed_for_field)
         bra_deficit += max(0.0, field.target_bra - achieved_bra)
