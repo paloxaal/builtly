@@ -90,8 +90,6 @@ class Delfelt:
     courtyard_reserve_ratio: float = 0.0
     frontage_depth_m: Optional[float] = None
     corridor_width_m: Optional[float] = None
-    central_void_m: float = 0.0
-    gap_between_m: float = 4.0
     max_neighbor_height_m: Optional[float] = None
     min_neighbor_distance_m: Optional[float] = None
     macro_structure: Optional[str] = None
@@ -137,8 +135,6 @@ class Delfelt:
             "courtyard_reserve_ratio": float(self.courtyard_reserve_ratio),
             "frontage_depth_m": self.frontage_depth_m,
             "corridor_width_m": self.corridor_width_m,
-            "central_void_m": float(self.central_void_m),
-            "gap_between_m": float(self.gap_between_m),
             "max_neighbor_height_m": self.max_neighbor_height_m,
             "min_neighbor_distance_m": self.min_neighbor_distance_m,
             "macro_structure": self.macro_structure,
@@ -186,8 +182,6 @@ class Delfelt:
             courtyard_reserve_ratio=float(data.get("courtyard_reserve_ratio", 0.0) or 0.0),
             frontage_depth_m=float(data["frontage_depth_m"]) if data.get("frontage_depth_m") is not None else None,
             corridor_width_m=float(data["corridor_width_m"]) if data.get("corridor_width_m") is not None else None,
-            central_void_m=float(data.get("central_void_m", 0.0) or 0.0),
-            gap_between_m=float(data.get("gap_between_m", 4.0) or 4.0),
             max_neighbor_height_m=float(data["max_neighbor_height_m"]) if data.get("max_neighbor_height_m") is not None else None,
             min_neighbor_distance_m=float(data["min_neighbor_distance_m"]) if data.get("min_neighbor_distance_m") is not None else None,
             macro_structure=data.get("macro_structure"),
@@ -443,8 +437,6 @@ class FieldParameterChoice:
     courtyard_reserve_ratio: float = 0.0
     frontage_depth_m: Optional[float] = None
     corridor_width_m: Optional[float] = None
-    central_void_m: float = 0.0
-    gap_between_m: float = 4.0
     macro_structure: Optional[str] = None
     micro_field_pattern: Optional[str] = None
     symmetry_preference: Optional[str] = None
