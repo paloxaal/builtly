@@ -9,16 +9,18 @@ from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polyg
 from .masterplan_engine import generate_concept_masterplans, validate_masterplan_geometry
 from .masterplan_types import BarnehageConfig, Masterplan, PlanRegler
 
-PHASE_COLORS_HEX = ["#38bdf8", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#60a5fa"]
+PHASE_COLORS_HEX = ["#1f375f", "#42679b", "#49b4dc", "#2aa999", "#6e849e", "#94a3b8"]
 
-# Roligere presentasjonsfarger for arkitektdiagrammer.
+# Builtly-tilpassede presentasjonsfarger for arkitektdiagrammer.
+# Holder volumene rolige i rapport/PDF og unngår neon-fasepreg.
 TYPOLOGY_DIAGRAM_COLORS: Dict[str, List[int]] = {
-    "Lamell": [191, 152, 112, 232],
-    "Punkthus": [133, 154, 121, 232],
-    "Karré": [226, 212, 178, 232],
-    "Rekkehus": [183, 138, 102, 232],
-    "Tun": [188, 163, 126, 232],
+    "Lamell": [64, 126, 188, 232],
+    "Punkthus": [74, 184, 179, 232],
+    "Karré": [66, 103, 155, 232],
+    "Rekkehus": [92, 149, 120, 232],
+    "Tun": [116, 132, 164, 232],
 }
+
 
 
 

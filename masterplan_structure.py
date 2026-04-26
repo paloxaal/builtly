@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from shapely import affinity
-from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon, box
 from shapely.ops import unary_union
 
 
@@ -251,6 +251,15 @@ def _pca_axes(buildable_poly: Polygon) -> Tuple[float, float, float, float, floa
     her for å holde masterplan_structure uavhengig av geometry.py's
     fulle importgraf (som drar inn typology_library etc).
     """
+    # Defensiv: buildable_poly kan være en MultiPolygon hvis tomten er
+    # splittet av vei, vann eller annet. Velg den største delpolygonen
+    # slik at .exterior-tilgangen ikke krasjer.
+    if isinstance(buildable_poly, MultiPolygon):
+        parts = [g for g in buildable_poly.geoms if not g.is_empty]
+        if not parts:
+            raise ValueError("buildable_poly er tom MultiPolygon")
+        buildable_poly = max(parts, key=lambda g: g.area)
+
     exterior = list(buildable_poly.exterior.coords)[:-1]
     if len(exterior) < 3:
         raise ValueError("buildable_poly trenger minst 3 punkter")
@@ -647,6 +656,14 @@ def axes_to_export_dict(axes: MasterplanAxes) -> Dict[str, Any]:
     def poly_coords(poly: Polygon) -> List[List[List[float]]]:
         if poly is None or poly.is_empty:
             return []
+        # Defensiv: håndter MultiPolygon ved å returnere alle delpolygonene.
+        if isinstance(poly, MultiPolygon):
+            rings: List[List[List[float]]] = []
+            for part in poly.geoms:
+                if part is None or part.is_empty:
+                    continue
+                rings.append([[float(x), float(y)] for x, y in list(part.exterior.coords)])
+            return rings
         return [[[float(x), float(y)] for x, y in list(poly.exterior.coords)]]
 
     def line_coords(line: Optional[LineString]) -> List[List[float]]:
