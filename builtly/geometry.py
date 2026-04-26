@@ -709,12 +709,12 @@ def _lamell_row_spacing(field: Delfelt, spec: BaseTypologySpec, rules: Optional[
     rule_obj = rules or PlanRegler()
     height_m = _height_for(Typology.LAMELL, int(getattr(field, 'floors_max', 4) or 4))
     base = _required_spacing(Typology.LAMELL, height_m, rule_obj)
-    length_min = float(getattr(getattr(spec, 'length_m', None), 'min_m', 40.0) or 40.0)
-    length_max = float(getattr(getattr(spec, 'length_m', None), 'max_m', length_min) or length_min)
-    typical_length = max(length_min, (length_min + length_max) / 2.0)
-    # Bruk ca. 40 % av lamell-lengden som kvalitativ hovedregel for parallelle rader.
-    half_length_rule = max(_minimum_building_spacing_m(rule_obj), min(34.0, 0.40 * typical_length))
-    return max(base, half_length_rule)
+    target_count = max(1, int(getattr(field, 'target_building_count', 0) or 1))
+    if target_count >= 8:
+        return max(_minimum_building_spacing_m(rule_obj), min(9.0, base))
+    if target_count >= 6:
+        return max(_minimum_building_spacing_m(rule_obj), min(10.0, base))
+    return max(_minimum_building_spacing_m(rule_obj), base)
 
 
 def _is_parallel(angle_a: float, angle_b: float, tol: float = 1e-3) -> bool:
@@ -763,23 +763,19 @@ def _parallel_lamell_spacing_requirement(
     normal_gap = _interval_gap(a_n, b_n)
 
     lamell_height = max(float(height_a_m), float(height_b_m))
+    solar_req = max(_minimum_building_spacing_m(rules), min(12.0, 0.55 * lamell_height + 2.0))
     fire_req = _minimum_building_spacing_m(rules)
-    half_length_req = max(fire_req, min(34.0, 0.40 * max(tangent_len, 0.0)))
-    solar_req = max(fire_req, min(34.0, max(0.52 * lamell_height + 2.0, half_length_req)))
 
-    # Stor overlap i lengderetningen = fasade mot fasade.
-    # Hovedregel: parallelle lameller skal ha omtrent 40 % av lamell-lengden mellom seg.
-    # Dette er strammere enn tidligere, men fortsatt over eksplisitt brannavstand.
+    # Stor overlap i lengderetningen = fasade mot fasade → krev solavstand.
     if tangent_overlap >= max(8.0, 0.35 * tangent_len):
         return solar_req
 
-    # Gavel-mot-gavel eller tydelig forskjøvet: hold minst brannavstand,
-    # men krev fortsatt noe mer hvis lengdeoverlappet begynner å bli betydelig.
+    # Gavel-mot-gavel eller tydelig forskjøvet = det er ikke nødvendig å kreve
+    # full høydeavstand. Dette åpner for flere lameller i samme delfelt.
     if tangent_gap > 0.0 or normal_gap <= 4.0:
-        partial_overlap_req = max(fire_req, min(28.0, 0.38 * max(tangent_overlap, 0.0)))
-        return partial_overlap_req if tangent_overlap >= 12.0 else fire_req
+        return fire_req
 
-    return max(fire_req, min(30.0, 0.40 * max(tangent_len, 0.0)))
+    return max(fire_req, 12.0)
 
 
 def _building_spacing_ok(candidate: Polygon, candidate_angle_deg: float, candidate_typology: Typology, candidate_height_m: float,
@@ -1310,30 +1306,20 @@ def _choose_best_with_solar(candidates: List[_PlacementCandidate], field: Delfel
 
     For retningsavhengige typologier (lamell, rekkehus) blir sol-scoren viktig.
     For retningsuavhengige typologier (karré, punkthus) er den nøytral.
-
-    V6: underdekning på BRA straffes tydeligere enn før. Dette gjør at når
-    %-BRA-overstyring er satt høyt, velger motoren kandidater som faktisk har
-    sjanse til å levere målet, og ikke for luftige varianter med god komposisjon
-    men for lite areal.
     """
     if not candidates:
         return None
 
     def combined_score(item: _PlacementCandidate) -> Tuple[float, float, int]:
-        # Primary score: hvor godt BRA-målet treffes. Underdekning straffes
-        # hardere enn overshoot slik at vi prioriterer å nå minstemålet.
+        # Primary score: hvor godt BRA-målet treffes
         deficit = max(0.0, field.target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - field.target_bra)
-        deficit_ratio = deficit / max(field.target_bra, 1.0)
-        deficit_multiplier = 1.0 + min(1.2, deficit_ratio * 1.6)
-        bra_score = deficit * deficit_multiplier + overshoot * 0.20
-        if deficit_ratio > 0.06:
-            bra_score += field.target_bra * 0.06 * min(1.0, deficit_ratio)
+        bra_score = deficit + overshoot * 0.25
 
         # Solar penalty: for lamell/rekkehus, straffer nord-sør-orientering
         global_angle = (field.orientation_deg + item.angle_offset_deg) % 180.0
         solar_bonus = _solar_orientation_bonus(global_angle, typology)
-        solar_penalty = field.target_bra * 0.16 * (1.0 - solar_bonus)
+        solar_penalty = field.target_bra * 0.20 * (1.0 - solar_bonus)
 
         # Variasjons-bonus: foretrekk "varied" (blandede lengder) og "rotated"
         # (per-bygg rotasjon) fremfor "single" (uniformt stort rektangel) når BRA
@@ -2978,12 +2964,8 @@ def _place_punkthus_on_nodes(skeleton: FieldSkeleton, field: Delfelt, spec: Base
                     continue
                 fps.append(rect)
             filtered: List[Polygon] = []
-            preferred_gap = float(getattr(field, "gap_between_m", 0.0) or 0.0)
-            min_node_spacing = max(16.0, preferred_gap, float(size) * 1.05)
-            if layout_mode in {"perimeter_ring", "perimeter_ring_dense", "green_room_ring"}:
-                min_node_spacing = max(min_node_spacing, float(size) * 1.10)
             for rect in fps:
-                if all(rect.distance(other) >= min_node_spacing for other in filtered):
+                if all(rect.distance(other) >= max(12.0, float(size)) * 0.78 for other in filtered):
                     filtered.append(rect)
             if len(filtered) > requested_count:
                 filtered = filtered[:requested_count]
@@ -3198,13 +3180,7 @@ def _choose_best_structured(
     skeleton: FieldSkeleton,
     field: Delfelt,
 ) -> Optional[_PlacementCandidate]:
-    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA.
-
-    V6: strukturscore er fortsatt viktig, men kandidater som havner tydelig under
-    BRA-målet taper oftere mot mer arealeffektive løsninger. Dette svarer direkte
-    på ønsket om at 100 %% BRA-overstyring skal gi minst 100 %% BRA når det er
-    fysisk mulig innen feltenes parametre.
-    """
+    """Pick candidate by architecture first enough that gaterom/uterom survives, but still respects BRA."""
     pool = [c for c in candidates if c is not None and c.footprints]
     if not pool:
         return None
@@ -3215,15 +3191,15 @@ def _choose_best_structured(
         deficit = max(0.0, target_bra - item.total_bra)
         overshoot = max(0.0, item.total_bra - target_bra)
         deficit_ratio = deficit / max(target_bra, 1.0)
-        bra_penalty = deficit * (1.45 + min(1.35, deficit_ratio * 2.4)) + overshoot * 0.16
+        bra_penalty = deficit * (1.50 + min(1.40, deficit_ratio * 2.5)) + overshoot * 0.14
         if deficit_ratio > 0.02:
-            bra_penalty += target_bra * (0.10 if density >= 1.0 else 0.06) * min(1.0, deficit_ratio * 1.5)
+            bra_penalty += target_bra * (0.12 if density >= 1.0 else 0.07) * min(1.0, deficit_ratio * 1.5)
         if deficit_ratio > 0.10:
-            bra_penalty += target_bra * 0.12 * min(1.0, deficit_ratio)
+            bra_penalty += target_bra * 0.14 * min(1.0, deficit_ratio)
         structure = _candidate_structure_score(item.footprints, skeleton, field)
-        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.10 + strictness * 0.09)
+        structure_penalty = (1.0 - structure) * max(target_bra, item.total_bra, 1.0) * (0.09 + strictness * 0.08)
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
-        count_weight = 0.016 if density >= 1.10 else 0.012
+        count_weight = 0.018 if density >= 1.10 else 0.012
         count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * count_weight
         return (bra_penalty + structure_penalty + count_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
@@ -3582,9 +3558,9 @@ def _scale_cluster_footprints_to_target(
     scale = math.sqrt(target_fp / total_fp)
     density = float(getattr(field, 'target_bra', 0.0) or 0.0) / max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or 0.0), 1.0)
     if getattr(field, 'typology', None) == Typology.KARRE:
-        max_scale = 1.28 if density >= 1.10 else 1.22
+        max_scale = 1.32 if density >= 1.10 else 1.24
     else:
-        max_scale = 1.12 if density >= 1.10 else 1.08
+        max_scale = 1.14 if density >= 1.10 else 1.08
     scale = max(0.78, min(max_scale, scale))
     if abs(scale - 1.0) < 1e-3:
         return list(polys)
@@ -3606,9 +3582,9 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
     cluster_counts = [cluster_target]
     if cluster_target >= 3:
         cluster_counts.append(cluster_target - 1)
-    if density >= 1.20 and cluster_target >= 3:
+    if density >= 1.15 and cluster_target >= 3:
         cluster_counts.append(cluster_target + 1)
-    cluster_counts = [c for c in dict.fromkeys(cluster_counts) if c >= 2]
+    cluster_counts = [c for c in dict.fromkeys(cluster_counts) if 2 <= c <= 8]
 
     candidates: List[_PlacementCandidate] = []
     for cluster_count in cluster_counts:
@@ -3632,7 +3608,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
                 courtyard_open_side=open_to_common,
                 view_corridor_count=max(0, int(getattr(field, "view_corridor_count", 0) or 0) - 1),
                 micro_band_count=max(2, int(getattr(field, "micro_band_count", 0) or 2) - 1),
-                courtyard_reserve_ratio=min(0.26, max(0.14, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.20))),
+                courtyard_reserve_ratio=min(0.34, max(0.22, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.28))),
             )
             sub_cand = _best_subcore_karre_candidate(sc, sub_field, spec)
             if sub_cand is None:
@@ -3651,7 +3627,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
         base_f = max(field.floors_min, min(field.floors_max, base_f))
         # Hvis vi fortsatt ligger under mål eller realiserer færre bygg enn ønsket,
         # skal etasjeantallet kompensere før vi aksepterer lav BRA.
-        if len(scaled_footprints) < cluster_target or total_fp_scaled * base_f < float(field.target_bra) * 0.86:
+        if len(scaled_footprints) < cluster_target or total_fp_scaled * base_f < float(field.target_bra) * 0.90:
             base_f = field.floors_max
         floors_per_final = [base_f for _ in scaled_footprints]
         candidate = _evaluate_candidate(
@@ -3757,50 +3733,185 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     return _evaluate_candidate(combined_footprints, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors_per, angle_offset_per_bygg=angle_per)
 
 
-def _top_up_field_bra_minimum(buildings: List[Bygg], field: Delfelt, target_bra: float) -> None:
-    """Hev etasjer på eksisterende bygg til vi når minimum BRA, hvis mulig.
+def _u_karre_footprint(cx: float, cy: float, width_m: float, depth_m: float, arm_m: float, open_side: str = "south") -> Polygon:
+    """Create a compact U-shaped footprint used for high-density completion."""
+    x0, x1 = cx - width_m / 2.0, cx + width_m / 2.0
+    y0, y1 = cy - depth_m / 2.0, cy + depth_m / 2.0
+    arm = max(8.0, min(float(arm_m), min(width_m, depth_m) * 0.40))
+    if open_side == "south":
+        parts = [box(x0, y1 - arm, x1, y1), box(x0, y0, x0 + arm, y1), box(x1 - arm, y0, x1, y1)]
+    elif open_side == "north":
+        parts = [box(x0, y0, x1, y0 + arm), box(x0, y0, x0 + arm, y1), box(x1 - arm, y0, x1, y1)]
+    elif open_side == "west":
+        parts = [box(x1 - arm, y0, x1, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
+    else:
+        parts = [box(x0, y0, x0 + arm, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
+    return unary_union(parts).buffer(0)
 
-    Hensikt: Når %-BRA-overstyring brukes skal løsningen i utgangspunktet ikke
-    stoppe på 90-95 %% av målet bare fordi en litt luftigere kandidat vant på
-    komposisjon. Vi gjør derfor en enkel og robust top-up ved å legge etasjer på
-    eksisterende bygg innenfor floors_max. Fotavtrykk og uterom beholdes, men
-    volumet strammes opp.
+
+def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[Tuple[Polygon, Typology, float]]:
+    """Generate additional urban-edge placements for high %-BRA completion.
+
+    Candidates are biased toward perimeter positions so larger common outdoor
+    rooms remain legible rather than becoming many leftover pockets.
     """
-    if not buildings or target_bra <= 0:
-        return
-    current = sum(b.bra_m2 for b in buildings)
-    tolerance = max(40.0, target_bra * 0.005)
-    if current + tolerance >= target_bra:
-        return
+    if core_local is None or core_local.is_empty:
+        return []
+    minx, miny, maxx, maxy = core_local.bounds
+    width = maxx - minx
+    height = maxy - miny
+    if width < 18.0 or height < 18.0:
+        return []
 
-    order = sorted(
-        range(len(buildings)),
-        key=lambda i: (
-            buildings[i].floors,
-            -float(getattr(buildings[i].footprint, 'area', 0.0) or 0.0),
-            0 if buildings[i].typology in {Typology.KARRE, Typology.LAMELL} else 1,
-            buildings[i].bygg_id,
+    options: List[Tuple[Typology, List[Tuple[float, float]]]] = []
+    if field.typology == Typology.KARRE:
+        options.append((Typology.KARRE, [(54.0, 38.0), (48.0, 34.0), (42.0, 30.0), (36.0, 28.0)]))
+        options.append((Typology.LAMELL, [(50.0, 13.0), (40.0, 13.0), (30.0, 13.0)]))
+    elif field.typology == Typology.PUNKTHUS:
+        options.append((Typology.PUNKTHUS, [(20.0, 20.0)]))
+        options.append((Typology.LAMELL, [(42.0, 13.0), (30.0, 13.0)]))
+    else:
+        options.append((Typology.LAMELL, [(65.0, 13.0), (55.0, 13.0), (45.0, 13.0), (32.0, 13.0)]))
+        options.append((Typology.PUNKTHUS, [(20.0, 20.0)]))
+
+    step = max(6.0, min(14.0, min(width, height) / 7.0))
+    xs = list(np.arange(minx + 8.0, maxx - 8.0 + 0.01, step)) or [(minx + maxx) / 2.0]
+    ys = list(np.arange(miny + 8.0, maxy - 8.0 + 0.01, step)) or [(miny + maxy) / 2.0]
+
+    raw: List[Tuple[float, Polygon, Typology, float]] = []
+    core_buf = core_local.buffer(1e-6)
+    for typ, dims in options:
+        for w, d in dims:
+            dim_variants = [(w, d)] if abs(w - d) < 1e-6 else [(w, d), (d, w)]
+            for ww, dd in dim_variants:
+                for cx in xs:
+                    for cy in ys:
+                        if typ == Typology.KARRE:
+                            for open_side in ("south", "north", "east", "west"):
+                                fp = _u_karre_footprint(cx, cy, ww, dd, 12.0, open_side=open_side)
+                                if core_buf.covers(fp):
+                                    dist_boundary = float(fp.distance(core_local.boundary))
+                                    dist_center = float(fp.centroid.distance(core_local.centroid))
+                                    score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.002
+                                    raw.append((score, fp, typ, 0.0))
+                        else:
+                            fp = box(cx - ww / 2.0, cy - dd / 2.0, cx + ww / 2.0, cy + dd / 2.0).buffer(0)
+                            if core_buf.covers(fp):
+                                dist_boundary = float(fp.distance(core_local.boundary))
+                                dist_center = float(fp.centroid.distance(core_local.centroid))
+                                score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.001
+                                raw.append((score, fp, typ, 90.0 if dd > ww else 0.0))
+    raw.sort(key=lambda item: item[0])
+    out: List[Tuple[Polygon, Typology, float]] = []
+    seen = set()
+    for _, fp, typ, angle in raw:
+        key = (round(fp.centroid.x, 1), round(fp.centroid.y, 1), typ.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((fp, typ, angle))
+        if len(out) >= 240:
+            break
+    return out
+
+
+def _complete_plan_density_with_infill(
+    buildings: List[Bygg],
+    delfelt: List[Delfelt],
+    buildable_poly: Polygon,
+    rules: PlanRegler,
+    start_counter: int,
+) -> Tuple[List[Bygg], int]:
+    """Add supplementary buildings when the generated plan misses target BRA."""
+    target_total = sum(float(getattr(f, "target_bra", 0.0) or 0.0) for f in delfelt)
+    if target_total <= 0.0:
+        return buildings, start_counter
+    current_total = sum(float(b.bra_m2) for b in buildings)
+    if current_total >= target_total * 0.985:
+        return buildings, start_counter
+
+    field_map = {f.field_id: f for f in delfelt}
+    global_geoms: List[Tuple[Polygon, float, Typology, float]] = []
+    for b in buildings:
+        f = field_map.get(b.delfelt_id)
+        angle = float(getattr(f, "orientation_deg", 0.0) if f is not None else 0.0)
+        global_geoms.append((b.footprint, angle, b.typology, b.height_m))
+
+    max_extra = 36
+    added = 0
+    field_order = sorted(
+        delfelt,
+        key=lambda f: (
+            0 if getattr(f, "character", "") != "neighborhood_edge" else 1,
+            -max(0.0, float(getattr(f, "target_bra", 0.0) or 0.0) - sum(b.bra_m2 for b in buildings if b.delfelt_id == f.field_id)),
+            -float(getattr(f.polygon, "area", 0.0) or 0.0),
         ),
     )
-    if not order:
-        return
 
-    max_rounds = max(1, int(field.floors_max - field.floors_min) + 3)
-    rounds = 0
-    progressed = True
-    while current + tolerance < target_bra and progressed and rounds < max_rounds:
+    while current_total < target_total * 0.985 and added < max_extra:
         progressed = False
-        rounds += 1
-        for idx in order:
-            b = buildings[idx]
-            if b.floors >= field.floors_max:
+        for field in field_order:
+            field_current = sum(b.bra_m2 for b in buildings if b.delfelt_id == field.field_id)
+            field_target = float(getattr(field, "target_bra", 0.0) or 0.0)
+            if getattr(field, "character", "") == "neighborhood_edge" and field_current >= field_target * 1.02:
                 continue
-            b.floors += 1
-            b.height_m = _height_for(field.typology, b.floors)
-            current += b.footprint_m2
-            progressed = True
-            if current + tolerance >= target_bra:
+            if field_current >= field_target * 1.12 and current_total >= target_total * 0.92:
+                continue
+
+            core_global = _field_core_polygon(field.polygon, rules.brann_avstand_m)
+            core_local = _rotate(core_global, -field.orientation_deg, origin=field.polygon.centroid) if abs(field.orientation_deg) > 1e-3 else core_global
+            existing_local = [
+                (_rotate(b.footprint, -field.orientation_deg, origin=field.polygon.centroid) if abs(field.orientation_deg) > 1e-3 else b.footprint)
+                for b in buildings
+                if b.delfelt_id == field.field_id
+            ]
+            if existing_local:
+                blockers = unary_union(existing_local).buffer(_minimum_building_spacing_m(rules)).buffer(0)
+                free_local = core_local.difference(blockers).buffer(0)
+                search_cores = [p for p in _flatten_polygons(free_local) if p.area > 260.0] or [core_local]
+            else:
+                search_cores = [core_local]
+
+            placed_this_field = False
+            for search_core in sorted(search_cores, key=lambda p: -p.area)[:4]:
+                for fp_local, typ, angle_local in _density_completion_candidates(search_core, field):
+                    fp_global = _rotate(fp_local, field.orientation_deg, origin=field.polygon.centroid).buffer(0) if abs(field.orientation_deg) > 1e-3 else fp_local.buffer(0)
+                    floors = int(field.floors_max)
+                    if getattr(field, "character", "") == "neighborhood_edge":
+                        floors = max(int(field.floors_min), min(floors, int(field.floors_max)))
+                    height_m = _height_for(typ, floors)
+                    angle_global = (field.orientation_deg + angle_local) % 180.0
+                    if not buildable_poly.buffer(1e-6).covers(fp_global):
+                        continue
+                    if not field.polygon.buffer(1e-6).covers(fp_global):
+                        continue
+                    if not _building_spacing_ok(fp_global, angle_global, typ, height_m, global_geoms, rules):
+                        continue
+                    bygg = Bygg(
+                        bygg_id=f"B{start_counter}",
+                        footprint=fp_global,
+                        floors=floors,
+                        height_m=height_m,
+                        typology=typ,
+                        delfelt_id=field.field_id,
+                        phase=field.phase,
+                        display_name=f"B{start_counter}",
+                    )
+                    buildings.append(bygg)
+                    global_geoms.append((fp_global, angle_global, typ, height_m))
+                    start_counter += 1
+                    added += 1
+                    current_total += bygg.bra_m2
+                    progressed = True
+                    placed_this_field = True
+                    break
+                if placed_this_field or current_total >= target_total * 0.985 or added >= max_extra:
+                    break
+            if current_total >= target_total * 0.985 or added >= max_extra:
                 break
+        if not progressed:
+            break
+    return buildings, start_counter
 
 
 def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], plan_regler: Optional[PlanRegler] = None) -> Tuple[List[Bygg], float]:
@@ -3888,7 +3999,6 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
             global_geoms.append((footprint_global, angle_global, field.typology, height_m))
             build_counter += 1
 
-        _top_up_field_bra_minimum(placed_for_field, field, float(field.target_bra or 0.0))
         accepted.extend(placed_for_field)
         achieved_bra = sum(b.bra_m2 for b in placed_for_field)
         bra_deficit += max(0.0, field.target_bra - achieved_bra)
@@ -3904,6 +4014,21 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
         # Fasade-justering er "nice-to-have" — hvis noe feiler, bruk uendret layout
         pass
 
+    try:
+        accepted, build_counter = _complete_plan_density_with_infill(
+            accepted,
+            delfelt,
+            buildable_poly,
+            rules,
+            build_counter,
+        )
+        accepted = _verify_adjusted_buildings(accepted, buildable_poly, delfelt, rules)
+    except Exception:
+        pass
+
+    achieved_total = sum(b.bra_m2 for b in accepted)
+    target_total = sum(float(getattr(f, "target_bra", 0.0) or 0.0) for f in delfelt)
+    bra_deficit = max(0.0, target_total - achieved_total)
     return accepted, float(bra_deficit)
 
 
