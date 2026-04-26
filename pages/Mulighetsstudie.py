@@ -4603,8 +4603,8 @@ def _draw_clearance_measurements(
     project_func,
     *,
     font,
-    max_pair_labels: int = 10,
-    max_boundary_labels: int = 8,
+    max_pair_labels: int = 6,
+    max_boundary_labels: int = 3,
 ) -> None:
     """Draw measured clearances between buildings and to the plot boundary.
 
@@ -4642,25 +4642,27 @@ def _draw_clearance_measurements(
     if not polys:
         return
 
+    used_label_boxes: List[Tuple[float, float, float, float]] = []
+
+    def _boxes_overlap(a, b, pad: float = 2.0) -> bool:
+        return not (a[2] + pad < b[0] or b[2] + pad < a[0] or a[3] + pad < b[1] or b[3] + pad < a[1])
+
     def _draw_measure_line(p1, p2, text_value: str, *, danger: bool = False, dashed: bool = False) -> None:
         try:
             s1 = project_func((p1.x, p1.y))
             s2 = project_func((p2.x, p2.y))
         except Exception:
             return
-        if math.hypot(s2[0] - s1[0], s2[1] - s1[1]) < 10.0:
+        seg_len = math.hypot(s2[0] - s1[0], s2[1] - s1[1])
+        if seg_len < 12.0:
             return
-        line_color = (188, 52, 52, 210) if danger else (50, 82, 112, 168)
+        line_color = (188, 52, 52, 215) if danger else (50, 82, 112, 136)
         if dashed:
-            # Short dashed line without depending on PIL dash support.
-            seg_len = math.hypot(s2[0] - s1[0], s2[1] - s1[1])
-            if seg_len <= 0:
-                return
-            step = 9.0
+            step = 10.0
             pos = 0.0
             on = True
             while pos < seg_len:
-                end = min(seg_len, pos + step * 0.55)
+                end = min(seg_len, pos + step * 0.50)
                 if on:
                     x1 = s1[0] + (s2[0] - s1[0]) * (pos / seg_len)
                     y1 = s1[1] + (s2[1] - s1[1]) * (pos / seg_len)
@@ -4671,12 +4673,35 @@ def _draw_clearance_measurements(
                 pos += step
         else:
             draw.line([s1, s2], fill=line_color, width=1)
+
+        # små endestreker gjør målet lesbart uten store labels
+        nx = -(s2[1] - s1[1]) / max(seg_len, 1.0)
+        ny = (s2[0] - s1[0]) / max(seg_len, 1.0)
+        tick = 3.5
+        draw.line([(s1[0] - nx*tick, s1[1] - ny*tick), (s1[0] + nx*tick, s1[1] + ny*tick)], fill=line_color, width=1)
+        draw.line([(s2[0] - nx*tick, s2[1] - ny*tick), (s2[0] + nx*tick, s2[1] + ny*tick)], fill=line_color, width=1)
+
         mx, my = (s1[0] + s2[0]) / 2.0, (s1[1] + s2[1]) / 2.0
         tw, th = _bbox(text_value)
-        fill = (255, 248, 238, 238) if danger else (255, 255, 255, 228)
-        outline = (185, 63, 63, 220) if danger else (142, 154, 166, 180)
-        draw.rounded_rectangle([(mx - tw / 2 - 4, my - th / 2 - 3), (mx + tw / 2 + 4, my + th / 2 + 3)], radius=6, fill=fill, outline=outline)
-        draw.text((mx - tw / 2, my - th / 2 - 1), text_value, fill=(35, 39, 45, 245), font=font)
+        # Prøv label litt ut fra målelinjen for å unngå klynge av tekst midt i planen.
+        positions = []
+        for offset in (8.0, -8.0, 15.0, -15.0, 0.0):
+            lx = mx + nx * offset
+            ly = my + ny * offset
+            positions.append((lx, ly, (lx - tw/2 - 3, ly - th/2 - 2, lx + tw/2 + 3, ly + th/2 + 2)))
+        chosen = None
+        for lx, ly, rect in positions:
+            if danger or not any(_boxes_overlap(rect, used) for used in used_label_boxes):
+                chosen = (lx, ly, rect)
+                break
+        if chosen is None:
+            return
+        lx, ly, rect = chosen
+        used_label_boxes.append(rect)
+        fill = (255, 248, 238, 238) if danger else (255, 255, 255, 215)
+        outline = (185, 63, 63, 220) if danger else (142, 154, 166, 145)
+        draw.rounded_rectangle([rect[:2], rect[2:]], radius=5, fill=fill, outline=outline)
+        draw.text((lx - tw / 2, ly - th / 2 - 1), text_value, fill=(35, 39, 45, 235), font=font)
 
     # Building-to-building: draw shortest relevant clearances, plus closest per building.
     pair_candidates: List[Tuple[float, int, int, Any, Any]] = []
@@ -4685,7 +4710,7 @@ def _draw_clearance_measurements(
         for j in range(i + 1, len(polys)):
             poly_b = polys[j][1]
             dist = float(poly_a.distance(poly_b))
-            if dist > 55.0:
+            if dist > 32.0 and dist >= 8.0:
                 continue
             try:
                 p1, p2 = nearest_points(poly_a, poly_b)
@@ -4698,12 +4723,13 @@ def _draw_clearance_measurements(
             if j not in closest_per_idx or dist < closest_per_idx[j][0]:
                 closest_per_idx[j] = item
     chosen_pairs: Dict[Tuple[int, int], Tuple[float, int, int, Any, Any]] = {}
-    for item in sorted(pair_candidates, key=lambda v: v[0])[:max_pair_labels]:
+    for item in sorted(pair_candidates, key=lambda v: (0 if v[0] < 8.0 else 1, v[0]))[:max_pair_labels]:
         chosen_pairs[(item[1], item[2])] = item
     for item in closest_per_idx.values():
         if len(chosen_pairs) >= max_pair_labels:
             break
-        chosen_pairs[(item[1], item[2])] = item
+        if item[0] <= 18.0 or item[0] < 8.0:
+            chosen_pairs[(item[1], item[2])] = item
     for dist, i, j, p1, p2 in sorted(chosen_pairs.values(), key=lambda v: v[0]):
         txt = f"{dist:.1f} m"
         _draw_measure_line(p1, p2, txt, danger=dist < 8.0, dashed=False)
@@ -4724,7 +4750,7 @@ def _draw_clearance_measurements(
                     dist = float(poly.distance(boundary))
                 except Exception:
                     continue
-                if dist <= 80.0:
+                if dist <= 36.0:
                     boundary_items.append((dist, i, p1, p2))
             # Prioritér de knappeste avstandene; disse er viktigst å kontrollere.
             for dist, i, p1, p2 in sorted(boundary_items, key=lambda v: v[0])[:max_boundary_labels]:
@@ -4968,8 +4994,8 @@ def render_plan_diagram(site: SiteInputs, option: OptionResult) -> Image.Image:
         site_coords,
         project,
         font=font_tiny,
-        max_pair_labels=12 if len(proposed) <= 8 else 10,
-        max_boundary_labels=8 if len(proposed) <= 8 else 6,
+        max_pair_labels=6 if len(proposed) <= 8 else 5,
+        max_boundary_labels=3 if len(proposed) <= 8 else 2,
     )
 
     # Building labels are intentionally kept off the footprints.
@@ -5315,8 +5341,8 @@ def render_plan_view(site: SiteInputs, option: OptionResult) -> Image.Image:
         site_coords,
         lambda pt: proj(pt[0], pt[1]),
         font=font_tiny,
-        max_pair_labels=12 if len(plan_callouts) <= 8 else 10,
-        max_boundary_labels=8 if len(plan_callouts) <= 8 else 6,
+        max_pair_labels=6 if len(plan_callouts) <= 8 else 5,
+        max_boundary_labels=3 if len(plan_callouts) <= 8 else 2,
     )
 
     _draw_building_callouts(
