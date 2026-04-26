@@ -204,11 +204,13 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
             if density >= 1.80:
                 count = min(count + 1, 3)
         else:
-            if density >= 1.0:
+            if density >= 0.95:
                 count += 1
-            if density >= 1.15:
+            if density >= 1.10:
                 count += 1
-            if density >= 1.28 and concept_family != ConceptFamily.COURTYARD_URBAN:
+            if density >= 1.22:
+                count += 1
+            if density >= 1.35 and concept_family != ConceptFamily.COURTYARD_URBAN:
                 count += 1
 
     # Runde 8.2B: UI-faser skal ikke alltid bli like mange makro-delfelt.
@@ -219,21 +221,21 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     elif urban_infill:
         count = min(max(count, 2), 3)
     elif concept_family == ConceptFamily.LINEAR_MIXED:
-        count = max(3, min(count, 4 if area < 18000.0 else 5))
+        count = max(4, min(count, 5 if area < 18000.0 else 6))
     elif concept_family == ConceptFamily.CLUSTER_PARK:
-        count = max(3, min(count, 4 if area < 16000.0 else 5))
+        count = max(4, min(count, 4 if area < 16000.0 else 5))
     else:  # COURTYARD_URBAN
         # Karréalternativet skal leses som kvartalsstruktur, ikke som to
         # store objektbygg. Derfor får det flere makrofelter på middels og
         # store tomter, særlig når mål-BRA er høy.
         if area < 12000.0:
-            count = max(2, min(count, 3 if density >= 1.55 else 2))
+            count = max(3, min(count, 4 if density >= 1.35 else 3))
         elif area < 18000.0:
-            count = max(3, min(max(count, 3), 4 if density >= 1.70 else 3))
-        elif area < 30000.0:
             count = max(4, min(max(count, 4), 5 if density >= 1.45 else 4))
+        elif area < 30000.0:
+            count = max(5, min(max(count, 5), 6 if density >= 1.25 else 5))
         else:
-            count = max(5, min(max(count, 5), 6))
+            count = max(6, min(max(count, 6), 7))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -640,20 +642,17 @@ def _effective_delfelt_count_for_family(
         return 1
     req = max(1, int(requested_count))
     if family == ConceptFamily.CLUSTER_PARK:
-        return max(3, min(req, 4 if area < 16000.0 else 5)) if area >= 7000.0 else max(1, min(req, 2))
+        floor = 5 if area >= 20000.0 else (4 if area >= 7000.0 else 2)
+        ceil = 5 if area >= 16000.0 else 4
+        return max(floor, min(req, ceil))
     if family == ConceptFamily.COURTYARD_URBAN:
-        # Karrévarianten trenger flere makrofelt enn 2-4 for å kunne danne
-        # kvartal-mot-kvartal, ikke bare to store objektbygg. UI-faser brukes
-        # fortsatt som maksimum, men store tomter får 5-6 bykvartalsfelt.
-        if area < 10000.0:
-            return max(2, min(req, 3 if density >= 1.25 else 2))
-        if area < 18000.0:
-            return max(3, min(req, 4))
-        if area < 30000.0:
-            return max(4, min(req, 5))
-        return max(5, min(req, 6))
+        floor = 6 if area >= 25000.0 else (5 if area >= 12000.0 else (4 if area >= 7000.0 else 2))
+        ceil = 7 if density >= 1.25 and area >= 20000.0 else (6 if area >= 12000.0 else 5)
+        return max(floor, min(req, ceil))
     if family == ConceptFamily.LINEAR_MIXED:
-        return max(3, min(req, 5 if area >= 18000.0 else 4))
+        floor = 5 if area >= 18000.0 else (4 if area >= 7000.0 else 3)
+        ceil = 6 if area >= 18000.0 else 5
+        return max(floor, min(req, ceil))
     return req
 
 
