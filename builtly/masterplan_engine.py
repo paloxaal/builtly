@@ -31,7 +31,6 @@ from .geometry import (
     build_field_skeleton_summaries,
     building_geometry_is_orthogonal_to_field,
     buildings_do_not_overlap,
-    buildings_respect_min_spacing,
     compute_architecture_metrics,
     place_buildings_for_fields,
     pca_site_axes,
@@ -191,10 +190,10 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
     count = resolve_delfelt_count(buildable_poly, requested_count=requested_count)
     area = max(float(buildable_poly.area), 1.0)
     density = float(target_bra_m2) / area if target_bra_m2 > 0 else 0.0
-    compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
-    urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
-
     if requested_count is None:
+        compact_infill = area <= 3500.0 or (area <= 7000.0 and density >= 1.75)
+        urban_infill = not compact_infill and area <= 9000.0 and density >= 1.30
+
         # Små, tette tomter skal ikke over-fragmenteres. Der skjer variasjonen inne i
         # ett eller to felt – ikke gjennom mange små delfelt.
         if compact_infill:
@@ -210,30 +209,19 @@ def pass1_generate_delfelt(buildable_poly: Polygon, concept_family: ConceptFamil
                 count += 1
             if density >= 1.28 and concept_family != ConceptFamily.COURTYARD_URBAN:
                 count += 1
-
-    # Runde 8.2B: UI-faser skal ikke alltid bli like mange makro-delfelt.
-    # Uansett om count kommer fra UI eller auto, mappes det til konseptets
-    # arkitektoniske makrostruktur. Flere bygg håndteres inne i hvert felt.
-    if compact_infill:
-        count = 1 if area <= 3500.0 else min(max(count, 1), 2)
-    elif urban_infill:
-        count = min(max(count, 2), 3)
-    elif concept_family == ConceptFamily.LINEAR_MIXED:
-        count = max(3, min(count, 4 if area < 18000.0 else 5))
-    elif concept_family == ConceptFamily.CLUSTER_PARK:
-        count = max(3, min(count, 4 if area < 16000.0 else 5))
-    else:  # COURTYARD_URBAN
-        # Karréalternativet skal leses som kvartalsstruktur, ikke som to
-        # store objektbygg. Derfor får det flere makrofelter på middels og
-        # store tomter, særlig når mål-BRA er høy.
-        if area < 12000.0:
-            count = max(2, min(count, 3 if density >= 1.55 else 2))
-        elif area < 18000.0:
-            count = max(3, min(max(count, 3), 4 if density >= 1.70 else 3))
-        elif area < 30000.0:
-            count = max(4, min(max(count, 4), 5 if density >= 1.45 else 4))
-        else:
-            count = max(5, min(max(count, 5), 6))
+            # Makro/mikro-prinsipp: hold makrofeltene rolige, men gi lineære og parkgrep
+            # nok armer til å bygge rytme. Karré-grep holdes strammere for å unngå for små blokker.
+            if concept_family == ConceptFamily.LINEAR_MIXED:
+                # Runde 8.1: færre, større makrofelt gir mer lesbare gaterom og
+                # interne akser; flere bygg håndteres inne i hvert felt.
+                count = max(3, min(count, 5 if density < 1.18 else 6))
+            elif concept_family == ConceptFamily.CLUSTER_PARK:
+                # Ett tydelig grønt fellesrom krever større sammenhengende felt,
+                # ikke 6-7 små delfelt med hver sin lokale park.
+                count = max(3, min(count, 4))
+            else:  # COURTYARD_URBAN
+                # Karré trenger feltstørrelse for komplette kvartalsringer.
+                count = max(2, min(count, 4 if density >= 1.18 else 3))
     polygons = subdivide_buildable_polygon(buildable_poly, count=count, orientation_deg=axes.theta_deg)
     seeded = _seed_neutral_fields(polygons, target_bra_m2, axes.theta_deg)
     return [replace(field, phase=idx, phase_label=f"Delfelt {idx}") for idx, field in enumerate(seeded, start=1)]
@@ -276,8 +264,6 @@ def _apply_parameter_choices(base_fields: Sequence[Delfelt], choices: Sequence[F
                 courtyard_reserve_ratio=float(choice.courtyard_reserve_ratio or 0.0),
                 frontage_depth_m=choice.frontage_depth_m,
                 corridor_width_m=choice.corridor_width_m,
-                central_void_m=float(getattr(choice, "central_void_m", 0.0) or 0.0),
-                gap_between_m=float(getattr(choice, "gap_between_m", 8.0) or 8.0),
                 macro_structure=choice.macro_structure,
                 micro_field_pattern=choice.micro_field_pattern,
                 symmetry_preference=choice.symmetry_preference,
@@ -391,8 +377,6 @@ def _normalize_choices(
                 courtyard_reserve_ratio=fb.courtyard_reserve_ratio,
                 frontage_depth_m=fb.frontage_depth_m,
                 corridor_width_m=fb.corridor_width_m,
-                central_void_m=fb.central_void_m,
-                gap_between_m=fb.gap_between_m,
                 macro_structure=fb.macro_structure,
                 micro_field_pattern=fb.micro_field_pattern,
                 symmetry_preference=fb.symmetry_preference,
@@ -640,20 +624,11 @@ def _effective_delfelt_count_for_family(
         return 1
     req = max(1, int(requested_count))
     if family == ConceptFamily.CLUSTER_PARK:
-        return max(3, min(req, 4 if area < 16000.0 else 5)) if area >= 7000.0 else max(1, min(req, 2))
+        return 3 if area >= 7000.0 else max(1, min(req, 2))
     if family == ConceptFamily.COURTYARD_URBAN:
-        # Karrévarianten trenger flere makrofelt enn 2-4 for å kunne danne
-        # kvartal-mot-kvartal, ikke bare to store objektbygg. UI-faser brukes
-        # fortsatt som maksimum, men store tomter får 5-6 bykvartalsfelt.
-        if area < 10000.0:
-            return max(2, min(req, 3 if density >= 1.25 else 2))
-        if area < 18000.0:
-            return max(3, min(req, 4))
-        if area < 30000.0:
-            return max(4, min(req, 5))
-        return max(5, min(req, 6))
+        return max(2, min(req, 3 if density < 1.10 and area < 10000.0 else 4))
     if family == ConceptFamily.LINEAR_MIXED:
-        return max(3, min(req, 5 if area >= 18000.0 else 4))
+        return max(3, min(req, 4))
     return req
 
 
@@ -796,9 +771,6 @@ def validate_masterplan_geometry(plan: Masterplan, buildable_poly: Polygon) -> L
     errors: List[str] = []
     if not buildings_do_not_overlap(plan.bygg):
         errors.append("Bygg overlapper hverandre.")
-    min_gap = max(8.0, float(getattr(plan.plan_regler, "brann_avstand_m", 8.0) or 8.0), float(getattr(plan.plan_regler, "avstand_bygg_bygg_m", 0.0) or 0.0))
-    if not buildings_respect_min_spacing(plan.bygg, min_gap):
-        errors.append(f"Bygg har mindre enn {min_gap:.0f} m innbyrdes avstand.")
     for field in plan.delfelt:
         for building in [b for b in plan.bygg if b.delfelt_id == field.field_id]:
             if not buildable_poly.buffer(1e-6).covers(building.footprint):
