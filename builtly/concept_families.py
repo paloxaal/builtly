@@ -464,9 +464,9 @@ class ConceptStrategy:
                     # Arbeidsøkt 4: større og tydeligere uterom uten å miste BRA.
                     # Vi reserverer et reelt hovedrom, men bruker perimeterbygg og
                     # etasjer for å hente volumet tilbake langs robuste kanter.
-                    courtyard_reserve_ratio = max(0.20 if urban_edge_like else 0.24, min(float(courtyard_reserve_ratio or 0.0), 0.25 if urban_edge_like else 0.29))
-                    public_realm_ratio = max(0.13 if urban_edge_like else 0.16, min(float(public_realm_ratio or 0.0), 0.18 if urban_edge_like else 0.21))
-                    central_void_m = max(22.0, min(float(central_void_m or 22.0), 26.0))
+                    courtyard_reserve_ratio = max(0.23 if urban_edge_like else 0.26, min(float(courtyard_reserve_ratio or 0.0), 0.31 if urban_edge_like else 0.34))
+                    public_realm_ratio = max(0.15 if urban_edge_like else 0.18, min(float(public_realm_ratio or 0.0), 0.22 if urban_edge_like else 0.25))
+                    central_void_m = max(24.0, min(float(central_void_m or 24.0), 30.0))
                     gap_between_m = max(8.0, min(float(gap_between_m or 8.0), 12.0))
                     macro_structure = 'room_frame_masterplan'
                     micro_field_pattern = 'quarter_field_edges'
@@ -720,7 +720,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             frontage_mode=("quad" if edge and use_karre else ("ring" if use_karre else "double")),
             micro_band_count=(7 if karre_count >= 4 else 6 if karre_count >= 2 else 5),
             view_corridor_count=(1 if karre_count <= 2 else 2),
-            courtyard_reserve_ratio=(0.30 if edge else 0.32),
+            courtyard_reserve_ratio=(0.31 if edge else 0.34),
             frontage_depth_m=(15.0 if use_karre else 13.0),
             corridor_width_m=7.5,
             central_void_m=(26.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
@@ -728,9 +728,9 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             macro_structure="room_frame_masterplan",
             micro_field_pattern=("quarter_field_edges" if karre_count >= 2 else ("room_frame_edges" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
-            composition_strictness=0.988,
+            composition_strictness=0.995,
             frontage_zone_ratio=0.30,
-            public_realm_ratio=0.21,
+            public_realm_ratio=0.23,
             node_symmetry=True,
             frontage_primary_side="south",
             frontage_secondary_side="west",
