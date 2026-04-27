@@ -1,4 +1,4 @@
-´´from __future__ import annotations
+from __future__ import annotations
 
 """Concept-family strategies for Builtly.
 
@@ -432,8 +432,8 @@ class ConceptStrategy:
                     # Økt 1: green-room-first. Ved høy utnyttelse skal lameller
                     # ikke bare fylle feltet i parallelle rekker; de skal kranse
                     # et hovedrom som kan leses som felles grønt uterom.
-                    macro_structure = 'green_room_first'
-                    micro_field_pattern = 'green_room_edges'
+                    macro_structure = 'room_frame_masterplan'
+                    micro_field_pattern = 'room_frame_edges'
                     lamell_rhythm_mode = lamell_rhythm_mode or 'staggered'
                     courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.14 if urban_edge_like else 0.18)
                     public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.11 if urban_edge_like else 0.15)
@@ -448,7 +448,7 @@ class ConceptStrategy:
                     target_bya_pct = max(float(target_bya_pct or 0.0), 28.0 if urban_edge_like else 24.0)
                     courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.18 if urban_edge_like else 0.22)
                     public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.13 if urban_edge_like else 0.17)
-                    macro_structure = 'green_room_first'
+                    macro_structure = 'room_frame_masterplan'
                     node_layout_mode = 'perimeter_ring_dense' if target_building_count >= 6 else (node_layout_mode or 'perimeter_ring')
                     courtyard_reserve_ratio = min(float(courtyard_reserve_ratio or 0.0), 0.18 if urban_edge_like else 0.22)
                     public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.13 if urban_edge_like else 0.17)
@@ -465,8 +465,8 @@ class ConceptStrategy:
                     public_realm_ratio = min(float(public_realm_ratio or 0.0), 0.12 if urban_edge_like else 0.16)
                     central_void_m = max(18.0, min(float(central_void_m or 20.0), 24.0))
                     gap_between_m = max(8.0, min(float(gap_between_m or 8.0), 12.0))
-                    macro_structure = 'green_room_first'
-                    micro_field_pattern = 'clustered_frontage_ring'
+                    macro_structure = 'room_frame_masterplan'
+                    micro_field_pattern = 'room_frame_quarters'
                     rationale += " Høy utnyttelse løses som flere karré-/U-volumer som kranser felles grønne rom og robuste tomtekanter."
                 if urban_edge_like and not smallhouse_edge:
                     floors_max = max(floors_max, min(floors_max + 1, 8))
@@ -515,9 +515,11 @@ class ConceptStrategy:
                 else:
                     central_void_m = max(float(central_void_m), 24.0 if target_building_count >= 4 else 19.0)
                 gap_between_m = max(9.0, float(gap_between_m or 9.0))
-                courtyard_reserve_ratio = max(float(courtyard_reserve_ratio or 0.0), 0.28 if target_building_count >= 4 else 0.24)
+                courtyard_reserve_ratio = max(float(courtyard_reserve_ratio or 0.0), 0.24 if target_building_count >= 4 else 0.22)
                 target_bya_pct = max(float(target_bya_pct or 0.0), 40.0 if target_building_count >= 3 else 36.0)
-                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, med kvalitetsstyrt felles uterom mellom kvartalene."
+                macro_structure = 'room_frame_masterplan'
+                micro_field_pattern = 'room_frame_quarters'
+                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, der hovedgrøntrommet tegnes først og byggene prioriteres som perimeter/romkanter før infill."
 
             out.append(FieldParameterChoice(
                 field_id=field.field_id,
@@ -633,8 +635,8 @@ class LinearMixedStrategy(ConceptStrategy):
             corridor_width_m=7.2,
             central_void_m=(18.0 if use_karre else 0.0),
             gap_between_m=9.0,
-            macro_structure=("green_room_first" if (use_karre or not use_punkthus) else "park_cluster"),
-            micro_field_pattern=("frontage_ring" if use_karre else ("node_cluster" if use_punkthus else "green_room_edges")),
+            macro_structure=("room_frame_masterplan" if (use_karre or not use_punkthus) else "park_cluster"),
+            micro_field_pattern=("room_frame_quarters" if use_karre else ("node_cluster" if use_punkthus else "room_frame_edges")),
             symmetry_preference=("axial" if use_karre else "bilateral"),
             composition_strictness=(0.985 if use_karre else 0.96),
             frontage_zone_ratio=(0.30 if use_karre else 0.24),
@@ -715,8 +717,8 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             corridor_width_m=7.5,
             central_void_m=(26.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
             gap_between_m=9.0,
-            macro_structure="green_room_first",
-            micro_field_pattern=("clustered_frontage_ring" if karre_count >= 2 else ("frontage_ring" if use_karre else "parallel_bands")),
+            macro_structure="room_frame_masterplan",
+            micro_field_pattern=("room_frame_quarters" if karre_count >= 2 else ("room_frame_edges" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
             composition_strictness=0.988,
             frontage_zone_ratio=0.30,
@@ -779,8 +781,8 @@ class ClusterParkStrategy(ConceptStrategy):
             courtyard_reserve_ratio=(0.23 if use_punkthus else 0.18),
             frontage_depth_m=(12.0 if use_punkthus else 13.0),
             corridor_width_m=6.4,
-            macro_structure="green_room_first",
-            micro_field_pattern=("node_cluster" if use_punkthus else "green_room_edges"),
+            macro_structure="room_frame_masterplan",
+            micro_field_pattern=("node_cluster" if use_punkthus else "room_frame_edges"),
             symmetry_preference="axial",
             composition_strictness=0.96,
             frontage_zone_ratio=0.18,
