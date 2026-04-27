@@ -1919,7 +1919,12 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
     if closed:
         outer_h_candidates = [s + 2.0 * arm for s in side_candidates]
     else:
-        outer_h_candidates = [s + arm for s in side_candidates]
+        # U-former med for lange armer gir smale, mørke uterom. Bruk litt
+        # kortere sidekandidater enn lukkede O-former, og la kvalitetsstraff
+        # styre bort fra dype U-er når tomten tillater det.
+        u_side_candidates = [min(s, 30.0) for s in side_candidates]
+        u_side_candidates = list(dict.fromkeys([s for s in u_side_candidates if s >= 24.0])) or [28.0, 26.0]
+        outer_h_candidates = [s + arm for s in u_side_candidates]
 
     best = None
     best_score = None
@@ -1964,8 +1969,10 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
             dims_score = abs((rx1 - rx0) - target_w) * 1.45 + abs(outer_h - target_h) * 1.15
             center_pen = shape.centroid.distance(core.centroid)
             width_bonus = -max(0.0, (rx1 - rx0) - 50.0) * 0.08
-            quality_pen = _karre_shape_quality_penalty(shape, max(float(getattr(field, "target_bra", 0.0) or 0.0), shape.area * 6.0)) * 0.0009
-            score = dims_score + center_pen * 0.055 + width_bonus + quality_pen
+            ref_bra = max(float(getattr(field, "target_bra", 0.0) or 0.0), shape.area * 6.0)
+            quality_pen = _karre_shape_quality_penalty(shape, ref_bra) * 0.00125
+            arm_pen = _karre_arm_balance_penalty(shape, ref_bra) * 0.00165
+            score = dims_score + center_pen * 0.055 + width_bonus + quality_pen + arm_pen
             if best_score is None or score < best_score:
                 best = shape
                 best_score = score
@@ -2231,6 +2238,83 @@ def _room_enclosure_score(union: Polygon, room: Optional[Polygon], *, margin_m: 
     return min(1.0, 0.55 * framed / 3.0 + 0.45 * quality / max(framed, 1))
 
 
+def _karre_void_metrics(fp: Polygon) -> Tuple[float, float, float, float, float]:
+    """Returner enkel analyse av indre/åpen gårdsromsgeometri.
+
+    Verdier: (void_area, void_major, void_minor, void_aspect, void_ratio).
+    For U-/O-/L-karréer er det viktigere at det finnes et brukbart grøntrom
+    enn at bygningskroppen bare har høy BYA. Denne helperen ser på største
+    restrom inne i footprintets bounding box. Det fanger både lukket gårdsrom
+    og U-formens åpne rom mellom armene.
+    """
+    if fp is None or fp.is_empty:
+        return 0.0, 0.0, 0.0, 99.0, 0.0
+    minx, miny, maxx, maxy = fp.bounds
+    bbox = box(minx, miny, maxx, maxy)
+    bbox_area = max(float(bbox.area), 1.0)
+    try:
+        void_geom = bbox.difference(fp.buffer(0.05)).buffer(0)
+        void_poly = _largest_polygon(void_geom)
+    except Exception:
+        void_poly = None
+    if void_poly is None or void_poly.is_empty:
+        return 0.0, 0.0, 0.0, 99.0, 0.0
+    vx0, vy0, vx1, vy1 = void_poly.bounds
+    vw = max(float(vx1 - vx0), 0.0)
+    vh = max(float(vy1 - vy0), 0.0)
+    major = max(vw, vh)
+    minor = max(min(vw, vh), 0.0)
+    aspect = major / max(minor, 1.0)
+    area = float(void_poly.area)
+    return area, major, minor, aspect, area / bbox_area
+
+
+def _karre_arm_balance_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
+    """Straff U-/L-/O-karréer der armene blir for lange i forhold til hovedkropp.
+
+    Bruker gårdsromsgeometrien som proxy: når hulrommet mellom armene blir for
+    smalt/dypt, betyr det vanligvis lange armer, lite sol og dårlig uteareal.
+    Kompakte rektangulære kvartalsblokker uten indre void straffes ikke her;
+    de håndteres av _is_true_karre_body og øvrig typologinormalisering.
+    """
+    if fp is None or fp.is_empty:
+        return float(target_bra or 1000.0) * 0.20
+    minx, miny, maxx, maxy = fp.bounds
+    bbox_area = max(float((maxx - minx) * (maxy - miny)), 1.0)
+    area = max(float(fp.area), 1.0)
+    occupancy = area / bbox_area
+    # Nesten kompakte blokker har ikke indre gårdsrom. De kan være gode som
+    # kvartalskant/blokk og skal ikke tolkes som arm-problem.
+    if occupancy > 0.78:
+        return 0.0
+    void_area, void_major, void_minor, void_aspect, void_ratio = _karre_void_metrics(fp)
+    if void_area <= 1.0:
+        return 0.0
+    ref = max(float(target_bra or 0.0), area * 6.0, 1.0)
+    penalty = 0.0
+    # Reelt felles uterom må tåle opphold, sol og innsynsavstand. For smalt void
+    # er den vanligste feilen ved lange karréarmer.
+    if void_minor < 15.0:
+        penalty += ref * min(0.26, (15.0 - void_minor) * 0.018)
+    if void_minor < 12.0:
+        penalty += ref * 0.08
+    # Lange, smale rom gir dårlige sol-/lysforhold.
+    if void_aspect > 1.85:
+        penalty += ref * min(0.24, (void_aspect - 1.85) * 0.075)
+    if void_aspect > 2.35:
+        penalty += ref * 0.08
+    # Et veldig lite void i en stor kropp er ofte tegn på pseudo-karré eller
+    # for tung infill.
+    if void_ratio < 0.18:
+        penalty += ref * min(0.18, (0.18 - void_ratio) * 0.75)
+    # Et svært dypt void sammenlignet med byggets korte side betyr armer som
+    # løper for langt fra hovedvolumet.
+    short_span = max(min(maxx - minx, maxy - miny), 1.0)
+    if void_major > short_span * 1.18 and void_minor < short_span * 0.62:
+        penalty += ref * min(0.20, (void_major / short_span - 1.18) * 0.10)
+    return float(penalty)
+
+
 def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
     """Penalty for karré/U shapes with tiny courtyards, overlong arms or weak compactness."""
     if fp is None or fp.is_empty:
@@ -2267,6 +2351,10 @@ def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
     short_span = min(w, h)
     if long_span > 0 and short_span > 0 and long_span / short_span > 2.0:
         penalty += ref * min(0.24, (long_span / short_span - 2.0) * 0.16)
+    # Arbeidsøkt 8: eksplisitt straff for U-/L-karréer der armene skaper for
+    # smale eller dype uterom. Dette er den viktigste visuelle feilen i siste
+    # output: gode BRA-tall, men enkelte karréarmer ble for lange ift. hovedbygg.
+    penalty += _karre_arm_balance_penalty(fp, ref)
     return float(penalty)
 
 
@@ -2296,15 +2384,19 @@ def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], s
         typ = typologies[idx] if idx < len(typologies) else field.typology
         if typ == Typology.KARRE:
             true_karre += 1
-            if minor < 19.0 or fp.area < 780.0:
-                penalty += target * 0.20
-            if aspect > 2.25:
-                penalty += target * min(0.18, (aspect - 2.25) * 0.060)
+            if minor < 19.0 or fp.area < 820.0:
+                penalty += target * 0.22
+            if aspect > 2.20:
+                penalty += target * min(0.20, (aspect - 2.20) * 0.070)
+            # Også room-frame-karréer må ha balanserte armer/void. Vi bruker en
+            # svakere vekt enn for single-U, siden kvartalsfelt kan bestå av flere
+            # kompakte brikker rundt et fellesrom.
+            penalty += _karre_arm_balance_penalty(fp, target) * (0.55 if ('room_frame' in variant or 'quarter_field' in variant) else 0.95)
             if 'room_frame' in variant or 'quarter_field' in variant or len(candidate.footprints) >= 4:
-                if aspect > 2.65:
-                    penalty += target * min(0.12, (aspect - 2.65) * 0.040)
+                if aspect > 2.55:
+                    penalty += target * min(0.14, (aspect - 2.55) * 0.050)
             else:
-                penalty += _karre_shape_quality_penalty(fp, target) * 0.70
+                penalty += _karre_shape_quality_penalty(fp, target) * 0.75
         else:
             if major < 28.0 or minor < 9.5 or fp.area < 280.0:
                 penalty += target * 0.05
@@ -3625,12 +3717,23 @@ def _is_true_karre_body(rect: Polygon, field: Optional[Delfelt] = None) -> bool:
     if rect is None or rect.is_empty:
         return False
     major, minor, area = _rect_dims(rect)
-    if area < 780.0:
+    if area < 820.0:
         return False
     if major < 34.0 or minor < 19.0:
         return False
-    if major / max(minor, 1.0) > 2.85:
+    aspect = major / max(minor, 1.0)
+    if aspect > 2.65:
         return False
+    bbox_area = max(major * minor, 1.0)
+    occupancy = area / bbox_area
+    # Kompakte blokker kan fungere som kvartalsbrikker. U-/L-former må derimot
+    # ha et brukbart void; hvis ikke skal de leses som lamell/blokk-kant.
+    if occupancy < 0.78:
+        void_area, void_major, void_minor, void_aspect, void_ratio = _karre_void_metrics(rect)
+        if void_area < max(260.0, bbox_area * 0.14):
+            return False
+        if void_minor < 14.0 or void_aspect > 2.25:
+            return False
     return True
 
 
@@ -3646,7 +3749,7 @@ def _room_frame_edge_typology(rect: Polygon, field: Delfelt) -> Optional[Typolog
         return None
     if _is_true_karre_body(rect, field):
         return Typology.KARRE
-    if area >= 300.0 and major >= 28.0 and minor >= 10.0:
+    if area >= 300.0 and major >= 28.0 and minor >= 10.5:
         return Typology.LAMELL
     if area >= 330.0 and major <= 24.0 and minor >= 15.0 and field.typology != Typology.KARRE:
         return Typology.PUNKTHUS
@@ -4705,7 +4808,14 @@ def _u_karre_footprint(cx: float, cy: float, width_m: float, depth_m: float, arm
         parts = [box(x1 - arm, y0, x1, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
     else:
         parts = [box(x0, y0, x0 + arm, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
-    return unary_union(parts).buffer(0)
+    fp = unary_union(parts).buffer(0)
+    ref = width_m * depth_m * 3.0
+    # Ved høy tetthet kan completion-pass fristes til dype U-er. Dersom voidet
+    # blir for smalt/dypt, bruk kompakt blokk i stedet for lange armer. Det
+    # bevarer volum, men gir bedre uterom og mer arkitektnær geometri.
+    if _karre_arm_balance_penalty(fp, ref) > ref * 0.22:
+        return box(x0, y0, x1, y1).buffer(0)
+    return fp
 
 
 def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[Tuple[Polygon, Typology, float]]:
