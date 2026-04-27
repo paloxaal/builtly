@@ -2282,7 +2282,7 @@ def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], s
     target = max(float(getattr(field, 'target_bra', 0.0) or 0.0), 1.0)
     variant = str(getattr(candidate, '_variant', '') or '')
     penalty = 0.0
-    typologies = _candidate_typologies(candidate, field.typology)
+    typologies = _effective_candidate_typologies(candidate, field)
     true_karre = 0
     for idx, fp in enumerate(candidate.footprints):
         if fp is None or fp.is_empty:
@@ -2296,22 +2296,25 @@ def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], s
         typ = typologies[idx] if idx < len(typologies) else field.typology
         if typ == Typology.KARRE:
             true_karre += 1
-            if minor < 16.0 or fp.area < 650.0:
-                penalty += target * 0.12
-            if aspect > 2.4:
-                penalty += target * min(0.14, (aspect - 2.4) * 0.045)
+            if minor < 19.0 or fp.area < 780.0:
+                penalty += target * 0.20
+            if aspect > 2.25:
+                penalty += target * min(0.18, (aspect - 2.25) * 0.060)
             if 'room_frame' in variant or 'quarter_field' in variant or len(candidate.footprints) >= 4:
-                if aspect > 2.9:
-                    penalty += target * min(0.10, (aspect - 2.9) * 0.030)
+                if aspect > 2.65:
+                    penalty += target * min(0.12, (aspect - 2.65) * 0.040)
             else:
-                penalty += _karre_shape_quality_penalty(fp, target) * 0.55
+                penalty += _karre_shape_quality_penalty(fp, target) * 0.70
         else:
             if major < 28.0 or minor < 9.5 or fp.area < 280.0:
-                penalty += target * 0.06
+                penalty += target * 0.05
             if aspect > 5.2:
                 penalty += target * min(0.06, (aspect - 5.2) * 0.015)
     if field.typology == Typology.KARRE and true_karre == 0:
-        penalty += target * 0.08
+        if 'room_frame' not in variant and 'quarter_field' not in variant:
+            penalty += target * 0.16
+        else:
+            penalty += target * 0.04
     if skeleton is not None and skeleton.courtyard_reserve is not None and not skeleton.courtyard_reserve.is_empty:
         try:
             union = unary_union([fp for fp in candidate.footprints if fp is not None and not fp.is_empty]).buffer(0)
@@ -2322,12 +2325,12 @@ def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], s
             room_area = float(skeleton.courtyard_reserve.area)
             field_area = max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or room_area), 1.0)
             room_ratio = room_area / field_area
-            if enclosure < 0.62:
-                penalty += target * (0.62 - enclosure) * 0.16
-            if room_ratio < 0.12:
-                penalty += target * (0.12 - room_ratio) * 0.18
-            if ('room_frame' in variant or 'quarter_field' in variant) and enclosure >= 0.62:
-                penalty -= target * min(0.10, (enclosure - 0.58) * 0.18)
+            if enclosure < 0.68:
+                penalty += target * (0.68 - enclosure) * 0.22
+            if room_ratio < 0.14:
+                penalty += target * (0.14 - room_ratio) * 0.22
+            if ('room_frame' in variant or 'quarter_field' in variant) and enclosure >= 0.68:
+                penalty -= target * min(0.12, (enclosure - 0.62) * 0.20)
     if 'room_frame' in variant or 'quarter_field' in variant:
         penalty -= target * 0.040
     elif len(candidate.footprints) <= 2 and field.typology == Typology.KARRE:
@@ -2490,14 +2493,17 @@ def _compose_room_frame_masterplan_skeleton(core: Polygon, field: Delfelt) -> Op
     target_count = max(2, int(getattr(field, "target_building_count", 0) or 4))
     base_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.0) or getattr(field, "public_realm_ratio", 0.0) or 0.16)
     if field.typology == Typology.KARRE:
-        desired = 0.25 if density >= 1.15 else 0.28
-        min_ratio, max_ratio = (0.20, 0.32)
+        # Arbeidsøkt 6: et karré-/kvartalsfelt trenger et større, lesbart rom.
+        # Vi holder BRA ved å prioritere perimeterbygg og etasjer heller enn å
+        # spise opp hovedrommet med infill.
+        desired = 0.28 if density >= 1.15 else 0.31
+        min_ratio, max_ratio = (0.23, 0.34)
     elif field.typology == Typology.PUNKTHUS:
-        desired = 0.19 if density >= 1.15 else 0.23
-        min_ratio, max_ratio = (0.15, 0.27)
+        desired = 0.20 if density >= 1.15 else 0.24
+        min_ratio, max_ratio = (0.16, 0.28)
     else:
-        desired = 0.18 if density >= 1.15 else 0.22
-        min_ratio, max_ratio = (0.14, 0.26)
+        desired = 0.20 if density >= 1.15 else 0.24
+        min_ratio, max_ratio = (0.16, 0.28)
     room_ratio = max(min_ratio, min(max_ratio, max(base_ratio, desired if density < 1.35 else desired * 0.96)))
 
     scale = math.sqrt(room_ratio)
@@ -2521,13 +2527,14 @@ def _compose_room_frame_masterplan_skeleton(core: Polygon, field: Delfelt) -> Op
         return None
 
     secondary_rooms: List[Polygon] = []
-    if core.area >= 4200.0 and target_count >= 4:
+    if core.area >= 5200.0 and target_count >= 5:
         hard_tmp, medium_tmp, soft_tmp = _edge_strategy_sides(field, default_primary=primary_side, default_secondary=secondary_side)
         candidate_sides = list(dict.fromkeys((soft_tmp or []) + medium_tmp))
-        sec_ratio = 0.045 if density >= 1.20 else 0.060
-        sec_area = max(120.0, min(360.0, core.area * sec_ratio))
-        sec_w = max(12.0, min(24.0, math.sqrt(sec_area) * 1.25))
-        sec_h = max(10.0, min(22.0, sec_area / max(sec_w, 1.0)))
+        # Sekundærrom skal være reelle pocket-courtyards, ikke små grøntrester.
+        sec_ratio = 0.055 if density >= 1.20 else 0.070
+        sec_area = max(180.0, min(520.0, core.area * sec_ratio))
+        sec_w = max(14.0, min(28.0, math.sqrt(sec_area) * 1.25))
+        sec_h = max(12.0, min(24.0, sec_area / max(sec_w, 1.0)))
         for side in candidate_sides[:2]:
             dx2 = dy2 = 0.0
             if side == 'west':
@@ -3607,31 +3614,93 @@ def _rect_dims(poly: Polygon) -> Tuple[float, float, float]:
     return float(max(w, h)), float(min(w, h)), float(poly.area)
 
 
+def _is_true_karre_body(rect: Polygon, field: Optional[Delfelt] = None) -> bool:
+    """Returner om et enkelt bygg faktisk bør leses som karré/blokk.
+
+    Arbeidsøkt 6: karré skal ikke bare være en etikett på et smalt romkantbygg.
+    En ekte karré-/kvartalsbrikke må ha nok dybde, footprint og proporsjon til å
+    bidra til et faktisk gårdsrom. Smale bygg er fortsatt nyttige, men de skal
+    leses som lamell/blokk-kant i stedet for pseudo-karré.
+    """
+    if rect is None or rect.is_empty:
+        return False
+    major, minor, area = _rect_dims(rect)
+    if area < 780.0:
+        return False
+    if major < 34.0 or minor < 19.0:
+        return False
+    if major / max(minor, 1.0) > 2.85:
+        return False
+    return True
+
+
 def _room_frame_edge_typology(rect: Polygon, field: Delfelt) -> Optional[Typology]:
     """Classify a room-frame edge body.
 
-    Runde 5: små/slanke karréfragmenter skal ikke vises som karré.
-    Hvis kroppen er en god, kompakt kvartalsbrikke beholdes Karré; hvis den
-    bare er en smal romkant, tolkes den som lamell/blokk. For små rester
-    forkastes. Dette flytter motoren fra pseudo-karré til kvartalsfelt.
+    Små/slanke karréfragmenter skal ikke vises som karré. Kompakte bygg med
+    nok dybde/areal beholdes som Karré; smale romkanter blir Lamell/blokk;
+    svært små rester forkastes.
     """
     major, minor, area = _rect_dims(rect)
     if area < 260.0 or major < 24.0 or minor < 7.5:
         return None
-    # Ekte kvartals-/blokkvolumer må ha brukbar dybde og footprint.
-    if area >= 720.0 and major >= 34.0 and minor >= 18.0:
+    if _is_true_karre_body(rect, field):
         return Typology.KARRE
-    # Smale romkanter er fortsatt nyttige, men som lamell/blokk, ikke karré.
     if area >= 300.0 and major >= 28.0 and minor >= 10.0:
         return Typology.LAMELL
-    # 20 x 20-ish små kompakte bygg kan fungere som punkt/aksent i mixed felt.
     if area >= 330.0 and major <= 24.0 and minor >= 15.0 and field.typology != Typology.KARRE:
         return Typology.PUNKTHUS
     return None
 
 
+def _architectural_typology_for_footprint(fp: Polygon, preferred: Typology, field: Delfelt) -> Typology:
+    """Normaliser typologi etter reell geometri.
+
+    Dette er et sikkerhetsnett for kandidater fra eldre fallback-funksjoner som
+    ikke bruker typology_per_bygg. Det hindrer at 40x8, 38x16 osv. vises som
+    Karré i sidepanelet og i videre scoring.
+    """
+    if preferred == Typology.KARRE:
+        if _is_true_karre_body(fp, field):
+            return Typology.KARRE
+        major, minor, area = _rect_dims(fp)
+        if area >= 330.0 and major <= 24.0 and minor >= 15.0 and field.typology != Typology.KARRE:
+            return Typology.PUNKTHUS
+        return Typology.LAMELL
+    return preferred
+
+
 def _candidate_typologies(candidate: _PlacementCandidate, fallback: Typology) -> List[Typology]:
     return [candidate.typology_at(i, fallback) for i in range(len(candidate.footprints))]
+
+
+def _effective_candidate_typologies(candidate: _PlacementCandidate, field: Delfelt) -> List[Typology]:
+    return [
+        _architectural_typology_for_footprint(fp, candidate.typology_at(i, field.typology), field)
+        for i, fp in enumerate(candidate.footprints)
+    ]
+
+
+def _normalise_candidate_typologies(candidate: Optional[_PlacementCandidate], field: Delfelt, skeleton: Optional[FieldSkeleton] = None) -> Optional[_PlacementCandidate]:
+    if candidate is None or not candidate.footprints:
+        return candidate
+    typologies = _effective_candidate_typologies(candidate, field)
+    candidate.typology_per_bygg = typologies
+    candidate._true_karre_count = sum(
+        1 for typ, fp in zip(typologies, candidate.footprints)
+        if typ == Typology.KARRE and _is_true_karre_body(fp, field)
+    )
+    if skeleton is not None and skeleton.courtyard_reserve is not None and not skeleton.courtyard_reserve.is_empty:
+        try:
+            union = unary_union([fp for fp in candidate.footprints if fp is not None and not fp.is_empty]).buffer(0)
+            candidate._room_frame_enclosure = _room_enclosure_score(
+                union,
+                skeleton.courtyard_reserve,
+                margin_m=max(8.0, float(getattr(field, 'frontage_depth_m', 12.0) or 12.0)),
+            )
+        except Exception:
+            pass
+    return candidate
 
 
 def _place_karre_room_frame_edges(skeleton: FieldSkeleton, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
@@ -3657,10 +3726,12 @@ def _place_karre_room_frame_edges(skeleton: FieldSkeleton, field: Delfelt, spec:
     max_len = float(getattr(spec.length_m, "max_m", 58.0) if getattr(spec, "length_m", None) else 58.0)
     max_len = min(62.0, max(36.0, max_len))
     target_depth = float(spec.depth_m.midpoint() if getattr(spec, "depth_m", None) else 15.0)
-    target_depth = max(13.0, min(18.0, target_depth * 1.16))
+    # Ekte kvartalskanter må ha mer dybde enn en vanlig lamell, ellers blir de
+    # pseudo-karréer med dårlig gårdsrom.
+    target_depth = max(15.0, min(21.0, target_depth * 1.28))
 
     candidates: List[_PlacementCandidate] = []
-    requested_counts = sorted({max(3, min(len(slots), target_count + delta)) for delta in (-1, 0, 1, 2, 3)})
+    requested_counts = sorted({max(3, min(len(slots), target_count + delta)) for delta in (-1, 0, 1, 2)})
     for req in requested_counts:
         fps: List[Polygon] = []
         typologies: List[Typology] = []
@@ -3668,7 +3739,7 @@ def _place_karre_room_frame_edges(skeleton: FieldSkeleton, field: Delfelt, spec:
         karre_count = 0
         for slot in slots:
             rect: Optional[Polygon] = None
-            for depth_factor, length_factor in ((1.00, 1.00), (0.88, 0.95), (0.78, 0.86)):
+            for depth_factor, length_factor in ((1.00, 1.00), (0.92, 0.96), (0.84, 0.90)):
                 maybe = _safe_slot_building_rect(slot, max_len=max_len * length_factor, target_depth=target_depth * depth_factor)
                 if maybe is None or maybe.is_empty:
                     continue
@@ -3686,7 +3757,7 @@ def _place_karre_room_frame_edges(skeleton: FieldSkeleton, field: Delfelt, spec:
                 continue
             if any(rect.intersects(c.buffer(0.15)) for c in skeleton.view_corridors if c is not None and not c.is_empty):
                 continue
-            spacing = max(7.5, float(getattr(field, "gap_between_m", 8.0) or 8.0) * (0.82 if typ == Typology.LAMELL else 0.92))
+            spacing = max(8.0, float(getattr(field, "gap_between_m", 8.0) or 8.0) * (0.86 if typ == Typology.LAMELL else 0.98))
             if any(rect.distance(other) < spacing for other in fps):
                 continue
             fps.append(rect)
@@ -4580,7 +4651,7 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     elif field.typology == Typology.REKKEHUS:
         cand = _place_single_core(core, field, spec)
     if cand is not None:
-        return cand
+        return _normalise_candidate_typologies(cand, field, skeleton)
 
     sub_cores = _field_placement_cores(core)
     if not sub_cores:
@@ -4588,7 +4659,8 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     if len(sub_cores) == 1:
         return _place_single_core(sub_cores[0], field, spec)
     if field.typology == Typology.KARRE:
-        return _place_multi_karre_clusters(core, field, spec) or _place_single_core(sub_cores[0], field, spec)
+        fallback = _place_multi_karre_clusters(core, field, spec) or _place_single_core(sub_cores[0], field, spec)
+        return _normalise_candidate_typologies(fallback, field, None)
 
     combined_footprints: List[Polygon] = []
     floors_per: List[int] = []
@@ -4681,7 +4753,8 @@ def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[
                                     dist_center = float(fp.centroid.distance(core_local.centroid))
                                     soft_penalty = max(0.0, 12.0 - dist_boundary) * (3.5 if getattr(field, "character", "") == "neighborhood_edge" else 0.0)
                                     score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.002 + soft_penalty + _karre_shape_quality_penalty(fp, field.target_bra) * 0.0008
-                                    raw.append((score, fp, typ, 0.0))
+                                    eff_typ = Typology.KARRE if _is_true_karre_body(fp, field) else Typology.LAMELL
+                                    raw.append((score, fp, eff_typ, 0.0))
                         else:
                             fp = box(cx - ww / 2.0, cy - dd / 2.0, cx + ww / 2.0, cy + dd / 2.0).buffer(0)
                             if core_buf.covers(fp):
@@ -4837,6 +4910,7 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
         if candidate is None:
             bra_deficit += max(0.0, field.target_bra)
             continue
+        candidate = _normalise_candidate_typologies(candidate, field, None) or candidate
 
         placed_for_field: List[Bygg] = []
         # Note: candidate.angle_offset_deg (fellesrotasjon) er allerede anvendt på
