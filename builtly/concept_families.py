@@ -469,8 +469,8 @@ class ConceptStrategy:
                     central_void_m = max(22.0, min(float(central_void_m or 22.0), 26.0))
                     gap_between_m = max(8.0, min(float(gap_between_m or 8.0), 12.0))
                     macro_structure = 'room_frame_masterplan'
-                    micro_field_pattern = 'room_frame_quarters'
-                    rationale += " Høy utnyttelse løses som flere karré-/U-volumer som kranser felles grønne rom og robuste tomtekanter."
+                    micro_field_pattern = 'quarter_field_edges'
+                    rationale += " Høy utnyttelse løses som kvartalsfelt: kompakte karré-/blokkvolumer og smalere lamellkanter kranser felles grønne rom og robuste tomtekanter."
                 if urban_edge_like and not smallhouse_edge:
                     floors_max = max(floors_max, min(floors_max + 1, 8))
 
@@ -501,10 +501,15 @@ class ConceptStrategy:
 
             if selected_typology == Typology.LAMELL and target_building_count >= 4:
                 design_variant = design_variant or 'rhythmic'
-                if target_building_count >= 6:
+                if macro_structure == 'room_frame_masterplan':
+                    micro_field_pattern = 'room_frame_edges'
+                    rationale += f" Feltet rommer {target_building_count} lameller; de organiseres som romkanter rundt et hoveduterom framfor bare parallelle rekker."
+                elif target_building_count >= 6:
                     micro_field_pattern = 'dense_parallel_bands'
+                    rationale += f" Feltet rommer {target_building_count} lameller; komposisjonen vris derfor mot rytmisk radstruktur."
+                else:
+                    rationale += f" Feltet rommer {target_building_count} lameller; komposisjonen vris derfor mot rytmisk radstruktur."
                 composition_strictness = min(0.97, max(composition_strictness, 0.88))
-                rationale += f" Feltet rommer {target_building_count} lameller; komposisjonen vris derfor mot rytmisk radstruktur."
             elif selected_typology == Typology.PUNKTHUS:
                 tower_size_m = 20 if target_building_count >= 1 else tower_size_m
                 if target_building_count >= 5:
@@ -521,8 +526,8 @@ class ConceptStrategy:
                 courtyard_reserve_ratio = max(float(courtyard_reserve_ratio or 0.0), 0.24 if target_building_count >= 4 else 0.22)
                 target_bya_pct = max(float(target_bya_pct or 0.0), 40.0 if target_building_count >= 3 else 36.0)
                 macro_structure = 'room_frame_masterplan'
-                micro_field_pattern = 'room_frame_quarters'
-                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, der hovedgrøntrommet tegnes først og byggene prioriteres som perimeter/romkanter før infill."
+                micro_field_pattern = 'quarter_field_edges'
+                rationale += f" Feltet vurderes som kvartalsfelt med {target_building_count} romkantbygg: kompakte bygg beholdes som karré, mens smale romkanter behandles som lamell/blokk."
 
             out.append(FieldParameterChoice(
                 field_id=field.field_id,
@@ -639,7 +644,7 @@ class LinearMixedStrategy(ConceptStrategy):
             central_void_m=(18.0 if use_karre else 0.0),
             gap_between_m=9.0,
             macro_structure=("room_frame_masterplan" if (use_karre or not use_punkthus) else "park_cluster"),
-            micro_field_pattern=("room_frame_quarters" if use_karre else ("node_cluster" if use_punkthus else "room_frame_edges")),
+            micro_field_pattern=("quarter_field_edges" if use_karre else ("node_cluster" if use_punkthus else "room_frame_edges")),
             symmetry_preference=("axial" if use_karre else "bilateral"),
             composition_strictness=(0.985 if use_karre else 0.96),
             frontage_zone_ratio=(0.30 if use_karre else 0.24),
@@ -721,7 +726,7 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             central_void_m=(26.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
             gap_between_m=9.0,
             macro_structure="room_frame_masterplan",
-            micro_field_pattern=("room_frame_quarters" if karre_count >= 2 else ("room_frame_edges" if use_karre else "parallel_bands")),
+            micro_field_pattern=("quarter_field_edges" if karre_count >= 2 else ("room_frame_edges" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
             composition_strictness=0.988,
             frontage_zone_ratio=0.30,
