@@ -126,13 +126,30 @@ def _lamell_field_fit_possible(poly: Any) -> bool:
     return major >= 48.0 and minor >= 16.0
 
 
+def _compact_infill_bar_fit_possible(poly: Any) -> bool:
+    """Small high-density infill can work as one continuous lamell/bar.
+
+    This is intentionally looser than normal lamell fit. On small urban plots,
+    a 30-45 m long, 11-16 m deep building along the buildable strip is often
+    more realistic than forcing a 20x20 punkthus that may not fit the shape.
+    """
+    major, minor = _minimum_rotated_dims(poly)
+    return major >= 30.0 and minor >= 10.5
+
+
 def _fallback_typology_for_field(poly: Any, density: float) -> Typology:
     area_m2 = float(getattr(poly, 'area', 0.0) or 0.0)
     major, minor = _minimum_rotated_dims(poly)
-    if area_m2 <= 3200.0 or major < 48.0 or minor < 18.0:
+    if area_m2 <= 3200.0:
+        if density >= 1.45 and _compact_infill_bar_fit_possible(poly):
+            return Typology.LAMELL
+        return Typology.PUNKTHUS
+    if major < 48.0 or minor < 18.0:
+        if density >= 1.45 and _compact_infill_bar_fit_possible(poly):
+            return Typology.LAMELL
         return Typology.PUNKTHUS
     if density >= 2.0 and area_m2 <= 7000.0:
-        return Typology.PUNKTHUS
+        return Typology.LAMELL if _compact_infill_bar_fit_possible(poly) else Typology.PUNKTHUS
     return Typology.LAMELL
 
 
@@ -349,6 +366,10 @@ class ConceptStrategy:
             courtyard_open_side = env.courtyard_open_side
             rationale = self._field_rationale(idx, len(delfelt), env)
 
+            if compact_infill and density >= 1.45 and _compact_infill_bar_fit_possible(field.polygon):
+                selected_typology = Typology.LAMELL
+                rationale += " Kompakt høyutnyttet tomt: sammenhengende lamell-/barbygg prioriteres framfor punktbygg for å sikre faktisk output og tett urban kant."
+
             if selected_typology == Typology.KARRE:
                 if karre_support <= 0.0:
                     selected_typology = _fallback_typology_for_field(field.polygon, density)
@@ -487,9 +508,11 @@ class ConceptStrategy:
                 composition_strictness = max(composition_strictness, 0.95)
                 if selected_typology == Typology.LAMELL:
                     frontage_mode = 'single'
-                    micro_field_pattern = 'parallel_bands'
-                    micro_band_count = max(1, min(micro_band_count, 3))
-                    rationale += " Feltet behandles som kompakt infill; volumet får prioritet foran gårdsrom og store MUA-reserver."
+                    micro_field_pattern = 'compact_infill_bar'
+                    micro_band_count = 1
+                    target_building_count = max(1, min(target_building_count, 2))
+                    frontage_depth_m = min(float(frontage_depth_m or 13.0), 11.5)
+                    rationale += " Feltet behandles som kompakt infill; volumet samles i ett sammenhengende kant-/barbygg framfor store MUA-reserver."
                 elif selected_typology == Typology.PUNKTHUS:
                     node_layout_mode = 'paired_edges' if max(target_building_count, 1) <= 2 else (node_layout_mode or 'corners')
                     public_realm_ratio = min(public_realm_ratio, 0.06)
