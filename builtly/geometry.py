@@ -2238,21 +2238,105 @@ def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
 
     ref = max(float(target_bra or 0.0), area * 6.0, 1.0)
     penalty = 0.0
-    if void_ratio < 0.18:
-        penalty += ref * (0.18 - void_ratio) * 0.22
+    if void_ratio < 0.26:
+        penalty += ref * (0.26 - void_ratio) * 0.42
     if occupancy < 0.34:
-        penalty += ref * (0.34 - occupancy) * 0.18
-    if occupancy > 0.72:
-        penalty += ref * (occupancy - 0.72) * 0.12
-    if aspect > 2.05:
-        penalty += ref * min(0.30, (aspect - 2.05) * 0.08)
-    if compactness < 0.23:
-        penalty += ref * min(0.22, (0.23 - compactness) * 0.90)
+        penalty += ref * (0.34 - occupancy) * 0.22
+    if occupancy > 0.66:
+        penalty += ref * (occupancy - 0.66) * 0.28
+    if aspect > 1.75:
+        penalty += ref * min(0.42, (aspect - 1.75) * 0.14)
+    if aspect > 2.25:
+        penalty += ref * 0.12
+    if compactness < 0.28:
+        penalty += ref * min(0.30, (0.28 - compactness) * 1.10)
     void_area = bbox_area - area
-    if void_area < 180.0:
-        penalty += (180.0 - void_area) * 3.0
+    min_void_area = max(320.0, bbox_area * 0.19)
+    if void_area < min_void_area:
+        penalty += (min_void_area - void_area) * 3.0
+    long_span = max(w, h)
+    short_span = min(w, h)
+    if long_span > 0 and short_span > 0 and long_span / short_span > 2.0:
+        penalty += ref * min(0.24, (long_span / short_span - 2.0) * 0.16)
     return float(penalty)
 
+
+
+def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], skeleton: Optional[FieldSkeleton], field: Delfelt) -> float:
+    """Architecture-quality penalty for karré candidates.
+
+    This separates a true kvartalsfelt (several compact bodies framing a room)
+    from a single U/O footprint with long, thin arms.
+    """
+    if candidate is None or not candidate.footprints:
+        return float(getattr(field, 'target_bra', 1000.0) or 1000.0)
+    target = max(float(getattr(field, 'target_bra', 0.0) or 0.0), 1.0)
+    variant = str(getattr(candidate, '_variant', '') or '')
+    penalty = 0.0
+    for fp in candidate.footprints:
+        if fp is None or fp.is_empty:
+            continue
+        minx, miny, maxx, maxy = fp.bounds
+        w = max(maxx - minx, 1.0)
+        h = max(maxy - miny, 1.0)
+        aspect = max(w, h) / max(min(w, h), 1.0)
+        if 'room_frame' in variant or len(candidate.footprints) >= 4:
+            if aspect > 3.2:
+                penalty += target * min(0.10, (aspect - 3.2) * 0.025)
+        else:
+            penalty += _karre_shape_quality_penalty(fp, target) * 0.55
+    if skeleton is not None and skeleton.courtyard_reserve is not None and not skeleton.courtyard_reserve.is_empty:
+        try:
+            union = unary_union([fp for fp in candidate.footprints if fp is not None and not fp.is_empty]).buffer(0)
+        except Exception:
+            union = None
+        if union is not None and not union.is_empty:
+            enclosure = _room_enclosure_score(union, skeleton.courtyard_reserve, margin_m=max(8.0, float(getattr(field, 'frontage_depth_m', 12.0) or 12.0)))
+            room_area = float(skeleton.courtyard_reserve.area)
+            field_area = max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or room_area), 1.0)
+            room_ratio = room_area / field_area
+            if enclosure < 0.62:
+                penalty += target * (0.62 - enclosure) * 0.16
+            if room_ratio < 0.12:
+                penalty += target * (0.12 - room_ratio) * 0.18
+            if 'room_frame' in variant and enclosure >= 0.62:
+                penalty -= target * min(0.10, (enclosure - 0.58) * 0.18)
+    if 'room_frame' in variant:
+        penalty -= target * 0.035
+    elif len(candidate.footprints) <= 2 and field.typology == Typology.KARRE:
+        penalty += target * 0.035
+    return float(penalty)
+
+
+def _residual_open_space_penalty(footprints: Sequence[Polygon], skeleton: FieldSkeleton, field: Delfelt) -> float:
+    """Penalty for fragmented leftover open spaces outside the planned room hierarchy."""
+    if not footprints or skeleton is None:
+        return 0.0
+    planned = [p for p in ([skeleton.courtyard_reserve] + list(skeleton.public_realm or [])) if p is not None and not getattr(p, 'is_empty', True)]
+    frame_parts = list(skeleton.build_bands or []) + list(skeleton.frontage_zones or []) + planned
+    if not frame_parts:
+        return 0.0
+    try:
+        frame = unary_union([p for p in frame_parts if p is not None and not p.is_empty]).convex_hull.buffer(0)
+        built = unary_union([p for p in footprints if p is not None and not p.is_empty]).buffer(0)
+        open_geom = frame.difference(built.buffer(0.2)).buffer(0)
+        if planned:
+            planned_union = unary_union(planned).buffer(0)
+            open_geom = open_geom.difference(planned_union.buffer(0.5)).buffer(0)
+        parts = [p for p in _flatten_polygons(open_geom) if p.area > 60.0]
+    except Exception:
+        return 0.0
+    if not parts:
+        return 0.0
+    target = max(float(getattr(field, 'target_bra', 0.0) or 0.0), 1.0)
+    small_frag = [p for p in parts if p.area < 280.0]
+    skinny = []
+    for p in parts:
+        minx, miny, maxx, maxy = p.bounds
+        w, h = maxx - minx, maxy - miny
+        if min(w, h) > 0 and max(w, h) / min(w, h) > 3.2:
+            skinny.append(p)
+    return target * min(0.12, 0.012 * len(small_frag) + 0.018 * len(skinny))
 
 def _split_band_symmetric(band: Polygon, splits: int, axis: str) -> List[Polygon]:
     pieces = _split_poly_evenly(band, splits, axis=axis)
@@ -2288,15 +2372,18 @@ def _slot_count_for_band(band: Polygon, count_hint: int, pattern: Optional[str])
             splits = 2 if width >= 72 else 1
         else:
             splits = 2 if height >= 84 else 1
-    elif pattern == "green_room_edges":
-        # Green-room-first: split edge bands enough to let several buildings
-        # define the same common room without filling the room itself.
-        if long_span >= 118 and count_hint >= 7:
+    elif pattern in {"green_room_edges", "room_frame_edges", "room_frame_quarters"}:
+        # Room-frame masterplan: split perimeter/room-edge bands enough to let
+        # several buildings frame the same primary outdoor room, but avoid too
+        # many tiny fragments that read as object scatter.
+        if long_span >= 132 and count_hint >= 8:
             splits = 3
-        elif long_span >= 66 and count_hint >= 4:
+        elif long_span >= 72 and count_hint >= 4:
             splits = 2
         else:
             splits = 1
+        if pattern == "room_frame_quarters" and long_span >= 96 and count_hint >= 6:
+            splits = max(splits, 2)
     elif pattern == "park_bands":
         splits = 2 if long_span >= 84 else 1
     elif pattern == "node_cluster":
@@ -2330,6 +2417,212 @@ def _build_micro_fields_from_bands(bands: Sequence[Polygon], count_hint: int, pa
     return [m for m in micro if m.area > 60.0]
 
 
+
+
+def _room_frame_sort_key(poly: Polygon, room: Optional[Polygon], core: Polygon, field: Delfelt) -> Tuple[int, float, float, float]:
+    """Prioritise perimeter/room-edge build bands like an architect would.
+
+    Hard/urban edges first, then bands that sit close to and frame the main
+    outdoor room, while still avoiding soft/småhus edges as the first infill.
+    """
+    if poly is None or poly.is_empty:
+        return (9, 9999.0, 0.0, 0.0)
+    hard, medium, soft = _edge_strategy_sides(field)
+    side = _side_for_polygon(poly, core)
+    side_rank = 0 if side in hard else (1 if side in medium else (3 if side in soft else 2))
+    room_dist = float(poly.distance(room)) if room is not None and not room.is_empty else 0.0
+    c = poly.centroid
+    return (side_rank, round(room_dist, 3), -float(poly.area), round(c.x + c.y, 3))
+
+
+def _compose_room_frame_masterplan_skeleton(core: Polygon, field: Delfelt) -> Optional[FieldSkeleton]:
+    """Create a room-frame skeleton: primary green room first, perimeter before infill.
+
+    This is stronger than the generic green-room skeleton. It intentionally builds
+    one legible outdoor room, then creates construction bands on hard boundaries
+    and on 2-3 sides of that room. The aim is to move from 'objects on a plot' to
+    'neighbourhood fields around common green rooms'.
+    """
+    if core is None or core.is_empty or float(core.area) < 700.0:
+        return None
+    minx, miny, maxx, maxy = core.bounds
+    width = maxx - minx
+    height = maxy - miny
+    if width < 36.0 or height < 30.0:
+        return None
+
+    density = float(getattr(field, "target_bra", 0.0) or 0.0) / max(float(core.area), 1.0)
+    target_count = max(2, int(getattr(field, "target_building_count", 0) or 4))
+    base_ratio = float(getattr(field, "courtyard_reserve_ratio", 0.0) or getattr(field, "public_realm_ratio", 0.0) or 0.16)
+    if field.typology == Typology.KARRE:
+        desired = 0.25 if density >= 1.15 else 0.28
+        min_ratio, max_ratio = (0.20, 0.32)
+    elif field.typology == Typology.PUNKTHUS:
+        desired = 0.19 if density >= 1.15 else 0.23
+        min_ratio, max_ratio = (0.15, 0.27)
+    else:
+        desired = 0.18 if density >= 1.15 else 0.22
+        min_ratio, max_ratio = (0.14, 0.26)
+    room_ratio = max(min_ratio, min(max_ratio, max(base_ratio, desired if density < 1.35 else desired * 0.96)))
+
+    scale = math.sqrt(room_ratio)
+    if width >= height:
+        room_w = width * max(0.30, min(0.62, scale * 1.18))
+        room_h = height * max(0.28, min(0.56, scale * 1.02))
+    else:
+        room_w = width * max(0.28, min(0.56, scale * 1.02))
+        room_h = height * max(0.30, min(0.62, scale * 1.18))
+
+    primary_side, secondary_side = _preferred_frontage_sides(
+        field,
+        getattr(field, "frontage_primary_side", None) or getattr(field, "courtyard_open_side", None) or "south",
+        getattr(field, "frontage_secondary_side", None) or ("north" if getattr(field, "frontage_mode", None) == "double" else None),
+    )
+    shift_x, shift_y = _side_bias_vector(field, width, height, default_primary=primary_side, default_secondary=secondary_side)
+    room = _safe_positioned_rect(core, room_w, room_h, shift_x, shift_y)
+    if room is None:
+        room = _safe_center_rect(core, room_w, room_h)
+    if room is None or room.is_empty or room.area < max(220.0, core.area * min_ratio * 0.72):
+        return None
+
+    secondary_rooms: List[Polygon] = []
+    if core.area >= 4200.0 and target_count >= 4:
+        hard_tmp, medium_tmp, soft_tmp = _edge_strategy_sides(field, default_primary=primary_side, default_secondary=secondary_side)
+        candidate_sides = list(dict.fromkeys((soft_tmp or []) + medium_tmp))
+        sec_ratio = 0.045 if density >= 1.20 else 0.060
+        sec_area = max(120.0, min(360.0, core.area * sec_ratio))
+        sec_w = max(12.0, min(24.0, math.sqrt(sec_area) * 1.25))
+        sec_h = max(10.0, min(22.0, sec_area / max(sec_w, 1.0)))
+        for side in candidate_sides[:2]:
+            dx2 = dy2 = 0.0
+            if side == 'west':
+                dx2 = -width * 0.26
+            elif side == 'east':
+                dx2 = width * 0.26
+            elif side == 'south':
+                dy2 = -height * 0.26
+            elif side == 'north':
+                dy2 = height * 0.26
+            sec = _safe_positioned_rect(core, sec_w, sec_h, dx2, dy2)
+            if sec is not None and not sec.is_empty and sec.distance(room) > max(6.0, min(sec_w, sec_h) * 0.45):
+                secondary_rooms.append(sec)
+
+    rminx, rminy, rmaxx, rmaxy = room.bounds
+    corridor_w = min(float(getattr(field, "corridor_width_m", None) or 6.5), 7.5)
+    frontage_depth = float(getattr(field, "frontage_depth_m", None) or (14.0 if field.typology == Typology.KARRE else 12.5))
+    hard_sides, medium_sides, soft_sides = _edge_strategy_sides(field, default_primary=primary_side, default_secondary=secondary_side)
+    side_order = hard_sides + medium_sides + soft_sides
+
+    corridors: List[Polygon] = []
+    if int(getattr(field, "view_corridor_count", 0) or 0) > 0:
+        # A single thin connection through the main room, parallel to the short axis.
+        cx = (rminx + rmaxx) / 2.0
+        cy = (rminy + rmaxy) / 2.0
+        if width >= height:
+            cor = core.intersection(box(cx - corridor_w / 2.0, miny - 1.0, cx + corridor_w / 2.0, maxy + 1.0)).buffer(0)
+        else:
+            cor = core.intersection(box(minx - 1.0, cy - corridor_w / 2.0, maxx + 1.0, cy + corridor_w / 2.0)).buffer(0)
+        corridors.extend([p for p in _flatten_polygons(cor) if p.area > 50.0])
+    cutters = [room.buffer(0.6)] + [r.buffer(0.35) for r in secondary_rooms] + [c.buffer(0.15) for c in corridors if c is not None and not c.is_empty]
+    cutter = unary_union(cutters).buffer(0) if cutters else None
+
+    room_edge_geoms = {
+        "north": core.intersection(box(minx - 1.0, rmaxy, maxx + 1.0, maxy + 1.0)).buffer(0),
+        "south": core.intersection(box(minx - 1.0, miny - 1.0, maxx + 1.0, rminy)).buffer(0),
+        "west": core.intersection(box(minx - 1.0, rminy, rminx, rmaxy)).buffer(0),
+        "east": core.intersection(box(rmaxx, rminy, maxx + 1.0, rmaxy)).buffer(0),
+    }
+
+    bands: List[Polygon] = []
+    # 1. Robust perimeter first: this makes buildings sit harder against the
+    # correct boundaries and leaves the primary green room clearer.
+    for side in side_order:
+        depth = frontage_depth * (1.22 if side in hard_sides else (1.00 if side in medium_sides else 0.70))
+        strip = _strip_from_side(core, side, depth)
+        if strip is None or strip.is_empty:
+            continue
+        geom = strip.difference(cutter).buffer(0) if cutter is not None else strip
+        bands.extend([p for p in _flatten_polygons(geom) if p.area > 90.0])
+
+    # 2. Then frame the green room itself on at least two-three sides. Soft sides
+    # are used last so they become landscape-buffer edges when possible.
+    for side in side_order:
+        geom = room_edge_geoms.get(side)
+        if geom is None or geom.is_empty:
+            continue
+        geom = geom.difference(cutter).buffer(0) if cutter is not None else geom
+        for part in _flatten_polygons(geom):
+            if part.area <= 90.0:
+                continue
+            bx0, by0, bx1, by1 = part.bounds
+            if (bx1 - bx0) < 10.0 or (by1 - by0) < 8.0:
+                continue
+            bands.append(part)
+
+    if not bands:
+        return None
+    # De-duplicate near-identical bands while keeping large/edge-prioritised parts.
+    sorted_bands = sorted(bands, key=lambda p: _room_frame_sort_key(p, room, core, field))
+    unique: List[Polygon] = []
+    for band in sorted_bands:
+        if any(band.intersection(prev).area > min(band.area, prev.area) * 0.72 for prev in unique):
+            continue
+        unique.append(band)
+    bands = unique or sorted_bands
+
+    pattern = getattr(field, "micro_field_pattern", None) or "room_frame_edges"
+    if pattern not in {"room_frame_edges", "room_frame_quarters", "green_room_edges"}:
+        pattern = "room_frame_edges"
+    micro_fields = _build_micro_fields_from_bands(
+        bands,
+        target_count,
+        pattern,
+        getattr(field, "symmetry_preference", None) or "axial",
+    )
+    micro_fields = sorted(micro_fields, key=lambda p: _room_frame_sort_key(p, room, core, field))
+    build_slots = [m for m in micro_fields if m.area > 65.0]
+    if not build_slots:
+        return None
+
+    frontages: List[SkeletonFrontage] = []
+    frontage_zones: List[Polygon] = []
+    for side in side_order:
+        line = _line_from_bounds(core, side)
+        if line is not None:
+            frontages.append(SkeletonFrontage(role=f"{side}_frontage", line=line))
+        zone = _strip_from_side(core, side, frontage_depth)
+        if zone is not None and not zone.is_empty:
+            frontage_zones.extend([p for p in _flatten_polygons(zone) if p.area > 50.0])
+
+    macro_axis = _axis_line(room, axis="x") if width >= height else _axis_line(room, axis="y")
+    symmetry_axis = _axis_line(room, axis="y") if width >= height else _axis_line(room, axis="x")
+    public_realm = [room] + secondary_rooms + corridors
+    # Punkthus can also use room-frame: nodes are taken from room-edge slots,
+    # so towers form a loose ring around the green room instead of scattering.
+    accent_nodes = [slot.centroid for slot in build_slots[:max(4, min(10, target_count + 2))]]
+    return FieldSkeleton(
+        field_id=field.field_id,
+        mode="room_frame_masterplan",
+        local_orientation_deg=0.0,
+        frontage_lines=frontages,
+        build_bands=bands,
+        courtyard_reserve=room,
+        view_corridors=[c for c in corridors if c is not None and not c.is_empty and c.area > 40.0],
+        accent_nodes=accent_nodes,
+        open_edges=list(dict.fromkeys(soft_sides)),
+        frontage_depth_m=frontage_depth,
+        corridor_width_m=corridor_w,
+        macro_axis=macro_axis,
+        symmetry_axis=symmetry_axis,
+        frontage_zones=frontage_zones,
+        micro_fields=build_slots,
+        public_realm=public_realm,
+        reserved_open_space=public_realm,
+        frontage_primary_side=primary_side,
+        frontage_secondary_side=secondary_side,
+        build_slots=build_slots,
+        node_layout_mode=getattr(field, "node_layout_mode", None),
+    )
 
 def _compose_green_room_linear_skeleton(core: Polygon, field: Delfelt) -> Optional[FieldSkeleton]:
     """Compose a lamell/edge field by reserving the green room first.
@@ -2865,6 +3158,12 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
 
 def _compose_field_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     mode = getattr(field, "skeleton_mode", None) or "linear_bands"
+    macro = getattr(field, "macro_structure", None)
+    pattern = getattr(field, "micro_field_pattern", None)
+    if macro in {"room_frame_masterplan", "neighborhood_room_frame"} or pattern in {"room_frame_edges", "room_frame_quarters"}:
+        rf = _compose_room_frame_masterplan_skeleton(core, field)
+        if rf is not None:
+            return rf
     if mode == "courtyard_frontage" or field.typology == Typology.KARRE:
         return _compose_courtyard_skeleton(core, field)
     if mode in {"park_nodes", "park_bands"} or field.typology == Typology.PUNKTHUS:
@@ -3236,6 +3535,99 @@ def _place_lameller_in_bands(skeleton: FieldSkeleton, field: Delfelt, spec: Base
 
     return _choose_best_structured(candidates, field.target_bra, skeleton, field)
 
+
+def _safe_slot_building_rect(slot: Polygon, *, max_len: float, target_depth: float) -> Optional[Polygon]:
+    """Return a compact building rectangle inside a slot, oriented along its long side."""
+    if slot is None or slot.is_empty:
+        return None
+    sx0, sy0, sx1, sy1 = slot.bounds
+    sw = sx1 - sx0
+    sh = sy1 - sy0
+    if sw < 9.5 or sh < 9.5:
+        return None
+    horizontal = sw >= sh
+    if horizontal:
+        length = min(max_len, max(24.0, sw - 1.6))
+        depth = min(max(11.5, target_depth), max(8.5, sh - 1.4))
+        rect = _safe_center_rect(slot, length, depth)
+    else:
+        length = min(max_len, max(24.0, sh - 1.6))
+        depth = min(max(11.5, target_depth), max(8.5, sw - 1.4))
+        rect = _safe_center_rect(slot, depth, length)
+    if rect is not None and not rect.is_empty and slot.buffer(1e-6).covers(rect):
+        return rect.buffer(0)
+    # If the slot is irregular, use a slightly inset largest part as a fallback.
+    inset = _largest_polygon(slot.buffer(-0.6).buffer(0))
+    if inset is not None and not inset.is_empty and inset.area > 90.0:
+        return inset
+    return None
+
+
+def _place_karre_room_frame_edges(skeleton: FieldSkeleton, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Place karré as several compact quarter/block edges around one room.
+
+    This deliberately avoids making every karré a deep U-shape. Instead, it uses
+    short perimeter/block bars on multiple sides of the green room, closer to the
+    architect reference where several volumes together define the courtyard.
+    """
+    if skeleton.courtyard_reserve is None or skeleton.courtyard_reserve.is_empty:
+        return None
+    slots = [s for s in (list(skeleton.build_slots) or list(skeleton.micro_fields) or list(skeleton.build_bands)) if s is not None and not s.is_empty]
+    if len(slots) < 2:
+        return None
+    core_parts = slots + [skeleton.courtyard_reserve]
+    try:
+        core_ref = unary_union(core_parts).convex_hull
+    except Exception:
+        core_ref = skeleton.courtyard_reserve.convex_hull
+    slots = sorted(slots, key=lambda p: _room_frame_sort_key(p, skeleton.courtyard_reserve, core_ref, field))
+    target_count = max(2, int(getattr(field, "target_building_count", 0) or 3))
+    max_len = float(getattr(spec.length_m, "max_m", 58.0) if getattr(spec, "length_m", None) else 58.0)
+    max_len = min(62.0, max(38.0, max_len))
+    target_depth = float(spec.depth_m.midpoint() if getattr(spec, "depth_m", None) else 15.0)
+    target_depth = max(12.5, min(16.5, target_depth * 1.08))
+
+    candidates: List[_PlacementCandidate] = []
+    requested_counts = sorted({max(2, min(len(slots), target_count + delta)) for delta in (-1, 0, 1, 2, 3, 4)})
+    for req in requested_counts:
+        fps: List[Polygon] = []
+        used_sides: set = set()
+        for slot in slots:
+            rect = _safe_slot_building_rect(slot, max_len=max_len, target_depth=target_depth)
+            if rect is None or rect.is_empty:
+                continue
+            if rect.intersects(skeleton.courtyard_reserve.buffer(0.25)):
+                continue
+            if any(rect.intersects(c.buffer(0.15)) for c in skeleton.view_corridors if c is not None and not c.is_empty):
+                continue
+            if any(rect.distance(other) < max(7.5, float(getattr(field, "gap_between_m", 8.0) or 8.0) * 0.82) for other in fps):
+                continue
+            fps.append(rect)
+            used_sides.add(_side_for_polygon(slot, core_ref))
+            if len(fps) >= req:
+                break
+        if len(fps) < 2:
+            continue
+        # Avoid one-sided rows; prefer at least two room sides for a karré field.
+        if len(used_sides) < 2 and len(fps) >= 3:
+            continue
+        total_fp = sum(float(p.area) for p in fps)
+        if total_fp <= 1.0:
+            continue
+        base_f = int(math.ceil(float(field.target_bra) / total_fp)) if field.target_bra > 0 else field.floors_min
+        base_f = max(field.floors_min, min(field.floors_max, base_f))
+        if total_fp * base_f < float(field.target_bra) * 0.94:
+            base_f = field.floors_max
+        floors = _varied_floors_for_cluster(len(fps), base_f, field.floors_min, field.floors_max, variation=getattr(field, "design_height_pattern", None) or "stepped")
+        cand = _evaluate_candidate(fps, field.target_bra, (field.floors_min, field.floors_max), floors_per_bygg=floors)
+        if cand is not None:
+            cand._variant = "room_frame_quarter_edges"
+            cand._room_frame_sides = len(used_sides)
+            candidates.append(cand)
+    if not candidates:
+        return None
+    return _choose_best_structured(candidates, field.target_bra, skeleton, field)
+
 def _place_karre_from_frontage(skeleton: FieldSkeleton, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
     # Frontage-baserte karréer endte ofte med tynne, uproporsjonale "armer".
     # Vi bruker derfor samme proporsjonerte kvartalslogikk som i lokal plassering,
@@ -3470,14 +3862,10 @@ def _candidate_structure_score(
 
         # En karré skal omslutte, en park-klynge skal ligge tydelig rundt grøntrommet.
         if field.typology == Typology.KARRE:
-            enclosure = 0.55
-            touching = 0
-            for band in skeleton.build_bands:
-                if union.intersection(band.buffer(1.0)).area > 25.0:
-                    touching += 1
-            if skeleton.build_bands:
-                enclosure = min(1.0, touching / max(2, min(4, len(skeleton.build_bands))))
-            room_score = 0.45 * openness + 0.55 * enclosure
+            enclosure = _room_enclosure_score(union, reserve, margin_m=max(8.0, float(getattr(field, 'frontage_depth_m', 12.0) or 12.0)))
+            room_ratio = reserve_area / max(float(getattr(getattr(field, 'polygon', None), 'area', 0.0) or reserve_area), 1.0)
+            size_score = max(0.0, min(1.0, (room_ratio - 0.09) / 0.13))
+            room_score = 0.34 * openness + 0.46 * enclosure + 0.20 * size_score
         elif field.typology == Typology.PUNKTHUS or skeleton.mode in {"park_nodes", "park_bands"}:
             room_score = 0.55 * openness + 0.45 * proximity
         else:
@@ -3519,6 +3907,8 @@ def _candidate_structure_score(
         weights.update({"frontage": 0.14, "rhythm": 0.10, "symmetry": 0.20, "room": 0.26, "corridor": 0.14, "cluster": 0.16})
     elif field.typology == Typology.KARRE:
         weights.update({"frontage": 0.26, "rhythm": 0.12, "symmetry": 0.13, "room": 0.34, "corridor": 0.05, "cluster": 0.10})
+    elif skeleton.mode == "room_frame_masterplan":
+        weights.update({"frontage": 0.23, "rhythm": 0.12, "symmetry": 0.11, "room": 0.38, "corridor": 0.06, "cluster": 0.10})
     elif skeleton.mode in {"green_room_edges", "courtyard_frontage"}:
         weights.update({"frontage": 0.24, "rhythm": 0.14, "symmetry": 0.12, "room": 0.28, "corridor": 0.08, "cluster": 0.14})
     elif skeleton.mode == "linear_bands_dense":
@@ -3532,6 +3922,8 @@ def _candidate_structure_score(
         + corridor_score * weights["corridor"]
         + cluster_score * weights["cluster"]
     )
+    residual_pen = _residual_open_space_penalty(geoms, skeleton, field) / max(float(getattr(field, 'target_bra', 1.0) or 1.0), 1.0)
+    total -= min(0.10, residual_pen)
     return max(0.0, min(1.0, float(total)))
 
 
@@ -3562,10 +3954,11 @@ def _choose_best_structured(
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
         count_weight = 0.018 if density >= 1.10 else 0.012
         count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * count_weight
-        shape_penalty = 0.0
+        quality_penalty = 0.0
         if field.typology == Typology.KARRE:
-            shape_penalty = sum(_karre_shape_quality_penalty(fp, target_bra / max(len(item.footprints), 1)) for fp in item.footprints) * 0.35
-        return (bra_penalty + structure_penalty + count_penalty + shape_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
+            quality_penalty += _karre_candidate_quality_penalty(item, skeleton, field) * 0.65
+        quality_penalty += _residual_open_space_penalty(item.footprints, skeleton, field) * 0.50
+        return (bra_penalty + structure_penalty + count_penalty + quality_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
     return min(pool, key=score)
 
@@ -3889,9 +4282,14 @@ def _karre_candidate_penalty(candidate: Optional[_PlacementCandidate], target_br
         ratio = smallest / largest
         if ratio < 0.45:
             imbalance_penalty = float(target_bra) * (0.45 - ratio) * 0.13
-    quality_penalty = sum(_karre_shape_quality_penalty(fp, target_bra / max(len(footprints), 1)) for fp in footprints)
-    return deficit * 1.10 + overshoot * 0.18 + tiny_penalty + imbalance_penalty + quality_penalty
-
+    variant = str(getattr(candidate, '_variant', '') or '')
+    if 'room_frame' in variant:
+        quality_penalty = 0.0
+        room_frame_bonus = -float(target_bra) * 0.035 if len(footprints) >= 3 else 0.0
+    else:
+        quality_penalty = sum(_karre_shape_quality_penalty(fp, target_bra / max(len(footprints), 1)) for fp in footprints) * 0.75
+        room_frame_bonus = 0.0
+    return deficit * 1.10 + overshoot * 0.18 + tiny_penalty + imbalance_penalty + quality_penalty + room_frame_bonus
 
 def _best_subcore_karre_candidate(sc: Polygon, sub_field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
     sub_skeleton = _compose_field_skeleton(sc, sub_field)
@@ -4053,11 +4451,32 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
     if field.typology == Typology.LAMELL:
         cand = _place_lameller_in_bands(skeleton, field, spec)
     elif field.typology == Typology.KARRE:
-        cand = _place_multi_karre_clusters(core, field, spec)
-        if cand is None:
-            cand = _place_karre_from_frontage(skeleton, field, spec)
-        if cand is None:
-            cand = _place_karre_local(core, field, spec)
+        if skeleton.mode == "room_frame_masterplan":
+            karre_candidates: List[_PlacementCandidate] = []
+            rf = _place_karre_room_frame_edges(skeleton, field, spec)
+            if rf is not None and rf.footprints:
+                karre_candidates.append(rf)
+                if rf.total_bra >= float(field.target_bra) * 0.92 and _karre_candidate_quality_penalty(rf, skeleton, field) <= float(field.target_bra) * 0.10:
+                    cand = rf
+                else:
+                    cand = None
+            else:
+                cand = None
+            if cand is None:
+                for maybe in (
+                    _place_karre_from_frontage(skeleton, field, spec),
+                    _place_multi_karre_clusters(core, field, spec),
+                    _place_karre_local(core, field, spec),
+                ):
+                    if maybe is not None and maybe.footprints:
+                        karre_candidates.append(maybe)
+                cand = _choose_best_structured(karre_candidates, field.target_bra, skeleton, field) if karre_candidates else None
+        else:
+            cand = _place_multi_karre_clusters(core, field, spec)
+            if cand is None:
+                cand = _place_karre_from_frontage(skeleton, field, spec)
+            if cand is None:
+                cand = _place_karre_local(core, field, spec)
     elif field.typology == Typology.PUNKTHUS:
         cand = _place_punkthus_on_nodes(skeleton, field, spec)
     elif field.typology == Typology.REKKEHUS:
