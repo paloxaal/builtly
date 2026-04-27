@@ -1919,12 +1919,7 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
     if closed:
         outer_h_candidates = [s + 2.0 * arm for s in side_candidates]
     else:
-        # U-former med for lange armer gir smale, mørke uterom. Bruk litt
-        # kortere sidekandidater enn lukkede O-former, og la kvalitetsstraff
-        # styre bort fra dype U-er når tomten tillater det.
-        u_side_candidates = [min(s, 30.0) for s in side_candidates]
-        u_side_candidates = list(dict.fromkeys([s for s in u_side_candidates if s >= 24.0])) or [28.0, 26.0]
-        outer_h_candidates = [s + arm for s in u_side_candidates]
+        outer_h_candidates = [s + arm for s in side_candidates]
 
     best = None
     best_score = None
@@ -1969,10 +1964,8 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
             dims_score = abs((rx1 - rx0) - target_w) * 1.45 + abs(outer_h - target_h) * 1.15
             center_pen = shape.centroid.distance(core.centroid)
             width_bonus = -max(0.0, (rx1 - rx0) - 50.0) * 0.08
-            ref_bra = max(float(getattr(field, "target_bra", 0.0) or 0.0), shape.area * 6.0)
-            quality_pen = _karre_shape_quality_penalty(shape, ref_bra) * 0.00125
-            arm_pen = _karre_arm_balance_penalty(shape, ref_bra) * 0.00165
-            score = dims_score + center_pen * 0.055 + width_bonus + quality_pen + arm_pen
+            quality_pen = _karre_shape_quality_penalty(shape, max(float(getattr(field, "target_bra", 0.0) or 0.0), shape.area * 6.0)) * 0.0009
+            score = dims_score + center_pen * 0.055 + width_bonus + quality_pen
             if best_score is None or score < best_score:
                 best = shape
                 best_score = score
@@ -2238,83 +2231,6 @@ def _room_enclosure_score(union: Polygon, room: Optional[Polygon], *, margin_m: 
     return min(1.0, 0.55 * framed / 3.0 + 0.45 * quality / max(framed, 1))
 
 
-def _karre_void_metrics(fp: Polygon) -> Tuple[float, float, float, float, float]:
-    """Returner enkel analyse av indre/åpen gårdsromsgeometri.
-
-    Verdier: (void_area, void_major, void_minor, void_aspect, void_ratio).
-    For U-/O-/L-karréer er det viktigere at det finnes et brukbart grøntrom
-    enn at bygningskroppen bare har høy BYA. Denne helperen ser på største
-    restrom inne i footprintets bounding box. Det fanger både lukket gårdsrom
-    og U-formens åpne rom mellom armene.
-    """
-    if fp is None or fp.is_empty:
-        return 0.0, 0.0, 0.0, 99.0, 0.0
-    minx, miny, maxx, maxy = fp.bounds
-    bbox = box(minx, miny, maxx, maxy)
-    bbox_area = max(float(bbox.area), 1.0)
-    try:
-        void_geom = bbox.difference(fp.buffer(0.05)).buffer(0)
-        void_poly = _largest_polygon(void_geom)
-    except Exception:
-        void_poly = None
-    if void_poly is None or void_poly.is_empty:
-        return 0.0, 0.0, 0.0, 99.0, 0.0
-    vx0, vy0, vx1, vy1 = void_poly.bounds
-    vw = max(float(vx1 - vx0), 0.0)
-    vh = max(float(vy1 - vy0), 0.0)
-    major = max(vw, vh)
-    minor = max(min(vw, vh), 0.0)
-    aspect = major / max(minor, 1.0)
-    area = float(void_poly.area)
-    return area, major, minor, aspect, area / bbox_area
-
-
-def _karre_arm_balance_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
-    """Straff U-/L-/O-karréer der armene blir for lange i forhold til hovedkropp.
-
-    Bruker gårdsromsgeometrien som proxy: når hulrommet mellom armene blir for
-    smalt/dypt, betyr det vanligvis lange armer, lite sol og dårlig uteareal.
-    Kompakte rektangulære kvartalsblokker uten indre void straffes ikke her;
-    de håndteres av _is_true_karre_body og øvrig typologinormalisering.
-    """
-    if fp is None or fp.is_empty:
-        return float(target_bra or 1000.0) * 0.20
-    minx, miny, maxx, maxy = fp.bounds
-    bbox_area = max(float((maxx - minx) * (maxy - miny)), 1.0)
-    area = max(float(fp.area), 1.0)
-    occupancy = area / bbox_area
-    # Nesten kompakte blokker har ikke indre gårdsrom. De kan være gode som
-    # kvartalskant/blokk og skal ikke tolkes som arm-problem.
-    if occupancy > 0.78:
-        return 0.0
-    void_area, void_major, void_minor, void_aspect, void_ratio = _karre_void_metrics(fp)
-    if void_area <= 1.0:
-        return 0.0
-    ref = max(float(target_bra or 0.0), area * 6.0, 1.0)
-    penalty = 0.0
-    # Reelt felles uterom må tåle opphold, sol og innsynsavstand. For smalt void
-    # er den vanligste feilen ved lange karréarmer.
-    if void_minor < 15.0:
-        penalty += ref * min(0.26, (15.0 - void_minor) * 0.018)
-    if void_minor < 12.0:
-        penalty += ref * 0.08
-    # Lange, smale rom gir dårlige sol-/lysforhold.
-    if void_aspect > 1.85:
-        penalty += ref * min(0.24, (void_aspect - 1.85) * 0.075)
-    if void_aspect > 2.35:
-        penalty += ref * 0.08
-    # Et veldig lite void i en stor kropp er ofte tegn på pseudo-karré eller
-    # for tung infill.
-    if void_ratio < 0.18:
-        penalty += ref * min(0.18, (0.18 - void_ratio) * 0.75)
-    # Et svært dypt void sammenlignet med byggets korte side betyr armer som
-    # løper for langt fra hovedvolumet.
-    short_span = max(min(maxx - minx, maxy - miny), 1.0)
-    if void_major > short_span * 1.18 and void_minor < short_span * 0.62:
-        penalty += ref * min(0.20, (void_major / short_span - 1.18) * 0.10)
-    return float(penalty)
-
-
 def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
     """Penalty for karré/U shapes with tiny courtyards, overlong arms or weak compactness."""
     if fp is None or fp.is_empty:
@@ -2351,10 +2267,6 @@ def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
     short_span = min(w, h)
     if long_span > 0 and short_span > 0 and long_span / short_span > 2.0:
         penalty += ref * min(0.24, (long_span / short_span - 2.0) * 0.16)
-    # Arbeidsøkt 8: eksplisitt straff for U-/L-karréer der armene skaper for
-    # smale eller dype uterom. Dette er den viktigste visuelle feilen i siste
-    # output: gode BRA-tall, men enkelte karréarmer ble for lange ift. hovedbygg.
-    penalty += _karre_arm_balance_penalty(fp, ref)
     return float(penalty)
 
 
@@ -2384,19 +2296,15 @@ def _karre_candidate_quality_penalty(candidate: Optional[_PlacementCandidate], s
         typ = typologies[idx] if idx < len(typologies) else field.typology
         if typ == Typology.KARRE:
             true_karre += 1
-            if minor < 19.0 or fp.area < 820.0:
-                penalty += target * 0.22
-            if aspect > 2.20:
-                penalty += target * min(0.20, (aspect - 2.20) * 0.070)
-            # Også room-frame-karréer må ha balanserte armer/void. Vi bruker en
-            # svakere vekt enn for single-U, siden kvartalsfelt kan bestå av flere
-            # kompakte brikker rundt et fellesrom.
-            penalty += _karre_arm_balance_penalty(fp, target) * (0.55 if ('room_frame' in variant or 'quarter_field' in variant) else 0.95)
+            if minor < 23.0 or fp.area < 950.0:
+                penalty += target * 0.30
+            if aspect > 2.05:
+                penalty += target * min(0.22, (aspect - 2.05) * 0.075)
             if 'room_frame' in variant or 'quarter_field' in variant or len(candidate.footprints) >= 4:
-                if aspect > 2.55:
-                    penalty += target * min(0.14, (aspect - 2.55) * 0.050)
+                if aspect > 2.65:
+                    penalty += target * min(0.12, (aspect - 2.65) * 0.040)
             else:
-                penalty += _karre_shape_quality_penalty(fp, target) * 0.75
+                penalty += _karre_shape_quality_penalty(fp, target) * 0.70
         else:
             if major < 28.0 or minor < 9.5 or fp.area < 280.0:
                 penalty += target * 0.05
@@ -3717,23 +3625,15 @@ def _is_true_karre_body(rect: Polygon, field: Optional[Delfelt] = None) -> bool:
     if rect is None or rect.is_empty:
         return False
     major, minor, area = _rect_dims(rect)
-    if area < 820.0:
+    # Strengere filter: et ekte karré-/kvartalsbygg må ha nok bredde, dybde
+    # og areal til å gi reell gårdsromskvalitet. Smale 40x8, 42x14, 52x16
+    # og små 29x22-volumer skal heller leses som lamell/blokk-kant.
+    if area < 950.0:
         return False
-    if major < 34.0 or minor < 19.0:
+    if major < 38.0 or minor < 23.0:
         return False
-    aspect = major / max(minor, 1.0)
-    if aspect > 2.65:
+    if major / max(minor, 1.0) > 2.55:
         return False
-    bbox_area = max(major * minor, 1.0)
-    occupancy = area / bbox_area
-    # Kompakte blokker kan fungere som kvartalsbrikker. U-/L-former må derimot
-    # ha et brukbart void; hvis ikke skal de leses som lamell/blokk-kant.
-    if occupancy < 0.78:
-        void_area, void_major, void_minor, void_aspect, void_ratio = _karre_void_metrics(rect)
-        if void_area < max(260.0, bbox_area * 0.14):
-            return False
-        if void_minor < 14.0 or void_aspect > 2.25:
-            return False
     return True
 
 
@@ -3749,7 +3649,7 @@ def _room_frame_edge_typology(rect: Polygon, field: Delfelt) -> Optional[Typolog
         return None
     if _is_true_karre_body(rect, field):
         return Typology.KARRE
-    if area >= 300.0 and major >= 28.0 and minor >= 10.5:
+    if area >= 300.0 and major >= 28.0 and minor >= 10.0:
         return Typology.LAMELL
     if area >= 330.0 and major <= 24.0 and minor >= 15.0 and field.typology != Typology.KARRE:
         return Typology.PUNKTHUS
@@ -4707,6 +4607,97 @@ def _place_single_core(core: Polygon, field: Delfelt, spec: BaseTypologySpec) ->
     return None
 
 
+
+def _is_compact_infill_field(core: Polygon, field: Delfelt) -> bool:
+    if core is None or core.is_empty:
+        return False
+    area = float(getattr(core, "area", 0.0) or 0.0)
+    target = float(getattr(field, "target_bra", 0.0) or 0.0)
+    density = target / max(area, 1.0)
+    return area <= 4200.0 and density >= 1.35
+
+
+def _scale_rect_to_area_within(rect: Polygon, container: Polygon, target_area: float) -> Polygon:
+    """Scale an axis-aligned rectangle down around its centroid while keeping it inside container."""
+    if rect is None or rect.is_empty:
+        return rect
+    cx, cy = rect.centroid.x, rect.centroid.y
+    minx, miny, maxx, maxy = rect.bounds
+    w = maxx - minx
+    h = maxy - miny
+    area = max(w * h, 1.0)
+    if target_area >= area * 0.96:
+        shrunk = rect.buffer(-0.15).buffer(0)
+        return shrunk if shrunk is not None and not shrunk.is_empty and shrunk.area > area * 0.70 else rect
+    scale = max(0.45, min(0.98, math.sqrt(max(target_area, 1.0) / area)))
+    for factor in [scale, scale * 0.95, scale * 0.90, scale * 0.84, 0.72, 0.62]:
+        candidate = box(cx - w * factor / 2.0, cy - h * factor / 2.0, cx + w * factor / 2.0, cy + h * factor / 2.0).buffer(0)
+        if container.buffer(1e-6).covers(candidate):
+            return candidate
+    shrunk = rect.buffer(-0.5).buffer(0)
+    return shrunk if shrunk is not None and not shrunk.is_empty and shrunk.area > 80.0 else rect
+
+
+def _place_compact_infill_local(core: Polygon, field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
+    """Robust fallback for small high-density urban infill.
+
+    Small plots with high %BRA should not fail just because normal courtyard or
+    park skeletons cannot establish generous outdoor rooms. The proper output is
+    a compact continuous 5-7 storey bar close to the buildable envelope, with an
+    optional small end block if there is genuinely space for it.
+    """
+    if not _is_compact_infill_field(core, field):
+        return None
+    if core is None or core.is_empty or core.area < 120.0:
+        return None
+    floors = max(1, int(getattr(field, "floors_max", 1) or 1))
+    target_fp = float(getattr(field, "target_bra", 0.0) or 0.0) / max(float(floors), 1.0)
+    max_cover = min(0.94, max(0.62, float(getattr(field, "target_bya_pct", 82.0) or 82.0) / 100.0))
+    target_fp = min(max(target_fp, core.area * 0.58), core.area * max_cover)
+
+    mir = largest_inscribed_rectangle(core, min_aspect=0.08, grid_resolution=30)
+    if mir is None or mir.is_empty or mir.area < 90.0:
+        mir = _largest_polygon(core.buffer(-0.35).buffer(0)) or _largest_polygon(core) or core
+    if mir is None or mir.is_empty or mir.area < 90.0:
+        return None
+
+    main = _scale_rect_to_area_within(mir, core, target_fp)
+    if main is None or main.is_empty or main.area < 90.0:
+        return None
+
+    footprints: List[Polygon] = [main]
+    typologies: List[Typology] = [Typology.LAMELL]
+    angles: List[float] = [90.0 if (main.bounds[3] - main.bounds[1]) > (main.bounds[2] - main.bounds[0]) else 0.0]
+
+    residual_target = max(0.0, float(getattr(field, "target_bra", 0.0) or 0.0) - main.area * floors)
+    if residual_target > 450.0 and core.area - main.area > 210.0:
+        free = core.difference(main.buffer(4.0)).buffer(0)
+        parts = [p for p in _flatten_polygons(free) if p.area >= 180.0]
+        for part in sorted(parts, key=lambda p: -p.area)[:3]:
+            for size in (20.0, 18.0, 16.0):
+                tower = _safe_center_rect(part, size, size)
+                if tower is not None and not tower.is_empty and core.buffer(1e-6).covers(tower):
+                    footprints.append(tower)
+                    typologies.append(Typology.PUNKTHUS)
+                    angles.append(0.0)
+                    break
+            if len(footprints) > 1:
+                break
+
+    floors_per = [floors for _ in footprints]
+    cand = _evaluate_candidate(
+        footprints,
+        float(getattr(field, "target_bra", 0.0) or 0.0),
+        (max(1, int(getattr(field, "floors_min", 1) or 1)), floors),
+        floors_per_bygg=floors_per,
+        angle_offset_per_bygg=angles,
+        typology_per_bygg=typologies,
+    )
+    if cand is not None:
+        cand._variant = "compact_infill_bar"
+    return cand
+
+
 def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCandidate]:
     """Generer plasseringskandidat for et delfelt.
 
@@ -4717,6 +4708,12 @@ def _candidate_for_field(core: Polygon, field: Delfelt) -> Optional[_PlacementCa
       4. Fallback til delkjerner for svært konkave felt
     """
     spec = get_typology_spec(field.typology)
+    # Høyutnyttede småtomter må alltid få et robust infill-forslag før
+    # ordinære gårdsroms-/karréregler får forkaste alt.
+    compact = _place_compact_infill_local(core, field, spec)
+    if compact is not None and compact.footprints:
+        return compact
+
     skeleton = _compose_field_skeleton(core, field)
 
     cand: Optional[_PlacementCandidate] = None
@@ -4808,14 +4805,7 @@ def _u_karre_footprint(cx: float, cy: float, width_m: float, depth_m: float, arm
         parts = [box(x1 - arm, y0, x1, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
     else:
         parts = [box(x0, y0, x0 + arm, y1), box(x0, y0, x1, y0 + arm), box(x0, y1 - arm, x1, y1)]
-    fp = unary_union(parts).buffer(0)
-    ref = width_m * depth_m * 3.0
-    # Ved høy tetthet kan completion-pass fristes til dype U-er. Dersom voidet
-    # blir for smalt/dypt, bruk kompakt blokk i stedet for lange armer. Det
-    # bevarer volum, men gir bedre uterom og mer arkitektnær geometri.
-    if _karre_arm_balance_penalty(fp, ref) > ref * 0.22:
-        return box(x0, y0, x1, y1).buffer(0)
-    return fp
+    return unary_union(parts).buffer(0)
 
 
 def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[Tuple[Polygon, Typology, float]]:
@@ -5099,6 +5089,39 @@ def place_buildings_for_fields(buildable_poly: Polygon, delfelt: List[Delfelt], 
         accepted = _verify_adjusted_buildings(accepted, buildable_poly, delfelt, rules)
     except Exception:
         pass
+
+    if not accepted and delfelt:
+        # Absolute fallback for compact infill sites where all normal candidates
+        # were filtered out by shape/spacing constraints. Use the buildable strip
+        # as one dense lamell/bar so the engine returns a feasible volume study
+        # instead of zero buildings.
+        target_total = sum(float(getattr(f, "target_bra", 0.0) or 0.0) for f in delfelt)
+        if buildable_poly is not None and not buildable_poly.is_empty and buildable_poly.area <= 4200.0 and target_total / max(buildable_poly.area, 1.0) >= 1.30:
+            ref = max(delfelt, key=lambda f: float(getattr(f, "target_bra", 0.0) or 0.0))
+            temp_field = replace(
+                ref,
+                polygon=buildable_poly,
+                typology=Typology.LAMELL,
+                target_bra=target_total,
+                target_bya_pct=max(float(getattr(ref, "target_bya_pct", 0.0) or 0.0), 80.0),
+            )
+            core_global = _field_core_polygon(buildable_poly, min(float(rules.brann_avstand_m), 4.0))
+            cand = _place_compact_infill_local(core_global, temp_field, get_typology_spec(Typology.LAMELL))
+            if cand is not None:
+                for idx, fp in enumerate(cand.footprints):
+                    typ = cand.typology_at(idx, Typology.LAMELL)
+                    fl = cand.floors_at(idx)
+                    accepted.append(Bygg(
+                        bygg_id=f"B{build_counter}",
+                        footprint=fp,
+                        floors=fl,
+                        height_m=_height_for(typ, fl),
+                        typology=typ,
+                        delfelt_id=ref.field_id,
+                        phase=ref.phase,
+                        display_name=f"B{build_counter}",
+                    ))
+                    build_counter += 1
 
     achieved_total = sum(b.bra_m2 for b in accepted)
     target_total = sum(float(getattr(f, "target_bra", 0.0) or 0.0) for f in delfelt)
