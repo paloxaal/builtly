@@ -1,4 +1,4 @@
-from __future__ import annotations
+´´from __future__ import annotations
 
 """Concept-family strategies for Builtly.
 
@@ -508,10 +508,16 @@ class ConceptStrategy:
                     rationale += f" Feltet prioriteres som fler-nodig punktfelt med {target_building_count} tårn."
             elif selected_typology == Typology.KARRE and target_building_count >= 2:
                 micro_field_pattern = micro_field_pattern or 'clustered_frontage_ring'
+                # Arbeidsøkt 2: flere karréer skal ikke gi tynne armer og små restgårdsrom.
+                # Vi reserverer derfor litt større hovedrom og lar BYA-målet ta volumtrykket.
                 if central_void_m <= 0.0:
-                    central_void_m = 22.0 if target_building_count >= 4 else 18.0
-                gap_between_m = max(8.0, float(gap_between_m or 8.0))
-                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, med felles uterom mellom kvartalene."
+                    central_void_m = 26.0 if target_building_count >= 4 else 20.0
+                else:
+                    central_void_m = max(float(central_void_m), 24.0 if target_building_count >= 4 else 19.0)
+                gap_between_m = max(9.0, float(gap_between_m or 9.0))
+                courtyard_reserve_ratio = max(float(courtyard_reserve_ratio or 0.0), 0.28 if target_building_count >= 4 else 0.24)
+                target_bya_pct = max(float(target_bya_pct or 0.0), 40.0 if target_building_count >= 3 else 36.0)
+                rationale += f" Feltet vurderes som kvartalsklynge med {target_building_count} karrégrupper, med kvalitetsstyrt felles uterom mellom kvartalene."
 
             out.append(FieldParameterChoice(
                 field_id=field.field_id,
@@ -626,7 +632,7 @@ class LinearMixedStrategy(ConceptStrategy):
             frontage_depth_m=(14.0 if use_karre else (12.0 if use_punkthus else 13.0)),
             corridor_width_m=7.2,
             central_void_m=(18.0 if use_karre else 0.0),
-            gap_between_m=8.0,
+            gap_between_m=9.0,
             macro_structure=("green_room_first" if (use_karre or not use_punkthus) else "park_cluster"),
             micro_field_pattern=("frontage_ring" if use_karre else ("node_cluster" if use_punkthus else "green_room_edges")),
             symmetry_preference=("axial" if use_karre else "bilateral"),
@@ -699,22 +705,22 @@ class CourtyardUrbanStrategy(ConceptStrategy):
             design_karre_shape=("uo_chamfered" if edge else "uo"),
             design_height_pattern=("neighbor_step_down" if (field and field.character == "neighborhood_edge") else "stepped"),
             design_variant=(None if use_karre else "terraced"),
-            target_bya_pct=(39.0 if karre_count >= 3 else (37.0 if karre_count >= 2 else 34.0)),
+            target_bya_pct=(42.0 if karre_count >= 3 else (40.0 if karre_count >= 2 else 36.0)),
             skeleton_mode=("courtyard_frontage" if use_karre else "linear_bands"),
             frontage_mode=("quad" if edge and use_karre else ("ring" if use_karre else "double")),
             micro_band_count=(7 if karre_count >= 4 else 6 if karre_count >= 2 else 5),
             view_corridor_count=(1 if karre_count <= 2 else 2),
-            courtyard_reserve_ratio=(0.31 if edge else 0.34),
+            courtyard_reserve_ratio=(0.34 if edge else 0.36),
             frontage_depth_m=(15.0 if use_karre else 13.0),
             corridor_width_m=7.5,
-            central_void_m=(22.0 if karre_count >= 4 else (18.0 if karre_count >= 2 else 0.0)),
-            gap_between_m=8.0,
+            central_void_m=(26.0 if karre_count >= 4 else (20.0 if karre_count >= 2 else 0.0)),
+            gap_between_m=9.0,
             macro_structure="green_room_first",
             micro_field_pattern=("clustered_frontage_ring" if karre_count >= 2 else ("frontage_ring" if use_karre else "parallel_bands")),
             symmetry_preference="axial",
             composition_strictness=0.988,
             frontage_zone_ratio=0.30,
-            public_realm_ratio=0.22,
+            public_realm_ratio=0.24,
             node_symmetry=True,
             frontage_primary_side="south",
             frontage_secondary_side="west",
