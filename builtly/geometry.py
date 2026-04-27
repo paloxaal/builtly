@@ -1904,8 +1904,8 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
         # Smaller karré cells are allowed in a multi-kvartal structure.
         # They still keep 11.5-12.5 m building depth, but the facade run may
         # step down to ca. 42-46 m so that two U-forms can face a shared space.
-        width_candidates = [54.0, 52.0, 50.0, 48.0, 46.0, 44.0, 42.0, 40.0]
-        side_candidates = [30.0, 28.0, 26.0, 25.0, 24.0]
+        width_candidates = [56.0, 54.0, 52.0, 50.0, 48.0, 46.0, 44.0]
+        side_candidates = [34.0, 32.0, 30.0, 28.0]
     outer_h_candidates = []
     if closed:
         outer_h_candidates = [s + 2.0 * arm for s in side_candidates]
@@ -1955,7 +1955,8 @@ def _canonical_karre_shape(core: Polygon, field: Delfelt, spec: BaseTypologySpec
             dims_score = abs((rx1 - rx0) - target_w) * 1.45 + abs(outer_h - target_h) * 1.15
             center_pen = shape.centroid.distance(core.centroid)
             width_bonus = -max(0.0, (rx1 - rx0) - 50.0) * 0.08
-            score = dims_score + center_pen * 0.055 + width_bonus
+            quality_pen = _karre_shape_quality_penalty(shape, max(float(getattr(field, "target_bra", 0.0) or 0.0), shape.area * 6.0)) * 0.0009
+            score = dims_score + center_pen * 0.055 + width_bonus + quality_pen
             if best_score is None or score < best_score:
                 best = shape
                 best_score = score
@@ -2079,6 +2080,180 @@ def _preferred_frontage_sides(field: Delfelt, default_primary: str = "south", de
     return str(primary), (str(secondary) if secondary else None)
 
 
+
+def _opposite_side(side: Optional[str]) -> Optional[str]:
+    mapping = {"north": "south", "south": "north", "east": "west", "west": "east"}
+    return mapping.get(str(side).lower()) if side else None
+
+
+def _edge_strategy_sides(field: Delfelt, *, default_primary: str = "south", default_secondary: Optional[str] = None) -> Tuple[List[str], List[str], List[str]]:
+    """Return hard, medium and soft sides in local field coordinates.
+
+    Hard sides get perimeter mass first; soft sides are held back for landscape
+    buffer and lower pressure. This uses available field role/character signals
+    until a full per-boundary neighbour classifier is available.
+    """
+    primary, secondary = _preferred_frontage_sides(field, default_primary, default_secondary)
+    role = str(getattr(field, "field_role", "") or "")
+    char = str(getattr(field, "character", "") or "")
+    courtyard_open = str(getattr(field, "courtyard_open_side", "") or "")
+    hard: List[str] = []
+    soft: List[str] = []
+    if role in {"urban_edge", "street_edge", "urban_core", "linear_mixed_core"} or char in {"street_facing", "sheltered"}:
+        hard.extend([s for s in (primary, secondary) if s])
+    if role in {"linear_edge", "park_edge"} and char != "neighborhood_edge":
+        hard.append(primary)
+    if char == "neighborhood_edge":
+        soft.extend([s for s in (primary, courtyard_open) if s])
+        opp = _opposite_side(primary)
+        if opp:
+            soft.append(opp)
+    if courtyard_open:
+        soft.append(courtyard_open)
+    all_sides = ["south", "north", "west", "east"]
+    hard = [s for s in all_sides if s in set(hard) and s not in set(soft)]
+    soft = [s for s in all_sides if s in set(soft)]
+    medium = [s for s in all_sides if s not in hard and s not in soft]
+    return hard, medium, soft
+
+
+def _side_bias_vector(field: Delfelt, width: float, height: float, *, default_primary: str = "south", default_secondary: Optional[str] = None) -> Tuple[float, float]:
+    """Shift common green room away from hard edges and mildly toward soft edges."""
+    hard, _, soft = _edge_strategy_sides(field, default_primary=default_primary, default_secondary=default_secondary)
+    dx = 0.0
+    dy = 0.0
+    step_x = max(0.0, min(14.0, width * 0.11))
+    step_y = max(0.0, min(14.0, height * 0.11))
+
+    def away_from(side: str, strength: float) -> None:
+        nonlocal dx, dy
+        if side == "south":
+            dy += step_y * strength
+        elif side == "north":
+            dy -= step_y * strength
+        elif side == "west":
+            dx += step_x * strength
+        elif side == "east":
+            dx -= step_x * strength
+
+    def toward(side: str, strength: float) -> None:
+        nonlocal dx, dy
+        if side == "south":
+            dy -= step_y * strength
+        elif side == "north":
+            dy += step_y * strength
+        elif side == "west":
+            dx -= step_x * strength
+        elif side == "east":
+            dx += step_x * strength
+
+    for s in hard:
+        away_from(s, 1.0)
+    for s in soft:
+        toward(s, 0.45)
+    return dx, dy
+
+
+def _safe_positioned_rect(poly: Polygon, width_m: float, height_m: float, dx: float = 0.0, dy: float = 0.0) -> Optional[Polygon]:
+    """Create a rectangle near the polygon centroid, shifted and clamped to bounds."""
+    if poly is None or poly.is_empty:
+        return None
+    minx, miny, maxx, maxy = poly.bounds
+    w = min(max(4.0, float(width_m)), maxx - minx - 2.0)
+    h = min(max(4.0, float(height_m)), maxy - miny - 2.0)
+    if w <= 4.0 or h <= 4.0:
+        return None
+    cx = float(poly.centroid.x) + float(dx)
+    cy = float(poly.centroid.y) + float(dy)
+    cx = min(max(cx, minx + w / 2.0 + 1.0), maxx - w / 2.0 - 1.0)
+    cy = min(max(cy, miny + h / 2.0 + 1.0), maxy - h / 2.0 - 1.0)
+    for shrink in (1.0, 0.92, 0.84, 0.74):
+        ww = w * shrink
+        hh = h * shrink
+        rect = box(cx - ww / 2.0, cy - hh / 2.0, cx + ww / 2.0, cy + hh / 2.0).buffer(0)
+        if poly.buffer(1e-6).covers(rect):
+            return rect
+    return _safe_center_rect(poly, w * 0.78, h * 0.78)
+
+
+def _side_for_polygon(poly: Polygon, container: Polygon) -> str:
+    minx, miny, maxx, maxy = container.bounds
+    c = poly.centroid
+    distances = {
+        "west": abs(c.x - minx),
+        "east": abs(maxx - c.x),
+        "south": abs(c.y - miny),
+        "north": abs(maxy - c.y),
+    }
+    return min(distances, key=distances.get)
+
+
+def _sort_polys_by_edge_strategy(polys: Sequence[Polygon], container: Polygon, field: Delfelt) -> List[Polygon]:
+    hard, medium, soft = _edge_strategy_sides(field)
+    priority = {s: 0 for s in hard}
+    priority.update({s: 1 for s in medium})
+    priority.update({s: 3 for s in soft})
+    return sorted(
+        [p for p in polys if p is not None and not p.is_empty],
+        key=lambda poly: (priority.get(_side_for_polygon(poly, container), 2), -float(poly.area), round(poly.centroid.y, 3), round(poly.centroid.x, 3)),
+    )
+
+
+def _room_enclosure_score(union: Polygon, room: Optional[Polygon], *, margin_m: float = 10.0) -> float:
+    if room is None or room.is_empty or union is None or getattr(union, "is_empty", True):
+        return 0.0
+    rminx, rminy, rmaxx, rmaxy = room.bounds
+    margin = max(5.0, min(14.0, float(margin_m)))
+    zones = [
+        box(rminx - margin, rmaxy, rmaxx + margin, rmaxy + margin),
+        box(rminx - margin, rminy - margin, rmaxx + margin, rminy),
+        box(rminx - margin, rminy - margin, rminx, rmaxy + margin),
+        box(rmaxx, rminy - margin, rmaxx + margin, rmaxy + margin),
+    ]
+    framed = 0
+    quality = 0.0
+    for z in zones:
+        overlap = float(union.intersection(z).area)
+        if overlap > 24.0:
+            framed += 1
+            quality += min(1.0, overlap / max(z.area * 0.20, 1.0))
+    if framed == 0:
+        return 0.0
+    return min(1.0, 0.55 * framed / 3.0 + 0.45 * quality / max(framed, 1))
+
+
+def _karre_shape_quality_penalty(fp: Polygon, target_bra: float = 0.0) -> float:
+    """Penalty for karré/U shapes with tiny courtyards, overlong arms or weak compactness."""
+    if fp is None or fp.is_empty:
+        return float(target_bra or 1000.0)
+    minx, miny, maxx, maxy = fp.bounds
+    w = max(maxx - minx, 1.0)
+    h = max(maxy - miny, 1.0)
+    bbox_area = max(w * h, 1.0)
+    area = max(float(fp.area), 1.0)
+    occupancy = area / bbox_area
+    void_ratio = max(0.0, 1.0 - occupancy)
+    aspect = max(w, h) / max(min(w, h), 1.0)
+    compactness = 4.0 * math.pi * area / max(float(fp.length) ** 2, 1.0)
+
+    ref = max(float(target_bra or 0.0), area * 6.0, 1.0)
+    penalty = 0.0
+    if void_ratio < 0.18:
+        penalty += ref * (0.18 - void_ratio) * 0.22
+    if occupancy < 0.34:
+        penalty += ref * (0.34 - occupancy) * 0.18
+    if occupancy > 0.72:
+        penalty += ref * (occupancy - 0.72) * 0.12
+    if aspect > 2.05:
+        penalty += ref * min(0.30, (aspect - 2.05) * 0.08)
+    if compactness < 0.23:
+        penalty += ref * min(0.22, (0.23 - compactness) * 0.90)
+    void_area = bbox_area - area
+    if void_area < 180.0:
+        penalty += (180.0 - void_area) * 3.0
+    return float(penalty)
+
+
 def _split_band_symmetric(band: Polygon, splits: int, axis: str) -> List[Polygon]:
     pieces = _split_poly_evenly(band, splits, axis=axis)
     if len(pieces) <= 1:
@@ -2181,14 +2356,17 @@ def _compose_green_room_linear_skeleton(core: Polygon, field: Delfelt) -> Option
     else:
         room_ratio = max(0.10, min(0.20, base_ratio))
 
-    scale = max(0.26, min(0.46, math.sqrt(room_ratio)))
+    scale = max(0.28, min(0.48, math.sqrt(room_ratio)))
     if width >= height:
-        room_w = width * min(0.55, scale * 1.18)
-        room_h = height * min(0.46, scale * 0.96)
+        room_w = width * min(0.58, scale * 1.24)
+        room_h = height * min(0.50, scale * 1.02)
     else:
-        room_w = width * min(0.46, scale * 0.96)
-        room_h = height * min(0.55, scale * 1.18)
-    courtyard = _safe_center_rect(core, room_w, room_h)
+        room_w = width * min(0.50, scale * 1.02)
+        room_h = height * min(0.58, scale * 1.24)
+    shift_x, shift_y = _side_bias_vector(field, width, height, default_primary="south", default_secondary=("north" if getattr(field, "frontage_mode", None) == "double" else None))
+    courtyard = _safe_positioned_rect(core, room_w, room_h, shift_x, shift_y)
+    if courtyard is None:
+        courtyard = _safe_center_rect(core, room_w, room_h)
     if courtyard is None or courtyard.is_empty or courtyard.area < max(120.0, core.area * 0.05):
         return None
 
@@ -2231,7 +2409,9 @@ def _compose_green_room_linear_skeleton(core: Polygon, field: Delfelt) -> Option
         corridors.extend([p for p in _flatten_polygons(cor) if p.area > 40.0])
 
     bands: List[Polygon] = []
-    for side in ("south", "north", "west", "east"):
+    hard_sides, medium_sides, soft_sides = _edge_strategy_sides(field, default_primary="south", default_secondary=("north" if getattr(field, "frontage_mode", None) == "double" else None))
+    side_order = hard_sides + medium_sides + soft_sides
+    for side in side_order:
         geom = side_geoms.get(side)
         if geom is None or geom.is_empty:
             continue
@@ -2250,12 +2430,14 @@ def _compose_green_room_linear_skeleton(core: Polygon, field: Delfelt) -> Option
     if not bands:
         return None
 
+    bands = _sort_polys_by_edge_strategy(bands, core, field)
     micro_fields = _build_micro_fields_from_bands(
         bands,
         target_count,
         "green_room_edges",
         getattr(field, "symmetry_preference", None) or "axial",
     )
+    micro_fields = _sort_polys_by_edge_strategy(micro_fields, core, field)
     build_slots = [m for m in micro_fields if m.area > 60.0]
     if not build_slots:
         return None
@@ -2477,8 +2659,9 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
     elif getattr(field, "design_karre_shape", None) in {"uo", "uo_chamfered"}:
         open_edges = [primary_side]
 
-    scale = max(0.44, min(0.78, reserve_ratio ** 0.5))
-    courtyard = _safe_center_rect(core, width * scale, height * scale)
+    scale = max(0.46, min(0.76, reserve_ratio ** 0.5))
+    shift_x, shift_y = _side_bias_vector(field, width, height, default_primary=getattr(field, "courtyard_open_side", None) or "south")
+    courtyard = _safe_positioned_rect(core, width * scale, height * scale, shift_x, shift_y)
     if courtyard is None:
         courtyard = _safe_center_rect(core, width * 0.56, height * 0.56)
     if courtyard is None:
@@ -2515,6 +2698,7 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         if corridors:
             bands = [p for band in bands for p in _flatten_polygons(band.difference(unary_union(corridors)).buffer(0)) if p.area > 70.0]
 
+    bands = _sort_polys_by_edge_strategy(bands, core, field)
     micro_fields: List[Polygon] = []
     for band in bands:
         bminx, bminy, bmaxx, bmaxy = band.bounds
@@ -2523,6 +2707,7 @@ def _compose_courtyard_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         if getattr(field, "composition_strictness", 0.0) >= 0.95 and horizontal and (bmaxx - bminx) >= 110:
             split_count = 3
         micro_fields.extend(_split_band_symmetric(band, split_count, axis=("x" if horizontal else "y")) or [band])
+    micro_fields = _sort_polys_by_edge_strategy(micro_fields, core, field)
     build_slots = [m for m in micro_fields if m.area > 60.0]
     public_realm = [courtyard] + corridors
     reserved_open_space = [courtyard] + corridors
@@ -2647,6 +2832,7 @@ def _compose_park_skeleton(core: Polygon, field: Delfelt) -> FieldSkeleton:
         getattr(field, "micro_field_pattern", None),
         getattr(field, "symmetry_preference", None),
     )
+    micro_fields = _sort_polys_by_edge_strategy(micro_fields, core, field)
     build_slots = [m for m in micro_fields if m.area > 60.0]
     public_realm = [park] + corridors
     reserved_open_space = [park] + corridors
@@ -3297,21 +3483,20 @@ def _candidate_structure_score(
         else:
             room_score = 0.65 * openness + 0.35 * proximity
 
-        # Green-room-first bonus: prefer layouts where at least two-three sides
-        # of the outdoor room are framed by buildings, as in the architect
-        # reference where green commons are defined by building edges.
+        # Green-room/perimeter bonus: prefer layouts where two-three sides of
+        # the outdoor room are framed by buildings, and avoid unused edge bands.
         try:
-            rminx, rminy, rmaxx, rmaxy = reserve.bounds
-            margin = max(6.0, min(12.0, max(rmaxx - rminx, rmaxy - rminy) * 0.12))
-            side_zones = [
-                box(rminx - margin, rmaxy, rmaxx + margin, rmaxy + margin),
-                box(rminx - margin, rminy - margin, rmaxx + margin, rminy),
-                box(rminx - margin, rminy - margin, rminx, rmaxy + margin),
-                box(rmaxx, rminy - margin, rmaxx + margin, rmaxy + margin),
-            ]
-            framed = sum(1 for z in side_zones if union.intersection(z).area > 20.0)
-            enclosure_bonus = min(1.0, framed / 3.0)
-            room_score = max(room_score, 0.45 * room_score + 0.55 * enclosure_bonus)
+            margin = max(6.0, min(13.0, max(reserve.bounds[2] - reserve.bounds[0], reserve.bounds[3] - reserve.bounds[1]) * 0.12))
+            enclosure_bonus = _room_enclosure_score(union, reserve, margin_m=margin)
+            if skeleton.build_bands:
+                used_bands = 0
+                for band in skeleton.build_bands:
+                    if union.intersection(band.buffer(0.8)).area > max(24.0, band.area * 0.10):
+                        used_bands += 1
+                band_use_score = min(1.0, used_bands / max(2, min(4, len(skeleton.build_bands))))
+            else:
+                band_use_score = 0.55
+            room_score = max(room_score, 0.40 * room_score + 0.42 * enclosure_bonus + 0.18 * band_use_score)
         except Exception:
             pass
 
@@ -3333,7 +3518,9 @@ def _candidate_structure_score(
     if field.typology == Typology.PUNKTHUS:
         weights.update({"frontage": 0.14, "rhythm": 0.10, "symmetry": 0.20, "room": 0.26, "corridor": 0.14, "cluster": 0.16})
     elif field.typology == Typology.KARRE:
-        weights.update({"frontage": 0.30, "rhythm": 0.12, "symmetry": 0.16, "room": 0.24, "corridor": 0.08, "cluster": 0.10})
+        weights.update({"frontage": 0.26, "rhythm": 0.12, "symmetry": 0.13, "room": 0.34, "corridor": 0.05, "cluster": 0.10})
+    elif skeleton.mode in {"green_room_edges", "courtyard_frontage"}:
+        weights.update({"frontage": 0.24, "rhythm": 0.14, "symmetry": 0.12, "room": 0.28, "corridor": 0.08, "cluster": 0.14})
     elif skeleton.mode == "linear_bands_dense":
         weights.update({"frontage": 0.28, "rhythm": 0.20, "symmetry": 0.14, "room": 0.10, "corridor": 0.14, "cluster": 0.14})
 
@@ -3375,7 +3562,10 @@ def _choose_best_structured(
         count_target = max(1, int(getattr(field, "target_building_count", 0) or len(item.footprints)))
         count_weight = 0.018 if density >= 1.10 else 0.012
         count_penalty = abs(len(item.footprints) - count_target) * max(target_bra, 1.0) * count_weight
-        return (bra_penalty + structure_penalty + count_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
+        shape_penalty = 0.0
+        if field.typology == Typology.KARRE:
+            shape_penalty = sum(_karre_shape_quality_penalty(fp, target_bra / max(len(item.footprints), 1)) for fp in item.footprints) * 0.35
+        return (bra_penalty + structure_penalty + count_penalty + shape_penalty, -structure, -item.total_bra, abs(len(item.footprints) - count_target))
 
     return min(pool, key=score)
 
@@ -3687,18 +3877,20 @@ def _karre_candidate_penalty(candidate: Optional[_PlacementCandidate], target_br
         return float("inf")
     deficit = max(0.0, float(target_bra) - float(candidate.total_bra))
     overshoot = max(0.0, float(candidate.total_bra) - float(target_bra))
-    areas = [float(fp.area) for fp in candidate.footprints if fp is not None and not fp.is_empty]
+    footprints = [fp for fp in candidate.footprints if fp is not None and not fp.is_empty]
+    areas = [float(fp.area) for fp in footprints]
     if not areas:
         return float("inf")
-    tiny_penalty = sum(max(0.0, 520.0 - a) * 1.9 for a in areas)
+    tiny_penalty = sum(max(0.0, 620.0 - a) * 2.2 for a in areas)
     imbalance_penalty = 0.0
     largest = max(areas)
     smallest = min(areas)
     if largest > 1.0:
         ratio = smallest / largest
-        if ratio < 0.42:
-            imbalance_penalty = float(target_bra) * (0.42 - ratio) * 0.10
-    return deficit + overshoot * 0.18 + tiny_penalty + imbalance_penalty
+        if ratio < 0.45:
+            imbalance_penalty = float(target_bra) * (0.45 - ratio) * 0.13
+    quality_penalty = sum(_karre_shape_quality_penalty(fp, target_bra / max(len(footprints), 1)) for fp in footprints)
+    return deficit * 1.10 + overshoot * 0.18 + tiny_penalty + imbalance_penalty + quality_penalty
 
 
 def _best_subcore_karre_candidate(sc: Polygon, sub_field: Delfelt, spec: BaseTypologySpec) -> Optional[_PlacementCandidate]:
@@ -3782,7 +3974,7 @@ def _place_multi_karre_clusters(core: Polygon, field: Delfelt, spec: BaseTypolog
                 courtyard_open_side=open_to_common,
                 view_corridor_count=max(0, int(getattr(field, "view_corridor_count", 0) or 0) - 1),
                 micro_band_count=max(2, int(getattr(field, "micro_band_count", 0) or 2) - 1),
-                courtyard_reserve_ratio=min(0.34, max(0.22, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.28))),
+                courtyard_reserve_ratio=min(0.36, max(0.26, float(getattr(field, "courtyard_reserve_ratio", 0.0) or 0.30))),
             )
             sub_cand = _best_subcore_karre_candidate(sc, sub_field, spec)
             if sub_cand is None:
@@ -3911,7 +4103,8 @@ def _u_karre_footprint(cx: float, cy: float, width_m: float, depth_m: float, arm
     """Create a compact U-shaped footprint used for high-density completion."""
     x0, x1 = cx - width_m / 2.0, cx + width_m / 2.0
     y0, y1 = cy - depth_m / 2.0, cy + depth_m / 2.0
-    arm = max(8.0, min(float(arm_m), min(width_m, depth_m) * 0.40))
+    # Avoid long, skinny arms with too little built body or too little courtyard.
+    arm = max(10.5, min(max(float(arm_m), min(width_m, depth_m) * 0.32), min(width_m, depth_m) * 0.44))
     if open_side == "south":
         parts = [box(x0, y1 - arm, x1, y1), box(x0, y0, x0 + arm, y1), box(x1 - arm, y0, x1, y1)]
     elif open_side == "north":
@@ -3939,7 +4132,7 @@ def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[
 
     options: List[Tuple[Typology, List[Tuple[float, float]]]] = []
     if field.typology == Typology.KARRE:
-        options.append((Typology.KARRE, [(54.0, 38.0), (48.0, 34.0), (42.0, 30.0), (36.0, 28.0)]))
+        options.append((Typology.KARRE, [(58.0, 40.0), (54.0, 38.0), (50.0, 36.0), (46.0, 34.0), (42.0, 32.0)]))
         options.append((Typology.LAMELL, [(50.0, 13.0), (40.0, 13.0), (30.0, 13.0)]))
     elif field.typology == Typology.PUNKTHUS:
         options.append((Typology.PUNKTHUS, [(20.0, 20.0)]))
@@ -3966,14 +4159,16 @@ def _density_completion_candidates(core_local: Polygon, field: Delfelt) -> List[
                                 if core_buf.covers(fp):
                                     dist_boundary = float(fp.distance(core_local.boundary))
                                     dist_center = float(fp.centroid.distance(core_local.centroid))
-                                    score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.002
+                                    soft_penalty = max(0.0, 12.0 - dist_boundary) * (3.5 if getattr(field, "character", "") == "neighborhood_edge" else 0.0)
+                                    score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.002 + soft_penalty + _karre_shape_quality_penalty(fp, field.target_bra) * 0.0008
                                     raw.append((score, fp, typ, 0.0))
                         else:
                             fp = box(cx - ww / 2.0, cy - dd / 2.0, cx + ww / 2.0, cy + dd / 2.0).buffer(0)
                             if core_buf.covers(fp):
                                 dist_boundary = float(fp.distance(core_local.boundary))
                                 dist_center = float(fp.centroid.distance(core_local.centroid))
-                                score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.001
+                                soft_penalty = max(0.0, 12.0 - dist_boundary) * (3.5 if getattr(field, "character", "") == "neighborhood_edge" else 0.0)
+                                score = dist_boundary * 3.0 - dist_center * 0.08 - fp.area * 0.001 + soft_penalty
                                 raw.append((score, fp, typ, 90.0 if dd > ww else 0.0))
     raw.sort(key=lambda item: item[0])
     out: List[Tuple[Polygon, Typology, float]] = []
